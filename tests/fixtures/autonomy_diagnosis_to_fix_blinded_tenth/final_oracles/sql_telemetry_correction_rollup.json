@@ -1,0 +1,6 @@
+{
+  "case_id": "sql_telemetry_correction_rollup",
+  "final_files": {
+    "tests/test_final_corrected_site_rollups.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).parents[1]\n\n\ndef load(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"utf-8\")\n\n\ndef payload(site, observed, received, value):\n    return {\n        \"site_id\": site,\n        \"sensor_id\": \"meter-4\",\n        \"event_id\": \"reused-31\",\n        \"observed_at\": observed,\n        \"received_at\": received,\n        \"value\": value,\n    }\n\n\ndef test_cross_site_corrections_remain_in_observed_hours():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(load(\"telemetry_schema.sql\"))\n    write = load(\"upsert_reading.sql\")\n    db.execute(write, payload(\"coast\", 300, 5000, 10.0))\n    db.execute(write, payload(\"coast\", 600, 6000, 12.0))\n    db.execute(write, payload(\"coast\", 7100, 5500, 99.0))\n    db.execute(write, payload(\"inland\", 3900, 7000, 30.0))\n\n    rows = db.execute(\n        load(\"hourly_rollup.sql\"),\n        {\"window_start\": 0, \"window_end\": 7200},\n    ).fetchall()\n    assert rows == [\n        (\"coast\", \"1970-01-01T00:00:00Z\", 12.0, 1),\n        (\"inland\", \"1970-01-01T01:00:00Z\", 30.0, 1),\n    ]\n"
+  }
+}

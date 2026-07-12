@@ -1,0 +1,12 @@
+{
+  "case_id": "sql_telemetry_correction_rollup",
+  "expected_dimension": "data",
+  "expected_files": [
+    "sql/telemetry_schema.sql",
+    "sql/upsert_reading.sql",
+    "sql/hourly_rollup.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_telemetry_edges.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).parents[1]\n\n\ndef sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"utf-8\")\n\n\ndef database():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(sql(\"telemetry_schema.sql\"))\n    return db\n\n\ndef reading(site, observed, received, value):\n    return {\n        \"site_id\": site,\n        \"sensor_id\": \"shared-sensor\",\n        \"event_id\": \"vendor-9\",\n        \"observed_at\": observed,\n        \"received_at\": received,\n        \"value\": value,\n    }\n\n\ndef test_vendor_identity_is_site_scoped():\n    db = database()\n    statement = \"\"\"\n        INSERT INTO readings\n        (site_id, sensor_id, event_id, observed_at, received_at, value)\n        VALUES (?, ?, ?, ?, ?, ?)\n    \"\"\"\n    db.execute(statement, (\"east\", \"probe\", \"same\", 1, 1, 10.0))\n    db.execute(statement, (\"west\", \"probe\", \"same\", 1, 1, 11.0))\n    total = db.execute(\"SELECT COUNT(*) FROM readings\").fetchone()[0]\n    assert total == 2\n\n\ndef test_stale_replay_cannot_mix_old_metadata_with_new_value():\n    db = database()\n    write = sql(\"upsert_reading.sql\")\n    db.execute(write, reading(\"lab\", observed=3600, received=5000, value=20.0))\n    db.execute(write, reading(\"lab\", observed=7200, received=4000, value=99.0))\n    row = db.execute(\n        \"SELECT observed_at, received_at, value FROM readings\"\n    ).fetchone()\n    assert row == (3600, 5000, 20.0)\n\n\ndef test_rollup_uses_observation_time_for_window_and_bucket():\n    db = database()\n    db.execute(\n        \"\"\"\n        INSERT INTO readings\n        (site_id, sensor_id, event_id, observed_at, received_at, value)\n        VALUES ('field', 'rain', 'late', 60, 3660, 2.5)\n        \"\"\"\n    )\n    rows = db.execute(\n        sql(\"hourly_rollup.sql\"),\n        {\"window_start\": 0, \"window_end\": 3600},\n    ).fetchall()\n    assert rows == [(\"field\", \"1970-01-01T00:00:00Z\", 2.5, 1)]\n"
+  }
+}

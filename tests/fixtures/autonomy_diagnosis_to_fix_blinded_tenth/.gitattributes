@@ -1,0 +1,5 @@
+manifest.json -text -diff
+cases/*.json -text -diff
+oracles/*.json -text -diff
+final_oracles/*.json -text -diff
+AUTHOR_RECEIPT.json -text -diff

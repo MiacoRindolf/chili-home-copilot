@@ -1,0 +1,18 @@
+{
+  "case_id": "ts_http_vary_isolation",
+  "language": "typescript",
+  "test_runner": "node_test",
+  "prompt": "An edge cache occasionally serves a representation selected for one request to another. Reports involve upstream Vary values with mixed casing or extra whitespace, and a separate endpoint marked with a wildcard is still found in cache diagnostics. The usual lowercase single-header language variant works. Correct the variant pipeline while preserving normal cache hits.",
+  "candidate_paths": [
+    "src/vary.mjs",
+    "src/key.mjs",
+    "src/cache.mjs"
+  ],
+  "max_files": 3,
+  "repo_files": {
+    "src/vary.mjs": "export function parseVary(value) {\n  if (!value) return [];\n  return value.split(\",\").filter((part) => part.length > 0);\n}\n",
+    "src/key.mjs": "export function headerValue(headers, name) {\n  const value = headers[name];\n  if (Array.isArray(value)) return value.join(\",\");\n  return value ?? \"\";\n}\n\nexport function makeVariantKey(url, varyFields, requestHeaders) {\n  const dimensions = varyFields.map(\n    (field) => `${field}:${headerValue(requestHeaders, field)}`,\n  );\n  return JSON.stringify([url, ...dimensions]);\n}\n",
+    "src/cache.mjs": "import { makeVariantKey } from \"./key.mjs\";\nimport { parseVary } from \"./vary.mjs\";\n\nexport class ResponseCache {\n  #entries = new Map();\n\n  put(url, requestHeaders, response) {\n    const varyFields = parseVary(response.headers?.vary ?? \"\");\n    const key = makeVariantKey(url, varyFields, requestHeaders);\n    this.#entries.set(key, { url, varyFields, response });\n  }\n\n  match(url, requestHeaders) {\n    for (const entry of this.#entries.values()) {\n      if (entry.url !== url) continue;\n      const key = makeVariantKey(url, entry.varyFields, requestHeaders);\n      if (this.#entries.get(key) === entry) return entry.response;\n    }\n    return undefined;\n  }\n\n  get size() {\n    return this.#entries.size;\n  }\n}\n",
+    "tests/test_public_cache.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { ResponseCache } from \"../src/cache.mjs\";\n\ntest(\"a conventional lowercase language variant is cached\", () => {\n  const cache = new ResponseCache();\n  const response = {\n    headers: { vary: \"accept-language\" },\n    body: \"bonjour\",\n  };\n  cache.put(\"/welcome\", { \"accept-language\": \"fr\" }, response);\n\n  assert.equal(\n    cache.match(\"/welcome\", { \"accept-language\": \"fr\" }),\n    response,\n  );\n});\n"
+  }
+}

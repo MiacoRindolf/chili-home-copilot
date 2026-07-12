@@ -1,0 +1,12 @@
+{
+  "case_id": "py_relay_rotation_window",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "relay/canonical.py",
+    "relay/keys.py",
+    "relay/verifier.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_protocol_edges.py": "import hashlib\nimport hmac\n\nfrom relay.canonical import canonical_target\nfrom relay.keys import KeyRing, SigningKey\nfrom relay.verifier import verify_delivery\n\n\ndef wire_signature(secret, timestamp, method, target, payload):\n    material = f\"{timestamp}\\n{method}\\n{target}\\n\".encode() + payload\n    return hmac.new(secret, material, hashlib.sha256).hexdigest()\n\n\ndef test_canonical_target_retains_repeated_parameters():\n    rendered = canonical_target(\"/hook?scope=write&blank=&scope=read\")\n    assert rendered == \"/hook?blank=&scope=read&scope=write\"\n\n\ndef test_recently_retired_key_remains_a_candidate_during_grace():\n    old = SigningKey(\"rotating\", b\"old\", 20, 100)\n    ring = KeyRing([old], grace_seconds=10)\n    assert ring.candidates(\"rotating\", 109) == [old]\n\n\ndef test_v2_millisecond_timestamp_uses_seconds_for_freshness():\n    secret = b\"v2-secret\"\n    raw = \"1700000000000\"\n    payload = b\"v2\"\n    target = \"/v2/receive?mode=full\"\n    headers = {\n        \"X-Relay-Timestamp\": raw,\n        \"X-Relay-Key\": \"v2\",\n        \"X-Relay-Signature\": wire_signature(\n            secret, raw, \"PUT\", target, payload\n        ),\n    }\n    ring = KeyRing([SigningKey(\"v2\", secret, 1699999900, 1700000100)])\n    assert verify_delivery(\n        \"put\", target, payload, headers, ring, now=1700000001\n    ) is True\n"
+  }
+}

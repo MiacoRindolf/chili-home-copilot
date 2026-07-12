@@ -1,0 +1,62 @@
+{
+  "schema": "chili.diagnosis-to-fix-manifest.v3",
+  "reference_family": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/py_relay_rotation_window.json",
+      "oracle": "oracles/py_relay_rotation_window.json",
+      "final_oracle": "final_oracles/py_relay_rotation_window.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/py_reservation_retry_scope.json",
+      "oracle": "oracles/py_reservation_retry_scope.json",
+      "final_oracle": "final_oracles/py_reservation_retry_scope.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/ts_http_vary_isolation.json",
+      "oracle": "oracles/ts_http_vary_isolation.json",
+      "final_oracle": "final_oracles/ts_http_vary_isolation.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/ts_retry_budget_clock.json",
+      "oracle": "oracles/ts_retry_budget_clock.json",
+      "final_oracle": "final_oracles/ts_retry_budget_clock.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/dart_offline_tombstone_join.json",
+      "oracle": "oracles/dart_offline_tombstone_join.json",
+      "final_oracle": "final_oracles/dart_offline_tombstone_join.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/dart_resumable_chunk_boundaries.json",
+      "oracle": "oracles/dart_resumable_chunk_boundaries.json",
+      "final_oracle": "final_oracles/dart_resumable_chunk_boundaries.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/sql_tenant_grant_intervals.json",
+      "oracle": "oracles/sql_tenant_grant_intervals.json",
+      "final_oracle": "final_oracles/sql_tenant_grant_intervals.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/sql_telemetry_correction_rollup.json",
+      "oracle": "oracles/sql_telemetry_correction_rollup.json",
+      "final_oracle": "final_oracles/sql_telemetry_correction_rollup.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    }
+  ]
+}

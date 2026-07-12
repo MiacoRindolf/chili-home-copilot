@@ -1,0 +1,12 @@
+{
+  "case_id": "ts_retry_budget_clock",
+  "expected_dimension": "clock",
+  "expected_files": [
+    "src/retry_after.mjs",
+    "src/budget.mjs",
+    "src/scheduler.mjs"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_retry_policy.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { RetryBudget } from \"../src/budget.mjs\";\nimport { parseRetryAfter } from \"../src/retry_after.mjs\";\nimport { scheduleRetry } from \"../src/scheduler.mjs\";\n\ntest(\"numeric Retry-After is expressed in seconds\", () => {\n  assert.equal(parseRetryAfter(\"12\", 500_000), 12_000);\n});\n\ntest(\"a budget grants only its remaining duration\", () => {\n  const budget = new RetryBudget(5_000);\n  assert.equal(budget.claim(4_000), 4_000);\n  assert.equal(budget.claim(3_000), 1_000);\n  assert.equal(budget.usedMs, 5_000);\n});\n\ntest(\"an explicit zero delay is still enqueued\", () => {\n  const nowMs = 1_800_000_000_000;\n  const queued = [];\n  const runAt = scheduleRetry({\n    retryAfter: new Date(nowMs).toUTCString(),\n    nowMs,\n    budget: new RetryBudget(1_000),\n    enqueue: (time) => queued.push(time),\n  });\n\n  assert.equal(runAt, nowMs);\n  assert.deepEqual(queued, [nowMs]);\n});\n"
+  }
+}

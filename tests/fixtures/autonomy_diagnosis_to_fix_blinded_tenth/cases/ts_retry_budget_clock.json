@@ -1,0 +1,18 @@
+{
+  "case_id": "ts_retry_budget_clock",
+  "language": "typescript",
+  "test_runner": "node_test",
+  "prompt": "A gateway retry coordinator behaves normally for HTTP-date backoff under the configured budget, but numeric Retry-After responses can fire almost immediately. Near budget exhaustion, some jobs disappear while others are queued beyond the remaining allowance; an explicit immediate retry is also dropped. Reconcile parsing, budget allocation, and queue time calculation as one policy.",
+  "candidate_paths": [
+    "src/retry_after.mjs",
+    "src/budget.mjs",
+    "src/scheduler.mjs"
+  ],
+  "max_files": 3,
+  "repo_files": {
+    "src/retry_after.mjs": "export function parseRetryAfter(value, nowMs) {\n  const text = String(value).trim();\n  if (/^\\d+$/.test(text)) return Number(text);\n  const target = Date.parse(text);\n  if (Number.isNaN(target)) return null;\n  return Math.max(0, target - nowMs);\n}\n",
+    "src/budget.mjs": "export class RetryBudget {\n  constructor(limitMs) {\n    this.limitMs = limitMs;\n    this.usedMs = 0;\n  }\n\n  claim(requestedMs) {\n    if (requestedMs < 0 || this.usedMs + requestedMs > this.limitMs) {\n      return null;\n    }\n    this.usedMs += requestedMs;\n    return requestedMs;\n  }\n}\n",
+    "src/scheduler.mjs": "import { parseRetryAfter } from \"./retry_after.mjs\";\n\nexport function scheduleRetry({ retryAfter, nowMs, budget, enqueue }) {\n  const requestedMs = parseRetryAfter(retryAfter, nowMs);\n  if (requestedMs === null) return null;\n  const grantedMs = budget.claim(requestedMs);\n  if (!grantedMs) return null;\n  const runAt = nowMs + requestedMs;\n  enqueue(runAt);\n  return runAt;\n}\n",
+    "tests/test_public_retry.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { RetryBudget } from \"../src/budget.mjs\";\nimport { scheduleRetry } from \"../src/scheduler.mjs\";\n\ntest(\"an HTTP-date delay within budget is queued\", () => {\n  const nowMs = 1_700_000_000_000;\n  const queued = [];\n  const runAt = scheduleRetry({\n    retryAfter: new Date(nowMs + 4_000).toUTCString(),\n    nowMs,\n    budget: new RetryBudget(5_000),\n    enqueue: (time) => queued.push(time),\n  });\n\n  assert.equal(runAt, nowMs + 4_000);\n  assert.deepEqual(queued, [nowMs + 4_000]);\n});\n"
+  }
+}

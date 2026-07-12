@@ -1,0 +1,6 @@
+{
+  "case_id": "sql_tenant_grant_intervals",
+  "final_files": {
+    "tests/test_final_import_visibility.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).parents[1]\n\n\ndef load(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"utf-8\")\n\n\ndef test_two_tenant_import_respects_each_effective_window():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(load(\"schema.sql\"))\n    write = load(\"upsert_grant.sql\")\n    for tenant, start, end in ((\"harbor\", 5, 20), (\"ridge\", 10, 30)):\n        db.execute(\n            write,\n            {\n                \"tenant_id\": tenant,\n                \"principal_id\": \"operator-77\",\n                \"capability\": \"approve\",\n                \"valid_from\": start,\n                \"valid_until\": end,\n                \"revoked_at\": None,\n            },\n        )\n\n    query = load(\"effective_access.sql\")\n    visible = {\n        \"harbor\": db.execute(\n            query,\n            {\"tenant_id\": \"harbor\", \"principal_id\": \"operator-77\", \"as_of\": 20},\n        ).fetchall(),\n        \"ridge\": db.execute(\n            query,\n            {\"tenant_id\": \"ridge\", \"principal_id\": \"operator-77\", \"as_of\": 20},\n        ).fetchall(),\n    }\n    assert visible == {\"harbor\": [], \"ridge\": [(\"approve\",)]}\n"
+  }
+}

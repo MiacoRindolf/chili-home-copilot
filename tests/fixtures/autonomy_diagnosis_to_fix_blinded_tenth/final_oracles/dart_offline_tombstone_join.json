@@ -1,0 +1,6 @@
+{
+  "case_id": "dart_offline_tombstone_join",
+  "final_files": {
+    "tests/test_final_offline_convergence_test.dart": "import '../lib/merge_policy.dart';\nimport '../lib/sync_engine.dart';\n\nvoid ensure(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final phoneEdit = SyncRecord(\n    id: 'sealed-note',\n    value: 'keep me',\n    deleted: false,\n    modifiedAt: 700,\n    deviceId: 'alpha-phone',\n    clock: {'phone': 4},\n  );\n  final tabletDelete = SyncRecord(\n    id: 'sealed-note',\n    value: '',\n    deleted: true,\n    modifiedAt: 700,\n    deviceId: 'zulu-tablet',\n    clock: {'tablet': 2},\n  );\n  final engine = SyncEngine([phoneEdit]);\n  engine.applyRemote(tabletDelete);\n  final converged = engine.records['sealed-note']!;\n\n  ensure(converged.deleted, 'concurrent deletion was resurrected');\n  ensure(\n    converged.clock['phone'] == 4 && converged.clock['tablet'] == 2,\n    'converged record omitted replica history',\n  );\n}\n"
+  }
+}

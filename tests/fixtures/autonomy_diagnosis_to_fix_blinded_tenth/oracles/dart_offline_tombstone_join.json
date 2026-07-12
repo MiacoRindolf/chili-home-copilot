@@ -1,0 +1,12 @@
+{
+  "case_id": "dart_offline_tombstone_join",
+  "expected_dimension": "state",
+  "expected_files": [
+    "lib/vector_clock.dart",
+    "lib/merge_policy.dart",
+    "lib/sync_engine.dart"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_sync_edges_test.dart": "import '../lib/merge_policy.dart';\nimport '../lib/sync_engine.dart';\nimport '../lib/vector_clock.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nSyncRecord record({\n  required String id,\n  required bool deleted,\n  required int modifiedAt,\n  required String device,\n  required Map<String, int> clock,\n}) =>\n    SyncRecord(\n      id: id,\n      value: deleted ? '' : 'body',\n      deleted: deleted,\n      modifiedAt: modifiedAt,\n      deviceId: device,\n      clock: clock,\n    );\n\nvoid main() {\n  final extensionOrder = compareClocks(\n    {'phone': 1},\n    {'phone': 1, 'tablet': 1},\n  );\n  check(extensionOrder == ClockOrder.before, 'new actor component was ignored');\n\n  final active = record(\n    id: 'feedback-delete',\n    deleted: false,\n    modifiedAt: 50,\n    device: 'alpha',\n    clock: {'phone': 2},\n  );\n  final tombstone = record(\n    id: 'feedback-delete',\n    deleted: true,\n    modifiedAt: 50,\n    device: 'zulu',\n    clock: {'tablet': 3},\n  );\n  check(resolveRecord(active, tombstone).deleted, 'tombstone lost tie break');\n\n  final engine = SyncEngine([\n    record(\n      id: 'feedback-join',\n      deleted: false,\n      modifiedAt: 20,\n      device: 'phone',\n      clock: {'phone': 2},\n    ),\n  ]);\n  engine.applyRemote(\n    record(\n      id: 'feedback-join',\n      deleted: false,\n      modifiedAt: 30,\n      device: 'tablet',\n      clock: {'tablet': 1},\n    ),\n  );\n  final joined = engine.records['feedback-join']!.clock;\n  check(\n    joined['phone'] == 2 && joined['tablet'] == 1,\n    'resolved clock did not join both histories',\n  );\n}\n"
+  }
+}

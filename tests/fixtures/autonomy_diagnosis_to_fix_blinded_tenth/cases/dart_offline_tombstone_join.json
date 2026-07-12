@@ -1,0 +1,18 @@
+{
+  "case_id": "dart_offline_tombstone_join",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "Offline note synchronization repeatedly replays the same conflict after reconnect. In one sequence, a deletion made on a tablet is resurrected by an equally recent phone edit, and the next pull still considers the replicas concurrent. Causally ordered edits synchronize correctly. Repair comparison, deterministic conflict choice, and convergence bookkeeping without adding a central coordinator.",
+  "candidate_paths": [
+    "lib/vector_clock.dart",
+    "lib/merge_policy.dart",
+    "lib/sync_engine.dart"
+  ],
+  "max_files": 3,
+  "repo_files": {
+    "lib/vector_clock.dart": "enum ClockOrder { before, after, equal, concurrent }\n\nClockOrder compareClocks(\n  Map<String, int> left,\n  Map<String, int> right,\n) {\n  var less = false;\n  var greater = false;\n  for (final actor in left.keys) {\n    final leftValue = left[actor]!;\n    final rightValue = right[actor] ?? leftValue;\n    if (leftValue < rightValue) less = true;\n    if (leftValue > rightValue) greater = true;\n  }\n  if (less && greater) return ClockOrder.concurrent;\n  if (less) return ClockOrder.before;\n  if (greater) return ClockOrder.after;\n  return ClockOrder.equal;\n}\n",
+    "lib/merge_policy.dart": "import 'vector_clock.dart';\n\nclass SyncRecord {\n  SyncRecord({\n    required this.id,\n    required this.value,\n    required this.deleted,\n    required this.modifiedAt,\n    required this.deviceId,\n    required Map<String, int> clock,\n  }) : clock = Map.unmodifiable(clock);\n\n  final String id;\n  final String value;\n  final bool deleted;\n  final int modifiedAt;\n  final String deviceId;\n  final Map<String, int> clock;\n\n  SyncRecord withClock(Map<String, int> joined) => SyncRecord(\n        id: id,\n        value: value,\n        deleted: deleted,\n        modifiedAt: modifiedAt,\n        deviceId: deviceId,\n        clock: joined,\n      );\n}\n\nSyncRecord resolveRecord(SyncRecord local, SyncRecord remote) {\n  final order = compareClocks(local.clock, remote.clock);\n  if (order == ClockOrder.before) return remote;\n  if (order == ClockOrder.after || order == ClockOrder.equal) return local;\n  if (local.modifiedAt != remote.modifiedAt) {\n    return local.modifiedAt > remote.modifiedAt ? local : remote;\n  }\n  return local.deviceId.compareTo(remote.deviceId) <= 0 ? local : remote;\n}\n",
+    "lib/sync_engine.dart": "import 'merge_policy.dart';\n\nclass SyncEngine {\n  SyncEngine(Iterable<SyncRecord> initial)\n      : records = {for (final record in initial) record.id: record};\n\n  final Map<String, SyncRecord> records;\n\n  void applyRemote(SyncRecord remote) {\n    final local = records[remote.id];\n    if (local == null) {\n      records[remote.id] = remote;\n      return;\n    }\n    records[remote.id] = resolveRecord(local, remote);\n  }\n}\n",
+    "tests/test_public_sync_test.dart": "import '../lib/merge_policy.dart';\nimport '../lib/sync_engine.dart';\nimport '../lib/vector_clock.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  check(\n    compareClocks({'phone': 1}, {'phone': 2}) == ClockOrder.before,\n    'ordered clock comparison failed',\n  );\n  final local = SyncRecord(\n    id: 'n1',\n    value: 'draft',\n    deleted: false,\n    modifiedAt: 10,\n    deviceId: 'phone',\n    clock: {'phone': 1},\n  );\n  final remote = SyncRecord(\n    id: 'n1',\n    value: 'published',\n    deleted: false,\n    modifiedAt: 20,\n    deviceId: 'phone',\n    clock: {'phone': 2},\n  );\n  final engine = SyncEngine([local]);\n  engine.applyRemote(remote);\n  check(engine.records['n1']!.value == 'published', 'newer edit was lost');\n}\n"
+  }
+}

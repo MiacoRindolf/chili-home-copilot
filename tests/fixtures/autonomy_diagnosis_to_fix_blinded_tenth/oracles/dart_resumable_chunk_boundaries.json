@@ -1,0 +1,12 @@
+{
+  "case_id": "dart_resumable_chunk_boundaries",
+  "expected_dimension": "data",
+  "expected_files": [
+    "lib/content_range.dart",
+    "lib/chunk_ledger.dart",
+    "lib/assembler.dart"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_chunk_edges_test.dart": "import '../lib/assembler.dart';\nimport '../lib/chunk_ledger.dart';\nimport '../lib/content_range.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final tenBytes = ContentRange.parse('bytes 100-109/200');\n  check(tenBytes.length == 10, 'inclusive range length is wrong');\n\n  final ledger = ChunkLedger(8);\n  check(ledger.accept(ContentRange.parse('bytes 0-3/8')), 'initial range rejected');\n  check(ledger.accept(ContentRange.parse('bytes 4-7/8')), 'adjacent range rejected');\n\n  final assembled = assembleChunks({\n    0: [0, 1, 2, 3],\n    12: [12, 13, 14, 15],\n    4: [4, 5, 6, 7, 8, 9, 10, 11],\n  }, 16);\n  check(\n    assembled.join(',') == List.generate(16, (index) => index).join(','),\n    'numeric offsets were assembled out of order',\n  );\n}\n"
+  }
+}

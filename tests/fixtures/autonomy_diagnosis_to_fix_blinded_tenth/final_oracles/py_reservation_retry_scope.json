@@ -1,0 +1,6 @@
+{
+  "case_id": "py_reservation_retry_scope",
+  "final_files": {
+    "tests/test_final_regional_replay.py": "from inventory.events import MemoryPublisher\nfrom inventory.ledger import InventoryLedger\nfrom inventory.service import ReservationService\n\n\ndef test_parallel_tenant_retries_produce_two_independent_effects():\n    ledger = InventoryLedger()\n    ledger.set_stock(\"north\", \"cable\", 8)\n    ledger.set_stock(\"south\", \"cable\", 8)\n    publisher = MemoryPublisher()\n    service = ReservationService(ledger, publisher)\n\n    for tenant, quantity in ((\"north\", 2), (\"south\", 3)):\n        service.reserve(tenant, \"mobile-42\", \"cable\", quantity, attempt=1)\n        service.reserve(tenant, \"mobile-42\", \"cable\", quantity, attempt=7)\n\n    remaining = {\n        tenant: ledger.stock(tenant, \"cable\")\n        for tenant in (\"north\", \"south\")\n    }\n    event_ids = {message[\"event_id\"] for message in publisher.messages}\n\n    assert remaining == {\"north\": 6, \"south\": 5}\n    assert len(publisher.messages) == 2\n    assert len(event_ids) == 2\n"
+  }
+}

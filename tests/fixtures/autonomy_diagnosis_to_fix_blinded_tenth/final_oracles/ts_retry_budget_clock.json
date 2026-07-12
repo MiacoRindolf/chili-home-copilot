@@ -1,0 +1,6 @@
+{
+  "case_id": "ts_retry_budget_clock",
+  "final_files": {
+    "tests/test_final_numeric_budget_clip.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { RetryBudget } from \"../src/budget.mjs\";\nimport { scheduleRetry } from \"../src/scheduler.mjs\";\n\ntest(\"numeric backoff is clipped to the remaining scheduling budget\", () => {\n  const origin = 1_900_000_000_000;\n  const queue = [];\n  const budget = new RetryBudget(2_500);\n  const scheduled = scheduleRetry({\n    retryAfter: \"9\",\n    nowMs: origin,\n    budget,\n    enqueue: (time) => queue.push(time),\n  });\n\n  assert.strictEqual(scheduled, origin + 2_500, \"wrong queue deadline\");\n  assert.deepStrictEqual(queue, [origin + 2_500], \"queue received wrong time\");\n  assert.strictEqual(budget.usedMs, 2_500, \"budget accounting drifted\");\n});\n"
+  }
+}

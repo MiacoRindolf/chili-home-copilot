@@ -1,0 +1,12 @@
+{
+  "case_id": "sql_tenant_grant_intervals",
+  "expected_dimension": "data",
+  "expected_files": [
+    "sql/schema.sql",
+    "sql/upsert_grant.sql",
+    "sql/effective_access.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_grant_boundaries.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).parents[1]\n\n\ndef sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"utf-8\")\n\n\ndef database():\n    connection = sqlite3.connect(\":memory:\")\n    connection.executescript(sql(\"schema.sql\"))\n    return connection\n\n\ndef grant(tenant, start=10, end=20):\n    return {\n        \"tenant_id\": tenant,\n        \"principal_id\": \"shared-user\",\n        \"capability\": \"approve\",\n        \"valid_from\": start,\n        \"valid_until\": end,\n        \"revoked_at\": None,\n    }\n\n\ndef test_schema_identity_includes_tenant():\n    db = database()\n    statement = \"\"\"\n        INSERT INTO access_grants\n        (tenant_id, principal_id, capability, valid_from, valid_until)\n        VALUES (?, ?, ?, ?, ?)\n    \"\"\"\n    db.execute(statement, (\"red\", \"duplicate\", \"read\", 0, 10))\n    db.execute(statement, (\"blue\", \"duplicate\", \"read\", 0, 10))\n    count = db.execute(\"SELECT COUNT(*) FROM access_grants\").fetchone()[0]\n    assert count == 2\n\n\ndef test_upsert_keeps_same_identity_in_both_tenants():\n    db = database()\n    db.execute(sql(\"upsert_grant.sql\"), grant(\"red\"))\n    db.execute(sql(\"upsert_grant.sql\"), grant(\"blue\", start=30, end=40))\n    tenants = {\n        row[0] for row in db.execute(\"SELECT tenant_id FROM access_grants\")\n    }\n    assert tenants == {\"red\", \"blue\"}\n\n\ndef test_expiration_boundary_is_not_effective():\n    db = database()\n    db.execute(sql(\"upsert_grant.sql\"), grant(\"edge\", start=80, end=90))\n    rows = db.execute(\n        sql(\"effective_access.sql\"),\n        {\"tenant_id\": \"edge\", \"principal_id\": \"shared-user\", \"as_of\": 90},\n    ).fetchall()\n    assert rows == []\n"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "case_id": "py_relay_rotation_window",
+  "final_files": {
+    "tests/test_final_rotated_v2_delivery.py": "import hashlib\nimport hmac\n\nfrom relay.keys import KeyRing, SigningKey\nfrom relay.verifier import verify_delivery\n\n\ndef test_delayed_v2_delivery_survives_rotation_and_query_reordering():\n    secret = b\"retired-green\"\n    raw_timestamp = \"1700000104000\"\n    canonical_target = \"/events?aud=billing&aud=ops&empty=\"\n    request_target = \"/events?aud=ops&empty=&aud=billing\"\n    payload = b'{\"invoice\":418}'\n    signed = (\n        f\"{raw_timestamp}\\nPATCH\\n{canonical_target}\\n\".encode() + payload\n    )\n    headers = {\n        \"X-Relay-Timestamp\": raw_timestamp,\n        \"X-Relay-Key\": \"green\",\n        \"X-Relay-Signature\": hmac.new(\n            secret, signed, hashlib.sha256\n        ).hexdigest(),\n    }\n    ring = KeyRing(\n        [SigningKey(\"green\", secret, 1699999000, 1700000100)],\n        grace_seconds=30,\n    )\n\n    accepted = verify_delivery(\n        \"patch\",\n        request_target,\n        payload,\n        headers,\n        ring,\n        now=1700000105,\n        tolerance_seconds=10,\n    )\n    assert accepted, \"the valid delayed v2 delivery was rejected\"\n"
+  }
+}

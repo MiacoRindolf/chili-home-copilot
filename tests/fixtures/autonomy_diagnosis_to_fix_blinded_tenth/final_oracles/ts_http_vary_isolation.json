@@ -1,0 +1,6 @@
+{
+  "case_id": "ts_http_vary_isolation",
+  "final_files": {
+    "tests/test_final_cache_boundaries.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { ResponseCache } from \"../src/cache.mjs\";\n\ntest(\"mixed-case multi-dimensional variants remain isolated\", () => {\n  const cache = new ResponseCache();\n  cache.put(\n    \"/catalog\",\n    { \"ACCEPT-LANGUAGE\": \"en\", \"x-tier\": \"free\" },\n    {\n      headers: { vary: \"Accept-Language, X-Tier\" },\n      body: \"english-free\",\n    },\n  );\n\n  const crossed = cache.match(\"/catalog\", {\n    \"Accept-Language\": \"es\",\n    \"X-Tier\": \"free\",\n  });\n  assert.strictEqual(crossed, undefined, \"a different locale hit the entry\");\n});\n\ntest(\"wildcard metadata never occupies cache storage\", () => {\n  const cache = new ResponseCache();\n  cache.put(\n    \"/session\",\n    { cookie: \"sid=a\" },\n    { headers: { vary: \"*\" }, body: \"account-a\" },\n  );\n  assert.strictEqual(cache.size, 0, \"wildcard response was retained\");\n});\n"
+  }
+}

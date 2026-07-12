@@ -1,0 +1,12 @@
+{
+  "case_id": "ts_http_vary_isolation",
+  "expected_dimension": "config",
+  "expected_files": [
+    "src/vary.mjs",
+    "src/key.mjs",
+    "src/cache.mjs"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_vary_contract.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { ResponseCache } from \"../src/cache.mjs\";\nimport { makeVariantKey } from \"../src/key.mjs\";\nimport { parseVary } from \"../src/vary.mjs\";\n\ntest(\"Vary fields are normalized and deduplicated\", () => {\n  assert.deepEqual(\n    parseVary(\"Accept-Encoding,  X-Device,accept-encoding\"),\n    [\"accept-encoding\", \"x-device\"],\n  );\n});\n\ntest(\"request header lookup is case insensitive\", () => {\n  const upper = makeVariantKey(\n    \"/asset\",\n    [\"accept-language\"],\n    { \"Accept-Language\": \"de\" },\n  );\n  const lower = makeVariantKey(\n    \"/asset\",\n    [\"accept-language\"],\n    { \"accept-language\": \"de\" },\n  );\n  assert.equal(upper, lower);\n});\n\ntest(\"a wildcard response cannot be retrieved\", () => {\n  const cache = new ResponseCache();\n  cache.put(\n    \"/private\",\n    { authorization: \"Bearer one\" },\n    { headers: { vary: \"*\" }, body: \"secret\" },\n  );\n  assert.equal(\n    cache.match(\"/private\", { authorization: \"Bearer two\" }),\n    undefined,\n  );\n});\n"
+  }
+}

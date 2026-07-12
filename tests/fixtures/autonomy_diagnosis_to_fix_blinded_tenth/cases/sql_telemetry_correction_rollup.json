@@ -1,0 +1,18 @@
+{
+  "case_id": "sql_telemetry_correction_rollup",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "Telemetry corrections arriving out of order are moving measurements into the wrong hourly bucket, and two sites that reuse a vendor event identifier can collapse into one reading. A late replay of an older correction can also alter event metadata while leaving the newer value in place. Fresh readings whose observation and receipt times match roll up correctly. Restore idempotent ingestion and event-time aggregation.",
+  "candidate_paths": [
+    "sql/telemetry_schema.sql",
+    "sql/upsert_reading.sql",
+    "sql/hourly_rollup.sql"
+  ],
+  "max_files": 3,
+  "repo_files": {
+    "sql/telemetry_schema.sql": "CREATE TABLE readings (\n    id INTEGER PRIMARY KEY,\n    site_id TEXT NOT NULL,\n    sensor_id TEXT NOT NULL,\n    event_id TEXT NOT NULL,\n    observed_at INTEGER NOT NULL,\n    received_at INTEGER NOT NULL,\n    value REAL NOT NULL,\n    UNIQUE(sensor_id, event_id)\n);\n",
+    "sql/upsert_reading.sql": "INSERT INTO readings (\n    site_id, sensor_id, event_id, observed_at, received_at, value\n) VALUES (\n    :site_id, :sensor_id, :event_id, :observed_at, :received_at, :value\n)\nON CONFLICT(sensor_id, event_id) DO UPDATE SET\n    observed_at = excluded.observed_at,\n    received_at = MAX(readings.received_at, excluded.received_at),\n    value = CASE\n        WHEN excluded.received_at >= readings.received_at THEN excluded.value\n        ELSE readings.value\n    END;\n",
+    "sql/hourly_rollup.sql": "SELECT\n    site_id,\n    strftime('%Y-%m-%dT%H:00:00Z', received_at, 'unixepoch') AS hour,\n    ROUND(AVG(value), 2) AS average_value,\n    COUNT(*) AS sample_count\nFROM readings\nWHERE received_at >= :window_start\n  AND received_at < :window_end\nGROUP BY site_id, hour\nORDER BY site_id, hour;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).parents[1]\n\n\ndef sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"utf-8\")\n\n\ndef test_fresh_reading_rolls_up_in_its_hour():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(sql(\"telemetry_schema.sql\"))\n    db.execute(\n        sql(\"upsert_reading.sql\"),\n        {\n            \"site_id\": \"public-site\",\n            \"sensor_id\": \"temp\",\n            \"event_id\": \"evt-1\",\n            \"observed_at\": 120,\n            \"received_at\": 120,\n            \"value\": 18.5,\n        },\n    )\n    rows = db.execute(\n        sql(\"hourly_rollup.sql\"),\n        {\"window_start\": 0, \"window_end\": 3600},\n    ).fetchall()\n\n    assert rows == [(\"public-site\", \"1970-01-01T00:00:00Z\", 18.5, 1)]\n"
+  }
+}

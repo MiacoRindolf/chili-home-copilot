@@ -1,0 +1,6 @@
+{
+  "case_id": "dart_resumable_chunk_boundaries",
+  "final_files": {
+    "tests/test_final_three_chunk_resume_test.dart": "import '../lib/assembler.dart';\nimport '../lib/chunk_ledger.dart';\nimport '../lib/content_range.dart';\n\nvoid ensure(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final ledger = ChunkLedger(24);\n  final accepted = [\n    'bytes 0-7/24',\n    'bytes 8-15/24',\n    'bytes 16-23/24',\n  ].map(ContentRange.parse).every(ledger.accept);\n  final bytes = assembleChunks({\n    0: List.generate(8, (index) => index),\n    8: List.generate(8, (index) => index + 8),\n    16: List.generate(8, (index) => index + 16),\n  }, 24);\n\n  ensure(accepted && ledger.isComplete, 'sealed upload never became complete');\n  ensure(bytes[8] == 8 && bytes[16] == 16, 'sealed upload order was corrupted');\n}\n"
+  }
+}

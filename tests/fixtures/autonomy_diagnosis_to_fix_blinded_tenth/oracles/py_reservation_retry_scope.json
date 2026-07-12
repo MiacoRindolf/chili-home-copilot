@@ -1,0 +1,12 @@
+{
+  "case_id": "py_reservation_retry_scope",
+  "expected_dimension": "state",
+  "expected_files": [
+    "inventory/ledger.py",
+    "inventory/service.py",
+    "inventory/events.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_idempotency.py": "from inventory.events import MemoryPublisher, reservation_created\nfrom inventory.ledger import InventoryLedger, Reservation\nfrom inventory.service import ReservationService\n\n\ndef test_retry_identity_is_scoped_to_tenant():\n    ledger = InventoryLedger()\n    ledger.set_stock(\"red\", \"sku\", 5)\n    ledger.set_stock(\"blue\", \"sku\", 5)\n    first = ledger.reserve(\"red\", \"same-token\", \"sku\", 2)\n    second = ledger.reserve(\"blue\", \"same-token\", \"sku\", 2)\n\n    assert first.tenant_id != second.tenant_id\n    assert ledger.stock(\"blue\", \"sku\") == 3\n\n\ndef test_service_replay_does_not_republish_creation():\n    ledger = InventoryLedger()\n    ledger.set_stock(\"solo\", \"sku\", 9)\n    publisher = MemoryPublisher()\n    service = ReservationService(ledger, publisher)\n    service.reserve(\"solo\", \"retry-me\", \"sku\", 4, attempt=1)\n    service.reserve(\"solo\", \"retry-me\", \"sku\", 4, attempt=2)\n\n    assert len(publisher.messages) == 1\n\n\ndef test_event_identity_is_stable_across_attempts_and_tenant_scoped():\n    one = Reservation(\"tenant-1\", \"request-9\", \"sku\", 1)\n    two = Reservation(\"tenant-2\", \"request-9\", \"sku\", 1)\n    first_id = reservation_created(one, 1)[\"event_id\"]\n    retry_id = reservation_created(one, 8)[\"event_id\"]\n    other_tenant_id = reservation_created(two, 1)[\"event_id\"]\n\n    assert first_id == retry_id\n    assert first_id != other_tenant_id\n"
+  }
+}

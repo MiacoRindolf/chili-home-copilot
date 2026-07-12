@@ -1,0 +1,18 @@
+{
+  "case_id": "dart_resumable_chunk_boundaries",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "Resumable uploads work for a short two-part sample but larger sessions report adjacent chunks as conflicting, never reach complete coverage, or reconstruct bytes out of order once offsets gain another digit. The service uses inclusive Content-Range boundaries. Make range validation, coverage tracking, and assembly agree for independently retried chunks.",
+  "candidate_paths": [
+    "lib/content_range.dart",
+    "lib/chunk_ledger.dart",
+    "lib/assembler.dart"
+  ],
+  "max_files": 3,
+  "repo_files": {
+    "lib/content_range.dart": "class ContentRange {\n  ContentRange(this.start, this.end, this.total) {\n    if (start < 0 || end < start || end >= total) {\n      throw FormatException('invalid content range');\n    }\n  }\n\n  final int start;\n  final int end;\n  final int total;\n\n  int get length => end - start;\n\n  factory ContentRange.parse(String value) {\n    final match = RegExp(r'^bytes (\\d+)-(\\d+)/(\\d+)$').firstMatch(value);\n    if (match == null) throw FormatException('bad Content-Range');\n    return ContentRange(\n      int.parse(match.group(1)!),\n      int.parse(match.group(2)!),\n      int.parse(match.group(3)!),\n    );\n  }\n}\n",
+    "lib/chunk_ledger.dart": "import 'content_range.dart';\n\nclass ChunkLedger {\n  ChunkLedger(this.total);\n\n  final int total;\n  final List<ContentRange> _ranges = [];\n\n  bool accept(ContentRange range) {\n    if (range.total != total) return false;\n    for (final existing in _ranges) {\n      final separated = range.end < existing.start - 1 ||\n          range.start > existing.end + 1;\n      if (!separated) return false;\n    }\n    _ranges.add(range);\n    return true;\n  }\n\n  bool get isComplete {\n    if (_ranges.isEmpty) return false;\n    final ordered = [..._ranges]..sort((a, b) => a.start.compareTo(b.start));\n    var next = 0;\n    for (final range in ordered) {\n      if (range.start != next) return false;\n      next += range.length;\n    }\n    return next == total;\n  }\n}\n",
+    "lib/assembler.dart": "List<int> assembleChunks(Map<int, List<int>> chunks, int total) {\n  final offsets = chunks.keys.toList()\n    ..sort((a, b) => a.toString().compareTo(b.toString()));\n  final output = <int>[];\n  for (final offset in offsets) {\n    output.addAll(chunks[offset]!);\n  }\n  if (output.length != total) {\n    throw StateError('assembled length does not match upload');\n  }\n  return output;\n}\n",
+    "tests/test_public_upload_test.dart": "import '../lib/assembler.dart';\nimport '../lib/chunk_ledger.dart';\nimport '../lib/content_range.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final parsed = ContentRange.parse('bytes 0-3/8');\n  check(parsed.start == 0 && parsed.end == 3 && parsed.total == 8, 'parse failed');\n\n  final ledger = ChunkLedger(8);\n  check(ledger.accept(parsed), 'first range was rejected');\n\n  final output = assembleChunks({\n    0: [0, 1, 2, 3],\n    4: [4, 5, 6, 7],\n  }, 8);\n  check(output.last == 7 && output.first == 0, 'small assembly failed');\n}\n"
+  }
+}

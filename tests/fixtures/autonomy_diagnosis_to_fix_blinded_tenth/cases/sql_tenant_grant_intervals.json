@@ -1,0 +1,18 @@
+{
+  "case_id": "sql_tenant_grant_intervals",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "An access-grant import for two tenants sharing a principal identifier leaves only one tenant with usable data. Separately, a capability remains visible at the exact instant its grant expires. Single-tenant grants queried well inside their validity window behave normally. Align storage identity, repeatable writes, and effective-time reads without broadening access.",
+  "candidate_paths": [
+    "sql/schema.sql",
+    "sql/upsert_grant.sql",
+    "sql/effective_access.sql"
+  ],
+  "max_files": 3,
+  "repo_files": {
+    "sql/schema.sql": "PRAGMA foreign_keys = ON;\n\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER\n);\n\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(principal_id, capability);\n",
+    "sql/upsert_grant.sql": "INSERT INTO access_grants (\n    tenant_id, principal_id, capability, valid_from, valid_until, revoked_at\n) VALUES (\n    :tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at\n)\nON CONFLICT(principal_id, capability) DO UPDATE SET\n    valid_from = excluded.valid_from,\n    valid_until = excluded.valid_until,\n    revoked_at = excluded.revoked_at;\n",
+    "sql/effective_access.sql": "SELECT capability\nFROM access_grants\nWHERE tenant_id = :tenant_id\n  AND principal_id = :principal_id\n  AND :as_of BETWEEN valid_from AND valid_until\n  AND (revoked_at IS NULL OR revoked_at > :as_of)\nORDER BY capability;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).parents[1]\n\n\ndef sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"utf-8\")\n\n\ndef database():\n    connection = sqlite3.connect(\":memory:\")\n    connection.executescript(sql(\"schema.sql\"))\n    return connection\n\n\ndef test_grant_is_visible_inside_its_window():\n    db = database()\n    db.execute(\n        sql(\"upsert_grant.sql\"),\n        {\n            \"tenant_id\": \"public\",\n            \"principal_id\": \"user-1\",\n            \"capability\": \"deploy\",\n            \"valid_from\": 100,\n            \"valid_until\": 200,\n            \"revoked_at\": None,\n        },\n    )\n    rows = db.execute(\n        sql(\"effective_access.sql\"),\n        {\"tenant_id\": \"public\", \"principal_id\": \"user-1\", \"as_of\": 150},\n    ).fetchall()\n\n    assert rows == [(\"deploy\",)]\n"
+  }
+}
