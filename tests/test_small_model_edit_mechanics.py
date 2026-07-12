@@ -57,6 +57,16 @@ def test_plan_parser_keeps_nested_contract_coverage():
     assert plan["contract_coverage"][0]["owner_paths"] == ["owner.py"]
 
 
+def test_full_file_fallback_rejects_embedded_search_replace_markers():
+    from app.services.code_brain.agent import _extract_full_file_replacement
+
+    response = "```python\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n```"
+    outcome = _extract_full_file_replacement(response, "owner.py", "x = 1\n")
+
+    assert outcome["new_content"] is None
+    assert "embedded SEARCH/REPLACE" in outcome["warnings"][0]
+
+
 # ── applying ─────────────────────────────────────────────────────────────
 
 

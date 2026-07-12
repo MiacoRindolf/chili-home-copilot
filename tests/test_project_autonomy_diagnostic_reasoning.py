@@ -2167,6 +2167,113 @@ def test_prompt_and_source_heuristics_remain_inferred_not_explicit(tmp_path):
     )
 
 
+def test_post_probe_family_change_requires_stronger_causal_evidence():
+    previous = {
+        "conclusion": {
+            "dimension": "config",
+            "status": "provisional",
+            "causal_sufficiency": "observational",
+            "evidence_ids": ["old"],
+        }
+    }
+    weak_candidate = {
+        "conclusion": {
+            "dimension": "data",
+            "status": "provisional",
+            "causal_sufficiency": "observational",
+            "evidence_ids": ["probe-weak"],
+        }
+    }
+    strong_candidate = {
+        "conclusion": {
+            "dimension": "clock",
+            "status": "provisional",
+            "causal_sufficiency": "isolated",
+            "evidence_ids": ["probe-strong"],
+        }
+    }
+
+    rejected = reasoning.evidence_gated_report_revision(
+        previous,
+        weak_candidate,
+        [
+            {
+                "evidence_id": "probe-weak",
+                "dimension_origin": "inferred",
+                "causal_role": "support",
+                "evidence_lifecycle": "observed_result",
+                "discriminating": True,
+            }
+        ],
+    )
+    accepted = reasoning.evidence_gated_report_revision(
+        previous,
+        strong_candidate,
+        [],
+    )
+
+    assert rejected["accepted"] is False
+    assert rejected["reason"] == "causal_family_change_lacks_stronger_evidence"
+    assert accepted["accepted"] is True
+    assert accepted["reason"] == "stronger_causal_sufficiency"
+
+
+def test_council_prompts_share_specific_causal_ownership_rubric():
+    case = {"case_id": "rubric", "problem_statement": "Diagnose retry delay."}
+
+    prompt = reasoning.investigator_prompt(case)
+
+    assert "not vector clocks" in prompt
+    assert "wall/event time" in prompt
+    assert "retry budgets" in prompt
+    assert "wire protocol" in prompt
+
+
+def test_realworld_boundary_language_yields_mechanical_contract_invariants():
+    vary = reasoning.derive_contract_invariants(
+        "Vary values have mixed casing and a wildcard response is still found in cache."
+    )
+    retry = reasoning.derive_contract_invariants(
+        "Numeric Retry-After exceeds the remaining allowance and an explicit immediate retry is dropped."
+    )
+    interval = reasoning.derive_contract_invariants(
+        "A capability remains visible at the exact instant its grant expires."
+    )
+    scoped = reasoning.derive_contract_invariants(
+        "Two tenants reuse the same identifier and one row collapses."
+    )
+    convergence = reasoning.derive_contract_invariants(
+        "Replicas concurrent after reconnect need convergence bookkeeping; deletion resurrects."
+    )
+
+    assert any("normalize both sides" in value for value in vary)
+    assert any("non-cacheable" in value for value in vary)
+    assert any("converts to milliseconds exactly once" in value for value in retry)
+    assert any("zero retry delay" in value for value in retry)
+    assert any("delay actually granted" in value for value in retry)
+    assert any("exclusive upper bound" in value for value in interval)
+    assert any("same composite identity" in value for value in scoped)
+    assert any("tombstones win" in value for value in convergence)
+
+
+def test_causal_taxonomy_disambiguates_protocol_policy_and_logical_state():
+    assert reasoning.infer_dimension(
+        "Vary header values use mixed casing and a wildcard response follows the wrong policy."
+    ) == "config"
+    assert reasoning.infer_dimension(
+        "Numeric Retry-After exceeds the remaining allowance and queue time is wrong."
+    ) == "clock"
+    assert reasoning.infer_dimension(
+        "A forwarder rollout disagrees with wire behavior during secret rotation."
+    ) == "dependency"
+    assert reasoning.infer_dimension(
+        "Replicas concurrent after reconnect need convergence bookkeeping for a tombstone."
+    ) == "state"
+    assert reasoning.infer_dimension(
+        "Inclusive Content-Range boundaries reconstruct bytes out of order."
+    ) == "data"
+
+
 def test_generic_mechanism_vocabulary_maps_to_causal_families_and_ties_stay_unknown():
     assert reasoning.infer_dimension(
         "The source stage plan differs at one ordering point."

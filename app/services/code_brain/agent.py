@@ -421,6 +421,14 @@ def _extract_full_file_replacement(
             "new_content": None,
             "warnings": ["full-file fallback rejected a unified diff fence"],
         }
+    if any(
+        marker in candidate
+        for marker in ("<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE")
+    ):
+        return {
+            "new_content": None,
+            "warnings": ["full-file fallback rejected embedded SEARCH/REPLACE markers"],
+        }
     if original.endswith("\n") and not candidate.endswith("\n"):
         candidate += "\n"
     if not candidate.strip() or candidate.rstrip() == original.rstrip():

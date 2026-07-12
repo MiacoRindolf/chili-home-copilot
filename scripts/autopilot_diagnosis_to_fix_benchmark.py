@@ -53,16 +53,7 @@ SCORE_WEIGHTS = {
     "final_tests": 45,
     "premium_independence": 10,
 }
-REPAIR_DIMENSION_RUBRIC = {
-    "clock": "time source, temporal ordering, event-time comparison, or cursor progression",
-    "config": "effective settings, explicit-value precedence, flags, or policy resolution",
-    "data": "persisted representation, schema, identity, nullability, joins, or data contract",
-    "state": "mutable ownership, lifecycle, transition, checkpoint, queue, or in-memory isolation",
-    "dependency": "external package, SDK, provider, service, protocol, or compatibility boundary",
-    "runtime": "language/runtime coercion, decoding, affinity, process, container, or execution semantics",
-    "test_harness": "test orchestration, fixture attribution, simulation, isolation, or result association",
-    "code": "algorithm or control-flow defect with no more specific owner family",
-}
+REPAIR_DIMENSION_RUBRIC = dict(diagnostic_reasoning.CAUSAL_DIMENSION_RUBRIC)
 REPAIR_PLAN_SCHEMA = {
     "type": "object",
     "required": ["dimension", "analysis", "files", "contract_coverage"],
@@ -1042,6 +1033,16 @@ def _attempt_ledger_context(attempts: Sequence[Mapping[str, Any]]) -> str:
                 "before_contracts": item.get("before_test_contracts") or {},
                 "after_contracts": item.get("after_test_contracts") or {},
                 "attempted_diff": str(item.get("attempted_diff") or "")[:3_000],
+                "optional_rejected_diffs": [
+                    {
+                        "path": str(rejected.get("path") or ""),
+                        "reason": str(rejected.get("reason") or "")[:500],
+                        "attempted_diff": str(rejected.get("attempted_diff") or "")[:1_500],
+                        "validation_output": str(rejected.get("validation_output") or "")[:1_000],
+                    }
+                    for rejected in item.get("optional_rejected_diffs") or []
+                    if isinstance(rejected, Mapping)
+                ][-3:],
                 "adapter_rejection": str(item.get("adapter_rejection") or "")[:1_500],
                 "validation_output": str(item.get("validation_output") or "")[:3_500],
                 "warnings": [str(value) for value in item.get("warnings") or []][-3:],
@@ -1303,7 +1304,7 @@ def _diagnose(
     initial = diagnostic_reasoning.run_local_diagnostic_debate(
         diagnostic_case,
         judge,
-        stages_to_run=("investigator", "skeptic", "judge"),
+        stages_to_run=("investigator", "judge"),
     )
     report = initial["report"]
     probes = diagnostic_probes.probes_from_packet(initial["packet"], max_probes=3)
@@ -1326,14 +1327,21 @@ def _diagnose(
     final = diagnostic_reasoning.run_local_diagnostic_debate(
         enriched,
         judge,
-        stages_to_run=("skeptic", "judge"),
+        stages_to_run=("judge",),
         previous_report=report,
     )
+    revision = diagnostic_reasoning.evidence_gated_report_revision(
+        report,
+        final.get("report") or {},
+        probe_run.get("evidence") or [],
+    )
+    retained = final if revision["accepted"] else initial
     return {
-        **final,
+        **retained,
         "stages": [*(initial.get("stages") or []), *(final.get("stages") or [])],
         "initial_report": report,
         "probe_run": probe_run,
+        "post_probe_conclusion_revision": revision,
         "case": enriched,
     }
 
@@ -1555,10 +1563,17 @@ def _apply_planned_edits(
 ) -> dict[str, Any]:
     """Apply one bounded edit group and roll it back if any member fails."""
     paths = [str(item.get("path") or "") for item in selected]
+    optional_paths = {
+        str(item.get("path") or "")
+        for item in selected
+        if bool(item.get("optional"))
+    }
     originals = {
         rel: (repo / rel).read_text(encoding="utf-8", errors="replace")
         for rel in paths
     }
+    optional_baseline_public: dict[str, Any] | None = None
+    optional_baseline_feedback: dict[str, Any] | None = None
 
     def current_attempted_diff() -> str:
         return _snapshot_diff(
@@ -1582,17 +1597,73 @@ def _apply_planned_edits(
             {
                 "path": str(item.get("path") or ""),
                 "responsibility": str(item.get("description") or ""),
+                "optional_context_candidate": bool(item.get("optional")),
             }
             for item in selected
         ],
         sort_keys=True,
     )
+    contract_coverage = [
+        dict(item)
+        for item in plan.get("contract_coverage") or []
+        if isinstance(item, Mapping)
+    ]
     warnings: list[str] = []
     applied: list[str] = []
     satisfied: list[str] = []
+    skipped_optional: list[str] = []
+    optional_rejected_diffs: list[dict[str, str]] = []
+
+    def record_optional_rejection(
+        rel: str,
+        *,
+        reason: str,
+        validation_output: str = "",
+    ) -> None:
+        current = (repo / rel).read_text(encoding="utf-8", errors="replace")
+        optional_rejected_diffs.append(
+            {
+                "path": rel,
+                "reason": reason,
+                "attempted_diff": _snapshot_diff(
+                    {rel: originals[rel]},
+                    {rel: current},
+                ),
+                "validation_output": validation_output[:3_000],
+            }
+        )
+
     for index, item in enumerate(selected, start=1):
         rel = str(item.get("path") or "")
         description = str(item.get("description") or case.get("prompt") or "")
+        if (
+            rel in optional_paths
+            and optional_baseline_public is None
+            and failure_output
+            and (repo / "tests").is_dir()
+        ):
+            optional_baseline_public = _run_case_tests(
+                repo,
+                case,
+                public_only=True,
+            )
+            optional_baseline_feedback = _run_case_tests(
+                repo,
+                case,
+                public_only=False,
+            )
+        owned_contracts = [
+            contract
+            for contract in contract_coverage
+            if rel
+            in {
+                candidate
+                for value in contract.get("owner_paths") or []
+                if (candidate := _safe_rel(value))
+            }
+        ]
+        if not owned_contracts:
+            owned_contracts = contract_coverage
         related = _candidate_context(
             repo,
             [
@@ -1610,6 +1681,8 @@ def _apply_planned_edits(
             f"Strongest causal evidence:\n{evidence_context or '(none)'}\n\n"
             f"Deterministic mechanism invariants:\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
             f"Coordinated file responsibilities:\n{plan_summary}\n"
+            f"Contract-to-owner postconditions (implement each applicable postcondition exactly):\n"
+            f"{json.dumps(owned_contracts, indent=2, sort_keys=True)}\n"
         )
         if related:
             change += f"\nRelated source context (read-only):\n{related[:7000]}\n"
@@ -1625,7 +1698,8 @@ def _apply_planned_edits(
         change += (
             "\nMake the smallest compatible production edit in this file. Preserve public function signatures "
             "unless every approved caller is updated. Do not invent dependencies, automatic retries, or error "
-            "classes that the repository does not define. Do not edit tests."
+            "classes that the repository does not define. Preserve semantic polarity exactly: cannot/not/never/"
+            "undefined are prohibitions, not permission to store, return, or enable the behavior. Do not edit tests."
         )
         edit = _apply_local_edit(
             repo,
@@ -1641,6 +1715,19 @@ def _apply_planned_edits(
             satisfied.append(rel)
             continue
         if not edit.get("patch_applied"):
+            if rel in optional_paths:
+                record_optional_rejection(
+                    rel,
+                    reason="local edit adapter rejected the optional candidate",
+                    validation_output="\n".join(
+                        str(value) for value in edit.get("warnings") or []
+                    ),
+                )
+                skipped_optional.append(rel)
+                warnings.append(
+                    f"Skipped optional source-owner candidate {rel} after its edit was rejected."
+                )
+                continue
             attempted_diff = current_attempted_diff()
             for original_rel, content in originals.items():
                 (repo / original_rel).write_text(content, encoding="utf-8")
@@ -1649,12 +1736,40 @@ def _apply_planned_edits(
                 "selected_files": paths,
                 "applied_files": [],
                 "satisfied_files": satisfied,
+                "skipped_optional_files": skipped_optional,
+                "optional_rejected_diffs": optional_rejected_diffs,
                 "attempted_diff": attempted_diff,
                 "warnings": [
                     *warnings,
                     f"Rolled back multi-file edit group after {rel} was rejected.",
                 ],
             }
+        if rel in optional_paths:
+            optional_syntax = validator_runner.run_ast_syntax(
+                repo,
+                changed_files=[rel],
+            )
+            if optional_syntax.exit_code != 0 or optional_syntax.timed_out:
+                detail = "\n".join(
+                    value
+                    for value in (
+                        str(optional_syntax.stdout or ""),
+                        str(optional_syntax.stderr or ""),
+                    )
+                    if value.strip()
+                )
+                record_optional_rejection(
+                    rel,
+                    reason="optional candidate failed changed-file syntax validation",
+                    validation_output=detail,
+                )
+                (repo / rel).write_text(originals[rel], encoding="utf-8")
+                skipped_optional.append(rel)
+                warnings.append(
+                    f"Skipped optional source-owner candidate {rel} after syntax rejection:\n"
+                    f"{detail[:3000]}"
+                )
+                continue
         applied.append(rel)
     if applied:
         syntax = validator_runner.run_ast_syntax(repo, changed_files=applied)
@@ -1723,6 +1838,8 @@ def _apply_planned_edits(
                     "selected_files": paths,
                     "applied_files": [],
                     "satisfied_files": satisfied,
+                    "skipped_optional_files": skipped_optional,
+                    "optional_rejected_diffs": optional_rejected_diffs,
                     "attempted_diff": attempted_diff,
                     "warnings": [
                         *warnings,
@@ -1730,6 +1847,43 @@ def _apply_planned_edits(
                         "Rolled back edit group after compiler-guided correction failed.",
                     ],
                 }
+    applied_optional = [rel for rel in applied if rel in optional_paths]
+    if (
+        applied_optional
+        and optional_baseline_public is not None
+        and optional_baseline_feedback is not None
+    ):
+        optional_after_public = _run_case_tests(repo, case, public_only=True)
+        optional_after_feedback = _run_case_tests(repo, case, public_only=False)
+        before_contracts = validation_contracts.test_contract_evidence(
+            optional_baseline_feedback
+        )
+        after_contracts = validation_contracts.test_contract_evidence(
+            optional_after_feedback
+        )
+        optional_regressed = bool(
+            not optional_after_public.get("passed")
+            or validation_contracts.contract_regressions(
+                before_contracts,
+                after_contracts,
+            )
+        )
+        if optional_regressed:
+            for rel in applied_optional:
+                record_optional_rejection(
+                    rel,
+                    reason="optional candidate regressed a previously passing contract",
+                    validation_output=_validation_failure_context(
+                        optional_after_public,
+                        optional_after_feedback,
+                    ),
+                )
+                (repo / rel).write_text(originals[rel], encoding="utf-8")
+                applied.remove(rel)
+                skipped_optional.append(rel)
+            warnings.append(
+                "Restored optional source-owner edits because they regressed a previously green contract."
+            )
     candidate_contents = {
         relative: (repo / relative).read_text(encoding="utf-8", errors="replace")
         for value in case.get("candidate_paths") or []
@@ -1749,6 +1903,8 @@ def _apply_planned_edits(
             "selected_files": paths,
             "applied_files": [],
             "satisfied_files": satisfied,
+            "skipped_optional_files": skipped_optional,
+            "optional_rejected_diffs": optional_rejected_diffs,
             "attempted_diff": attempted_diff,
             "warnings": [
                 *warnings,
@@ -1761,6 +1917,8 @@ def _apply_planned_edits(
         "selected_files": paths,
         "applied_files": applied,
         "satisfied_files": satisfied,
+        "skipped_optional_files": skipped_optional,
+        "optional_rejected_diffs": optional_rejected_diffs,
         "warnings": warnings,
     }
 
@@ -1869,6 +2027,7 @@ def _repair_after_failure(
     *,
     feedback_context: str = "",
     attempt_ledger: str = "",
+    contract_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidates = [
         rel
@@ -1889,6 +2048,7 @@ def _repair_after_failure(
         f"repair, up to {max_files}. Use multiple files when the failure crosses an interface. "
         "Map every independent failing contract to its causal source owner and a concrete postcondition. Files "
         "imported by a test are read-only context unless the evidence shows they must change. Never select a test. "
+        "Every contract_coverage.owner_paths value must be an allowed source candidate, never a test path. "
         "Required JSON schema:\n"
         f"{json.dumps(REPAIR_PLAN_SCHEMA, indent=2)}\n\n"
         f"Original request:\n{case.get('prompt')}\n\n"
@@ -1898,6 +2058,8 @@ def _repair_after_failure(
         f"Deterministic mechanism invariants:\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
         f"Previous selected files: {json.dumps(previous_patch.get('selected_files') or [])}\n\n"
         f"Rejected/no-progress attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
+        f"Stable test-contract inventory (cover every failed id and preserve every passed id):\n"
+        f"{json.dumps(dict(contract_evidence or {}), indent=2, sort_keys=True)}\n\n"
         f"Validation failure:\n{failure_output[:9000]}\n\n"
         f"Read-only repair-feedback tests:\n{feedback_context or '(unavailable)'}\n\n"
         f"Allowed candidates: {json.dumps(candidates)}\n\n"
@@ -1925,9 +2087,10 @@ def _repair_after_failure(
         "already-green behavior, copy mutable data when identity isolation is "
         "asserted, and keep required empty keys when an assertion indexes them. Never edit tests, swallow an "
         "exception, invent a dependency, add an unrequested retry loop, change a public signature without all "
-        "callers, or select a file that needs no change. A failed in-flight operation must not recursively await "
-        "its own cached promise. Include a contract_coverage entry for every independent assertion. Required JSON "
-        "schema:\n"
+        "callers, or select a file that needs no change. Preserve negative-contract polarity: cannot/not/never/"
+        "undefined means the behavior must not occur. A failed in-flight operation must not recursively await "
+        "its own cached promise. Include a contract_coverage entry for every independent assertion. Every "
+        "owner_paths value must be an allowed source candidate, never a test path. Required JSON schema:\n"
         f"{json.dumps(REPAIR_PLAN_SCHEMA, indent=2)}\n\n"
         f"Allowed candidates (max {max_files}): {json.dumps(candidates)}\n\n"
         f"Dimension rubric:\n{json.dumps(REPAIR_DIMENSION_RUBRIC, indent=2)}\n\n"
@@ -1937,6 +2100,8 @@ def _repair_after_failure(
         f"Repair-feedback validation contracts:\n{failure_output[:12000]}\n\n"
         f"Read-only repair-feedback tests:\n{feedback_context or '(unavailable)'}\n\n"
         f"Rejected/no-progress attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
+        f"Stable test-contract inventory (cover every failed id and preserve every passed id):\n"
+        f"{json.dumps(dict(contract_evidence or {}), indent=2, sort_keys=True)}\n\n"
         f"Draft plan:\n{json.dumps(plan, sort_keys=True)}\n\n"
         f"Current candidate contents:\n{context}\n\n"
         "Do not use action=review as a placeholder for a causal owner. If a source file must change to satisfy "
@@ -1965,13 +2130,30 @@ def _repair_after_failure(
         feedback_context,
         candidates,
     )
+    selected_paths = {str(item.get("path") or "") for item in selected}
+    ownership_augmented_files: list[str] = []
+    for relative in feedback_context_files:
+        if relative in selected_paths or len(selected) >= max_files:
+            continue
+        selected.append(
+            {
+                "path": relative,
+                "description": (
+                    "Repair this directly exercised source boundary only if its current behavior violates a "
+                    "listed feedback contract; otherwise leave it unchanged."
+                ),
+                "optional": True,
+            }
+        )
+        selected_paths.add(relative)
+        ownership_augmented_files.append(relative)
     if not selected:
         return {
             "round": round_index,
             "plan": plan,
             "selected_file": "",
             "selected_files": [],
-            "ownership_augmented_files": [],
+            "ownership_augmented_files": ownership_augmented_files,
             "feedback_context_files": feedback_context_files,
             "patch_applied": False,
             "warnings": ["Repair planner selected no valid source file."],
@@ -1996,7 +2178,7 @@ def _repair_after_failure(
         "plan": plan,
         "selected_file": selected_file_paths[0] if selected_file_paths else "",
         "selected_files": selected_file_paths,
-        "ownership_augmented_files": [],
+        "ownership_augmented_files": ownership_augmented_files,
         "feedback_context_files": feedback_context_files,
         **edit,
     }
@@ -2307,6 +2489,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     repair_round,
                     feedback_context=feedback_context,
                     attempt_ledger=_attempt_ledger_context(repair_attempts),
+                    contract_evidence=before_test_contracts,
                 )
                 repair_attempts.append(repair)
                 repair["model"] = repair_model

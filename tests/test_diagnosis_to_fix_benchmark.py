@@ -395,6 +395,130 @@ def test_multifile_edit_group_continues_past_already_satisfied_member(
     assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 20\n"
 
 
+def test_optional_owner_rejection_does_not_cancel_required_sibling(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "required.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "context.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    def fake_edit(repo_path, selected, *_args, **_kwargs):
+        if selected == "required.py":
+            (repo_path / selected).write_text("VALUE = 10\n", encoding="utf-8")
+            return {"patch_applied": True, "warnings": []}
+        return {"patch_applied": False, "warnings": ["no change needed"]}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    outcome = benchmark._apply_planned_edits(
+        repo,
+        {
+            "prompt": "Repair the owner.",
+            "candidate_paths": ["required.py", "context.py"],
+        },
+        {},
+        [
+            {"path": "required.py", "description": "Repair the contract."},
+            {
+                "path": "context.py",
+                "description": "Only change if causal.",
+                "optional": True,
+            },
+        ],
+        {"report": {}},
+        "local-model",
+        [],
+        1.0,
+        stage_prefix="edit",
+    )
+
+    assert outcome["patch_applied"] is True
+    assert outcome["applied_files"] == ["required.py"]
+    assert outcome["skipped_optional_files"] == ["context.py"]
+    assert outcome["optional_rejected_diffs"] == [
+        {
+            "path": "context.py",
+            "reason": "local edit adapter rejected the optional candidate",
+            "attempted_diff": "",
+            "validation_output": "no change needed",
+        }
+    ]
+    assert (repo / "required.py").read_text(encoding="utf-8") == "VALUE = 10\n"
+    assert (repo / "context.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_optional_owner_regression_is_restored_without_losing_required_edit(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tests").mkdir()
+    (repo / "required.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "optional.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    def fake_edit(repo_path, selected, *_args, **_kwargs):
+        value = "10" if selected == "required.py" else "20"
+        (repo_path / selected).write_text(f"VALUE = {value}\n", encoding="utf-8")
+        return {"patch_applied": True, "warnings": []}
+
+    public_calls = 0
+    feedback_calls = 0
+
+    def fake_tests(_repo, _case, *, public_only):
+        nonlocal public_calls, feedback_calls
+        if public_only:
+            public_calls += 1
+            return {"passed": public_calls == 1, "exit_code": 0 if public_calls == 1 else 1}
+        feedback_calls += 1
+        output = (
+            "tests/test_contract.py::test_alpha PASSED [ 50%]\n"
+            "tests/test_contract.py::test_beta FAILED [100%]\n"
+            if feedback_calls == 1
+            else (
+                "tests/test_contract.py::test_alpha FAILED [ 50%]\n"
+                "tests/test_contract.py::test_beta PASSED [100%]\n"
+            )
+        )
+        return {"passed": False, "exit_code": 1, "runner": "pytest", "output": output}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    monkeypatch.setattr(benchmark, "_run_case_tests", fake_tests)
+    outcome = benchmark._apply_planned_edits(
+        repo,
+        {
+            "prompt": "Repair the owner.",
+            "candidate_paths": ["required.py", "optional.py"],
+        },
+        {},
+        [
+            {"path": "required.py", "description": "Repair required behavior."},
+            {
+                "path": "optional.py",
+                "description": "Only change if causal.",
+                "optional": True,
+            },
+        ],
+        {"report": {}},
+        "local-model",
+        [],
+        1.0,
+        stage_prefix="edit",
+        failure_output="one contract failed",
+    )
+
+    assert outcome["patch_applied"] is True
+    assert outcome["applied_files"] == ["required.py"]
+    assert outcome["skipped_optional_files"] == ["optional.py"]
+    assert outcome["optional_rejected_diffs"][0]["path"] == "optional.py"
+    assert "previously passing contract" in outcome["optional_rejected_diffs"][0]["reason"]
+    assert "-VALUE = 2" in outcome["optional_rejected_diffs"][0]["attempted_diff"]
+    assert "+VALUE = 20" in outcome["optional_rejected_diffs"][0]["attempted_diff"]
+    assert (repo / "required.py").read_text(encoding="utf-8") == "VALUE = 10\n"
+    assert (repo / "optional.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
 def test_edit_group_rolls_back_changed_file_syntax_failure(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -704,6 +828,14 @@ def test_attempt_ledger_preserves_rejected_diff_and_adapter_evidence():
                 "round": 1,
                 "selected_files": ["owner.py"],
                 "attempted_diff": attempted_diff,
+                "optional_rejected_diffs": [
+                    {
+                        "path": "context.py",
+                        "reason": "regressed a passing contract",
+                        "attempted_diff": "-OLD\n+BAD\n",
+                        "validation_output": "test_context FAILED",
+                    }
+                ],
                 "adapter_rejection": "SEARCH text was stale",
                 "validation_output": "PUBLIC REGRESSION: omitted value changed",
                 "warnings": ["rejected"],
@@ -715,6 +847,8 @@ def test_attempt_ledger_preserves_rejected_diff_and_adapter_evidence():
     assert "+VALUE = 2" in ledger
     assert "SEARCH text was stale" in ledger
     assert "omitted value changed" in ledger
+    assert "regressed a passing contract" in ledger
+    assert "test_context FAILED" in ledger
 
 
 def test_read_only_feedback_context_is_bounded_and_test_scoped(tmp_path):

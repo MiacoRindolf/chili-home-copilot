@@ -237,19 +237,18 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             for call in calls
             if "diagnostic council" in call["messages"][0]["content"]
         ]
-        assert 4 <= len(diagnostic_calls) <= 3 + orchestrator._DIAGNOSTIC_MAX_PROBES
+        assert 3 <= len(diagnostic_calls) <= 2 + orchestrator._DIAGNOSTIC_MAX_PROBES
         assert calls[0]["options"]["format"] == "json"
         assert "local-only diagnostic team" in calls[0]["messages"][1]["content"]
         assert "investigator" in diagnostic_calls[0]["messages"][1]["content"]
-        assert "skeptic" in diagnostic_calls[1]["messages"][1]["content"]
-        assert "judge" in diagnostic_calls[2]["messages"][1]["content"]
+        assert "judge" in diagnostic_calls[1]["messages"][1]["content"]
         assert all(
             call["options"]["format"] == "json"
             for call in diagnostic_calls
         )
         assert all(
             "diagnostic_probe" in call["messages"][1]["content"]
-            for call in diagnostic_calls[3:]
+            for call in diagnostic_calls[2:]
         )
         assert "Diagnostic evidence gate:" in calls[-1]["messages"][1]["content"]
         artifact = (
@@ -264,7 +263,7 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
         assert len(payload["model_calls"]) == len(diagnostic_calls)
         assert payload["council_mode"] == "deep"
         assert payload["probe_run"]["evidence"]
-        assert len(payload["probe_run"]["rounds"]) == len(diagnostic_calls) - 3
+        assert len(payload["probe_run"]["rounds"]) == len(diagnostic_calls) - 2
         attempted = payload["probe_run"]["attempted_probe_ids"]
         assert len(attempted) == len(set(attempted))
         assert all(

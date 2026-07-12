@@ -6547,7 +6547,7 @@ def _run_local_diagnostic_reasoning(
         case,
         call_local_role if model_name else None,
         stages_to_run=(
-            ("investigator", "skeptic", "judge")
+            ("investigator", "judge")
             if _DIAGNOSTIC_DEEP_COUNCIL
             else ("judge",)
         ),
@@ -6658,16 +6658,31 @@ def _run_local_diagnostic_reasoning(
                 for stage in latest_debate.get("stages") or []
                 if isinstance(stage, Mapping)
             )
-            current_report = (
+            candidate_report = (
                 latest_debate.get("report")
                 if isinstance(latest_debate.get("report"), Mapping)
                 else current_report
             )
-            current_packet = (
+            candidate_packet = (
                 latest_debate.get("packet")
                 if isinstance(latest_debate.get("packet"), Mapping)
                 else current_packet
             )
+            conclusion_revision = diagnostic_reasoning.evidence_gated_report_revision(
+                current_report,
+                candidate_report,
+                probe_evidence,
+            )
+            round_record["conclusion_revision"] = conclusion_revision
+            if conclusion_revision["accepted"]:
+                current_report = candidate_report
+                current_packet = candidate_packet
+            latest_debate = {
+                **latest_debate,
+                "report": current_report,
+                "packet": current_packet,
+                "conclusion_revision": conclusion_revision,
+            }
             conclusion = (
                 current_report.get("conclusion")
                 if isinstance(current_report.get("conclusion"), Mapping)

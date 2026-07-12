@@ -15,7 +15,7 @@ _STATUS_VALUES = frozenset({"passed", "failed", "error", "skipped"})
 _PYTEST_STATUS_RE = re.compile(
     r"^\s*(?P<test>.+?::[^\r\n]+?)\s+"
     r"(?P<status>PASSED|FAILED|ERROR|SKIPPED)(?:\s|$)",
-    re.IGNORECASE | re.MULTILINE,
+    re.MULTILINE,
 )
 _PYTEST_SUMMARY_RE = re.compile(
     r"^\s*(?P<status>FAILED|ERROR)\s+(?P<test>[^\r\n]+?::[^\r\n\s]+)",
@@ -94,6 +94,8 @@ def _sectioned_status(output: str) -> dict[str, str]:
         node = _NODE_STATUS_RE.match(line)
         if node:
             name = normalize_contract_id(node.group("name"))
+            if name.rstrip(":") == "failing tests":
+                continue
             key = normalize_contract_id(
                 f"{current_file}::{name}" if current_file else f"node::{name}"
             )

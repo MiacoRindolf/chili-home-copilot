@@ -42,6 +42,18 @@ DIMENSION_ALIASES = {
     "infrastructure": "runtime",
     "lifecycle": "state",
 }
+CAUSAL_DIMENSION_RUBRIC = {
+    "clock": (
+        "wall/event time, units, deadlines, durations, ordering, or retry budgets; not vector clocks"
+    ),
+    "config": "effective policy/settings, precedence, flags, header policy, or normalization",
+    "data": "representation, schema, identity, joins, byte/range boundaries, or aggregation",
+    "state": "ownership, lifecycle, transition, queue, idempotency, isolation, or vector-clock state",
+    "dependency": "package, provider, service, wire protocol, compatibility, key rotation, or version",
+    "runtime": "coercion, decoding, process/container, loaded revision, or execution semantics",
+    "test_harness": "fixture, simulation, isolation, baseline comparability, or result mapping",
+    "code": "algorithm/control flow only when no specific owner applies",
+}
 AUTO_SAFE_LEVELS = frozenset({"read_only", "isolated"})
 SAFETY_LEVELS = AUTO_SAFE_LEVELS | {"runtime", "live"}
 
@@ -299,6 +311,10 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("recorded offset", 9),
             ("synchronized wall", 9),
             ("offset_seconds", 10),
+            ("retry-after", 10),
+            ("remaining allowance", 9),
+            ("retry budget", 9),
+            ("queue time", 8),
         ),
     ),
     (
@@ -346,6 +362,9 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("matching_rows", 8),
             ("unused key", 7),
             ("route-stop table", 7),
+            ("content-range", 10),
+            ("inclusive byte", 9),
+            ("vendor event identifier", 9),
         ),
     ),
     (
@@ -386,6 +405,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("durable ledger", 8),
             ("marked as already sent", 9),
             ("promoted snapshot", 8),
+            ("replicas concurrent", 11),
+            ("convergence bookkeeping", 11),
+            ("tombstone", 9),
+            ("retry token", 9),
+            ("attempt numbers", 8),
         ),
     ),
     (
@@ -444,6 +468,10 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("route definition", 8),
             ("relay definition", 8),
             ("bootstrap template", 7),
+            ("vary values", 11),
+            ("vary header", 11),
+            ("mixed casing", 8),
+            ("wildcard response", 9),
         ),
     ),
     (
@@ -494,6 +522,9 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("newer decoder", 9),
             ("older decoder", 9),
             ("base-layer inventory", 6),
+            ("wire behavior", 11),
+            ("secret rotation", 10),
+            ("forwarder rollout", 8),
         ),
     ),
     (
@@ -1416,7 +1447,91 @@ def derive_contract_invariants(statement: str) -> list[str]:
         invariants.append(
             "Aggregate each independent child relation to its parent key before joining sibling one-to-many data."
         )
-    return invariants[:8]
+    if "vary" in lowered and any(
+        token in lowered for token in ("mixed casing", "case insensitive", "case-insensitive")
+    ):
+        invariants.append(
+            "Case-insensitive header lookup must normalize both sides of the lookup (or iterate normalized entries); "
+            "normalizing only the requested field does not change object/map key casing."
+        )
+    if "wildcard" in lowered and "cache" in lowered:
+        invariants.append(
+            "A wildcard Vary response is non-cacheable: do not store it and never return it from cache matching."
+        )
+    if any(token in lowered for token in ("exact instant", "expiration boundary", "expiry boundary")):
+        invariants.append(
+            "An ineffective-at-expiration interval has an exclusive upper bound: valid_from <= as_of < valid_until; "
+            "do not rewrite unrelated revocation semantics."
+        )
+    if "retry-after" in lowered and "numeric" in lowered:
+        invariants.append(
+            "Numeric Retry-After is seconds and converts to milliseconds exactly once; HTTP-date remains an "
+            "absolute-time delta from the injected/current clock."
+        )
+    if any(token in lowered for token in ("explicit immediate retry", "explicit zero delay")):
+        invariants.append(
+            "A zero retry delay is a valid scheduled value; distinguish zero from absent/null instead of using "
+            "truthiness."
+        )
+    if any(token in lowered for token in ("budget", "allowance")) and any(
+        token in lowered for token in ("remaining allowance", "budget exhaustion", "remaining duration")
+    ):
+        invariants.append(
+            "Queue time uses the delay actually granted by the remaining budget, never the larger requested delay."
+        )
+    if "vector clock" in lowered:
+        invariants.append(
+            "Vector-clock comparison and join use the union of actor keys and component-wise maxima; missing actors "
+            "are zero and logical clocks are replicated state, not wall time."
+        )
+    if any(token in lowered for token in ("inclusive range", "content-range", "chunk bound")):
+        invariants.append(
+            "Inclusive byte-range length is end - start + 1, and contiguous coverage advances at previous_end + 1."
+        )
+    if any(token in lowered for token in ("repeated parameter", "duplicate query parameter")):
+        invariants.append(
+            "Canonical query rendering preserves every repeated parameter and blank value before deterministic sort."
+        )
+    if "repeated" in lowered and "parameter" in lowered:
+        invariants.append(
+            "Canonical query rendering preserves every repeated parameter and blank value before deterministic sort."
+        )
+    if "rotation" in lowered and any(token in lowered for token in ("key", "secret")):
+        invariants.append(
+            "Verification considers the current key plus only recently retired keys inside the configured grace "
+            "window; it must not accept unrelated keys or weaken freshness checks."
+        )
+    scoped_identity = bool(
+        any(token in lowered for token in ("two tenant", "two site", "two merchant", "regional"))
+        and any(token in lowered for token in ("reuse", "sharing", "same client", "same identifier"))
+    )
+    if scoped_identity:
+        invariants.append(
+            "A reused external identifier is scoped by its tenant/site/merchant in storage uniqueness, idempotency "
+            "lookup, and SQL conflict targets; all layers use the same composite identity."
+        )
+    if "attempt" in lowered and any(token in lowered for token in ("retry token", "retry", "dedup")):
+        invariants.append(
+            "Retry attempt number is not part of stable request/event identity; replay returns the original result "
+            "and publishes creation only for the first successful creation."
+        )
+    if "out of order" in lowered and any(token in lowered for token in ("correction", "replay")):
+        invariants.append(
+            "Out-of-order upsert acceptance is atomic across value and metadata; a stale replay cannot mix old "
+            "metadata with a newer accepted value."
+        )
+    if "event-time" in lowered or (
+        "observation" in lowered and "hourly bucket" in lowered
+    ):
+        invariants.append(
+            "Event-time rollups use observation time for both window filtering and bucket calculation, never receipt time."
+        )
+    if any(token in lowered for token in ("replicas concurrent", "convergence bookkeeping")):
+        invariants.append(
+            "Replicated logical-clock comparison/join uses the union of actors and component-wise maxima; on an "
+            "equal-time concurrent tie, tombstones win deterministic conflict choice to prevent resurrection."
+        )
+    return list(dict.fromkeys(invariants))[:8]
 
 
 def _partial_unique_active_status(statement: str) -> str | None:
@@ -3221,6 +3336,81 @@ def _causal_sufficiency_rank(value: object) -> int:
     }.get(str(value or "observational"), 0)
 
 
+def evidence_gated_report_revision(
+    previous_report: Mapping[str, Any],
+    candidate_report: Mapping[str, Any],
+    new_evidence: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Decide whether new evidence is strong enough to change causal family."""
+    previous = (
+        previous_report.get("conclusion")
+        if isinstance(previous_report.get("conclusion"), Mapping)
+        else {}
+    )
+    candidate = (
+        candidate_report.get("conclusion")
+        if isinstance(candidate_report.get("conclusion"), Mapping)
+        else {}
+    )
+    previous_dimension = str(previous.get("dimension") or "unknown")
+    candidate_dimension = str(candidate.get("dimension") or "unknown")
+    previous_rank = _causal_sufficiency_rank(previous.get("causal_sufficiency"))
+    candidate_rank = _causal_sufficiency_rank(candidate.get("causal_sufficiency"))
+    if candidate_dimension == previous_dimension:
+        return {
+            "accepted": True,
+            "reason": "same_causal_family",
+            "previous_dimension": previous_dimension,
+            "candidate_dimension": candidate_dimension,
+        }
+    if (
+        candidate.get("status") == "confirmed"
+        and previous.get("status") != "confirmed"
+        and not candidate.get("blockers")
+    ):
+        return {
+            "accepted": True,
+            "reason": "newly_confirmed_causal_family",
+            "previous_dimension": previous_dimension,
+            "candidate_dimension": candidate_dimension,
+        }
+    if candidate_rank > previous_rank:
+        return {
+            "accepted": True,
+            "reason": "stronger_causal_sufficiency",
+            "previous_dimension": previous_dimension,
+            "candidate_dimension": candidate_dimension,
+        }
+
+    selected_ids = {str(value) for value in candidate.get("evidence_ids") or []}
+    qualified_new_ids = {
+        str(item.get("evidence_id") or "")
+        for item in new_evidence
+        if isinstance(item, Mapping)
+        and str(item.get("dimension_origin") or "unknown") == "explicit"
+        and _is_qualified_causal_record(item)
+    }
+    if selected_ids & qualified_new_ids and candidate_rank >= previous_rank:
+        return {
+            "accepted": True,
+            "reason": "new_qualified_causal_evidence",
+            "previous_dimension": previous_dimension,
+            "candidate_dimension": candidate_dimension,
+        }
+    return {
+        "accepted": False,
+        "reason": "causal_family_change_lacks_stronger_evidence",
+        "previous_dimension": previous_dimension,
+        "candidate_dimension": candidate_dimension,
+        "previous_causal_sufficiency": str(
+            previous.get("causal_sufficiency") or "observational"
+        ),
+        "candidate_causal_sufficiency": str(
+            candidate.get("causal_sufficiency") or "observational"
+        ),
+    }
+
+
 def _experiment_result_ids(packet: Mapping[str, Any]) -> set[str]:
     return {
         str(evidence_id)
@@ -4479,6 +4669,7 @@ def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
         "SQL; db_profile exposes only count/group/min/max/avg/sum aggregates and production use requires a "
         "timestamp column plus bounded lookback. Use read_only for repo_state/search/file_excerpt/git_history/"
         "git_diff/log_inventory/log_search/db_schema/db_profile and isolated for compile/targeted_test. "
+        f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}"
     )
@@ -4493,6 +4684,7 @@ def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], repor
         "Challenge post-hoc metric optimization, replay leakage, source/runtime drift, producer-consumer starvation, "
         "broker/local-state divergence, external-condition confounding, and fixes aimed only at a downstream symptom. "
         "Retract a conclusion rather than defending it when the evidence changed. Never request automatic runtime or live mutation. "
+        f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
         f"Investigator packet:\n{_packet_prompt(packet)}\n\n"
@@ -4515,6 +4707,7 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
         "catalog: repo_state, fixed-string search, bounded file_excerpt, git_history, git_diff, isolated compile, "
         "one targeted_test selector under tests/, bounded log_inventory/log_search, or aggregate-only "
         "db_schema/db_profile. Database probes never accept SQL or raw-row selection. Raw commands are forbidden. "
+        f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
         f"Challenged packet:\n{_packet_prompt(packet)}\n\n"
