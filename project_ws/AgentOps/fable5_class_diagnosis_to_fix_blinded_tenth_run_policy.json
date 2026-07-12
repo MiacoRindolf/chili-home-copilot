@@ -1,0 +1,17 @@
+{
+  "schema": "chili.tenth-holdout-run-policy.v1",
+  "source_head": "3241f6743e8b8745c39542f4645290a4a8d6f44a",
+  "primary_model": "qwen2.5-coder:7b",
+  "max_repairs": 2,
+  "escalation_model": "qwen2.5-coder:14b",
+  "max_escalation_repairs": 1,
+  "timeout_seconds": 240,
+  "premium_calls_allowed": 0,
+  "case_count": 8,
+  "language_counts": {
+    "python": 2,
+    "typescript": 2,
+    "dart": 2,
+    "sql": 2
+  }
+}

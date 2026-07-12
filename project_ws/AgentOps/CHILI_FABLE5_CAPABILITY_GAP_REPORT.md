@@ -8,7 +8,7 @@ CHILI is now **qualified for local-only development shadow use** on the tested d
 
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
-The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call for its case. The first eight-case v3 holdout scored only 53.75/100, with 1/8 sealed-final passes.
+The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call for its case. The first eight-case v3 holdout scored 53.75/100 with 1/8 final passes. After generic repair-loop hardening, a new independently authored eight-case holdout improved to 68.75/100 and 2/8 final passes, still far below replacement readiness.
 
 ## Requirement Audit
 
@@ -27,10 +27,10 @@ The historical diagnosis-to-fix reports used the label `hidden` for tests that w
 | Runtime database evidence | Schema metadata and aggregate-only PostgreSQL profiles through an explicit read-only DSN, read-only transactions, short timeouts, bounded lookback, safe identifiers, and no raw SQL or raw rows | Proven in `_test` integration and development-regression tests; live production credential proof not performed |
 | No arbitrary diagnostic shell | Probe schema has no command kind; paths, selectors, time, count, and output are bounded | Proven by source and tests |
 | Workspace isolation for dynamic probes | Compile uses temporary copies; pytest uses a validated `git archive` snapshot and credential-stripped environment | Proven for repository isolation; hardened OS sandboxing remains open |
-| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+repair-feedback validation, assertion-contract extraction, rollback, bounded repair, and isolated final adjudication | Repair loop proven on 13 unsealed development repositories; first independently authored v3 sealed holdout failed at 53.75/100 with 1/8 final passes |
+| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+repair-feedback validation, assertion-contract extraction, rollback, bounded repair, and isolated final adjudication | Ninth sealed holdout: 53.75/100 and 1/8 final. Fresh post-hardening tenth holdout: 68.75/100, 2/8 final, 3/8 diagnosis families, and 7/8 exact file sets. Improved, but failed promotion |
 | Cross-language syntax validation | Python AST, parser-only Node TypeScript/JavaScript validation, and Dart analysis with isolated analyzer state; exact changed-file coverage required | Proven by safety and orchestration tests |
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
-| Production validation repair | Project Autonomy reads full targeted test contracts, pins the original test selectors, maps test imports to bounded source owners, snapshots every repair scope, retains only measurable same-scope validation progress, rolls back regressions/no-progress edits, and feeds rejected diffs and failure signatures into later attempts | Default three rounds, hard maximum five; final-round local 14B escalation is optional, Ollama-only, and fail-closed; 163 production-autonomy tests and 166 diagnostic/repair tests passed, but no large live inventory or fresh post-fix holdout yet |
+| Production validation repair | Project Autonomy reads full targeted test contracts, pins the original test selectors, maps test imports to bounded source owners, snapshots every repair scope, retains only measurable same-scope validation progress, rolls back regressions/no-progress edits, and feeds rejected diffs and failure signatures into later attempts | Default three rounds, hard maximum five; final-round local 14B escalation is Ollama-only and fail-closed; 163 production-autonomy tests and 166 diagnostic/repair tests passed. Fresh transfer improved file ownership but only solved 2/8 final contracts |
 | Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
 | Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Eight eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100; all below the 90 shadow threshold. The eighth oracle was dimension-lenient; strict primary-family scoring is 70.62/100 |
 | Durable local benchmark execution | Atomic per-case checkpoints bound to source, runner, public inputs, model, stages, and inference parameters; incompatible resumes fail closed | Proven by simulated interruption and compatible resume; real host-loss recovery remains untested |
@@ -125,6 +125,29 @@ These results justify the generic production mechanics and a rare local speciali
 generalization evidence, do not alter the untouched score, and do not support Fable 5 parity. Raw reports,
 JSON, hashes, and interpretation are preserved under
 `project_ws/AgentOps/ninth_development_replays/DEVELOPMENT_REPLAY_RECEIPT.md`.
+
+### Tenth Sealed Diagnosis-to-Fix Holdout
+
+- Frozen production source: `3241f6743e8b8745c39542f4645290a4a8d6f44a`
+- Fixture-only freeze: `d927f5f9f93d30e30f40a4551f4b198a3bb31202`
+- Eight independently authored, fully controller-blind cases; 2 Python, 2 TypeScript, 2 Dart, and 2 SQL; every case requires exactly three source owners
+- Precommitted route: 7B primary, two 7B repair rounds, one final local 14B repair round, 240-second call timeout, zero premium calls
+- Untouched score: **68.75/100**, `blinded_evaluation_failed`
+- Sealed-final functional success: **2/8 (25%)**
+- Correct diagnosis family: **3/8 (37.5%)**
+- Exact changed-file set: **7/8 (87.5%)**
+- Public regressions preserved: **8/8**
+- Only one case combined correct diagnosis, exact ownership, and final correctness
+- **141/141** model calls succeeded: 111 on 7B and 30 on 14B; total wall time **2,786.5 seconds**, average **347.7 seconds/case**, maximum call **102.8 seconds**
+- Premium calls: **0**
+- Three fixture-only filename adapters were made before fixture freeze and before any contestant call; assertions and difficulty were unchanged
+- Reports: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_BLINDED_TENTH_RUN.md` and `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_BLINDED_TENTH_RUN_RECEIPT.md`
+
+This is measurable post-hardening progress over the ninth run: functional solves doubled, diagnosis accuracy tripled,
+and exact ownership rose from 3/8 to 7/8. It is still decisive negative evidence against current Fable 5 replacement
+readiness. Six final contracts failed, five diagnosis families were wrong, and the local specialist route imposed
+substantial latency. No same-task authenticated Fable 5 output was collected, so parity remains unmeasured rather
+than implied.
 
 ### Typed Runtime-Evidence Diagnosis
 
@@ -374,14 +397,14 @@ authored causal language.
 
 ## Remaining Gaps
 
-1. The repair evidence now includes 13 small feedback-guided development repositories plus one eight-case sealed v3 holdout. The sealed holdout scored 53.75/100 and passed only 1/8 final suites. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
+1. The repair evidence now includes 13 small feedback-guided development repositories and two independently authored eight-case sealed suites. The ninth scored 53.75/100 with 1/8 final passes; the post-hardening tenth improved to 68.75/100 with 2/8 final passes. Six of eight fresh final contracts still failed. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through eighth untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The sixth repair replay reached 92.5/100, but the next fresh slice exposed six family errors, four drift misses, three decision errors, and four status errors. Seventh-slice disclosed reruns then varied from 98.75 to 95.62 before reaching 100 after two additional generic council-contract repairs; the fresh eighth slice still reached only 3/8 strict primary families and missed all four true drift findings. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
+5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through eighth untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The fresh tenth repair suite completed 141/141 local calls but still chose the wrong diagnosis family in 5/8 cases and failed 6/8 final contracts. Strong structural reliability and exact ownership therefore remain distinct from frontier-level causal reasoning and synthesis.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, 52.8, 50.9, and most recently 71.3 seconds on the slower untouched slices. The untouched seventh council required 1,717.3 seconds end to end; its final disclosed repair run still required 831.4 seconds and varied from 24 to 50 seconds per call. Atomic per-case checkpointing now prevents total progress loss and passed a simulated interruption/resume test, but adaptive stage routing and a real host-loss recovery proof remain open.
-8. The 14B local model is too slow and unreliable for default routing on current hardware: its disclosed standalone Dart solve took 1,062.3 seconds and missed the diagnosis family. One later bounded escalation solved the same disclosed case in 385.0 seconds after two failed staged variants. It is therefore limited to an optional final local repair round; the resident 7B model remains the primary lane.
+8. The 14B local model is too slow and unreliable for default routing on current hardware. In the fresh tenth suite, 30 escalation calls contributed to a 2,786.5-second run, while only 2/8 final suites passed. It remains limited to an optional final local repair round; adaptive routing must reduce unnecessary specialist calls before the workflow is practical.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
 ## Promotion Gate

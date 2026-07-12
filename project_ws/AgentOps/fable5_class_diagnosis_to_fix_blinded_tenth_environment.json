@@ -1,0 +1,19 @@
+{
+  "schema": "chili.tenth-holdout-environment.v1",
+  "os": "Microsoft Windows 11 Pro 10.0.26200 build 26200",
+  "python": "3.13.11",
+  "node": "24.15.0",
+  "dart": "3.11.1 stable windows_x64",
+  "git": "2.53.0.windows.1",
+  "ollama": "0.31.2",
+  "models": {
+    "qwen2.5-coder:7b": {
+      "ollama_id": "dae161e27b0e",
+      "size": "4.7 GB"
+    },
+    "qwen2.5-coder:14b": {
+      "ollama_id": "9ec8897f747e",
+      "size": "9.0 GB"
+    }
+  }
+}

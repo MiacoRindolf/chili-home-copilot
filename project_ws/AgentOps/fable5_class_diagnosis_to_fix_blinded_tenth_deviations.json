@@ -1,0 +1,38 @@
+{
+  "schema": "chili.tenth-holdout-deviations.v1",
+  "scored_run_deviations": [],
+  "fixture_only_prefreeze_adapters": [
+    {
+      "stage": "preflight",
+      "contestant_calls_before_change": 0,
+      "scope": "Node repair-feedback and final test filenames",
+      "change": "Renamed keys to discoverable .test.mjs names",
+      "assertions_changed": false
+    },
+    {
+      "stage": "preflight",
+      "contestant_calls_before_change": 0,
+      "scope": "Dart repair-feedback and final test filenames",
+      "change": "Renamed keys to discoverable _test.dart names",
+      "assertions_changed": false
+    },
+    {
+      "stage": "preflight",
+      "contestant_calls_before_change": 0,
+      "scope": "Eight seeded public test filenames",
+      "change": "Renamed keys to the runner's public-discovery contract",
+      "assertions_changed": false
+    }
+  ],
+  "final_preflight": {
+    "valid": true,
+    "public_passed": 8,
+    "feedback_failed": 8,
+    "final_failed": 8
+  },
+  "controller_blinding": {
+    "fixture_bodies_seen_before_scoring": false,
+    "oracle_bodies_seen_before_scoring": false,
+    "metadata_and_hashes_seen": true
+  }
+}

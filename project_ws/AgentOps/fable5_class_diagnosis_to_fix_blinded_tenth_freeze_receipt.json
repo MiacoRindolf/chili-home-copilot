@@ -1,0 +1,23 @@
+{
+  "schema": "chili.tenth-holdout-freeze-receipt.v1",
+  "production_source_head": "3241f6743e8b8745c39542f4645290a4a8d6f44a",
+  "production_repair_commit": "550b7e4",
+  "fixture_commit": "d927f5f9f93d30e30f40a4551f4b198a3bb31202",
+  "fixture_aggregate_sha256": "dc9c72540142cc14d7043625b0112b8997cbda412d66ba5e58f105490769e59a",
+  "protocol_sha256": "1f8afeb51cd1d7467b9881a8c06f5453801f2c4b7289c0613175ef09953eca53",
+  "run_policy_sha256": "192856f16eb5d08e32400424659d549ece56f819bed4ac5d24f957e2b3f8c911",
+  "environment_sha256": "52164ccea09f89137b406e50eb5e79550f03b0527733a76b27dc84f345e86484",
+  "fixture_preflight": {
+    "valid": true,
+    "cases": 8,
+    "public_passed": 8,
+    "feedback_failed": 8,
+    "final_failed": 8,
+    "contestant_calls_before_freeze": 0
+  },
+  "fixture_only_adapter_changes_before_freeze": [
+    "Node feedback/final keys renamed to discoverable .test.mjs names",
+    "Dart feedback/final keys renamed to discoverable _test.dart names",
+    "Public test keys renamed to runner-required public discoverability names"
+  ]
+}
