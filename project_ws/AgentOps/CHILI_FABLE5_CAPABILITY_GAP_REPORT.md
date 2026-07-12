@@ -31,6 +31,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
 | Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
 | Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Five eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, 69.38/100, and 74.4/100; all below the 90 shadow threshold |
+| Durable local benchmark execution | Atomic per-case checkpoints bound to source, runner, public inputs, model, stages, and inference parameters; incompatible resumes fail closed | Proven by simulated interruption and compatible resume; real host-loss recovery remains untested |
 | Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
 | Broad language/repository coverage | Initial Python, TypeScript, Dart, and SQL repair coverage | Partial; large repositories, Go, Rust, and mixed stacks remain incomplete |
 | Universal superiority claim | Statistically defensible quality, safety, latency, and cost advantage across broad tasks | Not proven |
@@ -194,6 +195,17 @@ council runs need atomic per-case checkpoints and resumability. The valid score 
 fourth-slice repair generalized only partially to fresh incidents, so its disclosed 100/100 result cannot support
 a broad parity claim.
 
+After preserving the untouched result, commit `aa2821db9c67444bb6d3ce5cc63c71bdbfe1756c` added generic
+changed-variable attribution, bounded structured evidence, semantic baseline comparison, ambiguous-control,
+known-family recovery, endpoint disambiguation, and atomic per-case checkpoint repairs. The disclosed fifth-slice
+heuristic replay and full 24-call council replay both reached **100/100**. The council completed **24/24 calls**,
+accepted **24/24 packets**, retained five model-selected conclusions, used stronger deterministic evidence for
+three conclusions, produced no unsafe final action, and made zero premium calls. The broad autonomy validation
+slice passed **221 tests**. Full details: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_FIFTH_SLICE_REPAIR.md`.
+
+These are disclosed development results. They do not overwrite the untouched 74.4 score. A sixth independently
+authored post-repair slice is required to test whether the repair generalizes.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -218,9 +230,9 @@ a broad parity claim.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Five independent eight-case diagnostic slices now total 40 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, and 74.4/100. The numeric diagnostic-count target is met, but every untouched slice is below the 90 shadow threshold and the set does not yet satisfy the required repository/language mix or direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth and fifth untouched slices each accepted 24/24 packets yet scored only 69.38 and 74.4, proving that structural usability is not diagnostic quality. The fifth slice missed five causal-family labels and every applicable baseline-drift flag. The latest exact-commit disclosed replay accepted 24/24 packets but still mislabeled one dependency case and attempted two unsafe automatic experiments that CHILI safely demoted. Other development runs varied between 95 and 100. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
+5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth and fifth untouched slices each accepted 24/24 packets yet scored only 69.38 and 74.4, proving that structural usability is not diagnostic quality. The fifth repair replay reached 100/100 with all 24 packets accepted, but three of eight final conclusions still required a stronger deterministic evidence-gate selection. Other disclosed development runs varied between 95 and 100, and five of six final cross-language successes required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, and most recently 52.8 seconds on the slower untouched slices. The fifth council required 1,274.8 seconds end to end, and an initial wrapper timeout lost all partial progress. Compact development prompts reduced one disclosed suite to 15.7 seconds/call, but that speedup and durable per-case checkpointing still need fresh-holdout proof.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, and 52.8 seconds on the slower untouched slices. The fifth repair council averaged 57.7 seconds/call and required 1,389.2 seconds end to end. Atomic per-case checkpointing now prevents total progress loss and passed a simulated interruption/resume test, but adaptive stage routing and a real host-loss recovery proof remain open.
 8. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
