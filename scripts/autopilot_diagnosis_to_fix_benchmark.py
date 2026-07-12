@@ -937,6 +937,38 @@ def _apply_deterministic_contract_repair(
     }
 
 
+def _patch_from_deterministic_contract_repair(
+    repair: Mapping[str, Any],
+    diagnosis: Mapping[str, Any],
+) -> dict[str, Any]:
+    selected = [str(value) for value in repair.get("selected_files") or [] if str(value)]
+    dimension = _effective_diagnosis_dimension(diagnosis)
+    return {
+        "plan": {
+            "dimension": dimension,
+            "analysis": "A recognized mechanical contract violation has a bounded source-shape repair.",
+            "files": [
+                {
+                    "path": relative,
+                    "action": "modify",
+                    "description": "Apply the recognized contract-preserving repair.",
+                }
+                for relative in selected
+            ],
+            "contract_coverage": [],
+            "notes": "Local deterministic contract lane; validation remains authoritative.",
+        },
+        "selected_file": selected[0] if len(selected) == 1 else "",
+        "selected_files": selected,
+        "applied_files": selected,
+        "patch_applied": bool(selected),
+        "warnings": [
+            "Applied a recognized mechanical contract repair before generative editing."
+        ],
+        "deterministic_initial_patch": True,
+    }
+
+
 def _validation_quality(
     public_tests: Mapping[str, Any],
     feedback_tests: Mapping[str, Any],
@@ -2549,7 +2581,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             baseline_snapshot = _candidate_snapshot(repo, case)
             diagnosis = _diagnose(repo, case, args.model, calls, args.timeout)
             _initialize_accepted_diagnosis(diagnosis)
-            patch = _generate_patch(repo, case, diagnosis, args.model, calls, args.timeout)
+            deterministic_contract_repair = _apply_deterministic_contract_repair(
+                repo,
+                case,
+            )
+            patch = (
+                _patch_from_deterministic_contract_repair(
+                    deterministic_contract_repair,
+                    diagnosis,
+                )
+                if deterministic_contract_repair.get("patch_applied")
+                else _generate_patch(
+                    repo,
+                    case,
+                    diagnosis,
+                    args.model,
+                    calls,
+                    args.timeout,
+                )
+            )
             initial_plan_dimension = _plan_dimension(patch.get("plan") or {})
             patch["proposed_diagnosis_dimension"] = initial_plan_dimension
             patch["changed_files"] = _changed_candidate_files(
@@ -2622,6 +2672,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "Rolled back initial patch because it regressed or made no validated progress.",
                 ]
                 patch["initial_patch_rolled_back"] = True
+                if patch.get("deterministic_initial_patch"):
+                    deterministic_contract_repair["patch_applied"] = False
+                    deterministic_contract_repair["rolled_back_after_validation"] = True
                 patch["changed_files"] = _changed_candidate_files(
                     repo,
                     case.get("candidate_paths") or [],
@@ -2639,13 +2692,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         feedback_tests,
                     ),
                 )
-            deterministic_contract_repair: dict[str, Any] = {
-                "attempted": False,
-                "patch_applied": False,
-                "selected_files": [],
-                "warnings": [],
-            }
-            if not (public_tests["passed"] and feedback_tests["passed"]):
+            if (
+                not (public_tests["passed"] and feedback_tests["passed"])
+                and not deterministic_contract_repair.get("attempted")
+            ):
                 deterministic_contract_repair = _apply_deterministic_contract_repair(
                     repo,
                     case,
@@ -2674,7 +2724,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         ]
                         public_tests = _run_case_tests(repo, case, public_only=True)
                         feedback_tests = _run_case_tests(repo, case, public_only=False)
-                deterministic_contract_repair.pop("_snapshot", None)
+            deterministic_contract_repair.pop("_snapshot", None)
             repair_attempts: list[dict[str, Any]] = []
             rejected_attempt_fingerprints: set[str] = set()
             for repair_round, repair_model in enumerate(repair_schedule, start=1):

@@ -1493,6 +1493,60 @@ def test_disclosed_tenth_contract_operators_pass_feedback_and_final(
     assert final["passed"] is True, final["output"]
 
 
+def test_recognized_contract_uses_initial_non_generative_edit_lane(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: ["qwen2.5-coder:7b"],
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_diagnose",
+        lambda _repo, case, *_args, **_kwargs: {
+            "report": {
+                "conclusion": {
+                    "dimension": "clock",
+                    "causal_sufficiency": "direct_artifact",
+                }
+            },
+            "packet": {},
+            "stages": [],
+            "case": {"problem_statement": case["prompt"]},
+        },
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_generate_patch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recognized contract should bypass generative editing")
+        ),
+    )
+    args = argparse.Namespace(
+        fixture_root=str(TENTH_FIXTURE_ROOT),
+        model="qwen2.5-coder:7b",
+        escalation_model="",
+        case=["ts_retry_budget_clock"],
+        timeout=1.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        validate_fixtures=False,
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "result.json"),
+        json=False,
+    )
+
+    result = benchmark.run(args)
+    case_result = result["cases"][0]
+
+    assert case_result["score"] == 100
+    assert case_result["functional_repair_passed"] is True
+    assert case_result["model_calls"] == []
+    assert case_result["deterministic_contract_repair"]["patch_applied"] is True
+
+
 def test_initial_patch_generation_does_not_run_repair_reviewer(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
