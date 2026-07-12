@@ -112,6 +112,26 @@ def test_multifile_budget_defaults_to_candidate_breadth_and_honors_explicit_cap(
     assert benchmark._plan_dimension({"dimension": "test harness"}) == "test_harness"
 
 
+def test_local_escalation_schedule_is_bounded_by_global_repair_cap():
+    schedule = benchmark._repair_model_schedule(
+        argparse.Namespace(
+            model="local-fast",
+            max_repairs=3,
+            escalation_model="local-deep",
+            max_escalation_repairs=4,
+        )
+    )
+
+    assert schedule == [
+        "local-fast",
+        "local-fast",
+        "local-fast",
+        "local-deep",
+        "local-deep",
+    ]
+    assert len(schedule) == benchmark.MAX_REPAIR_ROUNDS
+
+
 def test_fixture_ownership_preflight_rejects_impossible_edit_budget():
     case = {
         "candidate_paths": ["producer.py", "consumer.py"],
@@ -779,7 +799,7 @@ def test_score_uses_final_adjudication_not_green_feedback():
 def test_final_adjudication_occurs_after_repair_loop_and_before_no_more_model_calls():
     source = inspect.getsource(benchmark.run)
 
-    repair_loop = source.index("for repair_round in range")
+    repair_loop = source.index("for repair_round, repair_model in enumerate")
     final_oracle_read = source.index("final_oracle = _read_json")
     final_start = source.index("final_tests = _run_final_adjudication")
     model_call_guard = source.index("A model call occurred after final adjudication began")

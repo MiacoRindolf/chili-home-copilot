@@ -877,6 +877,21 @@ def _attempt_ledger_context(attempts: Sequence[Mapping[str, Any]]) -> str:
     return json.dumps(entries, indent=2, sort_keys=True)
 
 
+def _repair_model_schedule(args: argparse.Namespace) -> list[str]:
+    base_limit = max(0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs)))
+    escalation_model = str(getattr(args, "escalation_model", "") or "").strip()
+    escalation_limit = max(
+        0,
+        min(
+            MAX_REPAIR_ROUNDS - base_limit,
+            int(getattr(args, "max_escalation_repairs", 0) or 0),
+        ),
+    )
+    return [str(args.model)] * base_limit + [escalation_model] * (
+        escalation_limit if escalation_model else 0
+    )
+
+
 def _plan_prompt(
     prompt: str,
     candidates: list[str],
@@ -936,6 +951,7 @@ def _markdown(results: Mapping[str, Any]) -> str:
         "",
         f"- Run: {results['created_at']}",
         f"- Local model: `{results['model']}`",
+        f"- Local escalation model: `{results.get('escalation_model') or 'disabled'}`",
         f"- Reference family: `{results['reference_family']}`",
         f"- Overall score: **{results['overall_score']:.1f}/100**",
         f"- Development-regression score: **{results['development_regression_score']:.1f}/100**",
@@ -949,6 +965,7 @@ def _markdown(results: Mapping[str, Any]) -> str:
         "- Premium calls: **0**",
         f"- Average wall time: **{results['average_case_duration_ms'] / 1000:.1f}s/case**",
         f"- Maximum bounded repair rounds: **{results['max_repair_rounds']}**",
+        f"- Escalation repair rounds: **{results.get('max_escalation_repair_rounds', 0)}**",
         "- Fable 5 parity claim: **No**. No authenticated same-task Fable 5 head-to-head is included.",
         "",
         "| Case | Language | Runner | Evaluation | Split | Score | Diagnosis | Changed files | Patch | Public | Feedback | Final |",
@@ -1013,6 +1030,7 @@ def _local_call(
     calls.append(
         {
             "stage": stage,
+            "model": model,
             "ok": result.ok,
             "latency_ms": result.latency_ms,
             "wall_ms": int((time.monotonic() - started) * 1000),
@@ -1882,8 +1900,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "cases": validations,
         }
     installed = ollama_client.list_models()
-    if args.model not in installed:
-        raise SystemExit(f"Local model {args.model!r} is not installed.")
+    repair_schedule = _repair_model_schedule(args)
+    required_models = {str(args.model), *repair_schedule}
+    missing_models = sorted(model for model in required_models if model not in installed)
+    if missing_models:
+        raise SystemExit(
+            "Local model(s) are not installed: " + ", ".join(repr(value) for value in missing_models)
+        )
 
     case_results: list[dict[str, Any]] = []
     for entry in entries:
@@ -2018,8 +2041,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 deterministic_contract_repair.pop("_snapshot", None)
             repair_attempts: list[dict[str, Any]] = []
             rejected_attempt_fingerprints: set[str] = set()
-            repair_limit = max(0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs)))
-            for repair_round in range(1, repair_limit + 1):
+            for repair_round, repair_model in enumerate(repair_schedule, start=1):
                 if public_tests["passed"] and feedback_tests["passed"]:
                     break
                 failure_context = _validation_failure_context(
@@ -2037,7 +2059,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     diagnosis,
                     patch,
                     failure_context,
-                    args.model,
+                    repair_model,
                     calls,
                     args.timeout,
                     repair_round,
@@ -2045,6 +2067,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     attempt_ledger=_attempt_ledger_context(repair_attempts),
                 )
                 repair_attempts.append(repair)
+                repair["model"] = repair_model
+                repair["escalated"] = repair_model != str(args.model)
                 repair["before_failure_signature"] = before_failure_signature
                 revised_dimension = _plan_dimension(repair.get("plan") or {})
                 if revised_dimension:
@@ -2315,6 +2339,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "chili.diagnosis-to-fix-results.v4",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model": args.model,
+        "escalation_model": str(getattr(args, "escalation_model", "") or ""),
         "reference_family": manifest.get("reference_family") or "claude-fable-5",
         "overall_score": round(average, 2),
         "holdout_score": round(holdout_score, 2),
@@ -2347,9 +2372,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "verdict": _verdict(case_results),
         "evaluation_verdict": evaluation_verdict,
         "premium_calls": 0,
-        "max_repair_rounds": max(
+        "max_repair_rounds": len(repair_schedule),
+        "max_base_repair_rounds": max(
+            0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs))
+        ),
+        "max_escalation_repair_rounds": max(
             0,
-            min(MAX_REPAIR_ROUNDS, int(args.max_repairs)),
+            len(repair_schedule)
+            - max(0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs))),
         ),
         "fable5_head_to_head_run": False,
         "fable5_parity_claim": False,
@@ -2371,6 +2401,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--case", action="append")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--max-repairs", type=int, default=5)
+    parser.add_argument("--escalation-model", default="")
+    parser.add_argument("--max-escalation-repairs", type=int, default=0)
     parser.add_argument("--validate-fixtures", action="store_true")
     parser.add_argument("--report", default=str(DEFAULT_REPORT))
     parser.add_argument("--results-json", default=str(DEFAULT_RESULTS))
