@@ -441,18 +441,41 @@ def run_arm(label, grid, ticks, g4_on):
     if os.environ.get("PREPEND_OHLCV", "0") == "1":
         # Real historical 1m session bars (premarket included) fetched ONCE at setup —
         # BEFORE the replay's network guard arms; converts yf's ET-aware index to naive UTC.
+        #
+        # PREPEND PIN (2026-07-12 determinism fix): the live yfinance fetch DRIFTS across
+        # days (bar revisions / the sliding ~30-day 1m retention window) — the same JEM
+        # window moved −697.07 → −692.73 overnight with ZERO code change, which poisons
+        # cross-day A/B comparisons. First fetch per (symbol, session-date) is cached to
+        # CSV; every later run replays the IDENTICAL bars. Delete the cache file to
+        # deliberately refresh. Cache dir override: CHILI_REPLAY_PREPEND_CACHE_DIR.
         try:
-            import yfinance as yf
+            _cache_dir = os.environ.get(
+                "CHILI_REPLAY_PREPEND_CACHE_DIR",
+                r"D:\CHILI-Docker\chili-data\replay_prepend_cache",
+            )
+            os.makedirs(_cache_dir, exist_ok=True)
+            _cache_fp = os.path.join(
+                _cache_dir, f"{SYMBOL}_{WIN_START.date().isoformat()}_1m.csv"
+            )
+            _yfd = None
+            if os.path.exists(_cache_fp):
+                _yfd = pd.read_csv(_cache_fp, index_col=0, parse_dates=True)
+                print(f"  PREPEND_OHLCV: cache HIT {_cache_fp} ({len(_yfd)} bars)")
+            else:
+                import yfinance as yf
 
-            _d0 = WIN_START.date().isoformat()
-            _d1 = (WIN_START.date() + timedelta(days=1)).isoformat()
-            _yfd = yf.download(SYMBOL, start=_d0, end=_d1, interval="1m", prepost=True,
-                               progress=False, auto_adjust=False)
+                _d0 = WIN_START.date().isoformat()
+                _d1 = (WIN_START.date() + timedelta(days=1)).isoformat()
+                _yfd = yf.download(SYMBOL, start=_d0, end=_d1, interval="1m", prepost=True,
+                                   progress=False, auto_adjust=False)
+                if _yfd is not None and not _yfd.empty:
+                    if isinstance(_yfd.columns, pd.MultiIndex):
+                        _yfd.columns = [c[0] for c in _yfd.columns]
+                    _yfd = _yfd[["Open", "High", "Low", "Close", "Volume"]].copy()
+                    _yfd.index = pd.to_datetime(_yfd.index).tz_convert("UTC").tz_localize(None)
+                    _yfd.to_csv(_cache_fp)
+                    print(f"  PREPEND_OHLCV: cache MISS -> fetched + pinned {_cache_fp}")
             if _yfd is not None and not _yfd.empty:
-                if isinstance(_yfd.columns, pd.MultiIndex):
-                    _yfd.columns = [c[0] for c in _yfd.columns]
-                _yfd = _yfd[["Open", "High", "Low", "Close", "Volume"]].copy()
-                _yfd.index = pd.to_datetime(_yfd.index).tz_convert("UTC").tz_localize(None)
                 pre_bars = _yfd
                 print(f"  PREPEND_OHLCV: {len(pre_bars)} real 1m bars loaded "
                       f"({pre_bars.index[0]} .. {pre_bars.index[-1]})")
