@@ -7,6 +7,7 @@ final tests live in a separate oracle that is first read after every model call.
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -721,6 +722,31 @@ def _snapshot_fingerprint(snapshot: Mapping[str, str]) -> str:
     return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _snapshot_diff(
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+    *,
+    max_chars: int = 6_000,
+) -> str:
+    chunks: list[str] = []
+    for relative in sorted(set(before) | set(after)):
+        old = str(before.get(relative) or "")
+        new = str(after.get(relative) or "")
+        if old == new:
+            continue
+        chunks.append(
+            "".join(
+                difflib.unified_diff(
+                    old.splitlines(keepends=True),
+                    new.splitlines(keepends=True),
+                    fromfile=f"a/{relative}",
+                    tofile=f"b/{relative}",
+                )
+            )
+        )
+    return "\n".join(chunks)[:max_chars]
+
+
 def _apply_deterministic_contract_repair(
     repo: Path,
     case: Mapping[str, Any],
@@ -871,6 +897,8 @@ def _attempt_ledger_context(attempts: Sequence[Mapping[str, Any]]) -> str:
                 "duplicate_attempt": bool(item.get("duplicate_attempt")),
                 "before_failure": item.get("before_failure_signature") or "",
                 "after_failure": item.get("after_failure_signature") or "",
+                "attempted_diff": str(item.get("attempted_diff") or "")[:3_000],
+                "adapter_rejection": str(item.get("adapter_rejection") or "")[:1_500],
                 "warnings": [str(value) for value in item.get("warnings") or []][-3:],
             }
         )
@@ -1383,6 +1411,19 @@ def _apply_planned_edits(
         rel: (repo / rel).read_text(encoding="utf-8", errors="replace")
         for rel in paths
     }
+
+    def current_attempted_diff() -> str:
+        return _snapshot_diff(
+            originals,
+            {
+                relative: (repo / relative).read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                for relative in originals
+            },
+        )
+
     report = diagnosis.get("report") if isinstance(diagnosis.get("report"), Mapping) else {}
     evidence_context = _supporting_evidence_context(diagnosis)
     mechanism_invariants = diagnostic_reasoning.derive_contract_invariants(
@@ -1452,6 +1493,7 @@ def _apply_planned_edits(
             satisfied.append(rel)
             continue
         if not edit.get("patch_applied"):
+            attempted_diff = current_attempted_diff()
             for original_rel, content in originals.items():
                 (repo / original_rel).write_text(content, encoding="utf-8")
             return {
@@ -1459,6 +1501,7 @@ def _apply_planned_edits(
                 "selected_files": paths,
                 "applied_files": [],
                 "satisfied_files": satisfied,
+                "attempted_diff": attempted_diff,
                 "warnings": [
                     *warnings,
                     f"Rolled back multi-file edit group after {rel} was rejected.",
@@ -1468,6 +1511,7 @@ def _apply_planned_edits(
     if applied:
         syntax = validator_runner.run_ast_syntax(repo, changed_files=applied)
         if syntax.exit_code != 0 or syntax.timed_out:
+            attempted_diff = current_attempted_diff()
             for original_rel, content in originals.items():
                 (repo / original_rel).write_text(content, encoding="utf-8")
             detail = "\n".join(
@@ -1480,6 +1524,7 @@ def _apply_planned_edits(
                 "selected_files": paths,
                 "applied_files": [],
                 "satisfied_files": satisfied,
+                "attempted_diff": attempted_diff,
                 "warnings": [
                     *warnings,
                     f"Changed-file syntax validation failed:\n{detail[:5000]}",
@@ -1497,6 +1542,7 @@ def _apply_planned_edits(
         candidate_contents,
     )
     if contract_warnings:
+        attempted_diff = current_attempted_diff()
         for original_rel, content in originals.items():
             (repo / original_rel).write_text(content, encoding="utf-8")
         return {
@@ -1504,6 +1550,7 @@ def _apply_planned_edits(
             "selected_files": paths,
             "applied_files": [],
             "satisfied_files": satisfied,
+            "attempted_diff": attempted_diff,
             "warnings": [
                 *warnings,
                 *(f"contract invariant guard: {value}" for value in contract_warnings),
@@ -2094,25 +2141,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     *(repair.get("warnings") or []),
                 ]
                 if not repair.get("patch_applied"):
-                    rejection = (
+                    repair["adapter_rejection"] = (
                         "CHILI adapter rejected the attempted edit:\n"
                         + "\n".join(repair.get("warnings") or ["no applicable edit"])
                     )
-                    if not public_tests["passed"]:
-                        public_tests = {
-                            **public_tests,
-                            "output": f"{public_tests['output']}\n\n{rejection}",
-                        }
-                    if not feedback_tests["passed"]:
-                        feedback_tests = {
-                            **feedback_tests,
-                            "output": f"{feedback_tests['output']}\n\n{rejection}",
-                        }
                     continue
-                attempt_fingerprint = _snapshot_fingerprint(
-                    _candidate_snapshot(repo, case)
-                )
+                attempted_snapshot = _candidate_snapshot(repo, case)
+                attempt_fingerprint = _snapshot_fingerprint(attempted_snapshot)
                 repair["attempt_fingerprint"] = attempt_fingerprint
+                repair.setdefault(
+                    "attempted_diff",
+                    _snapshot_diff(before_repair, attempted_snapshot),
+                )
                 if attempt_fingerprint in rejected_attempt_fingerprints:
                     _restore_candidate_snapshot(repo, before_repair)
                     repair["duplicate_attempt"] = True

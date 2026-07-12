@@ -552,6 +552,27 @@ def test_validation_progress_rejects_earlier_exception_and_identical_failure():
     ) is False
 
 
+def test_attempt_ledger_preserves_rejected_diff_and_adapter_evidence():
+    before = {"owner.py": "VALUE = 1\n"}
+    after = {"owner.py": "VALUE = 2\n"}
+    attempted_diff = benchmark._snapshot_diff(before, after)
+    ledger = benchmark._attempt_ledger_context(
+        [
+            {
+                "round": 1,
+                "selected_files": ["owner.py"],
+                "attempted_diff": attempted_diff,
+                "adapter_rejection": "SEARCH text was stale",
+                "warnings": ["rejected"],
+            }
+        ]
+    )
+
+    assert "-VALUE = 1" in ledger
+    assert "+VALUE = 2" in ledger
+    assert "SEARCH text was stale" in ledger
+
+
 def test_read_only_feedback_context_is_bounded_and_test_scoped(tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_feedback.py").write_text(
