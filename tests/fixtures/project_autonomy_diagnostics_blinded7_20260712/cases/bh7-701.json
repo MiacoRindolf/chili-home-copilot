@@ -1,0 +1,148 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-701",
+  "problem_statement": "Arrival displays on three bus routes intermittently freeze one vehicle while the fleet map continues to show traffic from the route. Determine the production cause and the safest corrective direction without changing live dispatch records.",
+  "observations": [
+    {
+      "evidence_id": "bh7-701-e01",
+      "statement": "Retained gateway payloads from the prior 14 days show each active vehicle using a distinct trip_instance_id. In the first affected morning, 11 identifiers are each present under two different vehicle certificate subjects.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "immutable gateway archive comparison",
+      "independence_key": "gateway-archive",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "lookback_days": 14,
+        "collision_count": 11
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e02",
+      "statement": "The first display freeze begins four minutes after two refurbished onboard controllers complete their first depot handshake; no freeze is recorded while either controller is offline.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "dispatch and depot event timeline",
+      "independence_key": "depot-timeline",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "delay_minutes": 4
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e03",
+      "statement": "Passenger displays and the public arrival API show a stationary bus, while the operations map still plots both physical vehicles from lower-level radio envelopes.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "read-only comparison of three consumer views",
+      "independence_key": "consumer-views",
+      "reliability": 0.94,
+      "discriminating": false,
+      "metadata": {
+        "consumer_count": 3
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e04",
+      "statement": "For every frozen interval, signed raw messages with the same trip_instance_id arrive from two certificate subjects with overlapping event times and independently increasing odometer values. Both messages pass schema and signature checks.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed ingress payload sample",
+      "independence_key": "signed-payloads",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "sampled_intervals": 23
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e05",
+      "statement": "Routes served only by controllers that were not refurbished remain current through the same radio gateways, stream partitions, and display release.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "route cohort comparison",
+      "independence_key": "route-cohort",
+      "reliability": 0.93,
+      "discriminating": true,
+      "metadata": {
+        "control_routes": 17
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e06",
+      "statement": "The stream processor records normal latency and no restarts, but its audit output shows later messages discarded when a message for the shared identifier carries a sequence below the value last seen from the other vehicle.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "processor audit topic and health metrics",
+      "independence_key": "processor-audit",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "restart_count": 0
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e07",
+      "statement": "Application images, route rules, broker settings, and schema registry revisions are identical to the last unaffected weekday.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed deployment inventory",
+      "independence_key": "deployment-inventory",
+      "reliability": 0.95,
+      "discriminating": false,
+      "metadata": {
+        "compared_days": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e08",
+      "statement": "A bounded replay of 200 archived messages into an isolated namespace reproduces the freeze unchanged. Replacing only the colliding identifiers with distinct surrogate values yields two continuous arrival tracks; timestamps, sequence values, and processor image remain unchanged.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated non-production replay",
+      "independence_key": "isolated-replay",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "message_count": 200
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e09",
+      "statement": "Depot work records show the affected controllers were restored from the same commissioning image, including a seeded local trip counter, before they contacted central assignment service.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed maintenance work orders",
+      "independence_key": "maintenance-records",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "controller_count": 11
+      }
+    },
+    {
+      "evidence_id": "bh7-701-e10",
+      "statement": "A packet capture from an unaffected refurbished controller shows it receives a centrally assigned identifier before publishing location. The affected first-boot captures begin publishing immediately and receive assignment later.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "depot packet captures",
+      "independence_key": "handshake-captures",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "capture_count": 4
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

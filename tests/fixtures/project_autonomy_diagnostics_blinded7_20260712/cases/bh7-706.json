@@ -1,0 +1,136 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-706",
+  "problem_statement": "Whole-slide pathology previews intermittently miss their review target during an overnight window, delaying report assembly. Aggregate host signals suggest an execution-environment effect, but current records do not tie that mechanism to individual failed jobs. Determine the justified next action without touching clinical source images.",
+  "observations": [
+    {
+      "evidence_id": "bh7-706-e01",
+      "statement": "Matched-concurrency probes retained from six weeks before and two weeks after the alert show the same 3.1 to 3.4 percent long-tail rate on the shared worker pool. Higher nightly volume made the existing tail cross the operational alert threshold.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "sealed load-probe history",
+      "independence_key": "probe-baseline",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "before_weeks": 6,
+        "after_weeks": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e02",
+      "statement": "Long jobs cluster between 01:05 and 01:40, beginning shortly after an archival compression process starts on some of the same hosts and ending as its nightly queue drains.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "job and host activity timeline",
+      "independence_key": "overnight-ordering",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "window_minutes": 35
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e03",
+      "statement": "The report assembler waits for preview completion and then marks the study delayed; it reports no malformed tile or missing object, making the report status a downstream effect rather than a mechanism observation.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "assembler trace summary",
+      "independence_key": "assembler-impact",
+      "reliability": 0.93,
+      "discriminating": false,
+      "metadata": {
+        "sampled_studies": 44
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e04",
+      "statement": "Source image hashes, tile counts, stain profiles, and decode validation match successful previews from the same scanners. Reprocessing sampled sources on a dedicated diagnostic host completes within target.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "read-only source validation and diagnostic replay",
+      "independence_key": "source-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "sampled_sources": 24
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e05",
+      "statement": "Small preview jobs on shared hosts remain fast during the window, and whole-slide jobs outside the window complete normally through the same queue, storage path, and worker release.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "size and time cohort comparison",
+      "independence_key": "job-cohort-control",
+      "reliability": 0.92,
+      "discriminating": true,
+      "metadata": {
+        "cohort_count": 4
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e06",
+      "statement": "One-minute host metrics show scheduler wait and memory-pressure stalls rising on shared hosts during the compression window, while storage latency, network errors, worker heap pauses, and queue broker latency remain ordinary.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "host and service telemetry",
+      "independence_key": "aggregate-host-signals",
+      "reliability": 0.9,
+      "discriminating": true,
+      "metadata": {
+        "resolution_seconds": 60
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e07",
+      "statement": "Worker images, decoder packages, process limits, placement declarations, and transformation recipes are unchanged across the retained period. No application restart aligns consistently with a long job.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "attested deployment history",
+      "independence_key": "deployment-history",
+      "reliability": 0.95,
+      "discriminating": false,
+      "metadata": {
+        "history_weeks": 8
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e08",
+      "statement": "Current traces identify the worker process and total job duration but omit host run-queue delay and pressure-stall time for that process. Host aggregation cannot show whether any sampled failed job was runnable but unscheduled.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "trace schema review",
+      "independence_key": "attribution-gap",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "reviewed_fields": 28
+      }
+    },
+    {
+      "evidence_id": "bh7-706-e09",
+      "statement": "A bounded next measurement can collect per-process scheduler delay, pressure-stall counters, host identity, and job phase for the next 50 preview jobs, then compare them with 50 matched jobs on the dedicated pool. Sampling is read-only, excludes image content, and has a fixed overhead budget.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "reviewed sampled-tracing proposal",
+      "independence_key": "bounded-tracing",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "jobs_per_cohort": 50,
+        "overhead_budget_percent": 1
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

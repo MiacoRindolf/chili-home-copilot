@@ -1,0 +1,135 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-707",
+  "problem_statement": "Rights-managed museum images remain visible at one regional edge for about 17 minutes after scheduled withdrawal, although the collection system shows them withdrawn. Identify the production mechanism and a safe corrective proof that does not republish restricted images.",
+  "observations": [
+    {
+      "evidence_id": "bh7-707-e01",
+      "statement": "Retained synthetic withdrawals completed at all edges in 35 to 55 seconds for the prior month. After a coordinator host resumed on Thursday, one region's completion shifted to 16.8 to 17.4 minutes while other regions stayed in range.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "sealed synthetic withdrawal history",
+      "independence_key": "withdrawal-baseline",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "lookback_days": 30
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e02",
+      "statement": "The first delayed withdrawal is accepted 42 seconds after the coordinator virtual machine resumes from maintenance suspension; no delayed event is recorded before the resume.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "host lifecycle and event timeline",
+      "independence_key": "resume-timeline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "delay_seconds": 42
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e03",
+      "statement": "The collection API and origin both deny the withdrawn asset immediately, but the affected edge continues serving its cached derivative until an invalidation arrives. Viewer visibility is therefore downstream of the coordinator path.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "origin and edge request comparison",
+      "independence_key": "origin-edge-impact",
+      "reliability": 0.98,
+      "discriminating": false,
+      "metadata": {
+        "sampled_assets": 21
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e04",
+      "statement": "The queue receives each withdrawal immediately and reports no backlog or redelivery. Coordinator records show each event accepted promptly but held on its local timer until roughly 1,030 seconds after the source due time.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "queue ledger and coordinator audit",
+      "independence_key": "queue-audit",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "hold_seconds": 1030
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e05",
+      "statement": "Immediate invalidations and withdrawals assigned to another coordinator complete normally in the affected region, controlling for edge credentials, network path, and invalidation service health.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "coordinator cohort comparison",
+      "independence_key": "coordinator-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "control_events": 80
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e06",
+      "statement": "The resumed host's independent synchronization telemetry records its wall reading 1,032 seconds behind reference at resume, converging gradually over 19 minutes. Its monotonic counter advances continuously with no comparable pause.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "host synchronization telemetry",
+      "independence_key": "host-time-telemetry",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "offset_seconds": 1032,
+        "convergence_minutes": 19
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e07",
+      "statement": "Application image, queue settings, regional policy, certificate material, and edge client package match unaffected coordinators. CPU, memory, and network telemetry remain normal.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed coordinator inventory",
+      "independence_key": "coordinator-inventory",
+      "reliability": 0.95,
+      "discriminating": false,
+      "metadata": {
+        "compared_hosts": 4
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e08",
+      "statement": "A disconnected coordinator replay using a harmless synthetic asset and the recorded offset holds the scheduled action for 1,032 seconds. With a synchronized wall reading, the same artifact and event emit within one second.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated coordinator replay",
+      "independence_key": "offset-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "replay_variants": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-707-e09",
+      "statement": "A reviewed recovery proof requires synchronized-host eligibility before accepting scheduled work, then exercises only synthetic never-published asset keys and verifies origin denial plus edge invalidation latency before restoring normal assignment.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "safety review record",
+      "independence_key": "recovery-proof",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "uses_published_assets": false
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

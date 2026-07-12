@@ -1,0 +1,149 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-704",
+  "problem_statement": "A small fraction of revoked mobile building badges receive a later activation push before periodic reconciliation corrects them. Determine the responsible production mechanism and the safe corrective direction without testing against live doors or identities.",
+  "observations": [
+    {
+      "evidence_id": "bh7-704-e01",
+      "statement": "Retained weekly samples show the same 0.18 to 0.22 percent pattern for eight weeks before and two weeks after the latest release, although the incident became visible when badge volume increased.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "immutable notification ledger sample",
+      "independence_key": "ledger-baseline",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "before_weeks": 8,
+        "after_weeks": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e02",
+      "statement": "In 37 sampled incidents, the directory records a revocation, a second webhook for the same person arrives 80 to 230 milliseconds later, and an activation push follows within one second. The second webhook has a distinct delivery identifier.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "directory and notification timeline join",
+      "independence_key": "event-ordering",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "incident_count": 37
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e03",
+      "statement": "The authoritative directory remains revoked throughout each incident, but reader caches consume the activation push until their next reconciliation cycle.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "read-only directory and reader audit",
+      "independence_key": "reader-impact",
+      "reliability": 0.97,
+      "discriminating": false,
+      "metadata": {
+        "sampled_readers": 19
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e04",
+      "statement": "Revocations followed by no second webhook do not produce an activation push, including events handled by the same workers in the same minute.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "matched event cohort",
+      "independence_key": "single-webhook-control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "control_events": 420
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e05",
+      "statement": "Broker redelivery counters remain zero for the sampled messages, webhook signatures validate, and the two delivery identifiers are also distinct in the directory sender's ledger.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "broker metrics and sender ledger",
+      "independence_key": "delivery-integrity",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "sampled_messages": 74
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e06",
+      "statement": "Two application releases, three worker pools, and both regions exhibit comparable rates; their package inventories and deployment values differ in unrelated fields but share the same notification workflow artifact.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "release and region cohort inventory",
+      "independence_key": "release-cohort",
+      "reliability": 0.92,
+      "discriminating": true,
+      "metadata": {
+        "release_count": 2,
+        "region_count": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e07",
+      "statement": "The shipped workflow artifact shows that a debounce continuation captures the prior active value before the revocation commit, then publishes that captured value after a second webhook without checking whether the person aggregate advanced.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "reviewed shipped workflow artifact",
+      "independence_key": "workflow-inspection",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "reviewed_revisions": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e08",
+      "statement": "Existing per-push audit fields identify the debounce continuation for all 37 activation pushes and record an aggregate version exactly one behind the version attached to the completed revocation. No other publisher path appears in those incidents.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "immutable push audit records",
+      "independence_key": "push-attribution",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "attributed_pushes": 37
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e09",
+      "statement": "An isolated replay with a synthetic identity and the observed webhook spacing produces the activation push on every unmodified run. A candidate artifact that re-reads and compares aggregate version emits no activation; single-webhook and ordinary activation controls still produce expected output.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "non-production deterministic replay",
+      "independence_key": "workflow-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "runs_per_variant": 50
+      }
+    },
+    {
+      "evidence_id": "bh7-704-e10",
+      "statement": "Database latency, host pauses, queue depth, and directory response times are normal around affected events. A reviewed rollout proof requires isolated replay, audit-only canary comparison, and zero stale-version publishes before any production promotion.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "platform telemetry and rollout review",
+      "independence_key": "platform-and-proof",
+      "reliability": 0.93,
+      "discriminating": false,
+      "metadata": {
+        "telemetry_resolution_seconds": 1
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

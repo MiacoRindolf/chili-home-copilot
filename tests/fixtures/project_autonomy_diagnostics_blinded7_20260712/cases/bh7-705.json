@@ -1,0 +1,134 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-705",
+  "problem_statement": "Appointment reminders stop for a subset of clinics after a regional failover, although appointments remain visible and later visits still generate normal confirmations. Determine the source of suppression without sending test messages to patients.",
+  "observations": [
+    {
+      "evidence_id": "bh7-705-e01",
+      "statement": "Retained reminder ledgers show 99.4 percent dispatch in the seven days before failover and 71.2 percent immediately after it for clinics mapped to one cache shard. Other clinic cohorts remain within their prior range.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "immutable dispatch ledger comparison",
+      "independence_key": "dispatch-baseline",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "lookback_days": 7
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e02",
+      "statement": "Suppression begins 90 seconds after the standby shard is promoted and before the first reminder worker reconnects. No missed reminder precedes promotion in the affected cohort.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "failover and worker timeline",
+      "independence_key": "failover-timeline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "delay_seconds": 90
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e03",
+      "statement": "The scheduling database contains the correct appointment, consent, destination, and reminder due time for every sampled miss, and its change log shows no edits during the suppression window.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read-only scheduling database audit",
+      "independence_key": "schedule-audit",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "sampled_misses": 60
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e04",
+      "statement": "The communications provider receives no request for sampled misses, while clinic call volume about absent reminders rises later that morning. Confirmation messages use a separate path and continue normally.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "provider receipt log and support metrics",
+      "independence_key": "downstream-receipts",
+      "reliability": 0.95,
+      "discriminating": false,
+      "metadata": {
+        "sampled_requests": 60
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e05",
+      "statement": "Read-only inspection of the promoted shard finds reminder fence entries for the missed appointment identifiers marked as already sent, but the durable dispatch ledger has no corresponding send. Their stored creation times predate failover by 19 days.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "cache snapshot and ledger correlation",
+      "independence_key": "fence-correlation",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "entry_age_days": 19
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e06",
+      "statement": "Clinics mapped to shards restored from snapshots newer than the last dispatch compaction have no unmatched fences and no suppression, despite using the same workers, provider, and message templates.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "shard cohort comparison",
+      "independence_key": "shard-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "control_shards": 5
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e07",
+      "statement": "Restarting an affected worker in read-only diagnostic mode leaves the suppression decision unchanged. Worker image, templates, provider endpoint, and clinic policy revision match the unaffected cohort.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "diagnostic worker and signed inventory",
+      "independence_key": "worker-control",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "diagnostic_runs": 20
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e08",
+      "statement": "An isolated namespace loaded with the promoted snapshot suppresses the archived due reminders. Loading the same appointments and durable ledger without those unmatched fences yields one pending dispatch per appointment; no provider call is enabled in either replay.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "disconnected namespace replay",
+      "independence_key": "namespace-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "appointment_count": 60
+      }
+    },
+    {
+      "evidence_id": "bh7-705-e09",
+      "statement": "The failover report confirms that the promoted snapshot was taken before a completed ledger-based fence cleanup. A reviewed repair plan limits reconciliation to unmatched identifiers, previews the count, and proves dispatch once in a provider-disabled environment before any controlled recovery.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "restore report and recovery review",
+      "independence_key": "restore-report",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "preview_required": true
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

@@ -1,0 +1,148 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-702",
+  "problem_statement": "Recorded emergency-call audio handled through one processing zone ends at about 30 seconds, producing incomplete transcripts even though callers remain connected. Diagnose the responsible production boundary using only passive evidence and isolated probes.",
+  "observations": [
+    {
+      "evidence_id": "bh7-702-e01",
+      "statement": "Retained weekly acceptance recordings show that calls traversing the secondary relay have ended at 30 seconds since that zone was commissioned six weeks ago; recordings through the primary relay are complete both before and after the alert date.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "sealed acceptance recording index",
+      "independence_key": "acceptance-history",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "history_weeks": 6
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e02",
+      "statement": "The customer-impact alert starts within ten minutes of routine traffic weighting moving the secondary zone from 5 percent to 35 percent; no service image was deployed that day.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "routing audit and alert timeline",
+      "independence_key": "traffic-timeline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "before_percent": 5,
+        "after_percent": 35
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e03",
+      "statement": "The transcription service reports syntactically valid audio objects and finishes normally, but the final sentence is cut mid-word and the object duration clusters between 29.8 and 30.1 seconds.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "transcript quality sample and media headers",
+      "independence_key": "transcript-sample",
+      "reliability": 0.95,
+      "discriminating": false,
+      "metadata": {
+        "sample_count": 64
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e04",
+      "statement": "The capture service retains a full five-minute encrypted source object for each sampled failure, with continuous packet receipt from the call platform beyond the 30-second mark.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "capture ledger and object metadata",
+      "independence_key": "capture-ledger",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "verified_objects": 32
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e05",
+      "statement": "A read-only trace shows the secondary relay closing its upstream response at exactly 30 seconds and the media service recording a remote cancellation. The same stored source requested directly from the media service streams to completion.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "distributed trace sample",
+      "independence_key": "request-traces",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "trace_count": 18
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e06",
+      "statement": "Recordings shorter than 30 seconds complete through both zones with matching hashes after decode, providing a control for codec, storage, and transcript handling.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated acceptance probe",
+      "independence_key": "short-recording-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "probe_count": 12
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e07",
+      "statement": "Container digests, codec libraries, certificate chains, and host operating-system images match across the primary and secondary media-service pods.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "attested workload inventory",
+      "independence_key": "workload-inventory",
+      "reliability": 0.96,
+      "discriminating": false,
+      "metadata": {
+        "pod_count": 14
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e08",
+      "statement": "The exported relay definitions show a 30-second response deadline on the secondary route inherited from its bootstrap template and a 300-second deadline on the primary route. All other compared route fields match.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read-only control-plane export",
+      "independence_key": "relay-export",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "compared_fields": 41
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e09",
+      "statement": "A non-production relay instantiated from the secondary definition reproduces the truncation. Changing only the deadline to 300 seconds allows a five-minute synthetic recording to finish with the expected hash.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated relay verification",
+      "independence_key": "relay-verification",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "recording_minutes": 5
+      }
+    },
+    {
+      "evidence_id": "bh7-702-e10",
+      "statement": "CPU, memory, connection counts, and object-store latency in the secondary zone remain below their normal weekly medians during affected calls.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "zone resource telemetry",
+      "independence_key": "zone-telemetry",
+      "reliability": 0.91,
+      "discriminating": false,
+      "metadata": {
+        "window_minutes": 90
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

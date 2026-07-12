@@ -1,0 +1,147 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-703",
+  "problem_statement": "Newly ingested manuscript scans appear magenta in the public image viewer and yield poor text extraction, while repository checks report healthy objects. Identify the cause without altering preservation masters.",
+  "observations": [
+    {
+      "evidence_id": "bh7-703-e01",
+      "statement": "Retained derivatives made from the same scanner profile before Tuesday have neutral gray balance. Derivatives generated after Tuesday show the red and blue components exchanged, while preservation-master hashes are unchanged.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "preservation and derivative archive comparison",
+      "independence_key": "archive-comparison",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "paired_images": 48
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e02",
+      "statement": "The first altered derivative is produced seven minutes after the imaging worker pool replaces its base layer during scheduled node recycling; queued jobs completed on old workers remain correct.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "job ledger and worker lifecycle timeline",
+      "independence_key": "worker-timeline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "delay_minutes": 7
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e03",
+      "statement": "The image delivery service and edge cache serve byte-identical derivative files, and bypassing the cache does not change their appearance.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "viewer fetch and checksum comparison",
+      "independence_key": "delivery-checksums",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "delivery_paths": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e04",
+      "statement": "Text extraction confidence falls by 41 percentage points only for the altered derivatives; the extractor receives the same page identifiers and language hints as before.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "downstream extraction metrics",
+      "independence_key": "extraction-metrics",
+      "reliability": 0.94,
+      "discriminating": false,
+      "metadata": {
+        "confidence_drop_points": 41
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e05",
+      "statement": "PNG and TIFF masters processed on the same workers remain visually and numerically correct. Every affected master uses the repository's JPEG 2000 lossless profile with three components.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "format cohort analysis",
+      "independence_key": "format-cohort",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "control_formats": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e06",
+      "statement": "Scanner calibration targets embedded in affected masters decode correctly with the preservation workstation, and the scanner firmware and capture profile have not changed in four months.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "calibration archive and scanner inventory",
+      "independence_key": "scanner-controls",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "unchanged_months": 4
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e07",
+      "statement": "The imaging application digest, transformation recipe, color profile files, and job payload schema match the prior worker pool. The base-layer inventory differs in one JPEG 2000 decoder package revision.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed software-bill comparison",
+      "independence_key": "layer-inventory",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "differing_entries": 1
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e08",
+      "statement": "In an isolated worker, the same master and application produce the magenta derivative with the newer decoder and the archived correct derivative with the older decoder. Output dimensions and recipe inputs are identical.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "read-only dual-version reconstruction",
+      "independence_key": "decoder-reconstruction",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "master_count": 12
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e09",
+      "statement": "A component histogram of the newer output matches the older output after swapping the first and third channels; there is no corresponding shift in source pixel statistics.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "independent image analysis",
+      "independence_key": "component-analysis",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "sample_pages": 30
+      }
+    },
+    {
+      "evidence_id": "bh7-703-e10",
+      "statement": "Worker CPU pressure, memory, disk errors, and job retry rates remain within the prior month's envelope during both correct and altered jobs.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "worker health telemetry",
+      "independence_key": "worker-health",
+      "reliability": 0.9,
+      "discriminating": false,
+      "metadata": {
+        "lookback_days": 30
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

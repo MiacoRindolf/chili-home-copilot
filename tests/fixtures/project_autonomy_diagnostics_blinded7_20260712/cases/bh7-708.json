@@ -1,0 +1,135 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh7-708",
+  "problem_statement": "A synthetic browser check intermittently reports that the active notice is absent from a public service-status portal, blocking promotion despite no corroborated user report. Existing captures cannot distinguish portal delivery from observer contamination. Determine the justified next step without publishing or editing any notice.",
+  "observations": [
+    {
+      "evidence_id": "bh7-708-e01",
+      "statement": "Retained results show 0.6 to 0.8 percent missing-notice checks for five weeks before and two weeks after the flagged release. The promotion block began when the check frequency increased, not when the rate changed.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "immutable synthetic result history",
+      "independence_key": "synthetic-baseline",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "before_weeks": 5,
+        "after_weeks": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e02",
+      "statement": "Most failures occur after the same runner has executed a consent-overlay scenario, but the runner log has minute resolution and does not record browser-context reuse for individual checks.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "runner schedule correlation",
+      "independence_key": "runner-ordering",
+      "reliability": 0.84,
+      "discriminating": true,
+      "metadata": {
+        "correlated_failures": 31
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e03",
+      "statement": "Failure screenshots show the notice area empty and cause a release-gate failure, but they omit the address bar, request identifiers, network capture, and serialized document tree.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "synthetic screenshot archive",
+      "independence_key": "failure-screenshots",
+      "reliability": 0.9,
+      "discriminating": false,
+      "metadata": {
+        "screenshot_count": 38
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e04",
+      "statement": "Origin and edge logs show successful notice responses throughout the windows, but failing checks carry no request identifier, so none can be joined to a specific response or prove that a request reached those systems.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "portal and edge access logs",
+      "independence_key": "delivery-logs",
+      "reliability": 0.93,
+      "discriminating": true,
+      "metadata": {
+        "joinable_failures": 0
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e05",
+      "statement": "Fresh-browser read-only checks from two office networks and a separate probe region render the notice during sampled alert windows. These controls do not recreate the managed runner's sequence or prove what its failed page contained.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "independent browser controls",
+      "independence_key": "fresh-browser-control",
+      "reliability": 0.9,
+      "discriminating": true,
+      "metadata": {
+        "control_locations": 3
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e06",
+      "statement": "The portal release and a managed browser image update occurred within the same maintenance hour. CDN policy, notice payload schema, and origin service revision did not change.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed maintenance inventory",
+      "independence_key": "maintenance-inventory",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "change_count": 2
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e07",
+      "statement": "DNS, edge error rate, origin latency, browser-runner CPU, and runner memory stay within historical ranges. Their aggregate resolution cannot reveal a stale page, blocked script, wrong endpoint, or retained overlay in one browser context.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "platform telemetry review",
+      "independence_key": "aggregate-telemetry",
+      "reliability": 0.88,
+      "discriminating": false,
+      "metadata": {
+        "resolution_minutes": 1
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e08",
+      "statement": "An isolated sequence using a similar managed browser sometimes leaves an overlay container attached, but the archived production checks lack enough context to show that mechanism, and the isolated sequence also differs in browser patch revision.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "non-production sequence exploration",
+      "independence_key": "sequence-exploration",
+      "reliability": 0.78,
+      "discriminating": true,
+      "metadata": {
+        "reproduction_rate_percent": 1.1
+      }
+    },
+    {
+      "evidence_id": "bh7-708-e09",
+      "statement": "A bounded next measurement can dual-run the next 50 read-only checks in reused and fresh browser contexts while capturing final URL, request identifier, response hash, network log, document tree, and runner sequence. It creates no portal content and sends no privileged request.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "reviewed observer-capture proposal",
+      "independence_key": "bounded-dual-run",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "checks_per_cohort": 50
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
