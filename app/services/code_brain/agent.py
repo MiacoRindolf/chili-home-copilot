@@ -585,9 +585,12 @@ def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
     new_content = content
     warnings: List[str] = []
     applied = 0
+    satisfied = 0
+    rejected = False
     for i, (search, replace) in enumerate(blocks, start=1):
         if not search.strip():
             warnings.append(f"block {i}: empty SEARCH text")
+            rejected = True
             continue
         count = new_content.count(search)
         if count == 0:
@@ -609,22 +612,45 @@ def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
                     f"block {i}: matched via whitespace/unicode normalization"
                 )
         if count == 0:
+            if replace.strip() and new_content.count(replace) == 1:
+                warnings.append(
+                    f"block {i}: replacement is already satisfied in the current file"
+                )
+                satisfied += 1
+                continue
             snippet = search.strip().replace("\n", " | ")[:120]
             warnings.append(
                 f"block {i}: SEARCH text not found in file (hallucinated or "
                 f"stale content): {snippet!r}"
             )
+            rejected = True
             continue
         if count > 1:
             warnings.append(
                 f"block {i}: SEARCH text matches {count} times — not unique, add surrounding lines"
             )
+            rejected = True
+            continue
+        if search == replace:
+            warnings.append(f"block {i}: replacement is an identity and already satisfied")
+            satisfied += 1
             continue
         new_content = new_content.replace(search, replace, 1)
         applied += 1
+    if rejected:
+        warnings.append(
+            "atomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied"
+        )
+        return {
+            "new_content": None,
+            "applied": 0,
+            "already_satisfied": False,
+            "warnings": warnings,
+        }
     return {
         "new_content": new_content if applied else None,
         "applied": applied,
+        "already_satisfied": bool(satisfied) and not applied,
         "warnings": warnings,
     }
 
@@ -662,13 +688,16 @@ def _parse_plan_json(reply: str) -> Optional[Dict[str, Any]]:
             return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
-    # Try raw JSON
-    m = re.search(r"\{[^{}]*\"files\"[^{}]*\[.*?\].*?\}", reply, re.DOTALL)
-    if m:
+    # Decode a balanced raw object. Regex extraction truncates as soon as a
+    # plan grows nested evidence such as contract_coverage entries.
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", reply or ""):
         try:
-            return json.loads(m.group(0))
+            value, _end = decoder.raw_decode((reply or "")[match.start():])
         except json.JSONDecodeError:
-            pass
+            continue
+        if isinstance(value, dict) and isinstance(value.get("files"), list):
+            return value
     return None
 
 

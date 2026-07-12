@@ -56,6 +56,7 @@ from ..code_brain.runtime import resolve_repo_runtime_path
 from ..code_dispatch import frozen_scope
 from ..coding_task import workspaces as workspace_mod
 from ..coding_task.envelope import subprocess_safe_env, truncate_text
+from ..coding_task import validation_contracts
 from ..coding_task.validator_runner import (
     StepResult,
     run_ast_syntax,
@@ -2491,7 +2492,7 @@ _DIAGNOSTIC_NUM_CTX = int(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_CTX") or "8192"
 )
 _DIAGNOSTIC_DEEP_COUNCIL = str(
-    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_DEEP_COUNCIL") or "false"
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_DEEP_COUNCIL") or "true"
 ).strip().lower() in {"1", "true", "yes", "on"}
 _DIAGNOSTIC_MAX_PROBES = max(
     1,
@@ -8680,6 +8681,24 @@ def validation_progress_evidence(
         for item in executed
         if "test" in str(item.get("step_key") or "").lower()
     )
+    passed_test_ids: set[str] = set()
+    failed_test_ids: set[str] = set()
+    test_contract_sets: list[dict[str, Any]] = []
+    for item in executed:
+        step_key = str(item.get("step_key") or "validation")
+        if "test" not in step_key.lower():
+            continue
+        evidence = validation_contracts.test_contract_evidence(
+            item,
+            runner_hint=step_key,
+        )
+        test_contract_sets.append(evidence)
+        passed_test_ids.update(
+            f"{step_key}::{value}" for value in evidence["passed_ids"]
+        )
+        failed_test_ids.update(
+            f"{step_key}::{value}" for value in evidence["failed_ids"]
+        )
     return {
         "passed": not failed,
         "failed_steps": sorted(str(item.get("step_key") or "validation") for item in failed),
@@ -8695,6 +8714,11 @@ def validation_progress_evidence(
         "reported_passed_tests": _reported_validation_count(output, "pass"),
         "reported_failed_tests": _reported_validation_count(output, "fail"),
         "test_scopes": test_scopes,
+        "passed_test_ids": sorted(passed_test_ids),
+        "failed_test_ids": sorted(failed_test_ids),
+        "test_identity_available": bool(passed_test_ids or failed_test_ids),
+        "test_contracts_complete": bool(test_contract_sets)
+        and all(item.get("complete") for item in test_contract_sets),
     }
 
 
@@ -8712,10 +8736,7 @@ def validation_failure_signature(
                 str(item.get("stderr") or ""),
             ]
         )
-    normalized = "\n".join(chunks).lower()
-    normalized = re.sub(r"[a-z]:[/\\][^\s:]+", "<path>", normalized)
-    normalized = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds)\b", "<time>", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = validation_contracts.normalize_failure_text("\n".join(chunks))
     return hashlib.sha256(normalized[:20_000].encode("utf-8", errors="replace")).hexdigest()
 
 
@@ -8728,10 +8749,26 @@ def validation_repair_decision(
     regressed_steps = sorted(
         set(before_evidence["passed_steps"]) & set(after_evidence["failed_steps"])
     )
+    regressed_test_contracts = sorted(
+        set(before_evidence["passed_test_ids"])
+        - set(after_evidence["passed_test_ids"])
+    )
+    before_contracts = {
+        "passed_ids": before_evidence["passed_test_ids"],
+        "failed_ids": before_evidence["failed_test_ids"],
+        "complete": before_evidence["test_contracts_complete"],
+    }
+    after_contracts = {
+        "passed_ids": after_evidence["passed_test_ids"],
+        "failed_ids": after_evidence["failed_test_ids"],
+        "complete": after_evidence["test_contracts_complete"],
+    }
     accepted = False
     reason = "no_measurable_validation_progress"
     if after_evidence["test_scopes"] != before_evidence["test_scopes"]:
         reason = "validation_test_scope_changed"
+    elif regressed_test_contracts:
+        reason = "previously_passing_test_contract_regressed"
     elif after_evidence["passed"]:
         accepted, reason = True, "validation_passed"
     elif regressed_steps:
@@ -8742,17 +8779,19 @@ def validation_repair_decision(
         accepted, reason = True, "syntax_failure_resolved"
     elif after_evidence["timed_out"] < before_evidence["timed_out"]:
         accepted, reason = True, "validation_timeout_resolved"
-    elif (
-        before_evidence["reported_failed_tests"] > 0
-        and after_evidence["reported_failed_tests"] < before_evidence["reported_failed_tests"]
-    ):
-        accepted, reason = True, "fewer_tests_failed"
-    elif after_evidence["reported_passed_tests"] > before_evidence["reported_passed_tests"]:
-        accepted, reason = True, "more_tests_passed"
+    elif validation_contracts.contract_progressed(before_contracts, after_contracts):
+        accepted = True
+        reason = (
+            "fewer_test_contracts_failed"
+            if set(after_evidence["failed_test_ids"])
+            < set(before_evidence["failed_test_ids"])
+            else "stable_test_contract_resolved"
+        )
     return {
         "accepted": accepted,
         "reason": reason,
         "regressed_steps": regressed_steps,
+        "regressed_test_contracts": regressed_test_contracts,
         "before": before_evidence,
         "after": after_evidence,
     }

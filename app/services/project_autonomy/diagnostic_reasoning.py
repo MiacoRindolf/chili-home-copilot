@@ -2771,6 +2771,7 @@ def collect_repo_evidence(
                     "evidence_id": f"source-{index + 1}",
                     "statement": f"{provenance}: {snippet}",
                     "dimension": infer_dimension(f"{rel} {snippet}"),
+                    "dimension_origin": "inferred",
                     "kind": "artifact",
                     "provenance": provenance,
                     "independence_key": rel,
@@ -2802,6 +2803,7 @@ def build_case_from_prompt(
             "evidence_id": f"operator-{index + 1}",
             "statement": statement,
             "dimension": infer_dimension(statement),
+            "dimension_origin": "inferred",
             "kind": "observation",
             "provenance": f"operator_prompt:{index + 1}",
             "independence_key": "operator_prompt",
@@ -3384,13 +3386,10 @@ def _validate_packet(case: Mapping[str, Any], packet: Mapping[str, Any]) -> list
             str(value)
             for value in item.get("support_evidence_ids") or []
             if str(value) in evidence_by_id
-            and (
-                str(evidence_by_id[str(value)].get("dimension_origin") or "unknown")
-                == "explicit"
-                or str(evidence_by_id[str(value)].get("provenance") or "").startswith(
-                    "diagnostic_probe:"
-                )
+            and str(
+                evidence_by_id[str(value)].get("dimension_origin") or "unknown"
             )
+            == "explicit"
             and str(evidence_by_id[str(value)].get("dimension") or "unknown")
             not in {hypothesis_dimension, "unknown"}
         )
@@ -4563,8 +4562,6 @@ def _repair_candidate_contract(
             return False
         hard_owned = (
             contract.get("dimension_origin") == "explicit"
-            or str(contract.get("provenance") or "").startswith("diagnostic_probe:")
-            or contract.get("intervention_scope") == "component"
         )
         owner = str(contract.get("causal_dimension") or "unknown")
         if owner == "unknown":

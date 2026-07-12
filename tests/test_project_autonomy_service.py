@@ -237,16 +237,19 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             for call in calls
             if "diagnostic council" in call["messages"][0]["content"]
         ]
-        assert 2 <= len(diagnostic_calls) <= 1 + orchestrator._DIAGNOSTIC_MAX_PROBES
+        assert 4 <= len(diagnostic_calls) <= 3 + orchestrator._DIAGNOSTIC_MAX_PROBES
         assert calls[0]["options"]["format"] == "json"
         assert "local-only diagnostic team" in calls[0]["messages"][1]["content"]
+        assert "investigator" in diagnostic_calls[0]["messages"][1]["content"]
+        assert "skeptic" in diagnostic_calls[1]["messages"][1]["content"]
+        assert "judge" in diagnostic_calls[2]["messages"][1]["content"]
         assert all(
             call["options"]["format"] == "json"
             for call in diagnostic_calls
         )
         assert all(
             "diagnostic_probe" in call["messages"][1]["content"]
-            for call in diagnostic_calls[1:]
+            for call in diagnostic_calls[3:]
         )
         assert "Diagnostic evidence gate:" in calls[-1]["messages"][1]["content"]
         artifact = (
@@ -259,9 +262,9 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
         )
         payload = json.loads(artifact.content_json or "{}")
         assert len(payload["model_calls"]) == len(diagnostic_calls)
-        assert payload["council_mode"] == "adaptive_sequential_probe_judge"
+        assert payload["council_mode"] == "deep"
         assert payload["probe_run"]["evidence"]
-        assert len(payload["probe_run"]["rounds"]) == len(diagnostic_calls) - 1
+        assert len(payload["probe_run"]["rounds"]) == len(diagnostic_calls) - 3
         attempted = payload["probe_run"]["attempted_probe_ids"]
         assert len(attempted) == len(set(attempted))
         assert all(
@@ -3186,7 +3189,11 @@ def test_validation_repair_decision_keeps_progress_and_rejects_regression():
         {
             "step_key": "pytest_targeted",
             "exit_code": 1,
-            "stdout": "2 failed, 1 passed",
+            "stdout": (
+                "tests/test_owner.py::test_alpha PASSED [ 33%]\n"
+                "tests/test_owner.py::test_beta FAILED [ 66%]\n"
+                "tests/test_owner.py::test_gamma FAILED [100%]\n"
+            ),
         },
     ]
     progress = [
@@ -3194,12 +3201,24 @@ def test_validation_repair_decision_keeps_progress_and_rejects_regression():
         {
             "step_key": "pytest_targeted",
             "exit_code": 1,
-            "stdout": "1 failed, 2 passed",
+            "stdout": (
+                "tests/test_owner.py::test_alpha PASSED [ 33%]\n"
+                "tests/test_owner.py::test_beta PASSED [ 66%]\n"
+                "tests/test_owner.py::test_gamma FAILED [100%]\n"
+            ),
         },
     ]
     regression = [
         {"step_key": "ast_syntax", "exit_code": 1, "stdout": "SyntaxError"},
-        {"step_key": "pytest_targeted", "exit_code": 0, "stdout": "3 passed"},
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 0,
+            "stdout": (
+                "tests/test_owner.py::test_alpha PASSED [ 33%]\n"
+                "tests/test_owner.py::test_beta PASSED [ 66%]\n"
+                "tests/test_owner.py::test_gamma PASSED [100%]\n"
+            ),
+        },
     ]
 
     improved = orchestrator.validation_repair_decision(before, progress)
@@ -3207,11 +3226,42 @@ def test_validation_repair_decision_keeps_progress_and_rejects_regression():
     unchanged = orchestrator.validation_repair_decision(before, before)
 
     assert improved["accepted"] is True
-    assert improved["reason"] == "fewer_tests_failed"
+    assert improved["reason"] == "fewer_test_contracts_failed"
     assert regressed["accepted"] is False
     assert regressed["reason"] == "previously_passing_validation_regressed"
     assert unchanged["accepted"] is False
     assert unchanged["reason"] == "no_measurable_validation_progress"
+
+
+def test_validation_repair_decision_rejects_equal_count_contract_swap():
+    before = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 1,
+            "stdout": (
+                "tests/test_owner.py::test_alpha PASSED [ 50%]\n"
+                "tests/test_owner.py::test_beta FAILED [100%]\n"
+            ),
+        }
+    ]
+    swapped = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 1,
+            "stdout": (
+                "tests/test_owner.py::test_alpha FAILED [ 50%]\n"
+                "tests/test_owner.py::test_beta PASSED [100%]\n"
+            ),
+        }
+    ]
+
+    decision = orchestrator.validation_repair_decision(before, swapped)
+
+    assert decision["accepted"] is False
+    assert decision["reason"] == "previously_passing_test_contract_regressed"
+    assert decision["regressed_test_contracts"] == [
+        "pytest_targeted::tests/test_owner.py::test_alpha"
+    ]
 
 
 def test_validation_repair_decision_rejects_changed_test_scope_even_when_green():

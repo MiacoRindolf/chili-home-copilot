@@ -16,6 +16,7 @@ from app.services.code_brain.agent import (
     _apply_search_replace,
     _build_edit_prompt,
     _elide_for_prompt,
+    _parse_plan_json,
     _parse_search_replace_blocks,
     _unified_diff_text,
 )
@@ -43,6 +44,17 @@ def test_parse_tolerates_crlf_and_returns_empty_on_prose():
     reply = "<<<<<<< SEARCH\r\nold\r\n=======\r\nnew\r\n>>>>>>> REPLACE"
     assert _parse_search_replace_blocks(reply) == [("old", "new")]
     assert _parse_search_replace_blocks("I cannot make this change because ...") == []
+
+
+def test_plan_parser_keeps_nested_contract_coverage():
+    plan = _parse_plan_json(
+        '{"dimension":"data","files":[{"path":"owner.py","action":"modify"}],'
+        '"contract_coverage":[{"contract":"stable id","owner_paths":["owner.py"],'
+        '"postcondition":"retry preserves identity"}],"notes":""}'
+    )
+
+    assert plan is not None
+    assert plan["contract_coverage"][0]["owner_paths"] == ["owner.py"]
 
 
 # ── applying ─────────────────────────────────────────────────────────────
@@ -80,7 +92,7 @@ def test_apply_insertion_via_anchor_repetition():
     assert "def mul" in out["new_content"]
 
 
-def test_apply_multiple_blocks_partial_success():
+def test_apply_multiple_blocks_is_atomic_when_one_block_is_invalid():
     out = _apply_search_replace(
         FILE,
         [
@@ -88,9 +100,23 @@ def test_apply_multiple_blocks_partial_success():
             ("nonexistent", "whatever"),
         ],
     )
+    assert out["applied"] == 0
+    assert out["new_content"] is None
+    assert any("atomic edit rejected" in value for value in out["warnings"])
+
+
+def test_apply_multiple_blocks_allows_satisfied_sibling_and_useful_edit():
+    out = _apply_search_replace(
+        FILE,
+        [
+            ("def add(a, b):", "def add(a, b):"),
+            ("def sub(a, b):", "def sub(a: int, b: int) -> int:"),
+        ],
+    )
+
     assert out["applied"] == 1
-    assert "a: int" in out["new_content"]
-    assert len(out["warnings"]) == 1
+    assert "def sub(a: int" in out["new_content"]
+    assert any("already satisfied" in value for value in out["warnings"])
 
 
 # ── machine-generated diff is git-apply compatible (the load-bearing bit) ─

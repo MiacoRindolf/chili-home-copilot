@@ -2137,6 +2137,36 @@ def test_case_normalization_preserves_dimension_origin_idempotently():
     ]
 
 
+def test_prompt_and_source_heuristics_remain_inferred_not_explicit(tmp_path):
+    source = tmp_path / "owner.py"
+    source.write_text(
+        "def order_stages(stages):\n    return sorted(stages)\n",
+        encoding="utf-8",
+    )
+
+    case = reasoning.build_case_from_prompt(
+        "The source stage ordering changed after a refactor.",
+        repo_path=tmp_path,
+        candidate_paths=["owner.py"],
+    )
+
+    assert case["observations"]
+    heuristic = [
+        item
+        for item in case["observations"]
+        if str(item.get("provenance") or "").startswith(
+            ("operator_prompt:", "owner.py:")
+        )
+    ]
+    assert heuristic
+    assert all(item["dimension_origin"] != "explicit" for item in heuristic)
+    assert all(
+        item["dimension_origin"] == "inferred"
+        for item in heuristic
+        if item["dimension"] != "unknown"
+    )
+
+
 def test_generic_mechanism_vocabulary_maps_to_causal_families_and_ties_stay_unknown():
     assert reasoning.infer_dimension(
         "The source stage plan differs at one ordering point."

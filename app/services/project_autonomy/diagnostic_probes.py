@@ -1156,6 +1156,9 @@ def execute_safe_probes(
                     f"exit={result.get('exit_code')}: {_clip(result.get('output'), 900)}"
                 ),
                 "dimension": semantics["dimension"],
+                "dimension_origin": (
+                    "explicit" if semantics["dimension"] != "unknown" else "unknown"
+                ),
                 "kind": semantics["kind"],
                 "provenance": f"diagnostic_probe:{result.get('probe_id')}",
                 "independence_key": f"diagnostic_probe:{result.get('probe_id')}",

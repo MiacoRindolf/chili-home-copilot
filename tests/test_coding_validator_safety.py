@@ -39,6 +39,41 @@ def test_ast_syntax_does_not_mutate_source_file(tmp_path: Path) -> None:
     assert r.step_key == "ast_syntax"
 
 
+def test_dart_analyzer_warning_is_evidence_not_syntax_failure(tmp_path: Path) -> None:
+    (tmp_path / "sample.dart").write_text("void main() {}\n", encoding="utf-8")
+    warning = (
+        "WARNING|STATIC_WARNING|UNUSED_LOCAL_VARIABLE|sample.dart|1|1|1|unused value"
+    )
+    with patch(
+        "app.services.coding_task.validator_runner._dart_executable",
+        return_value="dart",
+    ), patch(
+        "app.services.coding_task.validator_runner._run_subprocess_allowlisted",
+        return_value=(2, False, warning, ""),
+    ):
+        result = run_ast_syntax(tmp_path, changed_files=["sample.dart"])
+
+    assert result.exit_code == 0
+    assert result.metadata["dart_analyzer_warnings"]
+    assert "warning sample.dart" in result.stdout
+
+
+def test_dart_analyzer_error_remains_fatal(tmp_path: Path) -> None:
+    (tmp_path / "sample.dart").write_text("void main() {}\n", encoding="utf-8")
+    error = "ERROR|COMPILE_TIME_ERROR|UNDEFINED_NAME|sample.dart|1|1|1|missing"
+    with patch(
+        "app.services.coding_task.validator_runner._dart_executable",
+        return_value="dart",
+    ), patch(
+        "app.services.coding_task.validator_runner._run_subprocess_allowlisted",
+        return_value=(3, False, error, ""),
+    ):
+        result = run_ast_syntax(tmp_path, changed_files=["sample.dart"])
+
+    assert result.exit_code == 1
+    assert "SyntaxError sample.dart" in result.stdout
+
+
 def test_subprocess_timeout_kills_long_running_step(tmp_path: Path) -> None:
     with patch("app.services.coding_task.validator_runner._timeout", return_value=0.08):
         code, timed_out, out, err = _run_subprocess_allowlisted(
@@ -105,6 +140,29 @@ def test_pytest_targeted_reports_full_contract_scope_without_first_failure(tmp_p
     assert result.metadata["test_files"] == ["tests/test_example.py"]
     assert result.metadata["targeted"] is True
     assert result.metadata["validation_scope"] == "targeted_tests"
+
+
+def test_pytest_targeted_records_contract_identities_on_test_failure(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "example.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_example.py").write_text(
+        "def test_example():\n    assert False\n",
+        encoding="utf-8",
+    )
+    output = "tests/test_example.py::test_example FAILED [100%]\n"
+    with patch(
+        "app.services.coding_task.validator_runner._run_subprocess_allowlisted",
+        return_value=(1, False, output, ""),
+    ):
+        result = run_pytest_targeted(tmp_path, ["app/example.py"])
+
+    assert result.exit_code == 1
+    assert result.metadata["tests_executed"] is True
+    assert result.metadata["test_contract_status"] == {
+        "tests/test_example.py::test_example": "failed"
+    }
+    assert result.metadata["test_contracts_complete"] is True
 
 
 def test_pytest_targeted_fails_closed_when_selected_files_collect_zero_tests(tmp_path: Path) -> None:

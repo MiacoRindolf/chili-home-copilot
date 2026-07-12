@@ -17,6 +17,7 @@ from typing import Callable
 
 from ...config import settings
 from .envelope import subprocess_safe_env, truncate_text
+from .validation_contracts import test_contract_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,21 @@ def _dart_executable() -> str:
     return command
 
 
+def _dart_analyzer_severities(stdout: str, stderr: str) -> dict[str, list[str]]:
+    """Parse both machine and human Dart analyzer severity formats."""
+    severities: dict[str, list[str]] = {"error": [], "warning": [], "info": []}
+    for raw_line in f"{stdout or ''}\n{stderr or ''}".splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        machine = re.match(r"^(ERROR|WARNING|INFO)\|", line, re.IGNORECASE)
+        human = re.match(r"^(error|warning|info)\s*[-\u2022]", line, re.IGNORECASE)
+        match = machine or human
+        if match:
+            severities[match.group(1).lower()].append(line)
+    return severities
+
+
 def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
     """Run bounded, allowlisted syntax checks for changed source files."""
     if changed_files is None:
@@ -233,6 +249,7 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
     errors = 1 if python_result is not None and python_result.exit_code != 0 else 0
     validated_files = list(python_files)
     languages = {"python"} if python_files else set()
+    dart_analyzer_warnings: list[str] = []
     node = shutil.which("node") or ""
     dart = _dart_executable()
 
@@ -279,7 +296,7 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
             appdata.mkdir()
             localappdata.mkdir()
             code, timed_out, stdout, stderr = _run_subprocess_allowlisted(
-                [dart, "analyze", relative],
+                [dart, "analyze", "--format=machine", relative],
                 root,
                 extra_env={
                     "APPDATA": str(appdata),
@@ -287,12 +304,21 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
                     "DART_DISABLE_ANALYTICS": "true",
                 },
             )
-        if code != 0 or timed_out:
+        severities = _dart_analyzer_severities(stdout, stderr)
+        if timed_out or severities["error"]:
             errors += 1
             detail = (stderr or stdout or "syntax check failed").strip()
             output_lines.append(f"SyntaxError {relative}: {detail}")
+        elif code != 0 and not (severities["warning"] or severities["info"]):
+            errors += 1
+            detail = (stderr or stdout or "unclassified analyzer failure").strip()
+            output_lines.append(f"SyntaxError {relative}: {detail}")
         else:
             output_lines.append(f"ok {relative}")
+            for warning in severities["warning"]:
+                rendered = f"warning {relative}: {warning}"
+                output_lines.append(rendered)
+                dart_analyzer_warnings.append(rendered)
 
     output = (
         "\n".join(output_lines)
@@ -314,6 +340,7 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
             "changed_files": validated_files,
             "validation_scope": "changed_file_syntax",
             "syntax_languages": sorted(languages),
+            "dart_analyzer_warnings": dart_analyzer_warnings,
         },
     )
 
@@ -479,7 +506,7 @@ def run_pytest_targeted(
         argv = [
             sys.executable, "-m", "pytest",
             "--tb=short",
-            "-q",
+            "-vv",
             "-o", f"cache_dir={pc}",
         ] + test_files
     else:
@@ -520,9 +547,17 @@ def run_pytest_targeted(
         "collected 0 items",
         "0 tests collected",
     )
-    tests_executed = bool(test_files) and code == 0 and not any(
+    tests_executed = bool(test_files) and code not in {4, 5, 127} and not any(
         marker in combined_output for marker in zero_test_markers
     )
+    contract_evidence = test_contract_evidence(
+        {"stdout": out or "", "stderr": err or "", "step_key": "pytest_targeted"},
+        runner_hint="pytest",
+    )
+    contract_status = {
+        **{value: "passed" for value in contract_evidence["passed_ids"]},
+        **{value: "failed" for value in contract_evidence["failed_ids"]},
+    }
     # Exit 5 is acceptable only for the collect-only fallback. A targeted
     # selection that collected nothing is a failed evidence contract.
     ok = code == 0 or (not test_files and code == 5)
@@ -544,6 +579,8 @@ def run_pytest_targeted(
             "validation_scope": "targeted_tests" if test_files else "collect_only",
             "command": " ".join(argv),
             "zero_tests_collected": bool(test_files) and not tests_executed,
+            "test_contract_status": contract_status,
+            "test_contracts_complete": contract_evidence["complete"],
         },
     )
 

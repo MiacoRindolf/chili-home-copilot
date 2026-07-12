@@ -226,7 +226,7 @@ def test_scoring_requires_real_final_repair_and_correct_ownership():
     assert weak_checks["final_tests"] is False
 
 
-def test_feedback_grounded_plan_dimension_can_revise_initial_diagnosis():
+def test_unaccepted_repair_plan_cannot_revise_diagnostic_conclusion():
     oracle = {"expected_dimension": "config", "expected_file": "owner.py"}
     diagnosis = {"report": {"conclusion": {"dimension": "runtime"}}}
     patch = {
@@ -244,8 +244,25 @@ def test_feedback_grounded_plan_dimension_can_revise_initial_diagnosis():
         {"passed": True},
     )
 
-    assert score == 100
-    assert checks["diagnosis"] is True
+    assert score == 85
+    assert checks["diagnosis"] is False
+
+    diagnosis["accepted_conclusion"] = {
+        "dimension": "config",
+        "stage": "repair_1_validated",
+        "accepted": True,
+    }
+    accepted_score, accepted_checks = benchmark._score_case(
+        oracle,
+        diagnosis,
+        patch,
+        {"passed": False},
+        {"passed": True},
+        {"passed": True},
+    )
+
+    assert accepted_score == 100
+    assert accepted_checks["diagnosis"] is True
 
 
 def test_shadow_verdict_requires_every_case_check_not_only_high_average():
@@ -291,7 +308,7 @@ def test_multifile_scoring_requires_exact_changed_file_set():
 
     assert exact == 100
     assert exact_checks["file_selection"] is True
-    assert extra == 85
+    assert extra == 90
     assert extra_checks["file_selection"] is False
 
 
@@ -406,6 +423,44 @@ def test_edit_group_rolls_back_changed_file_syntax_failure(tmp_path, monkeypatch
     assert owner.read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
+def test_edit_group_gets_one_bounded_compiler_guided_correction(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    owner = repo / "owner.py"
+    owner.write_text("VALUE = 1\n", encoding="utf-8")
+    stages: list[str] = []
+
+    def fake_edit(repo_path, selected, *_args, **kwargs):
+        stage = str(kwargs.get("stage") or "")
+        stages.append(stage)
+        if "compiler_correction" in stage:
+            (repo_path / selected).write_text("VALUE = 2\n", encoding="utf-8")
+        else:
+            (repo_path / selected).write_text("def broken(:\n", encoding="utf-8")
+        return {"patch_applied": True, "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    outcome = benchmark._apply_planned_edits(
+        repo,
+        {"prompt": "Repair the owner.", "candidate_paths": ["owner.py"]},
+        {},
+        [{"path": "owner.py", "description": "Repair behavior."}],
+        {"report": {}},
+        "local-model",
+        [],
+        1.0,
+        stage_prefix="edit",
+    )
+
+    assert outcome["patch_applied"] is True
+    assert owner.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert any("compiler_correction" in stage for stage in stages)
+    assert any("compiler-guided correction" in value for value in outcome["warnings"])
+
+
 def test_edit_group_rolls_back_when_result_contradicts_mechanism_contract(
     tmp_path, monkeypatch
 ):
@@ -480,6 +535,15 @@ def test_initial_plan_receives_deterministic_mechanism_invariants():
 
     assert "Deterministic mechanism invariants" in prompt
     assert "evicted by the state owner" in prompt
+    assert '"dimension":"state"' not in prompt
+    assert "contract_coverage" in prompt
+
+
+def test_repair_prompt_source_has_no_state_anchored_schema_or_owner_language():
+    source = inspect.getsource(benchmark._repair_after_failure)
+
+    assert '"dimension":"state"' not in source
+    assert "state/interface owner" not in source
 
 
 def test_validation_failure_context_keeps_public_and_feedback_failures():
@@ -550,6 +614,84 @@ def test_validation_progress_rejects_earlier_exception_and_identical_failure():
         public,
         same_elsewhere,
     ) is False
+
+
+def test_validation_progress_rejects_test_swap_and_accepts_stable_resolution():
+    public = {"passed": True, "exit_code": 0}
+    before = {
+        "passed": False,
+        "exit_code": 1,
+        "runner": "pytest",
+        "output": (
+            "tests/test_contract.py::test_alpha PASSED [ 33%]\n"
+            "tests/test_contract.py::test_beta FAILED [ 66%]\n"
+            "tests/test_contract.py::test_gamma FAILED [100%]\n"
+        ),
+    }
+    swapped = {
+        "passed": False,
+        "exit_code": 1,
+        "runner": "pytest",
+        "output": (
+            "tests/test_contract.py::test_alpha FAILED [ 33%]\n"
+            "tests/test_contract.py::test_beta PASSED [ 66%]\n"
+            "tests/test_contract.py::test_gamma PASSED [100%]\n"
+        ),
+    }
+    progressed = {
+        "passed": False,
+        "exit_code": 1,
+        "runner": "pytest",
+        "output": (
+            "tests/test_contract.py::test_alpha PASSED [ 33%]\n"
+            "tests/test_contract.py::test_beta PASSED [ 66%]\n"
+            "tests/test_contract.py::test_gamma FAILED [100%]\n"
+        ),
+    }
+
+    assert benchmark._validation_advanced(public, before, public, swapped) is False
+    assert benchmark._validation_advanced(public, before, public, progressed) is True
+
+
+def test_failure_signature_ignores_volatile_object_addresses():
+    first = {
+        "output": "owner=<inventory.Ledger object at 0x000001ABCDEF0123> failed"
+    }
+    second = {
+        "output": "owner=<inventory.Ledger object at 0x0000099999999999> failed"
+    }
+
+    assert benchmark._normalized_failure_signature(first) == benchmark._normalized_failure_signature(
+        second
+    )
+
+
+def test_dart_bad_state_contract_can_advance_without_forgetting_prior_passes():
+    public = {"passed": True, "exit_code": 0}
+    before = {
+        "passed": False,
+        "exit_code": 255,
+        "runner": "dart",
+        "test_contract_status": {
+            "tests/sync_test.dart::first": "failed",
+        },
+        "test_contracts_complete": False,
+        "output": "Bad state: first",
+    }
+    after = {
+        "passed": False,
+        "exit_code": 255,
+        "runner": "dart",
+        "test_contract_status": {
+            "tests/sync_test.dart::first": "passed",
+            "tests/sync_test.dart::second": "failed",
+        },
+        "test_contracts_complete": False,
+        "output": "Bad state: second",
+    }
+
+    assert benchmark._validation_progress(public, before)[1] == 2
+    assert benchmark._validation_advanced(public, before, public, after) is True
 
 
 def test_attempt_ledger_preserves_rejected_diff_and_adapter_evidence():
@@ -814,7 +956,7 @@ def test_score_uses_final_adjudication_not_green_feedback():
         failed,
     )
 
-    assert score == 80
+    assert score == 55
     assert checks["baseline_final_failure"] is True
     assert checks["final_tests"] is False
 
