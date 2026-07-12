@@ -1,0 +1,4581 @@
+{
+  "accepted_model_stages": 24,
+  "average_local_latency_ms": 50896.25,
+  "benchmark_id": "fable5-class-diagnostic-blinded-sixth-run-20260712",
+  "blinded": true,
+  "cases": [
+    {
+      "case_id": "bh6-601",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 44713,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 568
+        },
+        {
+          "error": null,
+          "latency_ms": 52246,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 609
+        },
+        {
+          "error": null,
+          "latency_ms": 42881,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 572
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-601-e05"
+          ],
+          "hypothesis_id": "h3",
+          "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "isolate-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The planner index was incorrectly updated with the new Residence row.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "A correct planner index should not contain the Residence row.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-601-e03"
+            ]
+          },
+          {
+            "claim": "The loading lane scanners were misconfigured to resolve to RB-044.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "All scanners should have resolved to the correct destination.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "bh6-601-e04"
+            ]
+          },
+          {
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "A valid planner artifact should not produce incorrect routes.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "bh6-601-e02",
+              "bh6-601-e05"
+            ]
+          },
+          {
+            "claim": "The route-stop table was incorrectly updated with the new Residence row.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "A correct route-stop table should not contain the Residence entry.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-601-e03"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "bh6-601-e07"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-601",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "isolated",
+          "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+          "confidence": 0.5434,
+          "dimension": "state",
+          "evidence_ids": [
+            "bh6-601-e05"
+          ],
+          "hypothesis_id": "h3",
+          "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+          "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+          "requested_status": "provisional",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The planner index was incorrectly updated with the new Residence row.",
+            "confidence": 0.1653,
+            "confirmatory_weight": 0,
+            "context_weight": 0.198,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "A correct planner index should not contain the Residence row.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-601-e03"
+            ],
+            "support_weight": 0.198,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The loading lane scanners were misconfigured to resolve to RB-044.",
+            "confidence": 0.1611,
+            "confirmatory_weight": 0,
+            "context_weight": 0.192,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "All scanners should have resolved to the correct destination.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-601-e04"
+            ],
+            "support_weight": 0.192,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-601-e05"
+            ],
+            "causal_support_weight": 0.99,
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "confidence": 0.5434,
+            "confirmatory_weight": 0.99,
+            "context_weight": 0.2,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "A valid planner artifact should not produce incorrect routes.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 1.99,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-601-e02",
+              "bh6-601-e05"
+            ],
+            "support_weight": 1.19,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The route-stop table was incorrectly updated with the new Residence row.",
+            "confidence": 0.1653,
+            "confirmatory_weight": 0,
+            "context_weight": 0.198,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "A correct route-stop table should not contain the Residence entry.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-601-e03"
+            ],
+            "support_weight": 0.198,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.1625,
+            "confirmatory_weight": 0,
+            "context_weight": 0.194,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-601-e07"
+            ],
+            "support_weight": 0.194,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "A correct planner index should not contain the Residence row.",
+            "dimension": "data",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "All scanners should have resolved to the correct destination.",
+            "dimension": "config",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h-runtime",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "state",
+          "hypothesis_dimensions": [
+            "config",
+            "data",
+            "runtime",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": false,
+          "decision": true,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 65
+      },
+      "source": "sealed_sixth_holdout_case_01",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "confidence": 0.5434,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "confidence": 0.5434,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "runtime"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-601-e03"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The planner index contains an incorrect entry for RB-044.",
+            "status": "provisional"
+          },
+          "response_chars": 2006,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "confidence": 0.5434,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+            "requested_status": "confirmed",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "confidence": 0.5434,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+            "requested_status": "confirmed",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "runtime"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-601-e02",
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+            "status": "confirmed"
+          },
+          "response_chars": 2136,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "confidence": 0.5434,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The planner artifact was corrupted during the 05:40 roster update.",
+            "confidence": 0.5434,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "runtime"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-601-e02",
+              "bh6-601-e05"
+            ],
+            "hypothesis_id": "h3",
+            "reason": "The planner artifact was confirmed to be corrupted during the 05:40 roster update.",
+            "status": "provisional"
+          },
+          "response_chars": 2008,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh6-602",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 36927,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 536
+        },
+        {
+          "error": null,
+          "latency_ms": 42545,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 496
+        },
+        {
+          "error": null,
+          "latency_ms": 46283,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 566
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-602-e06"
+          ],
+          "hypothesis_id": "evidence-clock",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "falsify-h1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "falsify-h2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The controller's clock was set incorrectly.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Controller clock synchronized with UTC.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-602-e01",
+              "bh6-602-e02"
+            ]
+          },
+          {
+            "claim": "The controller's software was corrupted.",
+            "contradict_evidence_ids": [
+              "bh6-602-e08"
+            ],
+            "dimension": "code",
+            "falsification": "Software hashes match previous week.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The network synchronization was faulty.",
+            "contradict_evidence_ids": [
+              "bh6-602-e08"
+            ],
+            "dimension": "dependency",
+            "falsification": "Network routes unchanged.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The controller's hardware was faulty.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Packet capture shows normal operation.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-602-e03"
+            ]
+          },
+          {
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold other dimensions constant and remove or restore only the observed clock condition.",
+            "hypothesis_id": "evidence-clock",
+            "support_evidence_ids": [
+              "bh6-602-e06"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-602",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "isolated",
+          "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+          "confidence": 0.4949,
+          "dimension": "clock",
+          "evidence_ids": [
+            "bh6-602-e06"
+          ],
+          "hypothesis_id": "evidence-clock",
+          "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "requested_status": "provisional",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The controller's clock was set incorrectly.",
+            "confidence": 0.2826,
+            "confirmatory_weight": 0,
+            "context_weight": 0.394,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Controller clock synchronized with UTC.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-602-e01",
+              "bh6-602-e02"
+            ],
+            "support_weight": 0.394,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The controller's software was corrupted.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [
+              "bh6-602-e08"
+            ],
+            "contradict_weight": 0.96,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Software hashes match previous week.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The network synchronization was faulty.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [
+              "bh6-602-e08"
+            ],
+            "contradict_weight": 0.96,
+            "dimension": "dependency",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Network routes unchanged.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The controller's hardware was faulty.",
+            "confidence": 0.1653,
+            "confirmatory_weight": 0,
+            "context_weight": 0.198,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Packet capture shows normal operation.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-602-e03"
+            ],
+            "support_weight": 0.198,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "causal_support_weight": 0.98,
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "confidence": 0.4949,
+            "confirmatory_weight": 0.98,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold other dimensions constant and remove or restore only the observed clock condition.",
+            "hypothesis_id": "evidence-clock",
+            "origin": "deterministic_evidence_gate",
+            "ownership_weight": 2.225,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "support_weight": 0.98,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Controller clock synchronized with UTC.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Packet capture shows normal operation.",
+            "dimension": "state",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [
+          {
+            "hypothesis_id": "h-clock",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "clock",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "dependency",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": false,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 90
+      },
+      "source": "sealed_sixth_holdout_case_02",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "confidence": 0.4949,
+            "dimension": "clock",
+            "evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "hypothesis_id": "evidence-clock",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h2:dropped_contradiction_support",
+            "h3:dropped_contradiction_support"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "confidence": 0.4949,
+            "dimension": "clock",
+            "evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "hypothesis_id": "evidence-clock",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-602-e01",
+              "bh6-602-e02"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Controller clock offset matches GPS logger.",
+            "status": "provisional"
+          },
+          "response_chars": 1856,
+          "retractions": [
+            {
+              "hypothesis_id": "h-clock",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "confidence": 0.4949,
+            "dimension": "clock",
+            "evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "hypothesis_id": "evidence-clock",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h2:dropped_contradiction_support",
+            "h3:dropped_contradiction_support"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "confidence": 0.4949,
+            "dimension": "clock",
+            "evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "hypothesis_id": "evidence-clock",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-602-e01",
+              "bh6-602-e02"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Controller clock offset matches GPS logger.",
+            "status": "provisional"
+          },
+          "response_chars": 1670,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "confidence": 0.4949,
+            "dimension": "clock",
+            "evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "hypothesis_id": "evidence-clock",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies clock as the primary causal dimension.",
+            "confidence": 0.4949,
+            "dimension": "clock",
+            "evidence_ids": [
+              "bh6-602-e06"
+            ],
+            "hypothesis_id": "evidence-clock",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-602-e01",
+              "bh6-602-e02"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Controller clock offset matches GPS logger.",
+            "status": "provisional"
+          },
+          "response_chars": 2023,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh6-603",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 42206,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 535
+        },
+        {
+          "error": null,
+          "latency_ms": 64756,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 691
+        },
+        {
+          "error": null,
+          "latency_ms": 54705,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 656
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-603-e05"
+          ],
+          "hypothesis_id": "evidence-state",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [
+              "before_fingerprint",
+              "after_fingerprint",
+              "actual_outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The reservation export was corrupted during failover.",
+            "contradict_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e07"
+            ],
+            "dimension": "data",
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-603-e02",
+              "bh6-603-e05"
+            ]
+          },
+          {
+            "claim": "The coordinator's acknowledgment was delayed or incorrect.",
+            "contradict_evidence_ids": [
+              "bh6-603-e05",
+              "bh6-603-e07"
+            ],
+            "dimension": "state",
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e03"
+            ]
+          },
+          {
+            "claim": "Physical safety controls failed to update the reservation status.",
+            "contradict_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e05"
+            ],
+            "dimension": "state",
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "bh6-603-e04"
+            ]
+          },
+          {
+            "claim": "There was a bug in the reservation handling logic.",
+            "contradict_evidence_ids": [
+              "bh6-603-e05",
+              "bh6-603-e07"
+            ],
+            "dimension": "code",
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e08"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold other dimensions constant and remove or restore only the observed state condition.",
+            "hypothesis_id": "evidence-state",
+            "support_evidence_ids": [
+              "bh6-603-e05"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-603",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "isolated",
+          "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+          "confidence": 0.4975,
+          "dimension": "state",
+          "evidence_ids": [
+            "bh6-603-e05"
+          ],
+          "hypothesis_id": "evidence-state",
+          "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "requested_status": "provisional",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "causal_support_weight": 0.99,
+            "claim": "The reservation export was corrupted during failover.",
+            "confidence": 0.2888,
+            "confirmatory_weight": 0.99,
+            "context_weight": 0.2,
+            "contradict_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e07"
+            ],
+            "contradict_weight": 1.93,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0.99,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.7775,
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [
+              "bh6-603-e02",
+              "bh6-603-e05"
+            ],
+            "support_weight": 1.19,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The coordinator's acknowledgment was delayed or incorrect.",
+            "confidence": 0.1191,
+            "confirmatory_weight": 0,
+            "context_weight": 0.396,
+            "contradict_evidence_ids": [
+              "bh6-603-e05",
+              "bh6-603-e07"
+            ],
+            "contradict_weight": 1.93,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e03"
+            ],
+            "support_weight": 0.396,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Physical safety controls failed to update the reservation status.",
+            "confidence": 0.0617,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e05"
+            ],
+            "contradict_weight": 1.98,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [
+              "bh6-603-e04"
+            ],
+            "support_weight": 0.196,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "There was a bug in the reservation handling logic.",
+            "confidence": 0.1185,
+            "confirmatory_weight": 0,
+            "context_weight": 0.394,
+            "contradict_evidence_ids": [
+              "bh6-603-e05",
+              "bh6-603-e07"
+            ],
+            "contradict_weight": 1.93,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "The paired store replay should have reproduced the occupied response.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [
+              "bh6-603-e01",
+              "bh6-603-e08"
+            ],
+            "support_weight": 0.394,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "causal_support_weight": 0.99,
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.99,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold other dimensions constant and remove or restore only the observed state condition.",
+            "hypothesis_id": "evidence-state",
+            "origin": "deterministic_evidence_gate",
+            "ownership_weight": 2.2375,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "state",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "data",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_sixth_holdout_case_03",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "evidence-state",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "evidence-state",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "clock"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-603-e02",
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The paired store replay contradicts the hypothesis.",
+            "status": "provisional"
+          },
+          "response_chars": 1697,
+          "retractions": [
+            {
+              "hypothesis_id": "h-state",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "evidence-state",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "evidence-state",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "clock"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-603-e02",
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The paired store replay contradicts the hypothesis.",
+            "status": "provisional"
+          },
+          "response_chars": 2314,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "evidence-state",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "evidence-state",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "clock"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-603-e02",
+              "bh6-603-e05"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The paired store replay contradicts the hypothesis.",
+            "status": "provisional"
+          },
+          "response_chars": 2147,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh6-604",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 41901,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 524
+        },
+        {
+          "error": null,
+          "latency_ms": 56356,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 698
+        },
+        {
+          "error": null,
+          "latency_ms": 46897,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 558
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-604-e03"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The generic environment entry is a plausible cause based on the evidence.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The generic environment entry caused the issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Remove the generic entry and observe if the issue persists.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-604-e03"
+            ]
+          },
+          {
+            "claim": "The relay's firmware version is incompatible.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Roll back the relay's firmware to a known good version and observe if the issue persists.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "bh6-604-e01"
+            ]
+          },
+          {
+            "claim": "The wireless policy export is incorrect.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Re-export the wireless policy and verify its correctness.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "bh6-604-e06"
+            ]
+          },
+          {
+            "claim": "The scanner firmware version is incompatible.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Roll back the scanner's firmware to a known good version and observe if the issue persists.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-604-e01"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-604",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The generic environment entry caused the issue.",
+          "confidence": 0.1653,
+          "dimension": "state",
+          "evidence_ids": [
+            "bh6-604-e03"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "The generic environment entry is a plausible cause based on the evidence.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The generic environment entry caused the issue.",
+            "confidence": 0.1653,
+            "confirmatory_weight": 0,
+            "context_weight": 0.198,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Remove the generic entry and observe if the issue persists.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "support_weight": 0.198,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The relay's firmware version is incompatible.",
+            "confidence": 0.1639,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Roll back the relay's firmware to a known good version and observe if the issue persists.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-604-e01"
+            ],
+            "support_weight": 0.196,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The wireless policy export is incorrect.",
+            "confidence": 0.1639,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Re-export the wireless policy and verify its correctness.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-604-e06"
+            ],
+            "support_weight": 0.196,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The scanner firmware version is incompatible.",
+            "confidence": 0.1639,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Roll back the scanner's firmware to a known good version and observe if the issue persists.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-604-e01"
+            ],
+            "support_weight": 0.196,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Remove the generic entry and observe if the issue persists.",
+            "dimension": "state",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "instrument_first",
+          "dimension": "state",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "data",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "provisional",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": false,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": false
+        },
+        "score": 45
+      },
+      "source": "sealed_sixth_holdout_case_04",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The generic environment entry caused the issue.",
+            "confidence": 0.1653,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [
+            "h3:dropped_contradiction_support",
+            "h3:restored_grounded_support"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The generic environment entry caused the issue.",
+            "confidence": 0.1653,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "code",
+            "data",
+            "clock"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "status": "provisional"
+          },
+          "response_chars": 1969,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The generic environment entry caused the issue.",
+            "confidence": 0.1653,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The generic environment entry caused the issue.",
+            "confidence": 0.1653,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "code",
+            "data",
+            "clock"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "status": "provisional"
+          },
+          "response_chars": 2717,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The generic environment entry caused the issue.",
+            "confidence": 0.1653,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The generic environment entry caused the issue.",
+            "confidence": 0.1653,
+            "dimension": "state",
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "code",
+            "data",
+            "clock"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-604-e03"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The generic environment entry is a plausible cause based on the evidence.",
+            "status": "provisional"
+          },
+          "response_chars": 2026,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh6-605",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 39022,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 515
+        },
+        {
+          "error": null,
+          "latency_ms": 50047,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 496
+        },
+        {
+          "error": null,
+          "latency_ms": 56359,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 544
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-605-e02"
+          ],
+          "hypothesis_id": "h3",
+          "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "falsify-h1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "falsify-h2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The new image is missing libheif.so.1.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Rebuild the image with libheif installed.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-605-e03"
+            ]
+          },
+          {
+            "claim": "The preview service is not correctly handling HEIC files.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Update the preview service to handle HEIC files.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "bh6-605-e01"
+            ]
+          },
+          {
+            "claim": "The worker stderr is misleading.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Run a test job on the new image with logging enabled.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "bh6-605-e02"
+            ]
+          },
+          {
+            "claim": "The preview service is not receiving the correct data.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Replay a known good job on the new image.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-605-e01",
+              "bh6-605-e07"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-605",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The worker stderr is misleading.",
+          "confidence": 0.1653,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "bh6-605-e02"
+          ],
+          "hypothesis_id": "h3",
+          "promotion_reason": "",
+          "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The new image is missing libheif.so.1.",
+            "confidence": 0.1667,
+            "confirmatory_weight": 0,
+            "context_weight": 0.2,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Rebuild the image with libheif installed.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-605-e03"
+            ],
+            "support_weight": 0.2,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The preview service is not correctly handling HEIC files.",
+            "confidence": 0.1653,
+            "confirmatory_weight": 0,
+            "context_weight": 0.198,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Update the preview service to handle HEIC files.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-605-e01"
+            ],
+            "support_weight": 0.198,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The worker stderr is misleading.",
+            "confidence": 0.1653,
+            "confirmatory_weight": 0,
+            "context_weight": 0.198,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Run a test job on the new image with logging enabled.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "support_weight": 0.198,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The preview service is not receiving the correct data.",
+            "confidence": 0.2826,
+            "confirmatory_weight": 0,
+            "context_weight": 0.394,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Replay a known good job on the new image.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-605-e01",
+              "bh6-605-e07"
+            ],
+            "support_weight": 0.394,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Rebuild the image with libheif installed.",
+            "dimension": "data",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Update the preview service to handle HEIC files.",
+            "dimension": "code",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Run a test job on the new image with logging enabled.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Replay a known good job on the new image.",
+            "dimension": "state",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "instrument_first",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "code",
+            "data",
+            "runtime",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "provisional",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": false,
+          "decision": false,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": false
+        },
+        "score": 35
+      },
+      "source": "sealed_sixth_holdout_case_05",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The worker stderr is misleading.",
+            "confidence": 0.1653,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [
+            "h2:dropped_contradiction_support"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The worker stderr is misleading.",
+            "confidence": 0.1653,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-605-e03"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Missing library is a strong candidate.",
+            "status": "provisional"
+          },
+          "response_chars": 1727,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The worker stderr is misleading.",
+            "confidence": 0.1653,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The worker stderr is misleading.",
+            "confidence": 0.1653,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+            "status": "provisional"
+          },
+          "response_chars": 1690,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The worker stderr is misleading.",
+            "confidence": 0.1653,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The worker stderr is misleading.",
+            "confidence": 0.1653,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "promotion_reason": "",
+            "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-605-e02"
+            ],
+            "hypothesis_id": "h3",
+            "reason": "The worker stderr is misleading, and the preview service is not correctly handling HEIC files.",
+            "status": "provisional"
+          },
+          "response_chars": 1846,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh6-606",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 54383,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 621
+        },
+        {
+          "error": null,
+          "latency_ms": 66508,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 682
+        },
+        {
+          "error": null,
+          "latency_ms": 56865,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 548
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-606-e04"
+          ],
+          "hypothesis_id": "h-test_harness",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "isolate-test_harness",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h-test_harness"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The matcher change introduced in 4.18.0 caused non-overlapping trip selection.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Replay with restored two-bound check selects only afternoon riders.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-606-e05"
+            ]
+          },
+          {
+            "claim": "The dispatch event's cancellation logic was not updated to handle split-day routes.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Offline replay selects both rider groups under 4.17.6.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "bh6-606-e03"
+            ]
+          },
+          {
+            "claim": "The notification service's logic was not updated to handle split-day routes.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Post-deployment, 52 ordinary cancellations completed without a recipient-selection regression.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "bh6-606-e08"
+            ]
+          },
+          {
+            "claim": "The deployment process did not properly validate the new matcher logic.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Paired replay with 4.17.6 selects only afternoon riders.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-606-e01",
+              "bh6-606-e02"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "support_evidence_ids": [
+              "bh6-606-e04"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-606",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "isolated",
+          "claim": "The observed failure is primarily caused by test_harness drift.",
+          "confidence": 0.4975,
+          "dimension": "test_harness",
+          "evidence_ids": [
+            "bh6-606-e04"
+          ],
+          "hypothesis_id": "h-test_harness",
+          "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "requested_status": "provisional",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The matcher change introduced in 4.18.0 caused non-overlapping trip selection.",
+            "confidence": 0.1667,
+            "confirmatory_weight": 0,
+            "context_weight": 0.2,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Replay with restored two-bound check selects only afternoon riders.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-606-e05"
+            ],
+            "support_weight": 0.2,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The dispatch event's cancellation logic was not updated to handle split-day routes.",
+            "confidence": 0.1653,
+            "confirmatory_weight": 0,
+            "context_weight": 0.198,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Offline replay selects both rider groups under 4.17.6.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-606-e03"
+            ],
+            "support_weight": 0.198,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The notification service's logic was not updated to handle split-day routes.",
+            "confidence": 0.1639,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Post-deployment, 52 ordinary cancellations completed without a recipient-selection regression.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-606-e08"
+            ],
+            "support_weight": 0.196,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The deployment process did not properly validate the new matcher logic.",
+            "confidence": 0.2837,
+            "confirmatory_weight": 0,
+            "context_weight": 0.396,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Paired replay with 4.17.6 selects only afternoon riders.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-606-e01",
+              "bh6-606-e02"
+            ],
+            "support_weight": 0.396,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "causal_support_weight": 0.99,
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.99,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "ownership_weight": 2.2375,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-606-e06"
+            ],
+            "causal_support_weight": 0.99,
+            "claim": "Controlled diagnostic evidence identifies state as the primary causal dimension.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.99,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold other dimensions constant and remove or restore only the observed state condition.",
+            "hypothesis_id": "evidence-state",
+            "origin": "deterministic_evidence_gate",
+            "ownership_weight": 2.2375,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-606-e06"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Replay with restored two-bound check selects only afternoon riders.",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Offline replay selects both rider groups under 4.17.6.",
+            "dimension": "state",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Paired replay with 4.17.6 selects only afternoon riders.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "test_harness",
+          "hypothesis_dimensions": [
+            "code",
+            "runtime",
+            "state",
+            "test_harness"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 75
+      },
+      "source": "sealed_sixth_holdout_case_06",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4975,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "hypothesis_id": "h-test_harness",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4975,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "hypothesis_id": "h-test_harness",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "test_harness"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-606-e05",
+              "bh6-606-e09"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Matcher change introduced in 4.18.0 caused non-overlapping trip selection, but post-deployment validation showed no issues.",
+            "status": "provisional"
+          },
+          "response_chars": 2203,
+          "retractions": [
+            {
+              "hypothesis_id": "h-state",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4975,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "hypothesis_id": "h-test_harness",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4975,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "hypothesis_id": "h-test_harness",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "test_harness"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-606-e05"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Replay with restored two-bound check selects only afternoon riders.",
+            "status": "provisional"
+          },
+          "response_chars": 2560,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4975,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "hypothesis_id": "h-test_harness",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4975,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-606-e04"
+            ],
+            "hypothesis_id": "h-test_harness",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "test_harness"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-606-e05"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Replay with restored two-bound check selects only afternoon riders.",
+            "status": "provisional"
+          },
+          "response_chars": 1945,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh6-607",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 51211,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 514
+        },
+        {
+          "error": null,
+          "latency_ms": 65692,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 646
+        },
+        {
+          "error": null,
+          "latency_ms": 52594,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 519
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-607-e05"
+          ],
+          "hypothesis_id": "h-runtime",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "falsify-h3",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "isolate-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Worker age causes handle growth.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Same-host fresh worker control shows normal latency.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-607-e01"
+            ]
+          },
+          {
+            "claim": "Handle growth causes queue drain.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "No handle class grows during canary plan.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "bh6-607-e03",
+              "bh6-607-e04"
+            ]
+          },
+          {
+            "claim": "Network error counters indicate root cause.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "No network errors during canary plan.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "Payload and source controls prevent incidents.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Replayed payloads fail on fresh workers.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-607-e07"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "bh6-607-e05",
+              "bh6-607-e01",
+              "bh6-607-e09"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-607",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "isolated",
+          "claim": "The observed failure is primarily caused by runtime drift.",
+          "confidence": 0.5708,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "bh6-607-e05"
+          ],
+          "hypothesis_id": "h-runtime",
+          "promotion_reason": "",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "requested_status": "confirmed",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Worker age causes handle growth.",
+            "confidence": 0.1568,
+            "confirmatory_weight": 0,
+            "context_weight": 0.186,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Same-host fresh worker control shows normal latency.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-607-e01"
+            ],
+            "support_weight": 0.186,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-607-e03"
+            ],
+            "causal_support_weight": 0.97,
+            "claim": "Handle growth causes queue drain.",
+            "confidence": 0.5375,
+            "confirmatory_weight": 0.97,
+            "context_weight": 0.192,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "No handle class grows during canary plan.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 1.97,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-607-e03",
+              "bh6-607-e04"
+            ],
+            "support_weight": 1.162,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Network error counters indicate root cause.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "No network errors during canary plan.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-607-e07"
+            ],
+            "causal_support_weight": 0.92,
+            "claim": "Payload and source controls prevent incidents.",
+            "confidence": 0.4792,
+            "confirmatory_weight": 0.92,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0.92,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Replayed payloads fail on fresh workers.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 2.15,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-607-e07"
+            ],
+            "support_weight": 0.92,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "causal_support_weight": 0.95,
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5708,
+            "confirmatory_weight": 0.95,
+            "context_weight": 0.38,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0.95,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "ownership_weight": 2.1875,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-607-e05",
+              "bh6-607-e01",
+              "bh6-607-e09"
+            ],
+            "support_weight": 1.33,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Same-host fresh worker control shows normal latency.",
+            "dimension": "state",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "No network errors during canary plan.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "code",
+            "dependency",
+            "runtime",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": false,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": false
+        },
+        "score": 70
+      },
+      "source": "sealed_sixth_holdout_case_07",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5708,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h3:dropped_contradiction_support"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5708,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "runtime"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-607-e03",
+              "bh6-607-e04"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Same-host fresh worker control shows normal latency.",
+            "status": "provisional"
+          },
+          "response_chars": 1711,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5708,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "confirmed",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "conclusion:restored_known_hypothesis"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5708,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "confirmed",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "runtime"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "confirmed"
+          },
+          "response_chars": 2405,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5708,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "confirmed",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5708,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "bh6-607-e05"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "confirmed",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "runtime"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-607-e03",
+              "bh6-607-e04"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "confirmed"
+          },
+          "response_chars": 1840,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh6-608",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 46322,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 498
+        },
+        {
+          "error": null,
+          "latency_ms": 56281,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 540
+        },
+        {
+          "error": null,
+          "latency_ms": 53810,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 513
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "bh6-608-e04"
+          ],
+          "hypothesis_id": "h4",
+          "reason": "Consistent results with fixed delay suggest signal generator issue.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The firmware update introduced a bug.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "No late results with known-good firmware.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "bh6-608-e01"
+            ]
+          },
+          {
+            "claim": "The oscilloscope trace discrepancy is due to a calibration issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Consistent results across multiple independent traces.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "bh6-608-e02"
+            ]
+          },
+          {
+            "claim": "Duplicate trigger identifiers indicate a hardware fault.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "No duplicate identifiers with known-good firmware.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "bh6-608-e03"
+            ]
+          },
+          {
+            "claim": "The late results are due to a signal generator issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Consistent results with fixed delay.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "bh6-608-e04"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "bh6-608",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "isolated",
+          "claim": "The late results are due to a signal generator issue.",
+          "confidence": 0.4898,
+          "dimension": "test_harness",
+          "evidence_ids": [
+            "bh6-608-e04"
+          ],
+          "hypothesis_id": "h4",
+          "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+          "reason": "Consistent results with fixed delay suggest signal generator issue.",
+          "requested_status": "provisional",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The firmware update introduced a bug.",
+            "confidence": 0.1611,
+            "confirmatory_weight": 0,
+            "context_weight": 0.192,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "No late results with known-good firmware.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-608-e01"
+            ],
+            "support_weight": 0.192,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The oscilloscope trace discrepancy is due to a calibration issue.",
+            "confidence": 0.1625,
+            "confirmatory_weight": 0,
+            "context_weight": 0.194,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Consistent results across multiple independent traces.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-608-e02"
+            ],
+            "support_weight": 0.194,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Duplicate trigger identifiers indicate a hardware fault.",
+            "confidence": 0.1554,
+            "confirmatory_weight": 0,
+            "context_weight": 0.184,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "No duplicate identifiers with known-good firmware.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "bh6-608-e03"
+            ],
+            "support_weight": 0.184,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "causal_support_weight": 0.96,
+            "claim": "The late results are due to a signal generator issue.",
+            "confidence": 0.4898,
+            "confirmatory_weight": 0.96,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Consistent results with fixed delay.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 1.96,
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "support_weight": 0.96,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "No late results with known-good firmware.",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Consistent results across multiple independent traces.",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "No duplicate identifiers with known-good firmware.",
+            "dimension": "state",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "test_harness",
+          "hypothesis_dimensions": [
+            "code",
+            "data",
+            "state",
+            "test_harness"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": false,
+          "decision": false,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": false
+        },
+        "score": 60
+      },
+      "source": "sealed_sixth_holdout_case_08",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The late results are due to a signal generator issue.",
+            "confidence": 0.4898,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The late results are due to a signal generator issue.",
+            "confidence": 0.4898,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-608-e01"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Firmware update introduced late results.",
+            "status": "provisional"
+          },
+          "response_chars": 1773,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The late results are due to a signal generator issue.",
+            "confidence": 0.4898,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Consistent results with fixed delay suggest signal generator issue.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The late results are due to a signal generator issue.",
+            "confidence": 0.4898,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Consistent results with fixed delay suggest signal generator issue.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "reason": "Consistent results with fixed delay suggest signal generator issue.",
+            "status": "provisional"
+          },
+          "response_chars": 2051,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The late results are due to a signal generator issue.",
+            "confidence": 0.4898,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Consistent results with fixed delay suggest signal generator issue.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "isolated",
+            "claim": "The late results are due to a signal generator issue.",
+            "confidence": 0.4898,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof.",
+            "reason": "Consistent results with fixed delay suggest signal generator issue.",
+            "requested_status": "provisional",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "bh6-608-e04"
+            ],
+            "hypothesis_id": "h4",
+            "reason": "Consistent results with fixed delay suggest signal generator issue.",
+            "status": "provisional"
+          },
+          "response_chars": 1836,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    }
+  ],
+  "cases_with_accepted_model_stage": 8,
+  "created_at": "2026-07-12T01:17:39.452807+00:00",
+  "evaluation_roles": [
+    "blinded_holdout_sixth_run"
+  ],
+  "expected_model_calls": 24,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_score": 67.5,
+  "max_local_latency_ms": 66508,
+  "model": "qwen2.5-coder:7b",
+  "model_output_gate_passed": true,
+  "model_output_usable_rate": 1.0,
+  "overall_score": 67.5,
+  "premium_calls": 0,
+  "recorded_model_calls": 24,
+  "reference_model": "claude-fable-5",
+  "schema": "chili.realworld-diagnostic-results.v1",
+  "successful_model_calls": 24,
+  "verdict": "needs_improvement"
+}
