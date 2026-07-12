@@ -1,0 +1,20 @@
+{
+  "schema": "chili.eleventh-holdout-run-policy.v1",
+  "core_source_head": "6cf5b7e0e7da6840da57dec678f8846796265091",
+  "evidence_baseline_head": "6bc9ebaa999b4b90bda851d1d10b3a348a645c4b",
+  "primary_model": "qwen2.5-coder:7b",
+  "max_repairs": 2,
+  "escalation_model": "qwen2.5-coder:14b",
+  "max_escalation_repairs": 1,
+  "timeout_seconds": 240,
+  "premium_calls_allowed": 0,
+  "case_count": 12,
+  "language_counts": {
+    "python": 4,
+    "typescript": 4,
+    "dart": 2,
+    "sql": 2
+  },
+  "first_complete_result_is_authoritative": true,
+  "source_changes_after_fixture_freeze_allowed": false
+}
