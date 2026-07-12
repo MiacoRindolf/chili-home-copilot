@@ -1,0 +1,121 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-808",
+  "problem_statement": "A school district's weekly continuity drill began declaring six kitchen label printers unavailable, while ordinary meal-label jobs show no confirmed interruption. Because extra prints could enter an allergen-controlled workflow, diagnosis must remain passive until the drill result and the production path can be distinguished.",
+  "observations": [
+    {
+      "evidence_id": "bh8-808-e01",
+      "statement": "The continuity drill changed from zero failures to six of 48 printers on June 7 and repeated the same six failures on June 14; routine job counters did not show a matching drop.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "District continuity report and print-fleet counter export",
+      "independence_key": "drill_and_fleet_metrics",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {"fleet_size": 48, "failed_printers": 6, "drill_dates": ["2026-06-07", "2026-06-14"]}
+    },
+    {
+      "evidence_id": "bh8-808-e02",
+      "statement": "All six flagged printers received the same manufacturer firmware maintenance on June 5; twelve printers of the same model on older firmware passed both drills.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Vendor maintenance ledger and device inventory",
+      "independence_key": "firmware_cohort",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-808-e03",
+      "statement": "The drill sends a read-only status request and stores only its normalized result code; for the six failures the stored code is UNKNOWN_RESPONSE, but the raw response bytes are not retained.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Continuity harness specification and two drill logs",
+      "independence_key": "harness_result_logging",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"stored_result": "UNKNOWN_RESPONSE", "raw_response_retained": false}
+    },
+    {
+      "evidence_id": "bh8-808-e04",
+      "statement": "Kitchen operations recorded 286 accepted label jobs on the six printers during the two drill windows, but acceptance is emitted by the spool stage and does not prove that a physical label emerged.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Meal-production job ledger and workflow semantics review",
+      "independence_key": "production_job_ledger",
+      "reliability": 0.95,
+      "discriminating": false,
+      "metadata": {"accepted_jobs": 286}
+    },
+    {
+      "evidence_id": "bh8-808-e05",
+      "statement": "Kitchen managers opened no missing-label incident for those dates, but their shift checklist records only exceptions noticed by staff and is not a printer-by-printer proof.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Signed kitchen shift checklists",
+      "independence_key": "operator_checklists",
+      "reliability": 0.92,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-808-e06",
+      "statement": "Five-minute network summaries show no loss or link flap at the affected kitchens, but their resolution cannot exclude a short status-request failure during the drill.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "District network availability summaries",
+      "independence_key": "network_summaries",
+      "reliability": 0.94,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-808-e07",
+      "statement": "The continuity harness, its status parser, and district printer settings were unchanged for 11 weeks; no matching updated printer is available in the test room for a passive reproduction.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Harness release attestation and test-equipment inventory",
+      "independence_key": "harness_and_lab_inventory",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-808-e08",
+      "statement": "Without the raw status response or physical-output telemetry, the evidence cannot distinguish a newly valid response the drill cannot interpret from a brief printer or network condition that ordinary counters conceal.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Cross-team evidence review",
+      "independence_key": "inconclusive_gap_review",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-808-e09",
+      "statement": "The safety boundary forbids sending extra status requests, producing test labels, changing firmware, or altering the production parser; passive observation of the next already-scheduled drill is allowed.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Nutrition services diagnostic authorization",
+      "independence_key": "allergen_workflow_safety",
+      "reliability": 1.0,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-808-e10",
+      "statement": "The approved next measurement is a passive capture of exact request and response bytes, timestamps, and link state during one scheduled drill for two affected and two control printers, capped at ten minutes and 2 MB per device, followed by offline parsing. It adds no probe or print and has not yet run.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Approved but not yet executed passive measurement plan",
+      "independence_key": "bounded_next_measurement",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"duration_minutes": 10, "device_count": 4, "maximum_mb_per_device": 2, "extra_requests": 0, "executed": false}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

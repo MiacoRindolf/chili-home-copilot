@@ -1,0 +1,65 @@
+{
+  "schema": "chili.realworld-diagnostic-manifest.v1",
+  "benchmark_id": "fable5-class-diagnostic-blinded-eighth-run-20260712",
+  "reference_model": "claude-fable-5",
+  "blinded": true,
+  "evaluation_roles": ["blinded_holdout_eighth_run"],
+  "cases": [
+    {
+      "case_id": "bh8-801",
+      "case_file": "cases/bh8-801.json",
+      "oracle_file": "oracles/bh8-801.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_01"
+    },
+    {
+      "case_id": "bh8-802",
+      "case_file": "cases/bh8-802.json",
+      "oracle_file": "oracles/bh8-802.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_02"
+    },
+    {
+      "case_id": "bh8-803",
+      "case_file": "cases/bh8-803.json",
+      "oracle_file": "oracles/bh8-803.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_03"
+    },
+    {
+      "case_id": "bh8-804",
+      "case_file": "cases/bh8-804.json",
+      "oracle_file": "oracles/bh8-804.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_04"
+    },
+    {
+      "case_id": "bh8-805",
+      "case_file": "cases/bh8-805.json",
+      "oracle_file": "oracles/bh8-805.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_05"
+    },
+    {
+      "case_id": "bh8-806",
+      "case_file": "cases/bh8-806.json",
+      "oracle_file": "oracles/bh8-806.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_06"
+    },
+    {
+      "case_id": "bh8-807",
+      "case_file": "cases/bh8-807.json",
+      "oracle_file": "oracles/bh8-807.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_07"
+    },
+    {
+      "case_id": "bh8-808",
+      "case_file": "cases/bh8-808.json",
+      "oracle_file": "oracles/bh8-808.json",
+      "split": "holdout",
+      "source": "sealed_eighth_holdout_case_08"
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-803",
+  "problem_statement": "A county mosquito-control route planner began producing implausibly long field routes just as a northern service zone was added. Dispatch needs to distinguish the expected increase from a planning defect before crews are sent to treatment sites.",
+  "observations": [
+    {
+      "evidence_id": "bh8-803-e01",
+      "statement": "Published route distance rose 78% on June 18, although the approved zone expansion added 6.2% more treatment sites and the planning estimate was a 5% to 8% distance increase.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Dispatch planning dashboard and signed expansion estimate",
+      "independence_key": "route_metrics",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {"observed_distance_change_percent": 78, "added_sites_percent": 6.2, "expected_range_percent": [5, 8]}
+    },
+    {
+      "evidence_id": "bh8-803-e02",
+      "statement": "Field supervisors verified 30 suspect site coordinates against survey sheets; the stored latitude, longitude, and coordinate reference identifier were correct before optimization.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Survey-control comparison signed by field supervisors",
+      "independence_key": "survey_verification",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"sites_checked": 30}
+    },
+    {
+      "evidence_id": "bh8-803-e03",
+      "statement": "The release inventory shows the application binary and route settings unchanged; the overnight package refresh changed GeoTransform from 4.8.1 to 4.8.2.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Signed runtime package inventory",
+      "independence_key": "package_inventory",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"previous_version": "4.8.1", "incident_version": "4.8.2"}
+    },
+    {
+      "evidence_id": "bh8-803-e04",
+      "statement": "A standalone transformation of the vendor's reference coordinate swaps axes under 4.8.2, while 4.8.1 and the vendor's corrective 4.8.3 package return the surveyed point within two meters.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Isolated package-compatibility test witnessed by GIS staff",
+      "independence_key": "standalone_dependency_test",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"affected_version": "4.8.2", "corrective_version": "4.8.3", "tolerance_meters": 2}
+    },
+    {
+      "evidence_id": "bh8-803-e05",
+      "statement": "Planner traces show correct surveyed coordinates entering the transformation boundary and axis-reversed projected coordinates leaving it for every implausible waypoint sampled.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Planner boundary trace captured from copied route inputs",
+      "independence_key": "planner_boundary_trace",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-803-e06",
+      "statement": "Vehicle constraints, depot locations, and road-closure feeds were unchanged, and a manual distance matrix for twelve sites differed from the incident planner by factors of four to nine.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Dispatch configuration audit and GIS analyst distance worksheet",
+      "independence_key": "routing_confounder_audit",
+      "reliability": 0.96,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-803-e07",
+      "statement": "The package vendor's bundled corrective note identifies an axis-order regression in 4.8.2 for the coordinate reference used by the county.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Corrective package release note retained in the software archive",
+      "independence_key": "vendor_release_note",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-803-e08",
+      "statement": "The safety boundary suspended automatic route publication, retained operator-approved paper routes, and allowed package replacement only after coordinate and distance checks in an isolated planner.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Vector-control duty manager authorization",
+      "independence_key": "dispatch_safety_plan",
+      "reliability": 0.99,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-803-e09",
+      "statement": "A canary planner using 4.8.3 produced all 30 surveyed coordinates within two meters and route distances within 1.4% of the independent GIS calculation.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "GIS canary acceptance report",
+      "independence_key": "corrective_package_canary",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-803-e10",
+      "statement": "After the corrective package was promoted, all 42 routes passed supervisor review for five consecutive dispatches; total distance settled 6.4% above the old-zone baseline, consistent with the real expansion.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Five-dispatch post-change proof report",
+      "independence_key": "postchange_proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"routes": 42, "dispatches": 5, "remaining_distance_change_percent": 6.4}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

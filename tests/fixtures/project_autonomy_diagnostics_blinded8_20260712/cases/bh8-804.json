@@ -1,0 +1,109 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-804",
+  "problem_statement": "A regional food bank's handheld pick lists began sending volunteers back and forth across warehouse aisles, delaying outbound pantry loads even though order volume and inventory remained normal. The team needs a bounded correction that cannot alter stock quantities or reservation priority.",
+  "observations": [
+    {
+      "evidence_id": "bh8-804-e01",
+      "statement": "Median walking distance per pick wave increased 41% after release 6.14, while cases picked per wave and active volunteer count stayed within 3% of their eight-week medians.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Warehouse labor analytics export",
+      "independence_key": "labor_metrics",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {"walking_distance_change_percent": 41, "release": "6.14"}
+    },
+    {
+      "evidence_id": "bh8-804-e02",
+      "statement": "The regression occurs only in waves containing two-digit bay numbers; single-digit-only waves retain their historical path length.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Pick-wave segmentation analysis",
+      "independence_key": "wave_segmentation",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-804-e03",
+      "statement": "For a representative aisle, the generated order is A-1, A-10, A-11, A-2, A-3; the signed warehouse map orders the same bays A-1, A-2, A-3, A-10, A-11.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Handheld pick-list capture compared with facilities map",
+      "independence_key": "route_output_comparison",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-804-e04",
+      "statement": "Location coordinates, aisle closures, item dimensions, and reservation priorities are unchanged from the prior release, and a physical survey found no blocked travel paths.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Inventory master audit and facilities walk-through",
+      "independence_key": "warehouse_confounder_audit",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-804-e05",
+      "statement": "The 6.14 release diff replaced the segmented bay comparator with a plain text comparator while consolidating two pick-list paths; no associated requirement changed.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Signed release review packet",
+      "independence_key": "release_change_review",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-804-e06",
+      "statement": "A deterministic test with the five mapped bays reproduces the incident ordering under 6.14 and the physical ordering under 6.13; changing data, configuration, and package versions is unnecessary to reproduce it.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Isolated route-order unit reproduction",
+      "independence_key": "deterministic_reproduction",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-804-e07",
+      "statement": "The proposed correction restores segmented numeric comparison only for bay labels and adds examples for mixed one- and two-digit bays; allocation and quantity calculations are outside the changed path.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Remediation review and scope analysis",
+      "independence_key": "correction_scope",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-804-e08",
+      "statement": "The safety boundary required read-only route previews, prohibited inventory or reservation writes during validation, and required a supervisor to compare every canary route with the warehouse map.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Food bank release authorization",
+      "independence_key": "validation_safety_boundary",
+      "reliability": 0.99,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-804-e09",
+      "statement": "After the correction, 100 preview waves and 60 supervised live waves followed map order with no allocation differences; median walking distance returned within 1.8% of the eight-week baseline for ten operating days.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Post-change route comparison and ten-day labor report",
+      "independence_key": "postchange_proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"preview_waves": 100, "live_waves": 60, "allocation_differences": 0, "followup_days": 10}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

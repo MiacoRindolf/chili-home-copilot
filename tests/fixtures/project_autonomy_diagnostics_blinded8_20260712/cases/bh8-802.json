@@ -1,0 +1,112 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-802",
+  "problem_statement": "After a planned restart, one branch of a public library's automated return sorter began sending most books to the staffed exception lane. The library must restore routing without risking book damage or silently changing catalog records.",
+  "observations": [
+    {
+      "evidence_id": "bh8-802-e01",
+      "statement": "Sorter S2's exception-lane rate rose from 2.1% to 68.4% immediately after the 04:30 restart; adjacent sorter S1 remained between 1.8% and 2.4%.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Sorter operations counter export",
+      "independence_key": "sorter_counters",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {"affected_sorter": "S2", "before_percent": 2.1, "after_percent": 68.4}
+    },
+    {
+      "evidence_id": "bh8-802-e02",
+      "statement": "RFID reader traces from 120 diverted books contain valid tag frames and catalog identifiers, with signal strength matching successful reads from the prior day.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Reader controller diagnostic capture",
+      "independence_key": "rfid_reader_trace",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {"sample_size": 120}
+    },
+    {
+      "evidence_id": "bh8-802-e03",
+      "statement": "Maintenance staff passed belt-speed, gate-actuation, and bin-presence checks on S2, and ten manually commanded gates moved to the requested positions without hesitation.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Facilities maintenance acceptance sheet",
+      "independence_key": "mechanical_acceptance",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-802-e04",
+      "statement": "The active S2 site profile has strip_prefix_chars set to 0; the signed profile approved for that branch and the still-working S1 profile both use 3 for the same catalog namespace.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Configuration controller snapshot and approved branch profile",
+      "independence_key": "profile_comparison",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"active_value": 0, "approved_value": 3}
+    },
+    {
+      "evidence_id": "bh8-802-e05",
+      "statement": "The restart deployed no application or firmware release; signed executable and library inventories match S1 and the previous S2 run.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Deployment ledger and device inventory attestation",
+      "independence_key": "deployment_ledger",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-802-e06",
+      "statement": "Replaying 200 archived tag frames against an isolated routing evaluator reproduced 137 exceptions with the active profile and 4 with the signed branch profile; destination bins for the other 196 matched their historical outcomes.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Maintenance-lab routing replay",
+      "independence_key": "profile_replay",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {"frames": 200, "active_profile_exceptions": 137, "approved_profile_exceptions": 4}
+    },
+    {
+      "evidence_id": "bh8-802-e07",
+      "statement": "The catalog authority reports no bulk identifier changes, and the same sampled books routed normally through S1 during a controlled manual feed.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Catalog audit plus circulation supervisor witness log",
+      "independence_key": "catalog_and_control_line",
+      "reliability": 0.96,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-802-e08",
+      "statement": "The safety boundary kept S2 in single-book maintenance mode with staff at every gate, forbade firmware and catalog writes, and required immediate stop on any destination mismatch.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Library operations change authorization",
+      "independence_key": "safety_authorization",
+      "reliability": 0.99,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-802-e09",
+      "statement": "After restoring the signed branch profile and restarting only the routing evaluator, 600 witnessed returns produced a 2.0% exception rate with zero wrong-bin events; the next seven days remained within the established 1.7% to 2.5% band.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Post-change acceptance run and seven-day operations report",
+      "independence_key": "postchange_proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"acceptance_books": 600, "wrong_bin_events": 0, "followup_days": 7}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

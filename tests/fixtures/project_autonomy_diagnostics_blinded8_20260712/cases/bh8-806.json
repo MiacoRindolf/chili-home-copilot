@@ -1,0 +1,122 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-806",
+  "problem_statement": "A city clerk's overnight captioning pipeline began missing the morning publication target during budget-hearing season. Recorded audio hours had genuinely increased, but processing capacity fell much further than the workload change explains.",
+  "observations": [
+    {
+      "evidence_id": "bh8-806-e01",
+      "statement": "Nightly audio volume increased 27.8% with the budget calendar, while completed audio-minutes per worker-hour fell 62.6% and the 07:00 backlog quadrupled.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Clerk publication dashboard and hearing calendar",
+      "independence_key": "workload_and_throughput",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {"audio_volume_change_percent": 27.8, "throughput_change_percent": -62.6, "backlog_multiplier": 4}
+    },
+    {
+      "evidence_id": "bh8-806-e02",
+      "statement": "The slowdown begins within three minutes of the host compliance scan starting at 00:30 and recovers shortly after that scan exits at 04:15 on each affected night.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Independent endpoint compliance schedule joined to worker timing metrics",
+      "independence_key": "host_scan_timeline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {"scan_start": "00:30", "scan_end": "04:15"}
+    },
+    {
+      "evidence_id": "bh8-806-e03",
+      "statement": "Affected hosts sustain memory pressure above 94%, swap activity above 1.8 GB per minute, and a 23-fold increase in major page faults; worker CPU utilization simultaneously falls below 30%.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Operating-system performance recorder",
+      "independence_key": "host_resource_telemetry",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"memory_pressure_percent": 94, "swap_gb_per_minute": 1.8, "major_fault_multiplier": 23}
+    },
+    {
+      "evidence_id": "bh8-806-e04",
+      "statement": "Application profiles attribute the added wall time to page-fault waits rather than decoding, language-model inference, file input, or retry handling, and no new error class appears.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Worker runtime profiles sampled by platform engineering",
+      "independence_key": "worker_profiles",
+      "reliability": 0.96,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-806-e05",
+      "statement": "The same 90-minute recording processed in 22 minutes on an isolated reserve host and in 91 minutes on an affected host during the scan, using the same binary, model files, settings, and input checksum.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Controlled paired-host processing trial",
+      "independence_key": "paired_host_trial",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"recording_minutes": 90, "reserve_host_minutes": 22, "affected_host_minutes": 91}
+    },
+    {
+      "evidence_id": "bh8-806-e06",
+      "statement": "Release attestations show no application, model, dependency, or pipeline-setting change during the incident week; source audio quality scores match the prior month.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Release archive and independent audio quality report",
+      "independence_key": "release_and_input_audit",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-806-e07",
+      "statement": "A one-worker canary moved to a host with reserved memory completed its normal queue during the scan window without swap activity or throughput loss.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Platform canary relocation report",
+      "independence_key": "runtime_isolation_canary",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-806-e08",
+      "statement": "The safety boundary prohibited disabling or weakening compliance scanning; workers could be drained to approved hosts, and scan placement could change only with security operations approval and capacity alarms active.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Joint clerk, platform, and security change authorization",
+      "independence_key": "runtime_safety_boundary",
+      "reliability": 0.99,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-806-e09",
+      "statement": "Platform staff drained caption workers from scan hosts, restored the approved memory-reserved worker pool, and moved the compliance workload to its designated maintenance capacity without changing scan coverage.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Executed platform remediation record",
+      "independence_key": "runtime_remediation",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-806-e10",
+      "statement": "For the next five budget-hearing nights, swap remained at zero on worker hosts, throughput returned within 4% of its prior per-worker rate, and all recordings met publication time despite audio volume remaining 27.6% above the old baseline.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Five-night post-change publication report",
+      "independence_key": "postchange_proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"followup_nights": 5, "remaining_audio_volume_change_percent": 27.6}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

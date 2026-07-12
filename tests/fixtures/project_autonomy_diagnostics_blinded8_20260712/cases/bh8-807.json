@@ -1,0 +1,121 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-807",
+  "problem_statement": "Two orchard frost-protection gateways now record fan acknowledgements several minutes before their commands, making the audit trail unusable even though field staff have not observed mistimed fan operation. The event rate also rose during a colder spell, so the team must isolate sequencing from the legitimate workload change before making any active correction.",
+  "observations": [
+    {
+      "evidence_id": "bh8-807-e01",
+      "statement": "Gateways G7 and G12 show acknowledgements 240 to 410 seconds earlier than their paired commands in 19 of 73 cycles; the other sixteen gateways show command-before-acknowledgement ordering.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Orchard command audit export",
+      "independence_key": "audit_ordering_metrics",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {"affected_gateways": ["G7", "G12"], "affected_cycles": 19, "total_cycles": 73, "lead_seconds_range": [240, 410]}
+    },
+    {
+      "evidence_id": "bh8-807-e02",
+      "statement": "The first inversions appear after enclosure work on May 14, when both affected gateways were relocated under metal weather shields; no inversion is retained before that date.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Facilities work orders aligned with retained audit logs",
+      "independence_key": "enclosure_timeline",
+      "reliability": 0.95,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-807-e03",
+      "statement": "Gateway-local sequence counters are monotonic with no gaps, and central receipt order is command then acknowledgement for every inverted pair.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Gateway sequence export compared with central ingest ledger",
+      "independence_key": "sequence_and_receipt_order",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-807-e04",
+      "statement": "Round-trip telemetry latency for G7 and G12 remains below 1.9 seconds at the affected times, comparable to control gateways and far below the timestamp inversion.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Independent radio link monitor",
+      "independence_key": "radio_latency_monitor",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {"maximum_roundtrip_seconds": 1.9}
+    },
+    {
+      "evidence_id": "bh8-807-e05",
+      "statement": "The daily health records stopped reporting satellite lock for G7 and G12 after the enclosure work, while power quality and enclosure temperature stayed in range; the health format does not expose current wall-clock offset.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Agronomy gateway health archive",
+      "independence_key": "gateway_health_records",
+      "reliability": 0.95,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-807-e06",
+      "statement": "Firmware and configuration attestations match unaffected gateways, but the retained logs cannot rule out a defect that serializes one event's wall timestamp into the next record.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Gateway fleet attestation and software review note",
+      "independence_key": "software_confounder_review",
+      "reliability": 0.94,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-807-e07",
+      "statement": "Fan-cycle count is 31.7% above the prior four-week baseline because overnight temperatures crossed the agronomic threshold more often; field current sensors indicate each requested fan run occurred.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Agronomist frost log and independent electrical current recorder",
+      "independence_key": "weather_and_actuation_baseline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {"cycle_count_change_percent": 31.7}
+    },
+    {
+      "evidence_id": "bh8-807-e08",
+      "statement": "No retained artifact samples gateway wall time and monotonic time against the same trusted reference, so an offset, intermittent time-source loss, and timestamp serialization remain distinguishable possibilities.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Incident evidence-gap review",
+      "independence_key": "evidence_gap_assessment",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-807-e09",
+      "statement": "The safety boundary forbids setting gateway time, restarting gateways, moving shields, or issuing fan commands while frost automation is armed; existing logs and telemetry may be read and exported.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Orchard operations diagnostic authorization",
+      "independence_key": "clock_safety_boundary",
+      "reliability": 1.0,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-807-e10",
+      "statement": "The approved next measurement is a read-only 20-minute capture on G7, G12, and two control gateways during ordinary telemetry: once per second record wall time, monotonic time, satellite-lock state, and the trusted receiver timestamp. It sends no control command, makes no clock adjustment, and stops after 20 minutes or 5 MB per gateway.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Approved but not yet executed diagnostic measurement plan",
+      "independence_key": "bounded_next_measurement",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"duration_minutes": 20, "sample_period_seconds": 1, "gateway_count": 4, "maximum_mb_per_gateway": 5, "executed": false}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

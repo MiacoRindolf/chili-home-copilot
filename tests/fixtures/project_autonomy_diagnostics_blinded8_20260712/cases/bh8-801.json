@@ -1,0 +1,124 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-801",
+  "problem_statement": "A municipal compost program's diversion dashboard began overstating net inbound tonnage after eleven electric collection trucks were added to the contracted fleet. Certified scale tickets, the operations dashboard, and hauler settlement summaries no longer agree, so the city needs a diagnosis that preserves regulatory records and separates a real seasonal volume increase from the defect.",
+  "observations": [
+    {
+      "evidence_id": "bh8-801-e01",
+      "statement": "At 06:00 on June 3, reported net tonnage stepped up 14.2% while load count rose only 2.8%; the step persisted across all shifts.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Diversion dashboard daily aggregate export",
+      "independence_key": "dashboard_aggregate",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {"step_start": "2026-06-03T06:00:00-07:00", "tonnage_change_percent": 14.2, "load_count_change_percent": 2.8}
+    },
+    {
+      "evidence_id": "bh8-801-e02",
+      "statement": "A stratified audit of 64 signed scale tickets found that gross weights in the dashboard matched the certified terminal within 20 kg, but calculated net weights were high only for the eleven newly enrolled trucks.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Metrology officer's signed-ticket comparison worksheet",
+      "independence_key": "certified_ticket_audit",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"tickets_sampled": 64, "affected_trucks": 11, "gross_tolerance_kg": 20}
+    },
+    {
+      "evidence_id": "bh8-801-e03",
+      "statement": "The source-of-record vehicle file lists tare values between 7,950 and 8,420 for those trucks with unit code LB, while each manufacturer's certificate lists the same numeric value in kilograms.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Fleet registry export cross-checked against manufacturer tare certificates",
+      "independence_key": "vehicle_master_records",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"source_unit": "LB", "certificate_unit": "kg", "record_count": 11}
+    },
+    {
+      "evidence_id": "bh8-801-e04",
+      "statement": "In an isolated copy of the June 3 records, changing only those eleven unit tags to KG reduced the median net-weight discrepancy from 4,360 kg to 14 kg per load.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Read-only reconciliation workbook using copied event records",
+      "independence_key": "offline_recalculation",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {"before_median_error_kg": 4360, "after_median_error_kg": 14}
+    },
+    {
+      "evidence_id": "bh8-801-e05",
+      "statement": "Application binaries, conversion tables, and deployment settings have identical signed checksums to the versions used during the preceding six weeks.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Release attestation and configuration archive",
+      "independence_key": "release_attestation",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-801-e06",
+      "statement": "The weighbridge passed its zero, span, and certified test-mass checks on June 2 and June 5, with no adjustment between them.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Independent scale-maintenance contractor log",
+      "independence_key": "metrology_checks",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-801-e07",
+      "statement": "Loads from the 43 previously registered trucks retained a median ticket-to-dashboard difference of 16 kg throughout the incident window.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Hauler settlement reconciliation report",
+      "independence_key": "settlement_reconciliation",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {"unaffected_trucks": 43, "median_difference_kg": 16}
+    },
+    {
+      "evidence_id": "bh8-801-e08",
+      "statement": "The approved safety boundary prohibited edits to signed tickets or measured gross weights; remediation was limited to versioned fleet-master rows, with before-and-after reconciliation and rollback retained.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "City data steward's approved change record",
+      "independence_key": "change_control",
+      "reliability": 0.98,
+      "discriminating": false,
+      "metadata": {"immutable_records": ["signed_scale_tickets", "measured_gross_weight"]}
+    },
+    {
+      "evidence_id": "bh8-801-e09",
+      "statement": "The fleet data steward corrected the eleven source records and added a producer-side check that rejects tare-unit tags inconsistent with the attached certificate.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Fleet registry remediation record and validation result",
+      "independence_key": "source_remediation",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-801-e10",
+      "statement": "For the next 180 loads, dashboard net weights matched signed tickets within the 25 kg operating tolerance; a historical replay removed the 11.1-point overstatement while leaving a genuine 3.1% seasonal tonnage increase.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Post-change production reconciliation signed by operations and finance",
+      "independence_key": "postchange_proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"loads_observed": 180, "tolerance_kg": 25, "remaining_seasonal_change_percent": 3.1}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

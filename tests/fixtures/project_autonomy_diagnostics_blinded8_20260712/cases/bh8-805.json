@@ -1,0 +1,122 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh8-805",
+  "problem_statement": "Following a brief UPS transfer, a university clean-room tool service showed 37 serialized torque tools as unavailable even though cabinet staff had physically received them. Researchers still need access, but any repair must preserve custody history and must not release an item that is genuinely checked out.",
+  "observations": [
+    {
+      "evidence_id": "bh8-805-e01",
+      "statement": "Unavailable inventory jumped from 9 to 46 at 19:42 during the UPS transfer; all 37 additional items belong to cabinet controller C4.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Tool-service availability history",
+      "independence_key": "availability_metrics",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {"incident_time": "2026-06-09T19:42:00-07:00", "additional_unavailable": 37, "controller": "C4"}
+    },
+    {
+      "evidence_id": "bh8-805-e02",
+      "statement": "C4's append-only device log contains door-close and return-sensor acknowledgements for all 37 serial numbers before power stabilized.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Cabinet controller export signed by clean-room operations",
+      "independence_key": "controller_event_log",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"serials_with_return_ack": 37}
+    },
+    {
+      "evidence_id": "bh8-805-e03",
+      "statement": "A read-only ledger snapshot shows those same items in release_pending with controller epoch 881, while C4 resumed at epoch 882; no other controller has rows from an earlier epoch in that state.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Custody-ledger snapshot retained by the records officer",
+      "independence_key": "ledger_snapshot",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"stale_epoch": 881, "current_epoch": 882, "rows": 37}
+    },
+    {
+      "evidence_id": "bh8-805-e04",
+      "statement": "A two-person physical inventory found every affected serial in its assigned locked cradle, and calibration seals were intact.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Dual-signature clean-room custody count",
+      "independence_key": "physical_custody_count",
+      "reliability": 1.0,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-805-e05",
+      "statement": "Application binaries, cabinet firmware, entitlement rules, and tool-master records are unchanged from the preceding month; controllers C1 through C3 continued normal checkout and return processing.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Release inventory plus controller operations summary",
+      "independence_key": "unchanged_system_inventory",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-805-e06",
+      "statement": "Reconciliation against a copied snapshot marked exactly the 37 old-epoch rows releasable when both a matching return acknowledgement and physical-cradle presence were required; no active checkout qualified.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Offline custody reconciliation witnessed by records staff",
+      "independence_key": "snapshot_reconciliation",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"qualified_rows": 37, "active_checkouts_qualified": 0}
+    },
+    {
+      "evidence_id": "bh8-805-e07",
+      "statement": "Reservation owners and laboratory managers confirmed that none of the affected serials had an open work order, transfer, quarantine, or after-hours loan.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Reservation audit signed by laboratory managers",
+      "independence_key": "reservation_audit",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-805-e08",
+      "statement": "The safety boundary required an immutable pre-repair snapshot, serial-by-serial dual signoff, and a targeted transition only for rows satisfying both return and cradle evidence; bulk reset and history deletion were prohibited.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Clean-room custody repair authorization",
+      "independence_key": "custody_safety_boundary",
+      "reliability": 1.0,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "bh8-805-e09",
+      "statement": "The authorized reconciliation transitioned the 37 qualified rows, retained linked return evidence in the audit trail, and left the nine genuinely unavailable items untouched.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Executed custody repair record",
+      "independence_key": "targeted_state_repair",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "bh8-805-e10",
+      "statement": "Over the next seven days, 113 checkouts and returns involving the repaired items completed with matching cabinet and ledger records; unavailable inventory remained at its established level and no custody exception was opened.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Seven-day post-repair custody audit",
+      "independence_key": "postchange_proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {"transactions": 113, "followup_days": 7, "custody_exceptions": 0}
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
