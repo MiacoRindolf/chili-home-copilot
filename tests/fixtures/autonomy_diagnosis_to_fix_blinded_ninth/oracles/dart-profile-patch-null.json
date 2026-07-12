@@ -1,0 +1,11 @@
+{
+  "case_id": "dart-profile-patch-null",
+  "expected_dimension": "data",
+  "expected_files": [
+    "lib/patch.dart",
+    "lib/profile_store.dart"
+  ],
+  "feedback_files": {
+    "tests/profile_feedback_test.dart": "import '../lib/patch.dart';\nimport '../lib/profile_store.dart';\n\nvoid require(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  final decoded = ProfilePatch.fromJson({'displayName': null});\n  require(decoded.displayName.isPresent, 'explicit null was decoded as absent');\n  require(decoded.displayName.value == null, 'clear value was not null');\n\n  final store = ProfileStore(\n    const Profile(displayName: 'Ada', note: 'On call'),\n  );\n  store.apply(\n    const ProfilePatch(\n      displayName: PatchField<String>.present(null),\n      note: PatchField<String>.absent(),\n    ),\n  );\n  require(store.current.displayName == null, 'explicit clear was not applied');\n  require(store.current.note == 'On call', 'absent note was changed');\n}\n"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "case_id": "sql-fixed-width-identifiers",
+  "final_files": {
+    "tests/test_final_prefixed_representation.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef test_prefixed_codes_do_not_alias_and_padding_round_trips():\n    database = sqlite3.connect(\":memory:\")\n    database.executescript(\n        (ROOT / \"sql\" / \"schema.sql\").read_text(encoding=\"utf-8\")\n    )\n    database.executemany(\n        \"INSERT INTO catalog_items(id, vendor_code, description) VALUES (?, ?, ?)\",\n        [\n            (1, \"A-01\", \"Alpha sensor\"),\n            (2, \"B-02\", \"Beta sensor\"),\n            (3, \"0009\", \"Padded switch\"),\n        ],\n    )\n    lookup = (ROOT / \"sql\" / \"item_lookup.sql\").read_text(\n        encoding=\"utf-8\"\n    )\n\n    alpha = database.execute(\n        lookup, {\"vendor_code\": \"A-01\"}\n    ).fetchall()\n    padded = database.execute(\n        lookup, {\"vendor_code\": \"0009\"}\n    ).fetchall()\n\n    assert alpha == [(1, \"A-01\", \"Alpha sensor\")]\n    assert padded == [(3, \"0009\", \"Padded switch\")]\n"
+  }
+}

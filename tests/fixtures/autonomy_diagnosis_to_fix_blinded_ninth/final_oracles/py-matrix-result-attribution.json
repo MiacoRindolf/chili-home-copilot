@@ -1,0 +1,6 @@
+{
+  "case_id": "py-matrix-result-attribution",
+  "final_files": {
+    "tests/test_final_matrix_failures.py": "from harness.runner import run_matrix\n\n\ndef test_multi_target_results_keep_order_and_target_specific_failures():\n    def deployable(context):\n        return context.case_id != \"beta\"\n\n    def manifest(context):\n        if context.case_id == \"gamma\":\n            raise ValueError(\"missing digest for gamma\")\n        return True\n\n    results = run_matrix(\n        [\"alpha\", \"beta\", \"gamma\"],\n        [(\"deployable\", deployable), (\"manifest\", manifest)],\n    )\n\n    assert [\n        (item.case_id, item.check_name, item.passed)\n        for item in results\n    ] == [\n        (\"alpha\", \"deployable\", True),\n        (\"alpha\", \"manifest\", True),\n        (\"beta\", \"deployable\", False),\n        (\"beta\", \"manifest\", True),\n        (\"gamma\", \"deployable\", True),\n        (\"gamma\", \"manifest\", False),\n    ]\n    assert results[-1].detail == \"ValueError: missing digest for gamma\"\n"
+  }
+}

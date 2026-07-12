@@ -1,0 +1,11 @@
+{
+  "case_id": "py-config-explicit-values",
+  "expected_dimension": "config",
+  "expected_files": [
+    "settings/cli.py",
+    "settings/resolver.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_zero_worker.py": "from settings.cli import CliOptions\nfrom settings.resolver import resolve\n\n\ndef test_explicit_auto_size_worker_value_beats_site_configuration():\n    cli = CliOptions.parse({\"workers\": 0})\n\n    assert \"workers\" in cli.values\n    assert resolve({\"workers\": 12}, cli)[\"workers\"] == 0\n"
+  }
+}

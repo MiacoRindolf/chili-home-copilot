@@ -1,0 +1,15 @@
+{
+  "case_id": "sql-fixed-width-identifiers",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "A vendor expanded its catalog feed to include fixed-width identifiers and prefixed identifiers. Imports now report a duplicate for codes such as 0012 and 12 even though the vendor treats them as different items, while a lookup for one prefixed code can return another prefixed item. Existing all-digit codes without leading zeroes still work. Preserve identifier representation and make lookup use the vendor's exact identifier contract.",
+  "candidate_paths": [
+    "sql/schema.sql",
+    "sql/item_lookup.sql"
+  ],
+  "repo_files": {
+    "sql/schema.sql": "CREATE TABLE catalog_items (\n    id INTEGER PRIMARY KEY,\n    vendor_code INTEGER NOT NULL UNIQUE,\n    description TEXT NOT NULL\n);\n",
+    "sql/item_lookup.sql": "SELECT id, vendor_code, description\nFROM catalog_items\nWHERE CAST(vendor_code AS INTEGER) = CAST(:vendor_code AS INTEGER)\nORDER BY id;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\nSCHEMA = (ROOT / \"sql\" / \"schema.sql\").read_text(encoding=\"utf-8\")\nLOOKUP = (ROOT / \"sql\" / \"item_lookup.sql\").read_text(encoding=\"utf-8\")\n\n\ndef test_plain_numeric_vendor_code_can_be_imported_and_found():\n    database = sqlite3.connect(\":memory:\")\n    database.executescript(SCHEMA)\n    database.execute(\n        \"INSERT INTO catalog_items(id, vendor_code, description) VALUES (?, ?, ?)\",\n        (1, \"8123\", \"Standard relay\"),\n    )\n\n    rows = database.execute(LOOKUP, {\"vendor_code\": \"8123\"}).fetchall()\n\n    assert len(rows) == 1\n    assert rows[0][0] == 1\n    assert rows[0][2] == \"Standard relay\"\n"
+  }
+}

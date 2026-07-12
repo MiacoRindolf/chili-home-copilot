@@ -1,0 +1,15 @@
+{
+  "case_id": "sql-retained-payment-history",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "A compliance export's settled-payment total decreases after customer erasure jobs run. The payment was visible beforehand, the customer is correctly gone afterward, and no reversal event exists. Policy requires financial history to remain reportable even when identifying customer data is deleted. Active customers and their payments still render normally. Restore retention and make the history report include both retained anonymous events and ordinary named events.",
+  "candidate_paths": [
+    "sql/schema.sql",
+    "sql/history_report.sql"
+  ],
+  "repo_files": {
+    "sql/schema.sql": "PRAGMA foreign_keys = ON;\n\nCREATE TABLE customers (\n    id INTEGER PRIMARY KEY,\n    display_name TEXT NOT NULL\n);\n\nCREATE TABLE payment_events (\n    id INTEGER PRIMARY KEY,\n    customer_id INTEGER NOT NULL\n        REFERENCES customers(id) ON DELETE CASCADE,\n    cents INTEGER NOT NULL CHECK (cents >= 0),\n    occurred_on TEXT NOT NULL\n);\n",
+    "sql/history_report.sql": "SELECT\n    event.id,\n    event.customer_id,\n    customer.display_name AS customer_name,\n    event.cents,\n    event.occurred_on\nFROM payment_events AS event\nJOIN customers AS customer ON customer.id = event.customer_id\nORDER BY event.occurred_on, event.id;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\nSCHEMA = (ROOT / \"sql\" / \"schema.sql\").read_text(encoding=\"utf-8\")\nREPORT = (ROOT / \"sql\" / \"history_report.sql\").read_text(encoding=\"utf-8\")\n\n\ndef make_database():\n    connection = sqlite3.connect(\":memory:\")\n    connection.executescript(SCHEMA)\n    return connection\n\n\ndef test_active_customer_payment_is_reported():\n    database = make_database()\n    database.execute(\n        \"INSERT INTO customers(id, display_name) VALUES (?, ?)\",\n        (1, \"Ada\"),\n    )\n    database.execute(\n        \"INSERT INTO payment_events(id, customer_id, cents, occurred_on) \"\n        \"VALUES (?, ?, ?, ?)\",\n        (101, 1, 2500, \"2026-06-01T10:00:00Z\"),\n    )\n\n    assert database.execute(REPORT).fetchall() == [\n        (101, 1, \"Ada\", 2500, \"2026-06-01T10:00:00Z\")\n    ]\n"
+  }
+}

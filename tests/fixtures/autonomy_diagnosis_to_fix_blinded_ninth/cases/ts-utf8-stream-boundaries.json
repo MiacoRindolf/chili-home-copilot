@@ -1,0 +1,16 @@
+{
+  "case_id": "ts-utf8-stream-boundaries",
+  "language": "typescript",
+  "test_runner": "node_test",
+  "prompt": "A telemetry reader is healthy with local ASCII fixtures but production captures show two symptoms: JSON string values occasionally contain replacement characters when a packet boundary lands inside a non-ASCII character, and the final event vanishes when a sender closes without a newline. The captured bytes decode as valid UTF-8 when processed as one buffer. Make chunked ingestion match whole-stream decoding across packet boundaries and normal end-of-stream behavior.",
+  "candidate_paths": [
+    "src/utf8Lines.ts",
+    "src/messageReader.ts"
+  ],
+  "repo_files": {
+    "package.json": "{\n  \"type\": \"module\"\n}\n",
+    "src/utf8Lines.ts": "function withoutCarriageReturn(line: string): string {\n  return line.endsWith(\"\\r\") ? line.slice(0, -1) : line;\n}\n\nexport class Utf8LineDecoder {\n  private carry = \"\";\n\n  push(chunk: Uint8Array): string[] {\n    const text = this.carry + new TextDecoder(\"utf-8\").decode(chunk);\n    const pieces = text.split(\"\\n\");\n    this.carry = pieces.pop() ?? \"\";\n    return pieces.map(withoutCarriageReturn);\n  }\n\n  finish(): string[] {\n    if (this.carry.length === 0) {\n      return [];\n    }\n    const finalLine = withoutCarriageReturn(this.carry);\n    this.carry = \"\";\n    return [finalLine];\n  }\n}\n",
+    "src/messageReader.ts": "import { Utf8LineDecoder } from \"./utf8Lines.ts\";\n\nexport interface TelemetryMessage {\n  [key: string]: unknown;\n}\n\nexport function readMessages(chunks: Iterable<Uint8Array>): TelemetryMessage[] {\n  const decoder = new Utf8LineDecoder();\n  const lines: string[] = [];\n\n  for (const chunk of chunks) {\n    lines.push(...decoder.push(chunk));\n  }\n\n  return lines\n    .filter((line) => line.length > 0)\n    .map((line) => JSON.parse(line) as TelemetryMessage);\n}\n",
+    "tests/telemetry.public.test.ts": "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\n\nimport { readMessages } from \"../src/messageReader.ts\";\n\ntest(\"newline-terminated ASCII messages decode across aligned chunks\", () => {\n  const encoder = new TextEncoder();\n  const messages = readMessages([\n    encoder.encode('{\"id\":1,\"status\":\"ok\"}\\n'),\n    encoder.encode('{\"id\":2,\"status\":\"ready\"}\\n'),\n  ]);\n\n  assert.deepEqual(messages, [\n    { id: 1, status: \"ok\" },\n    { id: 2, status: \"ready\" },\n  ]);\n});\n"
+  }
+}

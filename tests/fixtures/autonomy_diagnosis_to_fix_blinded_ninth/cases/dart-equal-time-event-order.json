@@ -1,0 +1,15 @@
+{
+  "case_id": "dart-equal-time-event-order",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "A ledger projection loses events during bursts even though broker metrics show every event delivered. The affected events share the same recorded millisecond and carry increasing sequence numbers; after a reconnect the projection often retains only one event from that instant. Events with distinct times are processed correctly, including batches received out of order. Make ordering and cursor advancement honor the broker's complete event position across batches and duplicates.",
+  "candidate_paths": [
+    "lib/event_cursor.dart",
+    "lib/inbox.dart"
+  ],
+  "repo_files": {
+    "lib/event_cursor.dart": "class LedgerEvent {\n  final String id;\n  final DateTime occurredAt;\n  final int sequence;\n\n  const LedgerEvent({\n    required this.id,\n    required this.occurredAt,\n    required this.sequence,\n  });\n}\n\nclass EventCursor {\n  DateTime? _lastTime;\n\n  bool accept(LedgerEvent event) {\n    final lastTime = _lastTime;\n    if (lastTime != null && !event.occurredAt.isAfter(lastTime)) {\n      return false;\n    }\n    _lastTime = event.occurredAt;\n    return true;\n  }\n}\n",
+    "lib/inbox.dart": "import 'event_cursor.dart';\n\nclass EventInbox {\n  final EventCursor _cursor;\n\n  EventInbox([EventCursor? cursor]) : _cursor = cursor ?? EventCursor();\n\n  List<LedgerEvent> applyBatch(Iterable<LedgerEvent> events) {\n    final ordered = events.toList()\n      ..sort((left, right) {\n        final byTime = left.occurredAt.compareTo(right.occurredAt);\n        if (byTime != 0) {\n          return byTime;\n        }\n        return right.sequence.compareTo(left.sequence);\n      });\n\n    final accepted = <LedgerEvent>[];\n    for (final event in ordered) {\n      if (_cursor.accept(event)) {\n        accepted.add(event);\n      }\n    }\n    return accepted;\n  }\n}\n",
+    "tests/inbox_public_test.dart": "import '../lib/event_cursor.dart';\nimport '../lib/inbox.dart';\n\nvoid main() {\n  final earlier = DateTime.utc(2026, 7, 1, 10, 0, 0);\n  final later = earlier.add(const Duration(seconds: 1));\n  final accepted = EventInbox().applyBatch([\n    LedgerEvent(id: 'later', occurredAt: later, sequence: 1),\n    LedgerEvent(id: 'earlier', occurredAt: earlier, sequence: 9),\n  ]);\n\n  final ids = accepted.map((event) => event.id).join(',');\n  if (ids != 'earlier,later') {\n    throw StateError('expected chronological events, got $ids');\n  }\n}\n"
+  }
+}

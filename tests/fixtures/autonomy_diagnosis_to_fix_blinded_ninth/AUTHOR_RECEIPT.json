@@ -1,0 +1,91 @@
+{
+  "author_isolation_attestation": "I did not read, search, list, or modify D:\\dev\\chili-home-copilot, any CHILI checkout, git history, prior benchmark fixtures/reports, project_ws, Claude/Fable transcripts, or chat history; I did not use the internet or run any CHILI benchmark or model.",
+  "created_at_utc": "2026-07-12T07:07:13Z",
+  "case_count": 8,
+  "case_ids": [
+    "py-config-explicit-values",
+    "py-matrix-result-attribution",
+    "ts-workspace-state-ownership",
+    "ts-utf8-stream-boundaries",
+    "dart-profile-patch-null",
+    "dart-equal-time-event-order",
+    "sql-retained-payment-history",
+    "sql-fixed-width-identifiers"
+  ],
+  "language_counts": {
+    "dart": 2,
+    "python": 2,
+    "sql": 2,
+    "typescript": 2
+  },
+  "multifile_count": 8,
+  "validation_summary": {
+    "py-config-explicit-values": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    },
+    "py-matrix-result-attribution": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    },
+    "ts-workspace-state-ownership": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    },
+    "ts-utf8-stream-boundaries": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    },
+    "dart-profile-patch-null": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    },
+    "dart-equal-time-event-order": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    },
+    "sql-retained-payment-history": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    },
+    "sql-fixed-width-identifiers": {
+      "public_baseline": "pass",
+      "baseline_plus_feedback": "fail_as_expected",
+      "fresh_baseline_plus_final": "fail_as_expected"
+    }
+  },
+  "sha256": {
+    "manifest.json": "bddd424e8726d568a690928cf27886b80936dca5419512895286df79c997134b",
+    "cases/py-config-explicit-values.json": "2dd2bcdfb531933a8c6664afeca2af4bf041dc116b8022de59f1c017dcf52a41",
+    "oracles/py-config-explicit-values.json": "07ce789236119450fb7c468ed2d4d1bc81cfb2a9c37ccc1bad61cdd8f7257bc0",
+    "final_oracles/py-config-explicit-values.json": "1fceef901162c979efdd1737e58699e94872ce004656199f02b20c5fd50e4e45",
+    "cases/py-matrix-result-attribution.json": "d3d212d9baee08f2e738d7aa3da3eb5e0ef7fa4f8952e74fc101edbc2f98f5fc",
+    "oracles/py-matrix-result-attribution.json": "0264e81772763c47bf29c7fc5fcaaf3d3eac5d3dbb7632bd40af51a00185c4f2",
+    "final_oracles/py-matrix-result-attribution.json": "e6e31afc9c5bffd6a9ac0e01316ea873dc87dd481969785c033d5604661a28d3",
+    "cases/ts-workspace-state-ownership.json": "a3803df2c7986c33ffd26eb5fd8cb5f2fe85bfa2444156cc7d15273e49e39d92",
+    "oracles/ts-workspace-state-ownership.json": "afecfd39a285251ca4ee307be7a58c4a01ec65492240ae42975c1c11323c9f0c",
+    "final_oracles/ts-workspace-state-ownership.json": "fb909b65b24e8b5edfba08aa7fec1c6bee5b2cc8784b00484a7935f8046a5a21",
+    "cases/ts-utf8-stream-boundaries.json": "03e9e88126f00bac2519945f11c51c0365a57f712a0455467139595fa2b3e928",
+    "oracles/ts-utf8-stream-boundaries.json": "f77e613892dbb9850c734429c6e9e02ab6026489641b452ab575118e42264e91",
+    "final_oracles/ts-utf8-stream-boundaries.json": "422cceb76896e9fa8f1090becfabfb70d7cf24d5e2e52a27eb66e5d9300831c9",
+    "cases/dart-profile-patch-null.json": "1c70d19c123fb6ba911b149a4382d60d3d55306cdfb623155dafc224fc07fa09",
+    "oracles/dart-profile-patch-null.json": "a578eb16fa88454f2d290676c5d01db363cd015af9e1fb3064945932b6b04ba8",
+    "final_oracles/dart-profile-patch-null.json": "d64cc892759748dcb7ff32305c198114b4b2b64d0f34400a9433d96d133e6e81",
+    "cases/dart-equal-time-event-order.json": "f3e57232a64ca3195c1b8dbc6cedf37e72db735b4dd848294d2982e53b72b983",
+    "oracles/dart-equal-time-event-order.json": "ddde1ba320c1de80c4f95d45e983aebc89d2ffda60ec74a9e87cd380f53e8597",
+    "final_oracles/dart-equal-time-event-order.json": "0b7e4b61f166f1017dfb24fb1d6c025df30e868ef3614c0d536f2de605f4c8ef",
+    "cases/sql-retained-payment-history.json": "cd5fa7f01c4ac72a782378845bc6003f4f256aae3f13e507edb8cc806c94b6d3",
+    "oracles/sql-retained-payment-history.json": "f5434a67a16c2476af9f169c2f1ba6eae62ad3fc877d43be269a075f6fdc4b9c",
+    "final_oracles/sql-retained-payment-history.json": "b47f36479f3ce76d04fe6832457702e30191e3a5034f1662d3360687a34962e7",
+    "cases/sql-fixed-width-identifiers.json": "310ba3fa9f34ca9b1f6caad7960a6bd53ea1c0a548b2c07fdbbf600b29fe7b42",
+    "oracles/sql-fixed-width-identifiers.json": "6dff28a8f95668b22e618cc1b897fe100f7624771d930eb037febe263848d35b",
+    "final_oracles/sql-fixed-width-identifiers.json": "e8d13bc537d50d587fb7dfc41b32b27646f10493b57e52daf8bb49074b6b04a0"
+  }
+}

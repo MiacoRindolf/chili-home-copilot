@@ -1,0 +1,6 @@
+{
+  "case_id": "dart-profile-patch-null",
+  "final_files": {
+    "tests/profile_final_test.dart": "import '../lib/patch.dart';\nimport '../lib/profile_store.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  final patch = ProfilePatch.fromJson({'note': null});\n  final store = ProfileStore(\n    const Profile(displayName: 'Lin', note: 'Temporary'),\n  );\n  store.apply(patch);\n\n  check(store.current.displayName == 'Lin', 'omitted display name changed');\n  check(store.current.note == null, 'note was not cleared');\n\n  final encoded = patch.toJson();\n  check(!encoded.containsKey('displayName'), 'omitted field was serialized');\n  check(encoded.containsKey('note'), 'explicit clear disappeared on serialization');\n  check(encoded['note'] == null, 'serialized clear was not null');\n}\n"
+  }
+}

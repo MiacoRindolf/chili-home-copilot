@@ -1,0 +1,11 @@
+{
+  "case_id": "sql-fixed-width-identifiers",
+  "expected_dimension": "runtime",
+  "expected_files": [
+    "sql/schema.sql",
+    "sql/item_lookup.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_padded_codes.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef test_padded_and_plain_codes_remain_distinct_and_lookup_exactly():\n    database = sqlite3.connect(\":memory:\")\n    database.executescript(\n        (ROOT / \"sql\" / \"schema.sql\").read_text(encoding=\"utf-8\")\n    )\n    try:\n        database.executemany(\n            \"INSERT INTO catalog_items(id, vendor_code, description) VALUES (?, ?, ?)\",\n            [(1, \"0012\", \"Padded fuse\"), (2, \"12\", \"Plain fuse\")],\n        )\n    except sqlite3.IntegrityError as exc:\n        raise AssertionError(\"distinct vendor codes collided during import\") from exc\n\n    lookup = (ROOT / \"sql\" / \"item_lookup.sql\").read_text(\n        encoding=\"utf-8\"\n    )\n    rows = database.execute(lookup, {\"vendor_code\": \"0012\"}).fetchall()\n\n    assert rows == [(1, \"0012\", \"Padded fuse\")]\n"
+  }
+}

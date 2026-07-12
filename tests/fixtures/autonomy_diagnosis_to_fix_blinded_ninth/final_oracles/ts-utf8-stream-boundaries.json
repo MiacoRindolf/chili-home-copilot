@@ -1,0 +1,6 @@
+{
+  "case_id": "ts-utf8-stream-boundaries",
+  "final_files": {
+    "tests/telemetry.final.test.ts": "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\n\nimport { readMessages } from \"../src/messageReader.ts\";\n\ntest(\"mixed line endings and packet cuts decode as one complete stream\", () => {\n  const bytes = new TextEncoder().encode(\n    '{\"label\":\"caf\\u00e9\"}\\r\\n{\"label\":\"go \\u{1F680}\"}',\n  );\n  const chunks = [\n    bytes.slice(0, 15),\n    bytes.slice(15, 16),\n    new Uint8Array(),\n    bytes.slice(16, 35),\n    bytes.slice(35, 37),\n    bytes.slice(37),\n  ];\n\n  assert.deepEqual(readMessages(chunks), [\n    { label: \"caf\\u00e9\" },\n    { label: \"go \\u{1F680}\" },\n  ]);\n});\n"
+  }
+}

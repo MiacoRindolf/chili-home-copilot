@@ -1,0 +1,11 @@
+{
+  "case_id": "sql-retained-payment-history",
+  "expected_dimension": "data",
+  "expected_files": [
+    "sql/schema.sql",
+    "sql/history_report.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_erased_customer.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\nSCHEMA = (ROOT / \"sql\" / \"schema.sql\").read_text(encoding=\"utf-8\")\nREPORT = (ROOT / \"sql\" / \"history_report.sql\").read_text(encoding=\"utf-8\")\n\n\ndef test_erasing_a_customer_retains_an_anonymous_payment_event():\n    database = sqlite3.connect(\":memory:\")\n    database.executescript(SCHEMA)\n    database.execute(\"INSERT INTO customers VALUES (?, ?)\", (7, \"Former User\"))\n    database.execute(\n        \"INSERT INTO payment_events VALUES (?, ?, ?, ?)\",\n        (701, 7, 9900, \"2026-06-02T08:00:00Z\"),\n    )\n\n    database.execute(\"DELETE FROM customers WHERE id = ?\", (7,))\n\n    assert database.execute(\n        \"SELECT COUNT(*) FROM payment_events\"\n    ).fetchone()[0] == 1\n    assert database.execute(REPORT).fetchall() == [\n        (701, None, None, 9900, \"2026-06-02T08:00:00Z\")\n    ]\n"
+  }
+}

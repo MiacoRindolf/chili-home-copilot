@@ -1,0 +1,11 @@
+{
+  "case_id": "ts-utf8-stream-boundaries",
+  "expected_dimension": "runtime",
+  "expected_files": [
+    "src/utf8Lines.ts",
+    "src/messageReader.ts"
+  ],
+  "feedback_files": {
+    "tests/telemetry.feedback.test.ts": "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\n\nimport { readMessages } from \"../src/messageReader.ts\";\nimport { Utf8LineDecoder } from \"../src/utf8Lines.ts\";\n\ntest(\"a UTF-8 scalar split between chunks remains intact\", () => {\n  const bytes = new TextEncoder().encode('{\"name\":\"caf\\u00e9\"}\\n');\n  const lead = bytes.indexOf(0xc3);\n  const decoder = new Utf8LineDecoder();\n\n  assert.deepEqual(decoder.push(bytes.slice(0, lead + 1)), []);\n  assert.deepEqual(decoder.push(bytes.slice(lead + 1)), ['{\"name\":\"caf\\u00e9\"}']);\n});\n\ntest(\"a complete final JSON record does not require a newline\", () => {\n  const messages = readMessages([\n    new TextEncoder().encode('{\"id\":7,\"status\":\"closed\"}'),\n  ]);\n\n  assert.deepEqual(messages, [{ id: 7, status: \"closed\" }]);\n});\n"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "case_id": "dart-profile-patch-null",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "Profile updates arrive as partial JSON documents. Support can change a display name, but sending an explicit null to clear an optional field leaves the old value in place. Fields omitted from the same request must remain untouched, and logs confirm the null key was present before decoding. Preserve the wire contract's distinction between omission and an explicit clear through parsing and application.",
+  "candidate_paths": [
+    "lib/patch.dart",
+    "lib/profile_store.dart"
+  ],
+  "repo_files": {
+    "lib/patch.dart": "class PatchField<T> {\n  final bool isPresent;\n  final T? value;\n\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n}\n\nclass ProfilePatch {\n  final PatchField<String> displayName;\n  final PatchField<String> note;\n\n  const ProfilePatch({\n    required this.displayName,\n    required this.note,\n  });\n\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n\n  Map<String, Object?> toJson() {\n    final result = <String, Object?>{};\n    if (displayName.isPresent) {\n      result['displayName'] = displayName.value;\n    }\n    if (note.isPresent) {\n      result['note'] = note.value;\n    }\n    return result;\n  }\n}\n",
+    "lib/profile_store.dart": "import 'patch.dart';\n\nclass Profile {\n  final String? displayName;\n  final String? note;\n\n  const Profile({required this.displayName, required this.note});\n}\n\nclass ProfileStore {\n  Profile _current;\n\n  ProfileStore(this._current);\n\n  Profile get current => _current;\n\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n}\n",
+    "tests/profile_public_test.dart": "import '../lib/patch.dart';\nimport '../lib/profile_store.dart';\n\nvoid expectEqual(Object? actual, Object? expected, String label) {\n  if (actual != expected) {\n    throw StateError('$label: expected $expected, got $actual');\n  }\n}\n\nvoid main() {\n  final store = ProfileStore(\n    const Profile(displayName: 'Ada', note: 'On call'),\n  );\n  store.apply(ProfilePatch.fromJson({'displayName': 'Grace'}));\n\n  expectEqual(store.current.displayName, 'Grace', 'display name');\n  expectEqual(store.current.note, 'On call', 'omitted note');\n}\n"
+  }
+}

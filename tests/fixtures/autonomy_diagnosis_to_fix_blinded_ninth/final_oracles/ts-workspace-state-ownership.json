@@ -1,0 +1,6 @@
+{
+  "case_id": "ts-workspace-state-ownership",
+  "final_files": {
+    "tests/workspace.final.test.ts": "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\n\nimport { WorkspaceSession } from \"../src/session.ts\";\n\ntest(\"reset restores pristine defaults after nested mutations\", () => {\n  const session = new WorkspaceSession();\n  session.addColumn(\"priority\");\n  session.setDensity(\"compact\");\n  session.reset();\n\n  assert.deepEqual(session.snapshot(), {\n    name: \"Untitled\",\n    columns: [\"title\", \"status\"],\n    preferences: { density: \"comfortable\", showHints: true },\n  });\n});\n\ntest(\"resetting from a snapshot keeps later edits local to the session\", () => {\n  const restored = {\n    name: \"Ops\",\n    columns: [\"incident\"],\n    preferences: { density: \"compact\" as const, showHints: false },\n  };\n  const session = new WorkspaceSession();\n  session.reset(restored);\n  session.addColumn(\"owner\");\n  session.setDensity(\"comfortable\");\n\n  assert.deepEqual(restored, {\n    name: \"Ops\",\n    columns: [\"incident\"],\n    preferences: { density: \"compact\", showHints: false },\n  });\n});\n"
+  }
+}

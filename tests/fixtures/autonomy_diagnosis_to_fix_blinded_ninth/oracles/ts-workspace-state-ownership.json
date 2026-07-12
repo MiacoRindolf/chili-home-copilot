@@ -1,0 +1,11 @@
+{
+  "case_id": "ts-workspace-state-ownership",
+  "expected_dimension": "state",
+  "expected_files": [
+    "src/defaults.ts",
+    "src/session.ts"
+  ],
+  "feedback_files": {
+    "tests/workspace.feedback.test.ts": "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\n\nimport { makeDefaultWorkspace, type WorkspaceState } from \"../src/defaults.ts\";\nimport { WorkspaceSession } from \"../src/session.ts\";\n\ntest(\"default factories do not share nested collections\", () => {\n  const first = makeDefaultWorkspace();\n  const second = makeDefaultWorkspace();\n\n  first.columns.push(\"priority\");\n  first.preferences.density = \"compact\";\n\n  assert.deepEqual(second.columns, [\"title\", \"status\"]);\n  assert.equal(second.preferences.density, \"comfortable\");\n});\n\ntest(\"constructing a session does not transfer ownership from its caller\", () => {\n  const seed: WorkspaceState = {\n    name: \"Restored\",\n    columns: [\"title\"],\n    preferences: { density: \"comfortable\", showHints: false },\n  };\n  const session = new WorkspaceSession(seed);\n  session.addColumn(\"assignee\");\n  session.setDensity(\"compact\");\n\n  assert.deepEqual(seed, {\n    name: \"Restored\",\n    columns: [\"title\"],\n    preferences: { density: \"comfortable\", showHints: false },\n  });\n});\n"
+  }
+}

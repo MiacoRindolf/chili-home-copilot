@@ -1,0 +1,11 @@
+{
+  "case_id": "dart-equal-time-event-order",
+  "expected_dimension": "clock",
+  "expected_files": [
+    "lib/event_cursor.dart",
+    "lib/inbox.dart"
+  ],
+  "feedback_files": {
+    "tests/inbox_feedback_test.dart": "import '../lib/event_cursor.dart';\nimport '../lib/inbox.dart';\n\nvoid main() {\n  final instant = DateTime.utc(2026, 7, 2, 9, 30);\n  final accepted = EventInbox().applyBatch([\n    LedgerEvent(id: 'second', occurredAt: instant, sequence: 2),\n    LedgerEvent(id: 'first', occurredAt: instant, sequence: 1),\n  ]);\n\n  final ids = accepted.map((event) => event.id).toList();\n  if (ids.length != 2 || ids[0] != 'first' || ids[1] != 'second') {\n    throw StateError('equal-time sequence order was not preserved: $ids');\n  }\n}\n"
+  }
+}

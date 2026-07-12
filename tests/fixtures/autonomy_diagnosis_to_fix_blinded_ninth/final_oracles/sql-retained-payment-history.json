@@ -1,0 +1,6 @@
+{
+  "case_id": "sql-retained-payment-history",
+  "final_files": {
+    "tests/test_final_mixed_history.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef test_report_totals_survive_selective_erasure_and_keep_active_names():\n    database = sqlite3.connect(\":memory:\")\n    database.executescript(\n        (ROOT / \"sql\" / \"schema.sql\").read_text(encoding=\"utf-8\")\n    )\n    database.executemany(\n        \"INSERT INTO customers(id, display_name) VALUES (?, ?)\",\n        [(1, \"North Shop\"), (2, \"Closed Shop\")],\n    )\n    database.executemany(\n        \"INSERT INTO payment_events(id, customer_id, cents, occurred_on) \"\n        \"VALUES (?, ?, ?, ?)\",\n        [\n            (10, 2, 4000, \"2026-05-01T09:00:00Z\"),\n            (11, 1, 1500, \"2026-05-01T10:00:00Z\"),\n            (12, 2, 500, \"2026-05-02T09:00:00Z\"),\n        ],\n    )\n    database.execute(\"DELETE FROM customers WHERE id = 2\")\n\n    report = (ROOT / \"sql\" / \"history_report.sql\").read_text(\n        encoding=\"utf-8\"\n    )\n    rows = database.execute(report).fetchall()\n\n    assert [row[0] for row in rows] == [10, 11, 12]\n    assert sum(row[3] for row in rows) == 6000\n    assert [row[2] for row in rows] == [None, \"North Shop\", None]\n"
+  }
+}

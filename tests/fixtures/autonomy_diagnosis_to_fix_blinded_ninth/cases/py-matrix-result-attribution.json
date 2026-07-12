@@ -1,0 +1,15 @@
+{
+  "case_id": "py-matrix-result-attribution",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "The release verification matrix says only two checks ran even though three deployment targets each scheduled the same two named probes. Both reported rows carry the final target name, and the earlier targets disappear from the JSON summary. A one-target verification run remains green and correctly named. Restore trustworthy per-target attribution and preserve every scheduled result, including repeated probe names across targets.",
+  "candidate_paths": [
+    "harness/context.py",
+    "harness/runner.py"
+  ],
+  "repo_files": {
+    "harness/context.py": "from dataclasses import dataclass\n\n\n@dataclass\nclass CaseContext:\n    case_id: str = \"\"\n\n    def bind(self, case_id: str) -> \"CaseContext\":\n        self.case_id = case_id\n        return self\n",
+    "harness/runner.py": "from collections.abc import Callable, Iterable\nfrom dataclasses import dataclass\n\nfrom harness.context import CaseContext\n\n\nCheck = Callable[[CaseContext], bool]\n\n\n@dataclass(frozen=True)\nclass CheckResult:\n    case_id: str\n    check_name: str\n    passed: bool\n    detail: str\n\n\ndef run_matrix(\n    case_ids: Iterable[str], checks: Iterable[tuple[str, Check]]\n) -> list[CheckResult]:\n    root = CaseContext()\n    scheduled: list[tuple[CaseContext, str, Check]] = []\n    check_list = list(checks)\n\n    for case_id in case_ids:\n        context = root.bind(case_id)\n        for check_name, check in check_list:\n            scheduled.append((context, check_name, check))\n\n    results: dict[str, CheckResult] = {}\n    for context, check_name, check in scheduled:\n        try:\n            passed = bool(check(context))\n            detail = \"\" if passed else \"returned false\"\n        except Exception as exc:\n            passed = False\n            detail = f\"{type(exc).__name__}: {exc}\"\n\n        results[check_name] = CheckResult(\n            case_id=context.case_id,\n            check_name=check_name,\n            passed=passed,\n            detail=detail,\n        )\n\n    return list(results.values())\n",
+    "tests/test_public.py": "from harness.runner import run_matrix\n\n\ndef test_single_target_keeps_each_distinct_probe():\n    results = run_matrix(\n        [\"staging\"],\n        [\n            (\"health\", lambda context: True),\n            (\"identity\", lambda context: context.case_id == \"staging\"),\n        ],\n    )\n\n    assert [(item.case_id, item.check_name, item.passed) for item in results] == [\n        (\"staging\", \"health\", True),\n        (\"staging\", \"identity\", True),\n    ]\n"
+  }
+}

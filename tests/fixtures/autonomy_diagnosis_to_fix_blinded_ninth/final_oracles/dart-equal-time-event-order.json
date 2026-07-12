@@ -1,0 +1,6 @@
+{
+  "case_id": "dart-equal-time-event-order",
+  "final_files": {
+    "tests/inbox_final_test.dart": "import '../lib/event_cursor.dart';\nimport '../lib/inbox.dart';\n\nvoid main() {\n  final instant = DateTime.utc(2026, 7, 3, 14, 0);\n  final inbox = EventInbox();\n  inbox.applyBatch([\n    LedgerEvent(id: 'first', occurredAt: instant, sequence: 1),\n  ]);\n\n  final accepted = inbox.applyBatch([\n    LedgerEvent(id: 'third', occurredAt: instant, sequence: 3),\n    LedgerEvent(id: 'duplicate', occurredAt: instant, sequence: 1),\n    LedgerEvent(\n      id: 'next-time',\n      occurredAt: instant.add(const Duration(milliseconds: 1)),\n      sequence: 1,\n    ),\n    LedgerEvent(id: 'second', occurredAt: instant, sequence: 2),\n  ]);\n\n  final ids = accepted.map((event) => event.id).join(',');\n  if (ids != 'second,third,next-time') {\n    throw StateError('unexpected cross-batch order: $ids');\n  }\n}\n"
+  }
+}

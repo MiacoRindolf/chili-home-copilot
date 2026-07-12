@@ -1,0 +1,6 @@
+{
+  "case_id": "py-config-explicit-values",
+  "final_files": {
+    "tests/test_final_false_and_empty_values.py": "from settings.cli import CliOptions\nfrom settings.resolver import resolve\n\n\ndef test_explicit_clear_values_coexist_with_an_unrelated_file_setting():\n    cli = CliOptions.parse({\"audit\": False, \"labels\": []})\n    result = resolve(\n        {\"workers\": 10, \"audit\": True, \"labels\": [\"inherited\"]}, cli\n    )\n\n    assert result == {\n        \"workers\": 10,\n        \"audit\": False,\n        \"labels\": [],\n    }\n"
+  }
+}

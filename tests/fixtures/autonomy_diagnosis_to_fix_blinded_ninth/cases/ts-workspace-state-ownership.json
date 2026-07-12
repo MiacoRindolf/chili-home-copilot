@@ -1,0 +1,16 @@
+{
+  "case_id": "ts-workspace-state-ownership",
+  "language": "typescript",
+  "test_runner": "node_test",
+  "prompt": "Users opening two editor workspaces in one desktop process sometimes see a column added in one workspace appear in the other. Support also reproduced a caller-owned restore snapshot changing after the editor session was modified. A fresh process and the ordinary single-workspace flow both look correct. Make workspace creation, restore, and reset establish independent state ownership while keeping snapshots safe to inspect.",
+  "candidate_paths": [
+    "src/defaults.ts",
+    "src/session.ts"
+  ],
+  "repo_files": {
+    "package.json": "{\n  \"type\": \"module\"\n}\n",
+    "src/defaults.ts": "export interface WorkspaceState {\n  name: string;\n  columns: string[];\n  preferences: {\n    density: \"comfortable\" | \"compact\";\n    showHints: boolean;\n  };\n}\n\nconst BASE_WORKSPACE: WorkspaceState = {\n  name: \"Untitled\",\n  columns: [\"title\", \"status\"],\n  preferences: {\n    density: \"comfortable\",\n    showHints: true,\n  },\n};\n\nexport function makeDefaultWorkspace(): WorkspaceState {\n  return { ...BASE_WORKSPACE };\n}\n",
+    "src/session.ts": "import { makeDefaultWorkspace, type WorkspaceState } from \"./defaults.ts\";\n\nexport class WorkspaceSession {\n  private state: WorkspaceState;\n\n  constructor(seed?: WorkspaceState) {\n    this.state = seed ?? makeDefaultWorkspace();\n  }\n\n  addColumn(column: string): void {\n    this.state.columns.push(column);\n  }\n\n  setDensity(density: \"comfortable\" | \"compact\"): void {\n    this.state.preferences.density = density;\n  }\n\n  reset(seed?: WorkspaceState): void {\n    this.state = seed ?? makeDefaultWorkspace();\n  }\n\n  snapshot(): WorkspaceState {\n    return {\n      ...this.state,\n      columns: [...this.state.columns],\n      preferences: { ...this.state.preferences },\n    };\n  }\n}\n",
+    "tests/workspace.public.test.ts": "import assert from \"node:assert/strict\";\nimport test from \"node:test\";\n\nimport { WorkspaceSession } from \"../src/session.ts\";\n\ntest(\"one workspace can be customized and snapshotted\", () => {\n  const session = new WorkspaceSession();\n  session.addColumn(\"owner\");\n  session.setDensity(\"compact\");\n\n  assert.deepEqual(session.snapshot(), {\n    name: \"Untitled\",\n    columns: [\"title\", \"status\", \"owner\"],\n    preferences: { density: \"compact\", showHints: true },\n  });\n});\n"
+  }
+}

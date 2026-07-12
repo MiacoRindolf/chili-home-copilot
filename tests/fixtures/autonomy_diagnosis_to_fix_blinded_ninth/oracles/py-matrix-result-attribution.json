@@ -1,0 +1,11 @@
+{
+  "case_id": "py-matrix-result-attribution",
+  "expected_dimension": "test_harness",
+  "expected_files": [
+    "harness/context.py",
+    "harness/runner.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_matrix_identity.py": "from harness.context import CaseContext\nfrom harness.runner import run_matrix\n\n\ndef test_bound_contexts_and_repeated_probe_names_keep_target_identity():\n    root = CaseContext()\n    first = root.bind(\"alpha\")\n    second = root.bind(\"beta\")\n\n    assert first is not second\n    assert (first.case_id, second.case_id) == (\"alpha\", \"beta\")\n\n    results = run_matrix(\n        [\"alpha\", \"beta\"],\n        [(\"reachable\", lambda context: context.case_id == \"alpha\")],\n    )\n    observed = {\n        (item.case_id, item.check_name): item.passed for item in results\n    }\n\n    assert observed == {\n        (\"alpha\", \"reachable\"): True,\n        (\"beta\", \"reachable\"): False,\n    }\n"
+  }
+}

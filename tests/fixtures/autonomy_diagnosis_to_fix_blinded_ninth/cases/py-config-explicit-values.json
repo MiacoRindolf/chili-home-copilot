@@ -1,0 +1,15 @@
+{
+  "case_id": "py-config-explicit-values",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "A worker rollout ignored values that operators can prove were present in the parsed launch record. One host was started with worker count 0 (the documented auto-size mode), while its startup summary reported 12 from the site file. A separate dry run that explicitly disabled audit output still showed audit enabled. Ordinary positive worker counts and enabled flags behave normally. Diagnose the precedence failure and make explicitly supplied command options survive resolution without disturbing defaults for options that were not supplied.",
+  "candidate_paths": [
+    "settings/cli.py",
+    "settings/resolver.py"
+  ],
+  "repo_files": {
+    "settings/cli.py": "from dataclasses import dataclass\nfrom typing import Any, Mapping\n\n\n@dataclass(frozen=True)\nclass CliOptions:\n    values: dict[str, Any]\n\n    @classmethod\n    def parse(cls, raw: Mapping[str, Any]) -> \"CliOptions\":\n        # The parser receives only options that were explicitly supplied.\n        return cls({key: value for key, value in raw.items() if value})\n",
+    "settings/resolver.py": "from typing import Any, Mapping\n\nfrom settings.cli import CliOptions\n\n\nDEFAULTS: dict[str, Any] = {\n    \"workers\": 4,\n    \"audit\": True,\n    \"labels\": [\"default\"],\n}\n\n\ndef resolve(file_values: Mapping[str, Any], cli: CliOptions) -> dict[str, Any]:\n    return {\n        \"workers\": cli.values.get(\"workers\") or file_values.get(\"workers\") or DEFAULTS[\"workers\"],\n        \"audit\": cli.values.get(\"audit\") or file_values.get(\"audit\") or DEFAULTS[\"audit\"],\n        \"labels\": cli.values.get(\"labels\") or file_values.get(\"labels\") or DEFAULTS[\"labels\"],\n    }\n",
+    "tests/test_public.py": "from settings.cli import CliOptions\nfrom settings.resolver import resolve\n\n\ndef test_truthy_command_values_override_the_site_file():\n    cli = CliOptions.parse(\n        {\"workers\": 8, \"audit\": True, \"labels\": [\"canary\"]}\n    )\n    result = resolve(\n        {\"workers\": 12, \"audit\": True, \"labels\": [\"west\"]}, cli\n    )\n\n    assert result == {\n        \"workers\": 8,\n        \"audit\": True,\n        \"labels\": [\"canary\"],\n    }\n\n\ndef test_truthy_file_values_override_defaults_without_command_values():\n    result = resolve(\n        {\"workers\": 6, \"audit\": True, \"labels\": [\"batch\"]},\n        CliOptions.parse({}),\n    )\n\n    assert result == {\n        \"workers\": 6,\n        \"audit\": True,\n        \"labels\": [\"batch\"],\n    }\n"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "schema": "chili.diagnosis-to-fix-manifest.v3",
+  "reference_family": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/py-config-explicit-values.json",
+      "oracle": "oracles/py-config-explicit-values.json",
+      "final_oracle": "final_oracles/py-config-explicit-values.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/py-matrix-result-attribution.json",
+      "oracle": "oracles/py-matrix-result-attribution.json",
+      "final_oracle": "final_oracles/py-matrix-result-attribution.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/ts-workspace-state-ownership.json",
+      "oracle": "oracles/ts-workspace-state-ownership.json",
+      "final_oracle": "final_oracles/ts-workspace-state-ownership.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/ts-utf8-stream-boundaries.json",
+      "oracle": "oracles/ts-utf8-stream-boundaries.json",
+      "final_oracle": "final_oracles/ts-utf8-stream-boundaries.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/dart-profile-patch-null.json",
+      "oracle": "oracles/dart-profile-patch-null.json",
+      "final_oracle": "final_oracles/dart-profile-patch-null.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/dart-equal-time-event-order.json",
+      "oracle": "oracles/dart-equal-time-event-order.json",
+      "final_oracle": "final_oracles/dart-equal-time-event-order.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/sql-retained-payment-history.json",
+      "oracle": "oracles/sql-retained-payment-history.json",
+      "final_oracle": "final_oracles/sql-retained-payment-history.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/sql-fixed-width-identifiers.json",
+      "oracle": "oracles/sql-fixed-width-identifiers.json",
+      "final_oracle": "final_oracles/sql-fixed-width-identifiers.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    }
+  ]
+}
