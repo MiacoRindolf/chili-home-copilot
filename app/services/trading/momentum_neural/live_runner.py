@@ -1086,6 +1086,18 @@ def _float_or_none(value: Any) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def _le_side_long(le: Any) -> bool:
+    """Session direction (SHORT LANE P1b, docs/DESIGN/SHORT_SIDE_LANE.md): True =
+    long. Nothing sets ``le["side_long"]=False`` until the short-candidate routing
+    ships, so threading this through the geometry call sites is byte-identical for
+    every existing session (regression-gated on the hermetic replay). Fail-LONG:
+    a malformed envelope behaves exactly like today."""
+    try:
+        return (le or {}).get("side_long") is not False
+    except Exception:
+        return True
+
+
 def _safe_mult(x: Any) -> float:
     """LOW-7 fail-NEUTRAL: sanitize ONE size-multiplier factor before it enters the product.
     A non-finite (NaN/inf) or NEGATIVE multiplier from any upstream helper is coerced to 1.0
@@ -2272,7 +2284,7 @@ def _scale_out_to_runner(
         be_stop = breakeven_stop_after_partial(
             float(entry_price),
             float(old_stop if old_stop is not None else entry_price),
-            side_long=True,
+            side_long=_le_side_long(le),
         )
         pos["stop_price"] = be_stop
         pos["scaled_out_at_utc"] = _utcnow().isoformat()
@@ -2341,7 +2353,7 @@ def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[fl
             stop = _float_or_none(pos.get("stop_price"))
     except (TypeError, ValueError):
         entry, stop = 0.0, None
-    levels = scale_grid_levels(entry, float(stop) if stop is not None else 0.0, side_long=True, symbol=symbol)
+    levels = scale_grid_levels(entry, float(stop) if stop is not None else 0.0, side_long=_le_side_long(pos), symbol=symbol)
     pos["scale_grid"] = [[float(px), float(fr)] for px, fr in levels]
     return [list(x) for x in pos["scale_grid"]]
 
@@ -2395,7 +2407,7 @@ def _scale_out_grid_step(
     be_stop = breakeven_stop_after_partial(
         float(entry_price),
         float(old_stop if old_stop is not None else entry_price),
-        side_long=True,
+        side_long=_le_side_long(pos),
     )
     pos["stop_price"] = be_stop
     pos["scaled_out_at_utc"] = _utcnow().isoformat()
@@ -8370,7 +8382,7 @@ def tick_live_session(
                         _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
                         _prior_rr, _ = adaptive_first_target_reward_risk(
                             base_reward_risk=_base_rr, entry=float(avg), stop=_stop_inline,
-                            realized_high=_float_or_none(le.get("entry_realized_high")), side_long=True,
+                            realized_high=_float_or_none(le.get("entry_realized_high")), side_long=_le_side_long(le),
                         )
                         _dd_meta = mfe_percentile_target_r(
                             _recent_mfe_samples(db, _fam, limit=200),
@@ -8386,7 +8398,7 @@ def tick_live_session(
                 stop_px, target_px = stop_target_prices(
                     avg,
                     atr_pct=float(atrp),
-                    side_long=True,
+                    side_long=_le_side_long(le),
                     stop_atr_mult=_stop_atr_mult,
                     target_atr_mult=float(params["target_atr_mult"]),
                     # data-derived R:R when live (it REPLACES the magic realized-HOD lift, so pass
@@ -12774,7 +12786,7 @@ def tick_live_session(
                 position_risk_usd=(avg * max(0.003, _atr_pct_trail * _sm)) * _q0,
                 breakeven_floor=_be_floor,
                 current_stop=stop_px,
-                side_long=True,
+                side_long=_le_side_long(le),
                 ema_5m=_ema5,
                 regime_band_mult=_regime_band_mult,
             )
@@ -12866,7 +12878,7 @@ def tick_live_session(
                             trail_dist_pct=_vn_dist,
                             breakeven_floor=_be_floor,
                             current_stop=stop_px,
-                            side_long=True,
+                            side_long=_le_side_long(le),
                         )
                         # INVARIANT-A: both candidates are ratchet-only over (cs, be); the
                         # max never loosens the live stop.
@@ -12934,7 +12946,7 @@ def tick_live_session(
                             micro_price_ref=_fs.get("mid"),
                             last_trade_px=_fs.get("last_price"),
                             ofi_threshold=_ofi_thr,
-                            side_long=True,
+                            side_long=_le_side_long(le),
                         )
                         # INVARIANT-A: RIDE-LOCK candidate is ratchet-only over (cs, be);
                         # take the MAX with the 2A/cushion trail — only a LOCK/HARD band that
@@ -13047,7 +13059,7 @@ def tick_live_session(
                             symbol=sess.symbol,
                             base_increment=_mm_inc,
                             base_min_size=_mm_min,
-                            side_long=True,
+                            side_long=_le_side_long(le),
                         )
                         # Double-top exhaustion off the SAME impulse high (flow optional).
                         _mm_ofi = None
@@ -13070,7 +13082,7 @@ def tick_live_session(
                             breakeven_floor=_be_floor,
                             ofi=_mm_ofi,
                             micro_edge=_mm_micro,
-                            side_long=True,
+                            side_long=_le_side_long(le),
                         )
                         # Action A — RATCHET-ONLY stop write (winner-safe core). The
                         # measured-move ratchet (to breakeven on the runner) and the
@@ -13210,7 +13222,7 @@ def tick_live_session(
                         candle_gate_live=bool(
                             getattr(settings, "chili_momentum_exit_candle_confirm_live", False)
                         ),
-                        side_long=True,
+                        side_long=_le_side_long(le),
                     )
                     # A/B telemetry on every ARMED tick (winner past the profit-arm),
                     # whether or not the lock fired — this is the counterfactual that
@@ -13288,7 +13300,7 @@ def tick_live_session(
                         breakeven_floor=_be_floor,
                         signed_tape_accel=_accel,
                         prev_signed_tape_accel=_prev_accel,
-                        side_long=True,
+                        side_long=_le_side_long(le),
                     )
                     # A/B telemetry on EVERY tick (with the lock-OFF counterfactual) so
                     # realized PnL is measured vs the baseline before we trust it.
@@ -13446,7 +13458,7 @@ def tick_live_session(
                         ladder=_ladder,
                         prior_partial_taken=bool(pos.get("partial_taken")),
                         cooldown_active=_cooldown,
-                        side_long=True,
+                        side_long=_le_side_long(le),
                         cadence_loosen=_cad_loosen,
                     )
                     # GUARD #2 — RE-ENTRY DAMPER under SLOW_CHOPPER: a name just called a
