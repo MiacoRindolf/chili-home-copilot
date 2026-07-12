@@ -815,6 +815,84 @@ def test_local_packet_cannot_replace_qualified_causal_support_with_correlation()
     assert result["report"]["decision"] == "instrument_first"
 
 
+def test_local_packet_preserves_grounded_family_when_model_ids_and_breadth_change():
+    case = {
+        "case_id": "grounded-family-retention",
+        "problem_statement": (
+            "A dataset manifest misses its target, while aggregate host signals "
+            "suggest an execution-pool effect."
+        ),
+        "observations": [
+            {
+                "evidence_id": "broad-control",
+                "statement": (
+                    "Reprocessing matched jobs on a dedicated diagnostic host restores "
+                    "latency while several host resources change together."
+                ),
+                "dimension": "runtime",
+                "kind": "experiment",
+                "provenance": "bounded-control",
+                "independence_key": "bounded-control",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "host-correlation",
+                "statement": "Scheduler wait rises during the affected nightly window.",
+                "dimension": "runtime",
+                "kind": "metric",
+                "provenance": "host-summary",
+                "independence_key": "host-summary",
+                "reliability": 0.97,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "event-gap",
+                "statement": (
+                    "Aggregate metrics cannot show whether any sampled event was "
+                    "runnable but unscheduled."
+                ),
+                "dimension": "runtime",
+                "kind": "artifact",
+                "provenance": "trace-audit",
+                "independence_key": "trace-audit",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+        "constraints": {"minimum_hypothesis_dimensions": 4},
+    }
+    relabeled = {
+        "hypotheses": [
+            {
+                "hypothesis_id": f"model-{dimension}",
+                "claim": f"The symptom belongs to {dimension}.",
+                "dimension": dimension,
+                "support_evidence_ids": ["host-correlation"],
+                "falsification": "Capture one event-level owner trace.",
+            }
+            for dimension in ("dependency", "state", "config", "data")
+        ],
+        "conclusion": {
+            "hypothesis_id": "model-data",
+            "status": "provisional",
+        },
+    }
+
+    result = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda _stage, _prompt: json.dumps(relabeled),
+        stages_to_run=("judge",),
+    )
+    stage = result["stages"][0]
+
+    assert stage["accepted"] is True
+    assert "runtime" in stage["preserved_hypothesis_dimensions"]
+    assert result["report"]["conclusion"]["dimension"] == "runtime"
+    assert result["report"]["conclusion"]["status"] == "provisional"
+    assert result["report"]["decision"] == "instrument_first"
+
+
 def test_local_dimension_aliases_preserve_system_layer_meaning():
     packet = reasoning.normalize_packet(
         {

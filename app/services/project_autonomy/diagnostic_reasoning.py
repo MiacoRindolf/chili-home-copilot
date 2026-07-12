@@ -3171,6 +3171,23 @@ def _has_direct_causal_artifact(record: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_qualified_causal_record(record: Mapping[str, Any]) -> bool:
+    return bool(
+        str(record.get("causal_role") or "context") == "support"
+        and str(record.get("evidence_lifecycle") or "observed_result")
+        == "observed_result"
+        and not bool(record.get("attribution_gap"))
+        and (
+            bool(record.get("discriminating"))
+            or str(record.get("provenance") or "").startswith(
+                "diagnostic_probe:"
+            )
+            or _record_has_structured_break(record)
+            or _has_direct_causal_artifact(record)
+        )
+    )
+
+
 def _causal_sufficiency(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -3939,6 +3956,17 @@ def evaluate_packet(
             ):
                 chosen = strongest_supported
                 conclusion_id = str(chosen.get("hypothesis_id") or "")
+        elif chosen.get("status") in {"blocked", "untested", "refuted"}:
+            provisional = [
+                item
+                for item in hypothesis_results
+                if item.get("status") == "provisional"
+                and float(item.get("causal_support_weight") or 0) > 0
+                and float(item.get("ownership_weight") or 0) > 0
+            ]
+            if provisional:
+                chosen = max(provisional, key=selection_rank)
+                conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     if earliest_break_id and earliest_break_dimension != "unknown":
         causal_candidates = [
@@ -4006,9 +4034,12 @@ def evaluate_packet(
         if problem_candidates:
             problem_candidate = max(problem_candidates, key=selection_rank)
             if (
-                float(problem_candidate.get("ownership_weight") or 0) + 0.6
-                > float(chosen.get("ownership_weight") or 0)
-                or bool(problem_candidate.get("attribution_gap_blocked"))
+                selection_rank(problem_candidate)[0] >= selection_rank(chosen)[0]
+                and (
+                    float(problem_candidate.get("ownership_weight") or 0) + 0.6
+                    > float(chosen.get("ownership_weight") or 0)
+                    or bool(problem_candidate.get("attribution_gap_blocked"))
+                )
             ):
                 chosen = problem_candidate
                 conclusion_id = str(chosen.get("hypothesis_id") or "")
@@ -4520,20 +4551,7 @@ def _repair_candidate_contract(
                 item.get("evidence_lifecycle") or "observed_result"
             ),
             "attribution_gap": bool(item.get("attribution_gap")),
-            "qualified_causal_support": bool(
-                str(item.get("causal_role") or "context") == "support"
-                and str(item.get("evidence_lifecycle") or "observed_result")
-                == "observed_result"
-                and not bool(item.get("attribution_gap"))
-                and (
-                    bool(item.get("discriminating"))
-                    or str(item.get("provenance") or "").startswith(
-                        "diagnostic_probe:"
-                    )
-                    or _record_has_structured_break(item)
-                    or _has_direct_causal_artifact(item)
-                )
-            ),
+            "qualified_causal_support": _is_qualified_causal_record(item),
         }
         for item in case.get("observations") or []
         if isinstance(item, Mapping) and str(item.get("evidence_id") or "")
@@ -4577,9 +4595,13 @@ def _repair_candidate_contract(
         dimension: str,
     ) -> bool:
         contract = evidence_contracts.get(evidence_id)
+        owner = str((contract or {}).get("causal_dimension") or "unknown")
+        if owner == "unknown":
+            owner = str((contract or {}).get("dimension") or "unknown")
         return bool(
             contract
             and contract.get("qualified_causal_support")
+            and owner == dimension
             and support_is_compatible(evidence_id, dimension)
         )
 
@@ -4736,12 +4758,42 @@ def _preserve_competing_hypotheses(
         (case.get("constraints") or {}).get("minimum_hypothesis_dimensions") or 1
     )
     normalized_candidate = normalize_packet(candidate)
+    evidence = {
+        str(item.get("evidence_id") or ""): item
+        for item in case.get("observations") or []
+        if isinstance(item, Mapping) and str(item.get("evidence_id") or "")
+    }
+
+    def has_owner_aligned_causal_support(item: Mapping[str, Any]) -> bool:
+        dimension = str(item.get("dimension") or "unknown")
+        if dimension == "unknown":
+            return False
+        return any(
+            evidence_id in evidence
+            and _evidence_owner_dimension(evidence[evidence_id]) == dimension
+            and _is_qualified_causal_record(evidence[evidence_id])
+            for evidence_id in (
+                str(value) for value in item.get("support_evidence_ids") or []
+            )
+        )
+
     represented = {
         str(item.get("dimension") or "unknown")
         for item in normalized_candidate.get("hypotheses") or []
         if str(item.get("dimension") or "unknown") != "unknown"
     }
-    if len(represented) >= required:
+    previous_hypotheses = [
+        item
+        for item in previous_packet.get("hypotheses") or []
+        if isinstance(item, Mapping)
+    ]
+    missing_grounded_dimensions = {
+        str(item.get("dimension") or "unknown")
+        for item in previous_hypotheses
+        if has_owner_aligned_causal_support(item)
+        and str(item.get("dimension") or "unknown") not in represented
+    }
+    if len(represented) >= required and not missing_grounded_dimensions:
         return normalized_candidate, []
 
     hypotheses = list(normalized_candidate.get("hypotheses") or [])
@@ -4754,16 +4806,19 @@ def _preserve_competing_hypotheses(
     }
     added_hypothesis_ids: set[str] = set()
     added_dimensions: list[str] = []
-    for item in previous_packet.get("hypotheses") or []:
-        if not isinstance(item, Mapping):
-            continue
+    for item in sorted(
+        previous_hypotheses,
+        key=lambda value: not has_owner_aligned_causal_support(value),
+    ):
         dimension = str(item.get("dimension") or "unknown")
         hypothesis_id = str(item.get("hypothesis_id") or "")
+        grounded = has_owner_aligned_causal_support(item)
         if (
             dimension == "unknown"
             or dimension in represented
             or not hypothesis_id
             or hypothesis_id in existing_hypothesis_ids
+            or (not grounded and len(represented) >= required)
         ):
             continue
         hypotheses.append(dict(item))
@@ -4771,8 +4826,6 @@ def _preserve_competing_hypotheses(
         existing_hypothesis_ids.add(hypothesis_id)
         added_hypothesis_ids.add(hypothesis_id)
         added_dimensions.append(dimension)
-        if len(represented) >= required:
-            break
 
     for item in previous_packet.get("experiments") or []:
         if not isinstance(item, Mapping):
