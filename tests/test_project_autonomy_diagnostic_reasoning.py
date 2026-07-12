@@ -2216,6 +2216,265 @@ def test_retained_before_after_metadata_marks_semantic_baseline_drift():
     assert reasoning.detect_baseline_drift([unretained]) == []
 
 
+def test_retained_control_onset_marks_drift_without_misreading_cursor_order():
+    cohort_onset = reasoning.normalize_evidence(
+        {
+            "evidence_id": "cohort-onset",
+            "statement": (
+                "Failures began as work moved to replacement hosts; prior hosts "
+                "continued processing the same inputs successfully."
+            ),
+            "metadata": {"retained": True},
+        }
+    )
+    cursor_order = reasoning.normalize_evidence(
+        {
+            "evidence_id": "cursor-order",
+            "statement": (
+                "For one retained sequence, the next query begins after the final "
+                "retained row and returns filtered rows before reaching its limit."
+            ),
+        }
+    )
+
+    findings = reasoning.detect_baseline_drift([cohort_onset, cursor_order])
+
+    assert [finding["evidence_ids"] for finding in findings] == [["cohort-onset"]]
+    assert cohort_onset["retained_comparison"] == "changed"
+    assert cursor_order["retained_comparison"] == "none"
+
+
+def test_causal_owner_follows_the_manipulated_factor_not_the_probe_apparatus():
+    examples = {
+        "data": (
+            "A replay runs in an isolated worker. Replacing only colliding sample "
+            "identifiers with distinct surrogate values restores two streams while "
+            "the processor image remains unchanged."
+        ),
+        "config": (
+            "Changing only the response deadline in the effective route definition "
+            "from 20 to 200 seconds restores the complete recording."
+        ),
+        "dependency": (
+            "The same source produces altered output with the newer decoder package "
+            "and correct output with the older decoder while recipe inputs are identical."
+        ),
+        "code": (
+            "A candidate artifact re-reads and compares the current generation before "
+            "publishing, while the prior workflow continuation captures a stale value."
+        ),
+        "state": (
+            "Loading the same jobs and durable ledger without unmatched persisted fence "
+            "entries restores one pending dispatch per job."
+        ),
+        "clock": (
+            "A replay using the recorded offset delays the action, while the same event "
+            "with a synchronized wall reading emits immediately."
+        ),
+    }
+
+    for expected, statement in examples.items():
+        evidence = reasoning.normalize_evidence(
+            {
+                "evidence_id": f"owner-{expected}",
+                "statement": statement,
+                "kind": "experiment",
+                "reliability": 0.99,
+                "discriminating": True,
+            }
+        )
+
+        assert evidence["causal_dimension"] == expected
+        assert evidence["dimension"] == expected
+        assert evidence["intervention_scope"] == "component"
+        assert evidence["causal_role"] == "support"
+
+
+def test_planned_measurements_and_broad_relocations_are_not_completed_proof():
+    planned = reasoning.normalize_evidence(
+        {
+            "evidence_id": "planned-probe",
+            "statement": (
+                "A bounded next measurement can collect per-process scheduler delay "
+                "for fifty matched jobs."
+            ),
+            "dimension": "runtime",
+            "kind": "experiment",
+            "reliability": 0.99,
+            "discriminating": True,
+        }
+    )
+    broad = reasoning.normalize_evidence(
+        {
+            "evidence_id": "broad-control",
+            "statement": (
+                "Reprocessing the same payload on a dedicated diagnostic host restores "
+                "latency while the internal contention source remains unknown."
+            ),
+            "dimension": "runtime",
+            "kind": "experiment",
+            "reliability": 0.99,
+            "discriminating": True,
+        }
+    )
+
+    assert planned["evidence_lifecycle"] == "planned_measurement"
+    assert planned["causal_role"] == "context"
+    assert planned["intervention_scope"] == "none"
+    assert reasoning._is_contrastive_experiment(planned) is False
+    assert broad["evidence_lifecycle"] == "observed_result"
+    assert broad["intervention_scope"] == "broad"
+    assert reasoning._is_contrastive_experiment(broad) is False
+
+
+def test_retained_comparison_distinguishes_changed_stable_and_incomparable_outcomes():
+    changed = reasoning.normalize_evidence(
+        {
+            "evidence_id": "changed-baseline",
+            "statement": (
+                "Retained runs completed in forty seconds before maintenance and took "
+                "nine hundred seconds after it with the same input cohort."
+            ),
+        }
+    )
+    stable = reasoning.normalize_evidence(
+        {
+            "evidence_id": "stable-baseline",
+            "statement": (
+                "Retained samples show the same 2.1 percent error rate for six weeks "
+                "before and two weeks after the alert; only request volume increased."
+            ),
+        }
+    )
+    incomparable = reasoning.normalize_evidence(
+        {
+            "evidence_id": "missing-baseline",
+            "statement": (
+                "The pre-change baseline snapshot is unavailable, so the current "
+                "outcome cannot be compared to a retained cohort."
+            ),
+        }
+    )
+
+    assert changed["retained_comparison"] == "changed"
+    assert stable["retained_comparison"] == "stable"
+    assert incomparable["retained_comparison"] == "incomparable"
+    findings = reasoning.detect_baseline_drift([changed, stable, incomparable])
+    assert {item["finding_type"] for item in findings} == {
+        "retained_semantic_baseline_drift",
+        "baseline_comparability_gap",
+    }
+    assert "stable-baseline" not in {
+        evidence_id
+        for item in findings
+        for evidence_id in item["evidence_ids"]
+    }
+
+
+def test_effective_status_depends_on_qualified_proof_not_model_posture():
+    case = {
+        "case_id": "status-invariance",
+        "problem_statement": "A gateway closes long streams too early.",
+        "observations": [
+            {
+                "evidence_id": "setting-proof",
+                "statement": (
+                    "Changing only the effective deadline setting restores the full "
+                    "stream while code, inputs, packages, and runtime remain fixed."
+                ),
+                "dimension": "config",
+                "kind": "experiment",
+                "reliability": 0.99,
+                "discriminating": True,
+            }
+        ],
+    }
+
+    outcomes = set()
+    for requested_status in ("confirmed", "provisional", "inconclusive", "rejected"):
+        report = reasoning.evaluate_packet(
+            case,
+            {
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h-config",
+                        "claim": "The effective deadline setting truncates the stream.",
+                        "dimension": "config",
+                        "support_evidence_ids": ["setting-proof"],
+                        "falsification": "Restore only the prior deadline value.",
+                    }
+                ],
+                "conclusion": {
+                    "hypothesis_id": "h-config",
+                    "status": requested_status,
+                },
+            },
+        )
+        outcomes.add((report["conclusion"]["status"], report["decision"]))
+
+    assert outcomes == {("confirmed", "patch_root_cause")}
+
+
+def test_broad_family_localization_with_event_gap_remains_instrument_first():
+    case = {
+        "case_id": "broad-localization",
+        "problem_statement": "Large jobs stall on a shared execution pool.",
+        "observations": [
+            {
+                "evidence_id": "broad-control",
+                "statement": (
+                    "Reprocessing matched jobs on a dedicated diagnostic host restores "
+                    "latency, but several execution resources change together."
+                ),
+                "dimension": "runtime",
+                "kind": "experiment",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "missing-owner",
+                "statement": (
+                    "Current traces omit per-process wait counters and cannot show whether "
+                    "scheduler delay or memory reclaim owns any failed event."
+                ),
+                "dimension": "runtime",
+                "kind": "artifact",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "planned-probe",
+                "statement": (
+                    "A bounded next measurement can collect both counters for matched jobs."
+                ),
+                "dimension": "runtime",
+                "kind": "experiment",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-runtime",
+                "claim": "Shared execution-pool pressure causes the long tail.",
+                "dimension": "runtime",
+                "support_evidence_ids": ["broad-control", "planned-probe"],
+                "falsification": "Capture event-level wait classes on both pools.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-runtime", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["attribution_assessment"]["mechanism_gap"] is True
+    assert report["conclusion"]["dimension"] == "runtime"
+    assert report["conclusion"]["status"] == "provisional"
+    assert report["decision"] == "instrument_first"
+
+
 def test_coarse_runtime_reset_with_missing_mechanism_stays_provisional():
     case = {
         "case_id": "coarse-runtime-reset",

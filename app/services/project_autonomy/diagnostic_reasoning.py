@@ -294,6 +294,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("elapsed duration", 7),
             ("retain their offsets", 9),
             ("negative age", 7),
+            ("wall reading", 10),
+            ("seconds behind reference", 10),
+            ("recorded offset", 9),
+            ("synchronized wall", 9),
+            ("offset_seconds", 10),
         ),
     ),
     (
@@ -332,6 +337,9 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("identity fields", 8),
             ("key composition", 8),
             ("duplicate key", 10),
+            ("colliding identifiers", 10),
+            ("identifier assignments", 8),
+            ("distinct surrogate values", 7),
             ("facility key", 9),
             ("entries for key", 8),
             ("entries_for_key", 8),
@@ -372,6 +380,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("transition rules", 7),
             ("claimable state", 7),
             ("orphaned rows", 6),
+            ("persisted marker", 8),
+            ("fence entries", 10),
+            ("unmatched fences", 10),
+            ("durable ledger", 8),
+            ("marked as already sent", 9),
+            ("promoted snapshot", 8),
         ),
     ),
     (
@@ -424,6 +438,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("became effective", 7),
             ("effective value", 7),
             ("reported at startup", 6),
+            ("effective deadline", 9),
+            ("response deadline", 9),
+            ("changing only the deadline", 10),
+            ("route definition", 8),
+            ("relay definition", 8),
+            ("bootstrap template", 7),
         ),
     ),
     (
@@ -469,6 +489,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("cannot load lib", 10),
             ("loader error", 8),
             ("adding the exact prior", 8),
+            ("decoder package", 10),
+            ("decoder revision", 10),
+            ("newer decoder", 9),
+            ("older decoder", 9),
+            ("base-layer inventory", 6),
         ),
     ),
     (
@@ -536,6 +561,16 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("automated accessibility gate", 9),
             ("automated runs", 6),
             ("diagnostic instrumentation", 9),
+            ("managed browser", 9),
+            ("fresh browser", 9),
+            ("fresh-browser", 9),
+            ("browser checks", 8),
+            ("browser-context", 10),
+            ("browser context", 10),
+            ("runner sequence", 9),
+            ("runner reuse", 9),
+            ("reused and fresh browser", 10),
+            ("observer contamination", 10),
         ),
     ),
     (
@@ -582,6 +617,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("release comparison", 7),
             ("release artifact", 8),
             ("changed_factor=release_artifact", 10),
+            ("workflow continuation", 9),
+            ("debounce continuation", 10),
+            ("captures the prior", 8),
+            ("without checking whether", 9),
+            ("publisher path", 7),
+            ("re-reads and compares", 10),
         ),
     ),
 )
@@ -791,6 +832,9 @@ _ATTRIBUTION_GAP_MARKERS = (
     "no incident preserved",
     "preventing event-by-event attribution",
     "do not share one identifier",
+    "cannot show whether",
+    "lack enough context to show",
+    "lacks enough context to show",
     "rotated before preservation",
 )
 _AMBIGUOUS_EXPERIMENT_MARKERS = (
@@ -819,6 +863,9 @@ _DECISIVE_ATTRIBUTION_GAP_MARKERS = (
     "no incident preserved",
     "preventing event-by-event attribution",
     "do not share one identifier",
+    "cannot show whether",
+    "lack enough context to show",
+    "lacks enough context to show",
 )
 _MECHANISM_ATTRIBUTION_GAP_MARKERS = (
     "cannot distinguish",
@@ -829,6 +876,18 @@ _MECHANISM_ATTRIBUTION_GAP_MARKERS = (
     "no incident preserved",
     "preventing event-by-event attribution",
     "do not share one identifier",
+    "cannot show whether",
+    "lack enough context to show",
+    "lacks enough context to show",
+)
+_PROSPECTIVE_MEASUREMENT_MARKERS = (
+    "next measurement",
+    "next probe",
+    "can collect",
+    "can dual-run",
+    "would collect",
+    "planned measurement",
+    "proposed measurement",
 )
 _COARSE_RESET_EXPERIMENT_MARKERS = (
     "supervised recycle",
@@ -839,6 +898,19 @@ _COARSE_RESET_EXPERIMENT_MARKERS = (
     "recreate the process",
     "replace the worker",
     "replace the process",
+)
+_BROAD_INTERVENTION_MARKERS = (
+    "dedicated host",
+    "dedicated diagnostic host",
+    "dedicated pool",
+    "different host",
+    "fresh host",
+    "isolated environment",
+    "replace the environment",
+    "rebuild the environment",
+    "move the workload",
+    "relocate the workload",
+    *_COARSE_RESET_EXPERIMENT_MARKERS,
 )
 _SEMANTIC_BASELINE_PAIR_PATTERNS = (
     r"\b(?:final\s+)?good\s+(?:build|release|deployment|host|run)\b.{0,220}"
@@ -880,6 +952,16 @@ _RETAINED_CANDIDATE_MARKERS = (
     " after ",
     " new ",
     " resumed ",
+)
+_BASELINE_STABILITY_MARKERS = (
+    "both before and after",
+    "did not materially change",
+    "rate did not change",
+    "outcome did not change",
+    "result did not change",
+    "behavior did not change",
+    "no step change",
+    "not when the rate changed",
 )
 
 
@@ -1012,6 +1094,192 @@ def infer_evidence_dimension(statement: str, structured_context: str = "") -> st
     return _select_dimension(combined)
 
 
+_SINGLE_FACTOR_INTERVENTION_MARKERS = (
+    "changing only",
+    "replacing only",
+    "reverting only",
+    "pinning only",
+    "resetting only",
+    "removing only",
+    "adding the exact",
+    "restoring only",
+    "without those",
+    "candidate artifact",
+    "recorded offset",
+)
+_PAIRED_VARIANT_PATTERN = re.compile(
+    r"\bwith (?:the )?(?:newer|current|candidate|changed|updated|recorded)\b"
+    r".{0,240}\bwith (?:the )?(?:older|prior|baseline|archived|previous|synchronized)\b"
+    r"|\bwith (?:the )?(?:older|prior|baseline|archived|previous|synchronized)\b"
+    r".{0,240}\bwith (?:the )?(?:newer|current|candidate|changed|updated|recorded)\b"
+)
+
+
+def _intervention_focus(statement: str) -> str:
+    raw = str(statement or "")
+    lower = raw.lower()
+    positions = [
+        position
+        for marker in _SINGLE_FACTOR_INTERVENTION_MARKERS
+        if (position := lower.find(marker)) >= 0
+    ]
+    if positions:
+        start = min(positions)
+        return raw[start : start + 420]
+    match = _PAIRED_VARIANT_PATTERN.search(lower)
+    if match:
+        start = max(0, match.start() - 100)
+        return raw[start : match.end() + 100]
+    return ""
+
+
+def infer_causal_dimension(statement: str, structured_context: str = "") -> str:
+    """Infer the manipulated owner separately from the observed surface.
+
+    The full evidence sentence often names the worker, replay apparatus, or
+    downstream symptom more often than the one factor varied by the proof.
+    Only a bounded intervention clause or explicit changed-factor metadata is
+    allowed to override that surface vocabulary.
+    """
+    focus = _intervention_focus(statement)
+    context = str(structured_context or "")
+    changed_context = ""
+    match = re.search(
+        r"(?:^|;\s*)changed_factor=([^;]{1,180})",
+        context,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        changed_context = match.group(1)
+    if not focus and not changed_context:
+        return "unknown"
+    focus_scores = _dimension_scores(focus)
+    context_scores = _dimension_scores(changed_context)
+    combined = {
+        dimension: (3 * focus_scores.get(dimension, 0))
+        + (4 * context_scores.get(dimension, 0))
+        for dimension in DIMENSIONS
+        if dimension != "unknown"
+    }
+    return _select_dimension(combined)
+
+
+def _evidence_lifecycle(statement: str) -> str:
+    lower = str(statement or "").lower()
+    return (
+        "planned_measurement"
+        if any(marker in lower for marker in _PROSPECTIVE_MEASUREMENT_MARKERS)
+        else "observed_result"
+    )
+
+
+def _intervention_scope(
+    statement: str,
+    *,
+    causal_dimension: str,
+    lifecycle: str,
+    kind: str,
+) -> str:
+    if lifecycle != "observed_result" or str(kind or "") != "experiment":
+        return "none"
+    lower = str(statement or "").lower()
+    if causal_dimension != "unknown" and (
+        any(marker in lower for marker in _SINGLE_FACTOR_INTERVENTION_MARKERS)
+        or _PAIRED_VARIANT_PATTERN.search(lower)
+    ):
+        return "component"
+    if any(marker in lower for marker in _BROAD_INTERVENTION_MARKERS):
+        return "broad"
+    if causal_dimension != "unknown" and any(
+        marker in lower for marker in _CAUSAL_INTERVENTION_MARKERS
+    ):
+        return "component"
+    return "boundary"
+
+
+def _retained_comparison_relation(
+    statement: str,
+    structured_context: str = "",
+) -> str:
+    lower = str(statement or "").lower()
+    padded = f" {lower} "
+    if (
+        ("baseline" in lower and has_attribution_gap(lower))
+        or any(marker in lower for marker in _BASELINE_COMPARABILITY_GAP_MARKERS)
+        or re.search(
+            r"\b(?:baseline|pre-change|prior)\b.{0,90}"
+            r"\b(?:unavailable|missing|not retained)\b",
+            lower,
+        )
+        or "cannot be compared" in lower
+    ):
+        return "incomparable"
+    retained_signal = bool(
+        "retained=true" in str(structured_context or "").lower()
+        or re.search(r"\bretained\b", lower)
+    )
+    baseline_hits = [
+        (marker, padded.find(marker))
+        for marker in _RETAINED_BASELINE_MARKERS
+        if marker in padded
+    ]
+    candidate_hits = [
+        (marker, padded.find(marker))
+        for marker in _RETAINED_CANDIDATE_MARKERS
+        if marker in padded
+    ]
+    temporal_pair = bool(
+        any(
+            baseline_position < candidate_position
+            for _baseline_marker, baseline_position in baseline_hits
+            for _candidate_marker, candidate_position in candidate_hits
+        )
+        or any(
+            candidate_marker in {" first ", " new "}
+            and baseline_marker in {" prior ", " previous "}
+            for baseline_marker, _baseline_position in baseline_hits
+            for candidate_marker, _candidate_position in candidate_hits
+        )
+    )
+    retained_control_onset_pair = bool(
+        retained_signal
+        and any(
+            candidate_marker == " began "
+            and candidate_position < baseline_position
+            and baseline_marker in {" prior ", " previous "}
+            for baseline_marker, baseline_position in baseline_hits
+            for candidate_marker, candidate_position in candidate_hits
+        )
+        and re.search(
+            r"\b(?:continued|remained|still)\b.{0,100}"
+            r"\b(?:successfully|healthy|working|passing|completed|succeeded|unaffected)\b",
+            lower,
+        )
+    )
+    semantic_pair = any(
+        re.search(pattern, lower) for pattern in _SEMANTIC_BASELINE_PAIR_PATTERNS
+    )
+    if not (
+        (retained_signal and temporal_pair)
+        or retained_control_onset_pair
+        or semantic_pair
+    ):
+        return "none"
+    stable = bool(
+        any(marker in lower for marker in _BASELINE_STABILITY_MARKERS)
+        or re.search(
+            r"\bsame\b.{0,80}\b(?:rate|pattern|distribution|outcome|result|behavior)\b",
+            lower,
+        )
+        or re.search(
+            r"\b(?:rate|outcome|result|behavior)\b.{0,50}"
+            r"\b(?:did not|does not)\b.{0,20}\bchange",
+            lower,
+        )
+    )
+    return "stable" if stable else "changed"
+
+
 def _bounded_metadata_summary(raw: Mapping[str, Any]) -> str:
     existing = _clip(raw.get("structured_context"), 700)
     metadata = raw.get("metadata")
@@ -1047,7 +1315,14 @@ def _bounded_metadata_summary(raw: Mapping[str, Any]) -> str:
 
 def has_attribution_gap(statement: str) -> bool:
     lower = str(statement or "").lower()
-    return any(marker in lower for marker in _ATTRIBUTION_GAP_MARKERS)
+    return bool(
+        any(marker in lower for marker in _ATTRIBUTION_GAP_MARKERS)
+        or re.search(
+            r"\bdoes not (?:record|retain|capture)\b.{0,120}"
+            r"\b(?:individual|event|correlation|request|execution)\b",
+            lower,
+        )
+    )
 
 
 def infer_causal_role(
@@ -1068,6 +1343,8 @@ def infer_causal_role(
     lower = str(statement or "").lower()
     if has_attribution_gap(lower):
         return "context"
+    if any(marker in lower for marker in _PROSPECTIVE_MEASUREMENT_MARKERS):
+        return "context"
     if any(marker in lower for marker in _AMBIGUOUS_EXPERIMENT_MARKERS):
         return "context"
     if any(marker in lower for marker in _NEGATED_INTERVENTION_MARKERS) or re.search(
@@ -1077,6 +1354,8 @@ def infer_causal_role(
     ):
         return "contradiction"
     if any(marker in lower for marker in _CAUSAL_INTERVENTION_MARKERS):
+        return "support"
+    if _PAIRED_VARIANT_PATTERN.search(lower):
         return "support"
     if any(marker in lower for marker in _CAUSAL_CONTRADICTION_MARKERS):
         return "contradiction"
@@ -1694,6 +1973,16 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         dimension = (
             explicit_dimension if explicit_dimension in DIMENSIONS else "unknown"
         )
+        observed_dimension = str(
+            raw.get("observed_dimension") or dimension
+        ).strip().lower()
+        if observed_dimension not in DIMENSIONS:
+            observed_dimension = dimension
+        causal_dimension = str(
+            raw.get("causal_dimension") or "unknown"
+        ).strip().lower()
+        if causal_dimension not in DIMENSIONS:
+            causal_dimension = "unknown"
         dimension_origin = (
             supplied_origin if dimension != "unknown" else "unknown"
         )
@@ -1701,10 +1990,20 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         has_explicit_dimension = (
             explicit_dimension in DIMENSIONS and explicit_dimension != "unknown"
         )
-        dimension = (
+        observed_dimension = (
             explicit_dimension
             if has_explicit_dimension
             else infer_evidence_dimension(statement, structured_context)
+        )
+        causal_dimension = (
+            explicit_dimension
+            if has_explicit_dimension
+            else infer_causal_dimension(statement, structured_context)
+        )
+        dimension = (
+            causal_dimension
+            if causal_dimension != "unknown"
+            else observed_dimension
         )
         dimension_origin = (
             "explicit"
@@ -1716,6 +2015,33 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
     kind = str(raw.get("kind") or "observation").strip().lower()
     if kind not in {"observation", "experiment", "artifact", "metric"}:
         kind = "observation"
+    lower_statement = statement.lower()
+    if (
+        causal_dimension == "unknown"
+        and observed_dimension != "unknown"
+        and kind == "experiment"
+        and any(marker in lower_statement for marker in _CAUSAL_INTERVENTION_MARKERS)
+        and not any(marker in lower_statement for marker in _BROAD_INTERVENTION_MARKERS)
+    ):
+        causal_dimension = observed_dimension
+        dimension = causal_dimension
+    lifecycle = str(raw.get("evidence_lifecycle") or "").strip().lower()
+    if lifecycle not in {"observed_result", "planned_measurement"}:
+        lifecycle = _evidence_lifecycle(statement)
+    intervention_scope = str(raw.get("intervention_scope") or "").strip().lower()
+    if intervention_scope not in {"none", "component", "boundary", "broad"}:
+        intervention_scope = _intervention_scope(
+            statement,
+            causal_dimension=causal_dimension,
+            lifecycle=lifecycle,
+            kind=kind,
+        )
+    if (
+        intervention_scope == "boundary"
+        and dimension_origin == "explicit"
+        and kind == "experiment"
+    ):
+        intervention_scope = "component"
     discriminating = bool(raw.get("discriminating"))
     provenance = _clip(raw.get("provenance") or f"unattributed:{index + 1}", 300)
     expected_state = str(evidence_value("expected_state") or "")
@@ -1746,6 +2072,14 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
             provenance=provenance,
             structured_break=structured_break,
             downstream_surface=downstream_surface,
+        )
+    if lifecycle == "planned_measurement":
+        causal_role = "context"
+    retained_comparison = str(raw.get("retained_comparison") or "").strip().lower()
+    if retained_comparison not in {"none", "stable", "changed", "incomparable"}:
+        retained_comparison = _retained_comparison_relation(
+            statement,
+            structured_context,
         )
     correlation_values = [
         *(
@@ -1784,8 +2118,13 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         "statement": statement,
         "structured_context": structured_context,
         "dimension": dimension,
+        "observed_dimension": observed_dimension,
+        "causal_dimension": causal_dimension,
         "dimension_origin": dimension_origin,
         "kind": kind,
+        "evidence_lifecycle": lifecycle,
+        "intervention_scope": intervention_scope,
+        "retained_comparison": retained_comparison,
         "provenance": provenance,
         "independence_key": _clip(raw.get("independence_key") or raw.get("provenance") or f"source:{index + 1}", 200),
         "reliability": _clamp_reliability(raw.get("reliability")),
@@ -2627,17 +2966,18 @@ def detect_baseline_drift(observations: Sequence[Mapping[str, Any]]) -> list[dic
     for item in observations:
         evidence_id = str(item.get("evidence_id") or "")
         statement = str(item.get("statement") or "").lower()
-        padded_statement = f" {statement} "
-        retained_pair = bool(
-            "retained=true" in str(item.get("structured_context") or "").lower()
-            and any(marker in padded_statement for marker in _RETAINED_BASELINE_MARKERS)
-            and any(marker in padded_statement for marker in _RETAINED_CANDIDATE_MARKERS)
-        )
-        semantic_pair = retained_pair or any(
-            re.search(pattern, statement)
-            for pattern in _SEMANTIC_BASELINE_PAIR_PATTERNS
-        )
-        if evidence_id and evidence_id not in recorded_ids and semantic_pair:
+        relation = str(item.get("retained_comparison") or "").lower()
+        if relation not in {"none", "stable", "changed", "incomparable"}:
+            relation = _retained_comparison_relation(
+                statement,
+                str(item.get("structured_context") or ""),
+            )
+        if evidence_id and evidence_id not in recorded_ids and relation == "changed":
+            explicitly_retained = bool(
+                "retained=true"
+                in str(item.get("structured_context") or "").lower()
+                or re.search(r"\bretained\b", statement)
+            )
             drift.append(
                 {
                     "comparison_key": str(
@@ -2654,24 +2994,17 @@ def detect_baseline_drift(observations: Sequence[Mapping[str, Any]]) -> list[dic
                     "evidence_ids": [evidence_id],
                     "finding_type": (
                         "retained_semantic_baseline_drift"
-                        if retained_pair
+                        if explicitly_retained
                         else "semantic_baseline_drift"
                     ),
                 }
             )
             recorded_ids.add(evidence_id)
             continue
-        comparability_gap = (
-            ("baseline" in statement and bool(item.get("attribution_gap")))
-            or any(
-                marker in statement
-                for marker in _BASELINE_COMPARABILITY_GAP_MARKERS
-            )
-        )
         if (
             not evidence_id
             or evidence_id in recorded_ids
-            or not comparability_gap
+            or relation != "incomparable"
         ):
             continue
         drift.append(
@@ -2724,6 +3057,11 @@ def _record_has_structured_break(record: Mapping[str, Any]) -> bool:
 def _is_contrastive_experiment(record: Mapping[str, Any]) -> bool:
     return bool(
         str(record.get("kind") or "") == "experiment"
+        and str(record.get("evidence_lifecycle") or "observed_result")
+        == "observed_result"
+        and str(record.get("intervention_scope") or "none")
+        in {"component", "boundary"}
+        and _evidence_owner_dimension(record) != "unknown"
         and bool(record.get("discriminating"))
         and str(record.get("causal_role") or "context") == "support"
         and not bool(record.get("attribution_gap"))
@@ -2733,6 +3071,8 @@ def _is_contrastive_experiment(record: Mapping[str, Any]) -> bool:
 def _is_coarse_reset_experiment(record: Mapping[str, Any]) -> bool:
     if str(record.get("kind") or "") != "experiment":
         return False
+    if str(record.get("intervention_scope") or "") == "broad":
+        return True
     lower = str(record.get("statement") or "").lower()
     return any(marker in lower for marker in _COARSE_RESET_EXPERIMENT_MARKERS)
 
@@ -2740,11 +3080,15 @@ def _is_coarse_reset_experiment(record: Mapping[str, Any]) -> bool:
 def _is_attribution_resolving_evidence(record: Mapping[str, Any]) -> bool:
     if bool(record.get("attribution_gap")):
         return False
+    if str(record.get("evidence_lifecycle") or "observed_result") != "observed_result":
+        return False
     if str(record.get("provenance") or "").startswith("diagnostic_probe:"):
         return True
     if str(record.get("kind") or "") != "experiment":
         return False
-    if _is_coarse_reset_experiment(record):
+    if _is_coarse_reset_experiment(record) or str(
+        record.get("intervention_scope") or "none"
+    ) == "broad":
         return False
     lower = str(record.get("statement") or "").lower()
     context = str(record.get("structured_context") or "").lower()
@@ -2780,6 +3124,36 @@ def _is_attribution_resolving_evidence(record: Mapping[str, Any]) -> bool:
         )
         or _record_has_structured_break(record)
         and bool(record.get("correlation_fingerprints"))
+    )
+
+
+def _evidence_owner_dimension(record: Mapping[str, Any]) -> str:
+    causal = str(record.get("causal_dimension") or "unknown")
+    return (
+        causal
+        if causal in DIMENSIONS and causal != "unknown"
+        else str(record.get("dimension") or "unknown")
+    )
+
+
+def _contradiction_record_compatible(
+    record: Mapping[str, Any],
+    hypothesis_dimension: str,
+) -> bool:
+    if (
+        bool(record.get("attribution_gap"))
+        or str(record.get("evidence_lifecycle") or "observed_result")
+        != "observed_result"
+    ):
+        return False
+    role = str(record.get("causal_role") or "context")
+    if role == "contradiction":
+        return True
+    owner_dimension = _evidence_owner_dimension(record)
+    return bool(
+        role == "support"
+        and str(record.get("intervention_scope") or "none") == "component"
+        and owner_dimension not in {"unknown", hypothesis_dimension}
     )
 
 
@@ -2863,7 +3237,7 @@ def _typed_probe_fallback_hypotheses(
     for record in case.get("observations") or []:
         if not isinstance(record, Mapping):
             continue
-        dimension = str(record.get("dimension") or "unknown")
+        dimension = _evidence_owner_dimension(record)
         provenance = str(record.get("provenance") or "")
         expected_edge_state = str(record.get("expected_edge_state") or "")
         actual_edge_state = str(record.get("actual_edge_state") or "")
@@ -3254,7 +3628,13 @@ def evaluate_packet(
             and str(record.get("evidence_id") or "") not in completed_result_ids
         ]
         explicit_contradict_records = [
-            evidence[value] for value in contradict_ids if value in evidence
+            evidence[value]
+            for value in contradict_ids
+            if value in evidence
+            and _contradiction_record_compatible(
+                evidence[value],
+                str(item.get("dimension") or "unknown"),
+            )
         ]
         implicit_contradict_records = [
             record
@@ -3333,14 +3713,14 @@ def evaluate_packet(
         aligned_dimension_records = [
             record
             for record in causal_support_records
-            if str(record.get("dimension") or "unknown") == hypothesis_dimension
+            if _evidence_owner_dimension(record) == hypothesis_dimension
             and hypothesis_dimension != "unknown"
         ]
         inferred_mismatch_records = [
             record
             for record in causal_support_records
             if str(record.get("dimension_origin") or "unknown") == "inferred"
-            and str(record.get("dimension") or "unknown")
+            and _evidence_owner_dimension(record)
             not in {hypothesis_dimension, "unknown"}
         ]
         dimension_alignment_weight = _independent_weight(
@@ -3640,40 +4020,24 @@ def evaluate_packet(
     elif chosen.get("status") == "refuted":
         effective_status = "rejected"
     elif (
-        requested_status == "rejected"
-        and not (
-            chosen.get("status") == "supported"
-            and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) >= 2
-            and not chosen.get("blockers")
-            and not errors
-        )
-    ):
-        effective_status = "rejected"
-    elif (
-        requested_status == "confirmed"
-        and chosen.get("status") == "supported"
-        and not errors
-        and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) >= 1
-        and not chosen.get("blockers")
-    ):
-        effective_status = "confirmed"
-    elif (
-        requested_status in {"provisional", "inconclusive", "rejected"}
-        and chosen.get("status") == "supported"
+        chosen.get("status") == "supported"
         and not errors
         and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) >= 2
         and not chosen.get("blockers")
     ):
         effective_status = "confirmed"
-        promotion_reason = (
-            "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof."
-        )
-    elif requested_status == "inconclusive":
-        effective_status = "inconclusive"
+        if requested_status != "confirmed":
+            promotion_reason = (
+                "Deterministic evidence gate promoted a cautious conclusion only after independently qualified causal proof."
+            )
     elif chosen.get("status") in {"blocked", "untested"}:
         effective_status = "inconclusive"
-    else:
+    elif chosen.get("status") == "provisional":
         effective_status = "provisional"
+    elif chosen.get("status") == "supported":
+        effective_status = "provisional"
+    else:
+        effective_status = "inconclusive"
 
     retractions: list[dict[str, Any]] = []
     if previous_report:
@@ -3916,8 +4280,13 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "statement",
         "structured_context",
         "dimension",
+        "observed_dimension",
+        "causal_dimension",
         "dimension_origin",
         "kind",
+        "evidence_lifecycle",
+        "intervention_scope",
+        "retained_comparison",
         "provenance",
         "independence_key",
         "reliability",
@@ -4142,9 +4511,15 @@ def _repair_candidate_contract(
     evidence_contracts = {
         str(item.get("evidence_id") or ""): {
             "dimension": str(item.get("dimension") or "unknown"),
+            "causal_dimension": str(item.get("causal_dimension") or "unknown"),
             "dimension_origin": str(item.get("dimension_origin") or "unknown"),
             "causal_role": str(item.get("causal_role") or "context"),
             "provenance": str(item.get("provenance") or ""),
+            "intervention_scope": str(item.get("intervention_scope") or "none"),
+            "evidence_lifecycle": str(
+                item.get("evidence_lifecycle") or "observed_result"
+            ),
+            "attribution_gap": bool(item.get("attribution_gap")),
         }
         for item in case.get("observations") or []
         if isinstance(item, Mapping) and str(item.get("evidence_id") or "")
@@ -4157,8 +4532,31 @@ def _repair_candidate_contract(
         hard_owned = (
             contract.get("dimension_origin") == "explicit"
             or str(contract.get("provenance") or "").startswith("diagnostic_probe:")
+            or contract.get("intervention_scope") == "component"
         )
-        return not hard_owned or contract.get("dimension") in {dimension, "unknown"}
+        owner = str(contract.get("causal_dimension") or "unknown")
+        if owner == "unknown":
+            owner = str(contract.get("dimension") or "unknown")
+        return not hard_owned or owner in {dimension, "unknown"}
+
+    def contradiction_is_compatible(evidence_id: str, dimension: str) -> bool:
+        contract = evidence_contracts.get(evidence_id)
+        if (
+            not contract
+            or contract.get("attribution_gap")
+            or contract.get("evidence_lifecycle") != "observed_result"
+        ):
+            return False
+        if contract.get("causal_role") == "contradiction":
+            return True
+        owner = str(contract.get("causal_dimension") or "unknown")
+        if owner == "unknown":
+            owner = str(contract.get("dimension") or "unknown")
+        return bool(
+            contract.get("causal_role") == "support"
+            and contract.get("intervention_scope") == "component"
+            and owner not in {"unknown", dimension}
+        )
 
     previous_by_id = {
         str(item.get("hypothesis_id") or ""): item
@@ -4226,6 +4624,15 @@ def _repair_candidate_contract(
             if aligned_support:
                 repairs.append(f"{hypothesis_id}:restored_grounded_support")
         repaired["support_evidence_ids"] = aligned_support
+        raw_contradictions = list(repaired.get("contradict_evidence_ids") or [])
+        aligned_contradictions = [
+            evidence_id
+            for evidence_id in raw_contradictions
+            if contradiction_is_compatible(str(evidence_id), dimension)
+        ]
+        if aligned_contradictions != raw_contradictions:
+            repairs.append(f"{hypothesis_id}:dropped_unqualified_contradiction")
+        repaired["contradict_evidence_ids"] = aligned_contradictions
         hypotheses.append(repaired)
 
     experiments: list[dict[str, Any]] = []
