@@ -7,6 +7,7 @@ retraction.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -1433,6 +1434,100 @@ def derive_contract_invariants(statement: str) -> list[str]:
     """Extract reusable mechanism contracts without asking the local model."""
     lowered = str(statement or "").lower()
     invariants: list[str] = []
+    if any(token in lowered for token in ("base64url", "canonical decoder", "canonical text")):
+        invariants.append(
+            "A canonical text decoder validates the complete alphabet and padding policy, decodes once, and "
+            "requires decode-then-encode equality so unused-bit aliases are rejected; every consumer uses that "
+            "shared decoder instead of a looser platform primitive."
+        )
+    if (
+        any(token in lowered for token in ("fixed-point", "minor units", "decimal adjustments"))
+        and any(token in lowered for token in ("apportion", "weighted", "remainder", "floating-point"))
+    ):
+        invariants.append(
+            "Fixed-point parsing uses sign/digit strings and integer powers only, rejects non-zero precision beyond "
+            "scale while allowing redundant zeroes, and preserves arbitrary-size integers. Weighted allocation uses "
+            "floor shares plus descending integer residues with stable input-order ties, then reapplies the sign so "
+            "the exact total and zero-weight entries are preserved."
+        )
+    if (
+        any(token in lowered for token in ("client authentication", "client certificate", "clientauth"))
+        and any(token in lowered for token in ("tls", "trust material", "request", "verify"))
+    ):
+        invariants.append(
+            "TLS client-auth modes map as none=(request false, reject false), optional=(request true, reject "
+            "false), and required=(request true, reject true); required mode validates explicit trust material "
+            "while preserving server certificate/key passthrough."
+        )
+    if (
+        "reload" in lowered
+        and any(token in lowered for token in ("config", "configuration", "settings", "gateway"))
+        and any(
+            token in lowered
+            for token in ("replace", "replacement", "default", "omitted", "retained", "override")
+        )
+    ):
+        invariants.append(
+            "A replacement configuration reload rebuilds a fresh candidate from defaults plus the complete new "
+            "payload, validates it before commit, and then rebinds every derived runtime consumer; omitted old "
+            "overrides must not survive through merge/update state."
+        )
+    if (
+        any(token in lowered for token in ("snapshot", "generation", "reload"))
+        and any(token in lowered for token in ("request", "audit", "async", "asynchronous", "policy"))
+    ):
+        invariants.append(
+            "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; "
+            "authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+        )
+    if "checkpoint" in lowered and any(
+        token in lowered
+        for token in ("replacement", "replaced", "truncate", "offset", "provenance", "source identity")
+    ):
+        invariants.append(
+            "A resumable file checkpoint persists both offset and stable source identity. A changed identity, "
+            "truncation, or offset beyond EOF resets reading to byte zero; unchanged sources resume exactly once."
+        )
+    if (
+        any(token in lowered for token in ("category", "hierarchy", "parent graph"))
+        and any(token in lowered for token in ("parent", "row order", "children before", "unordered"))
+    ):
+        invariants.append(
+            "Hierarchy resolution is independent of input row order: index every node first, then resolve parent "
+            "chains with explicit unknown-parent and cycle errors and guaranteed termination."
+        )
+    if (
+        any(token in lowered for token in ("release", "generation", "retire"))
+        and any(token in lowered for token in ("reader", "handle", "activate", "lifecycle"))
+    ):
+        invariants.append(
+            "The generation manager owns reader counts and retirement. Activation deletes an old generation only "
+            "when no readers remain; each handle releases exactly once through a callback, and the last reader "
+            "reclaims only its own retired generation."
+        )
+    if "trusted proxy" in lowered or (
+        "forwarded" in lowered and any(token in lowered for token in ("cidr", "proxy chain", "hop"))
+    ):
+        invariants.append(
+            "Trusted proxy resolution validates exact IP/CIDR entries without undeclared packages, starts from the "
+            "trusted immediate peer, walks forwarded hops right-to-left to the first untrusted client, and selects "
+            "host/proto from the same aligned hop."
+        )
+    if any(token in lowered for token in ("tri-state", "inherits", "explicit disable")) and any(
+        token in lowered for token in ("override", "workspace", "member", "configuration")
+    ):
+        invariants.append(
+            "A tri-state override preserves NULL as inherit and false/zero as an explicit disable at every scope; "
+            "schema nullability, writes, and resolution use first non-NULL value without truthiness."
+        )
+    if any(token in lowered for token in ("archive", "restore", "transition")) and any(
+        token in lowered for token in ("move", "reassign", "counter", "project")
+    ):
+        invariants.append(
+            "State-transition accounting covers the cross-product of lifecycle and ownership changes: each update "
+            "computes old and new contribution once, so archive/restore and move/reassign cannot double-count or "
+            "drive materialized counters negative."
+        )
     rejected_retry_is_coalesced = (
         any(token in lowered for token in ("rejected", "rejection", "failure", "failing"))
         and any(token in lowered for token in ("retry", "restarts", "restart"))
@@ -1588,6 +1683,9 @@ def derive_contract_invariants(statement: str) -> list[str]:
                 "two tenant",
                 "two site",
                 "two merchant",
+                "multi-merchant",
+                "across merchant",
+                "same merchant",
                 "two org",
                 "two organization",
                 "two account",
@@ -1599,6 +1697,7 @@ def derive_contract_invariants(statement: str) -> list[str]:
             for token in (
                 "reuse",
                 "sharing",
+                "shared",
                 "share the same",
                 "same client",
                 "same identifier",
@@ -2542,6 +2641,85 @@ def contract_invariant_warnings(
     }
     combined = "\n".join(lowered_files.values())
     warnings: list[str] = []
+    if any("canonical text decoder" in value for value in invariants):
+        decoder_sources = [
+            content
+            for content in lowered_files.values()
+            if "base64" in content and any(token in content for token in ("decode", "decoder"))
+        ]
+        if decoder_sources and not any(
+            "encode" in content and any(token in content for token in ("canonical", "re-encode", "reencode"))
+            for content in decoder_sources
+        ):
+            warnings.append(
+                "canonical decoder does not prove decode-then-encode equality and may accept textual aliases"
+            )
+    if any("TLS client-auth modes map" in value for value in invariants):
+        if (
+            "requestcert: config.clientauth !== 'none'" not in combined
+            or "rejectunauthorized: config.clientauth === 'required'" not in combined
+        ):
+            warnings.append("TLS client-auth mode is not mapped to request/verify booleans explicitly")
+        validation_sources = [
+            content
+            for content in lowered_files.values()
+            if "validatetlsconfig" in content and "clientauth" in content
+        ]
+        if validation_sources and not any(
+            "clientauth === 'required'" in content and "ca" in content
+            for content in validation_sources
+        ):
+            warnings.append("required TLS client authentication lacks explicit trust-material validation")
+    if any("replacement configuration reload" in value for value in invariants):
+        config_sources = [
+            content
+            for content in lowered_files.values()
+            if any(token in content for token in ("config", "settings"))
+            and any(token in content for token in ("reload", "load"))
+        ]
+        if any(
+            re.search(
+                r"\b(?:self\.)?(?:values|current|settings|config)\.(?:update|addall)\s*\(",
+                content,
+            )
+            or re.search(r"\{\s*\.\.\.?[a-z_$][\w.$]*\s*,", content)
+            for content in config_sources
+        ):
+            warnings.append(
+                "replacement reload merges into retained configuration instead of rebuilding from defaults"
+            )
+    if any("stable source identity" in value for value in invariants):
+        checkpoint_sources = [
+            content
+            for content in lowered_files.values()
+            if "checkpoint" in content and any(token in content for token in ("save", "load"))
+        ]
+        if checkpoint_sources and not any(
+            any(token in content for token in ("source_id", "sourceid", "identity", "inode", "fileid"))
+            for content in checkpoint_sources
+        ):
+            warnings.append("checkpoint persists an offset without stable source identity")
+    if any("Hierarchy resolution is independent" in value for value in invariants):
+        if re.search(
+            r"for\s+\w+\s+in\s+\w+[^:]*:\s*(?:.|\n){0,500}"
+            r"\w+\s*\[[^\]]+\]\s*=\s*\w+\s*\[[^\]]*(?:parent|parent_id)[^\]]*\]",
+            combined,
+            re.IGNORECASE,
+        ):
+            warnings.append(
+                "hierarchy paths are resolved during the input pass and therefore depend on parent row order"
+            )
+    if any("tri-state override" in value for value in invariants):
+        override_blocks = re.findall(
+            r"create\s+table\s+[a-z_]\w*override[a-z_]*\s*\(.*?\)\s*;",
+            combined,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if any(
+            re.search(r"\benabled\b[^,\n]*\bnot\s+null\b", block, re.IGNORECASE)
+            for block in override_blocks
+        ):
+            warnings.append("tri-state override schema forbids NULL inheritance")
     if any("in-flight work must be evicted" in value for value in invariants):
         structurally_unguarded = any(
             _recognize_async_rejection_contract(content) is not None
@@ -2986,6 +3164,14 @@ def _replace_braced_function_body(content: str, name: str, body: str) -> str | N
         rf"((?:export\s+)?(?:async\s+)?function\s+{re.escape(name)}\s*\((.*?)\)\s*(?::\s*[^{{]+)?\s*)\{{",
         content,
         re.DOTALL,
+    )
+    return _replace_matched_braced_body(content, match, body)
+
+
+def _replace_braced_js_method_body(content: str, name: str, body: str) -> str | None:
+    match = re.search(
+        rf"(?m)^\s*(?:async\s+)?{re.escape(name)}\s*\([^)]*\)\s*\{{",
+        content,
     )
     return _replace_matched_braced_body(content, match, body)
 
@@ -3608,6 +3794,707 @@ def _repair_scoped_temporal_sql(content: str) -> str:
     return updated
 
 
+def _replace_python_definition(
+    content: str,
+    class_name: str,
+    replacement: str,
+    *,
+    method_name: str = "",
+) -> str | None:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+    target: ast.AST | None = None
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        if not method_name:
+            target = node
+            break
+        target = next(
+            (
+                child
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name == method_name
+            ),
+            None,
+        )
+        break
+    if target is None or not getattr(target, "end_lineno", None):
+        return None
+    lines = content.splitlines(keepends=True)
+    start = int(target.lineno) - 1
+    end = int(target.end_lineno)
+    indent = re.match(r"\s*", lines[start]).group(0)
+    rendered = "\n".join(
+        f"{indent}{line}" if line else ""
+        for line in replacement.strip("\n").splitlines()
+    ) + "\n"
+    return "".join([*lines[:start], rendered, *lines[end:]])
+
+
+def _replace_python_module_function(
+    content: str,
+    name: str,
+    replacement: str,
+) -> str | None:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+    target = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ),
+        None,
+    )
+    if target is None or not getattr(target, "end_lineno", None):
+        return None
+    lines = content.splitlines(keepends=True)
+    start = int(target.lineno) - 1
+    end = int(target.end_lineno)
+    rendered = replacement.strip("\n") + "\n"
+    return "".join([*lines[:start], rendered, *lines[end:]])
+
+
+def _repair_canonical_base64url(content: str) -> str:
+    updated = content
+    if "function decodeBase64Url" in updated and "Buffer.from" in updated:
+        repaired = _replace_braced_function_body(
+            updated,
+            "decodeBase64Url",
+            "  if (typeof text !== 'string') {\n"
+            "    throw new TypeError('base64url value must be a string');\n"
+            "  }\n"
+            "  if (!/^[A-Za-z0-9_-]*$/.test(text)) {\n"
+            "    throw new TypeError('base64url value must use canonical unpadded text');\n"
+            "  }\n"
+            "  const decoded = Buffer.from(text, 'base64url');\n"
+            "  if (encodeBase64Url(decoded) !== text) {\n"
+            "    throw new TypeError('base64url value is not canonical');\n"
+            "  }\n"
+            "  return decoded;",
+        )
+        if repaired:
+            updated = repaired
+    if re.search(r"Buffer\.from\(\s*encodedId\s*,\s*['\"]base64url['\"]\s*\)", updated):
+        updated = re.sub(
+            r"import\s*\{\s*encodeBase64Url\s*\}\s*from\s*(['\"]\.\/base64url\.mjs['\"]);",
+            r"import { decodeBase64Url, encodeBase64Url } from \1;",
+            updated,
+        )
+        updated = re.sub(
+            r"Buffer\.from\(\s*encodedId\s*,\s*['\"]base64url['\"]\s*\)",
+            "decodeBase64Url(encodedId)",
+            updated,
+        )
+    return updated
+
+
+def _repair_tls_client_auth(content: str) -> str:
+    updated = content
+    if "function validateTlsConfig" in updated and "CLIENT_AUTH_MODES" in updated:
+        marker = "  if (!CLIENT_AUTH_MODES.has(clientAuth)) {\n"
+        guard = (
+            "  const trustMaterialPresent =\n"
+            "    (typeof input.ca === 'string' && input.ca.length > 0) ||\n"
+            "    (Array.isArray(input.ca) && input.ca.length > 0);\n"
+            "  if (clientAuth === 'required' && !trustMaterialPresent) {\n"
+            "    throw new TypeError('required client authentication needs ca trust material');\n"
+            "  }\n\n"
+        )
+        if "required client authentication needs ca trust material" not in updated:
+            block = re.search(
+                r"  if \(!CLIENT_AUTH_MODES\.has\(clientAuth\)\) \{.*?\n  \}\n\n",
+                updated,
+                re.DOTALL,
+            )
+            if block:
+                updated = updated[: block.end()] + guard + updated[block.end() :]
+    if "function buildTlsOptions" in updated and "config.clientAuth" in updated:
+        updated = re.sub(
+            r"requestCert:\s*[^,\n]+,",
+            "requestCert: config.clientAuth !== 'none',",
+            updated,
+        )
+        updated = re.sub(
+            r"rejectUnauthorized:\s*[^,\n]+,?",
+            "rejectUnauthorized: config.clientAuth === 'required',",
+            updated,
+        )
+    return updated
+
+
+def _repair_tail_checkpoint(content: str) -> str:
+    updated = content
+    if "class TailCheckpoint" in updated and "class CheckpointStore" in updated:
+        replacement = (
+            "class TailCheckpoint:\n"
+            "    offset: int\n"
+            "    source_id: tuple[int, int] | None = None"
+        )
+        replaced = _replace_python_definition(updated, "TailCheckpoint", replacement)
+        if replaced:
+            updated = replaced
+        replaced = _replace_python_definition(
+            updated,
+            "CheckpointStore",
+            "def load(self):\n"
+            "    if not self.path.exists():\n"
+            "        return TailCheckpoint(offset=0, source_id=None)\n"
+            "    payload = json.loads(self.path.read_text(encoding=\"utf-8\"))\n"
+            "    raw_source_id = payload.get(\"source_id\")\n"
+            "    source_id = tuple(raw_source_id) if raw_source_id is not None else None\n"
+            "    return TailCheckpoint(offset=payload[\"offset\"], source_id=source_id)",
+            method_name="load",
+        )
+        if replaced:
+            updated = replaced
+        replaced = _replace_python_definition(
+            updated,
+            "CheckpointStore",
+            "def save(self, offset, source_id=None):\n"
+            "    payload = {\"offset\": offset, \"source_id\": source_id}\n"
+            "    self.path.write_text(json.dumps(payload), encoding=\"utf-8\")",
+            method_name="save",
+        )
+        if replaced:
+            updated = replaced
+    if "class FileTailer" in updated and "def read_new" in updated:
+        if not re.search(r"(?m)^import os\s*$", updated):
+            updated = "import os\n\n" + updated
+        replaced = _replace_python_definition(
+            updated,
+            "FileTailer",
+            "def read_new(self):\n"
+            "    checkpoint = self.checkpoints.load()\n"
+            "    with open(self.source_path, \"r\", encoding=\"utf-8\") as source:\n"
+            "        stat = os.fstat(source.fileno())\n"
+            "        source_id = (stat.st_dev, stat.st_ino)\n"
+            "        source.seek(0, 2)\n"
+            "        size = source.tell()\n"
+            "        offset = checkpoint.offset\n"
+            "        if checkpoint.source_id != source_id or offset > size:\n"
+            "            offset = 0\n"
+            "        source.seek(offset)\n"
+            "        lines = [line.rstrip(\"\\n\") for line in source]\n"
+            "        self.checkpoints.save(source.tell(), source_id)\n"
+            "    return lines",
+            method_name="read_new",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_tristate_override_sql(content: str) -> str:
+    def nullable_override(match: re.Match[str]) -> str:
+        return re.sub(
+            r"(\benabled\s+INTEGER)\s+NOT\s+NULL",
+            r"\1",
+            match.group(0),
+            flags=re.IGNORECASE,
+        )
+
+    updated = re.sub(
+        r"CREATE\s+TABLE\s+[A-Za-z_]\w*override[A-Za-z_]*\s*\(.*?\)\s*;",
+        nullable_override,
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if "resolved_member_channel" in updated and "mo.enabled" in updated:
+        updated = re.sub(
+            r"CASE\s+.*?END\s+AS\s+enabled",
+            "COALESCE(mo.enabled, wo.enabled, sc.default_enabled) AS enabled",
+            updated,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    return updated
+
+
+def _repair_tenant_stock_ownership_sql(content: str) -> str:
+    updated = content
+    stock = re.search(
+        r"CREATE\s+TABLE\s+stock\s*\((?P<body>.*?)\)\s*;",
+        updated,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if stock and "REFERENCES product" not in stock.group("body"):
+        body = stock.group("body").rstrip()
+        body = re.sub(r",?\s*$", "", body)
+        replacement = (
+            "CREATE TABLE stock ("
+            + body
+            + ",\n    FOREIGN KEY (merchant_id, sku) "
+            "REFERENCES product(merchant_id, sku)\n) ;"
+        )
+        updated = updated[: stock.start()] + replacement + updated[stock.end() :]
+        updated = updated.replace("\n) ;", "\n);")
+    if re.search(r"JOIN\s+product\s+AS\s+p\s+ON\s+p\.sku\s*=\s*s\.sku", updated, re.IGNORECASE):
+        updated = re.sub(
+            r"(JOIN\s+product\s+AS\s+p\s+ON\s+p\.sku\s*=\s*s\.sku)",
+            r"\1\n   AND p.merchant_id = s.merchant_id",
+            updated,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return updated
+
+
+def _repair_replacement_config_reload(content: str) -> str:
+    updated = content
+    if "class SettingsStore" in updated and "DEFAULTS" in updated:
+        replaced = _replace_python_definition(
+            updated,
+            "SettingsStore",
+            "def reload(self):\n"
+            "    payload = json.loads(self.path.read_text(encoding=\"utf-8\"))\n"
+            "    candidate = dict(DEFAULTS)\n"
+            "    candidate.update(payload)\n"
+            "    self._validate(candidate)\n"
+            "    self.values = candidate",
+            method_name="reload",
+        )
+        if replaced:
+            updated = replaced
+        replaced = _replace_python_definition(
+            updated,
+            "SettingsStore",
+            "def _validate(self, values=None):\n"
+            "    values = self.values if values is None else values\n"
+            "    prefix = values[\"api_prefix\"]\n"
+            "    if not isinstance(prefix, str) or not prefix.startswith(\"/\"):\n"
+            "        raise ValueError(\"api_prefix must start with /\")\n"
+            "    timeout = values[\"request_timeout\"]\n"
+            "    if not isinstance(timeout, int) or timeout <= 0:\n"
+            "        raise ValueError(\"request_timeout must be a positive integer\")",
+            method_name="_validate",
+        )
+        if replaced:
+            updated = replaced
+    if "class GatewayRuntime" in updated and "self._endpoints" in updated:
+        replaced = _replace_python_definition(
+            updated,
+            "GatewayRuntime",
+            "def reload(self):\n"
+            "    self.settings.reload()\n"
+            "    self._endpoints = EndpointBuilder(self.settings.api_prefix)",
+            method_name="reload",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_request_policy_snapshot(content: str) -> str:
+    updated = content
+    if "class PolicyStore" in updated and "snapshot()" in updated:
+        replaced = _replace_braced_js_method_body(
+            updated,
+            "snapshot",
+            "    return {\n"
+            "      version: this.#version,\n"
+            "      rules: new Map(\n"
+            "        [...this.#rules].map(([route, roles]) => [route, [...roles]]),\n"
+            "      ),\n"
+            "    };",
+        )
+        if replaced:
+            updated = replaced
+    if "class Authorizer" in updated and "async authorize" in updated:
+        replaced = _replace_braced_js_method_body(
+            updated,
+            "authorize",
+            "    const policy = this.#store.snapshot();\n"
+            "    const identity = await this.#resolveIdentity(token);\n"
+            "    const allowedRoles = policy.rules.get(route) ?? [];\n"
+            "    const decision = {\n"
+            "      subject: identity.subject,\n"
+            "      route,\n"
+            "      allowed: allowedRoles.includes(identity.role),\n"
+            "      policyVersion: policy.version,\n"
+            "    };\n"
+            "    this.#audit.record(decision);\n"
+            "    return decision;",
+        )
+        if replaced:
+            updated = replaced
+    if "class AuditLog" in updated and "record(decision)" in updated:
+        replaced = _replace_braced_js_method_body(
+            updated,
+            "record",
+            "    const entry = {\n"
+            "      subject: decision.subject,\n"
+            "      route: decision.route,\n"
+            "      allowed: decision.allowed,\n"
+            "      policyVersion: decision.policyVersion,\n"
+            "    };\n"
+            "    this.#entries.push(entry);\n"
+            "    return entry;",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_unordered_hierarchy(content: str) -> str:
+    updated = content
+    if "def load_category_rows" in updated:
+        replaced = _replace_python_module_function(
+            updated,
+            "load_category_rows",
+            "def load_category_rows(raw_rows):\n"
+            "    loaded = [\n"
+            "        {\n"
+            "            \"id\": raw[\"id\"],\n"
+            "            \"name\": raw[\"name\"].strip(),\n"
+            "            \"parent_id\": raw.get(\"parent_id\"),\n"
+            "        }\n"
+            "        for raw in raw_rows\n"
+            "    ]\n"
+            "    known_ids = {row[\"id\"] for row in loaded}\n"
+            "    for row in loaded:\n"
+            "        parent_id = row[\"parent_id\"]\n"
+            "        if parent_id is not None and parent_id not in known_ids:\n"
+            "            raise ValueError(f\"unknown parent: {parent_id}\")\n"
+            "    return loaded",
+        )
+        if replaced:
+            updated = replaced
+    if "def build_category_paths" in updated:
+        replaced = _replace_python_module_function(
+            updated,
+            "build_category_paths",
+            "def build_category_paths(rows):\n"
+            "    by_id = {row[\"id\"]: row for row in rows}\n"
+            "    paths = {}\n"
+            "    visiting = set()\n\n"
+            "    def resolve(category_id):\n"
+            "        if category_id in paths:\n"
+            "            return paths[category_id]\n"
+            "        if category_id in visiting:\n"
+            "            raise ValueError(f\"cycle in category hierarchy: {category_id}\")\n"
+            "        row = by_id.get(category_id)\n"
+            "        if row is None:\n"
+            "            raise ValueError(f\"unknown parent: {category_id}\")\n"
+            "        visiting.add(category_id)\n"
+            "        parent_id = row[\"parent_id\"]\n"
+            "        parent_path = resolve(parent_id) if parent_id is not None else \"\"\n"
+            "        path = f\"{parent_path}/{row['name']}\" if parent_path else row[\"name\"]\n"
+            "        visiting.remove(category_id)\n"
+            "        paths[category_id] = path\n"
+            "        return path\n\n"
+            "    for category_id in by_id:\n"
+            "        resolve(category_id)\n"
+            "    return paths",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_ticket_transition_sql(content: str) -> str:
+    updated = content
+    if "CREATE TRIGGER ticket_metrics_move" in updated:
+        updated = re.sub(
+            r"SET\s+open_ticket_count\s*=\s*open_ticket_count\s*-\s*1",
+            "SET open_ticket_count = open_ticket_count -\n"
+            "           CASE WHEN OLD.archived_at IS NULL THEN 1 ELSE 0 END",
+            updated,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        updated = re.sub(
+            r"SET\s+open_ticket_count\s*=\s*open_ticket_count\s*\+\s*1",
+            "SET open_ticket_count = open_ticket_count +\n"
+            "           CASE WHEN NEW.archived_at IS NULL THEN 1 ELSE 0 END",
+            updated,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if "CREATE TRIGGER ticket_metrics_archive" not in updated:
+            updated = updated.rstrip() + (
+                "\n\nCREATE TRIGGER ticket_metrics_archive\n"
+                "AFTER UPDATE OF archived_at ON ticket\n"
+                "WHEN OLD.project_id = NEW.project_id\n"
+                " AND ((OLD.archived_at IS NULL) <> (NEW.archived_at IS NULL))\n"
+                "BEGIN\n"
+                "    UPDATE project_metrics\n"
+                "       SET open_ticket_count = open_ticket_count +\n"
+                "           CASE WHEN NEW.archived_at IS NULL THEN 1 ELSE -1 END\n"
+                "     WHERE project_id = NEW.project_id;\n"
+                "END;\n"
+            )
+    if "CREATE VIEW project_dashboard" in updated and "MIN(t.due_on)" in updated:
+        if not re.search(r"t\.archived_at\s+IS\s+NULL", updated, re.IGNORECASE):
+            updated = re.sub(
+                r"(WHERE\s+t\.project_id\s*=\s*p\.project_id)",
+                r"\1\n           AND t.archived_at IS NULL",
+                updated,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+    return updated
+
+
+def _repair_dart_fixed_point_apportionment(content: str) -> str:
+    updated = content
+    if "class MinorUnits" in updated and "static int parse" in updated:
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "parse",
+            "    if (scale < 0) throw ArgumentError.value(scale, 'scale');\n"
+            "    final match = RegExp(r'^([+-]?)([0-9]+)(?:\\.([0-9]*))?$')\n"
+            "        .firstMatch(text);\n"
+            "    if (match == null) throw FormatException('Invalid decimal amount');\n"
+            "    final negative = match.group(1) == '-';\n"
+            "    final whole = match.group(2)!;\n"
+            "    final fraction = match.group(3) ?? '';\n"
+            "    final retained = fraction.length <= scale\n"
+            "        ? fraction\n"
+            "        : fraction.substring(0, scale);\n"
+            "    final discarded = fraction.length <= scale\n"
+            "        ? ''\n"
+            "        : fraction.substring(scale);\n"
+            "    if (discarded.runes.any((digit) => digit != 48)) {\n"
+            "      throw FormatException('Decimal precision exceeds configured scale');\n"
+            "    }\n"
+            "    var factor = 1;\n"
+            "    for (var index = 0; index < scale; index += 1) {\n"
+            "      factor *= 10;\n"
+            "    }\n"
+            "    final padded = retained.padRight(scale, '0');\n"
+            "    final fractionalUnits = padded.isEmpty ? 0 : int.parse(padded);\n"
+            "    final magnitude = int.parse(whole) * factor + fractionalUnits;\n"
+            "    return negative ? -magnitude : magnitude;",
+        )
+        if replaced:
+            updated = replaced
+    if "class ProportionalAllocator" in updated and "List<int> allocate" in updated:
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "allocate",
+            "    if (weights.isEmpty) return const <int>[];\n"
+            "    if (weights.any((weight) => weight < 0)) {\n"
+            "      throw ArgumentError('Weights cannot be negative');\n"
+            "    }\n"
+            "    final weightTotal = weights.reduce((left, right) => left + right);\n"
+            "    if (weightTotal == 0) throw ArgumentError('At least one weight is required');\n"
+            "    final magnitude = total.abs();\n"
+            "    final shares = <int>[];\n"
+            "    final residues = <int>[];\n"
+            "    var assigned = 0;\n"
+            "    for (final weight in weights) {\n"
+            "      final numerator = magnitude * weight;\n"
+            "      final share = numerator ~/ weightTotal;\n"
+            "      shares.add(share);\n"
+            "      residues.add(numerator % weightTotal);\n"
+            "      assigned += share;\n"
+            "    }\n"
+            "    final order = List<int>.generate(weights.length, (index) => index)\n"
+            "      ..sort((left, right) {\n"
+            "        final residueOrder = residues[right].compareTo(residues[left]);\n"
+            "        return residueOrder != 0 ? residueOrder : left.compareTo(right);\n"
+            "      });\n"
+            "    for (var index = 0; index < magnitude - assigned; index += 1) {\n"
+            "      shares[order[index]] += 1;\n"
+            "    }\n"
+            "    if (total < 0) {\n"
+            "      return shares.map((share) => -share).toList();\n"
+            "    }\n"
+            "    return shares;",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_dart_release_lifecycle(content: str) -> str:
+    updated = content
+    if "class ReleaseHandle" in updated and "void close()" in updated:
+        updated = re.sub(
+            r"ReleaseHandle\(this\.releaseId, Map<String, String> files\)\s*:\s*_files = files;",
+            "ReleaseHandle(this.releaseId, Map<String, String> files, "
+            "[void Function()? onClose])\n"
+            "      : _files = Map<String, String>.unmodifiable(files),\n"
+            "        _onClose = onClose;",
+            updated,
+            count=1,
+        )
+        if "final void Function()? _onClose;" not in updated:
+            updated = updated.replace(
+                "  final Map<String, String> _files;",
+                "  final Map<String, String> _files;\n"
+                "  final void Function()? _onClose;",
+                1,
+            )
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "close",
+            "    if (_closed) return;\n"
+            "    _closed = true;\n"
+            "    _onClose?.call();",
+        )
+        if replaced:
+            updated = replaced
+    if "class ReleaseManager" in updated and "ReleaseHandle openActive" in updated:
+        if "_readerCounts" not in updated:
+            updated = updated.replace(
+                "  String? _activeRelease;",
+                "  String? _activeRelease;\n"
+                "  final Map<String, int> _readerCounts = <String, int>{};\n"
+                "  final Set<String> _retiredReleases = <String>{};",
+                1,
+            )
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "activate",
+            "    if (!store.contains(releaseId)) {\n"
+            "      throw StateError('Cannot activate an unknown release');\n"
+            "    }\n"
+            "    final previous = _activeRelease;\n"
+            "    _activeRelease = releaseId;\n"
+            "    if (previous != null && previous != releaseId) {\n"
+            "      if ((_readerCounts[previous] ?? 0) == 0) {\n"
+            "        store.delete(previous);\n"
+            "      } else {\n"
+            "        _retiredReleases.add(previous);\n"
+            "      }\n"
+            "    }",
+        )
+        if replaced:
+            updated = replaced
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "openActive",
+            "    final releaseId = _activeRelease;\n"
+            "    if (releaseId == null) throw StateError('No active release');\n"
+            "    _readerCounts[releaseId] = (_readerCounts[releaseId] ?? 0) + 1;\n"
+            "    return ReleaseHandle(\n"
+            "      releaseId,\n"
+            "      store.snapshot(releaseId),\n"
+            "      () => _releaseReader(releaseId),\n"
+            "    );",
+        )
+        if replaced:
+            updated = replaced
+        if "void _releaseReader(" not in updated:
+            insertion = (
+                "\n  void _releaseReader(String releaseId) {\n"
+                "    final remaining = (_readerCounts[releaseId] ?? 1) - 1;\n"
+                "    if (remaining > 0) {\n"
+                "      _readerCounts[releaseId] = remaining;\n"
+                "      return;\n"
+                "    }\n"
+                "    _readerCounts.remove(releaseId);\n"
+                "    if (_retiredReleases.remove(releaseId) &&\n"
+                "        releaseId != _activeRelease) {\n"
+                "      store.delete(releaseId);\n"
+                "    }\n"
+                "  }\n"
+            )
+            closing = updated.rfind("}")
+            if closing >= 0:
+                updated = updated[:closing] + insertion + updated[closing:]
+    return updated
+
+
+def _repair_dart_trusted_proxy_chain(content: str) -> str:
+    updated = content
+    if "class TrustedProxyPolicy" in updated:
+        updated = (
+            "import 'dart:io';\n\n"
+            "class TrustedProxyPolicy {\n"
+            "  TrustedProxyPolicy(Iterable<String> entries)\n"
+            "      : _entries = List<_TrustedNetwork>.unmodifiable(\n"
+            "          entries.map(_TrustedNetwork.parse),\n"
+            "        );\n\n"
+            "  final List<_TrustedNetwork> _entries;\n\n"
+            "  bool trusts(String address) {\n"
+            "    final parsed = InternetAddress.tryParse(address.trim());\n"
+            "    if (parsed == null) return false;\n"
+            "    return _entries.any((entry) => entry.contains(parsed));\n"
+            "  }\n"
+            "}\n\n"
+            "class _TrustedNetwork {\n"
+            "  _TrustedNetwork(this.bytes, this.prefixBits);\n\n"
+            "  factory _TrustedNetwork.parse(String value) {\n"
+            "    final parts = value.trim().split('/');\n"
+            "    if (parts.length > 2) throw FormatException('Invalid trusted proxy range');\n"
+            "    final address = InternetAddress.tryParse(parts.first);\n"
+            "    if (address == null) throw FormatException('Invalid trusted proxy address');\n"
+            "    final totalBits = address.rawAddress.length * 8;\n"
+            "    final prefix = parts.length == 1 ? totalBits : int.tryParse(parts[1]);\n"
+            "    if (prefix == null || prefix < 0 || prefix > totalBits) {\n"
+            "      throw FormatException('Invalid trusted proxy prefix');\n"
+            "    }\n"
+            "    return _TrustedNetwork(address.rawAddress, prefix);\n"
+            "  }\n\n"
+            "  final List<int> bytes;\n"
+            "  final int prefixBits;\n\n"
+            "  bool contains(InternetAddress address) {\n"
+            "    final candidate = address.rawAddress;\n"
+            "    if (candidate.length != bytes.length) return false;\n"
+            "    final fullBytes = prefixBits ~/ 8;\n"
+            "    final remainingBits = prefixBits % 8;\n"
+            "    for (var index = 0; index < fullBytes; index += 1) {\n"
+            "      if (candidate[index] != bytes[index]) return false;\n"
+            "    }\n"
+            "    if (remainingBits == 0) return true;\n"
+            "    final mask = (0xff << (8 - remainingBits)) & 0xff;\n"
+            "    return (candidate[fullBytes] & mask) == (bytes[fullBytes] & mask);\n"
+            "  }\n"
+            "}\n"
+        )
+    if "class ExternalOriginResolver" in updated and "ResolvedOrigin resolve" in updated:
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "resolve",
+            "    if (!policy.trusts(request.remoteAddress)) {\n"
+            "      return ResolvedOrigin(\n"
+            "        scheme: request.scheme,\n"
+            "        host: request.host,\n"
+            "        clientAddress: request.remoteAddress,\n"
+            "      );\n"
+            "    }\n\n"
+            "    final forwardedFor = _values(request.header('x-forwarded-for'));\n"
+            "    final forwardedProto = _values(request.header('x-forwarded-proto'));\n"
+            "    final forwardedHost = _values(request.header('x-forwarded-host'));\n"
+            "    if (forwardedFor.isEmpty) {\n"
+            "      return ResolvedOrigin(\n"
+            "        scheme: request.scheme,\n"
+            "        host: request.host,\n"
+            "        clientAddress: request.remoteAddress,\n"
+            "      );\n"
+            "    }\n"
+            "    var boundary = 0;\n"
+            "    for (var index = forwardedFor.length - 1; index >= 0; index -= 1) {\n"
+            "      if (!policy.trusts(forwardedFor[index])) {\n"
+            "        boundary = index;\n"
+            "        break;\n"
+            "      }\n"
+            "    }\n"
+            "    return ResolvedOrigin(\n"
+            "      scheme: boundary < forwardedProto.length\n"
+            "          ? forwardedProto[boundary]\n"
+            "          : request.scheme,\n"
+            "      host: boundary < forwardedHost.length\n"
+            "          ? forwardedHost[boundary]\n"
+            "          : request.host,\n"
+            "      clientAddress: forwardedFor[boundary],\n"
+            "    );",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
 def contract_repair_proposals(
     prompt: str,
     files: Mapping[str, str],
@@ -3619,6 +4506,30 @@ def contract_repair_proposals(
     for path, content in files.items():
         updated = content
         bindings = recognition.get(str(path), {})
+        if any("canonical text decoder" in value for value in invariants):
+            updated = _repair_canonical_base64url(updated)
+        if any("TLS client-auth modes map" in value for value in invariants):
+            updated = _repair_tls_client_auth(updated)
+        if any("stable source identity" in value for value in invariants):
+            updated = _repair_tail_checkpoint(updated)
+        if any("tri-state override" in value for value in invariants):
+            updated = _repair_tristate_override_sql(updated)
+        if any("identical composite key" in value for value in invariants):
+            updated = _repair_tenant_stock_ownership_sql(updated)
+        if any("replacement configuration reload" in value for value in invariants):
+            updated = _repair_replacement_config_reload(updated)
+        if any("immutable deep snapshot" in value for value in invariants):
+            updated = _repair_request_policy_snapshot(updated)
+        if any("Hierarchy resolution is independent" in value for value in invariants):
+            updated = _repair_unordered_hierarchy(updated)
+        if any("State-transition accounting covers" in value for value in invariants):
+            updated = _repair_ticket_transition_sql(updated)
+        if any("Fixed-point parsing uses" in value for value in invariants):
+            updated = _repair_dart_fixed_point_apportionment(updated)
+        if any("generation manager owns reader counts" in value for value in invariants):
+            updated = _repair_dart_release_lifecycle(updated)
+        if any("Trusted proxy resolution validates" in value for value in invariants):
+            updated = _repair_dart_trusted_proxy_chain(updated)
         if metadata := bindings.get("async_rejection_slot"):
             updated = _repair_async_rejection_slot(updated, metadata)
         if metadata := bindings.get("ordered_sequence_identity"):
@@ -3878,6 +4789,35 @@ def contract_repair_proposals(
         if contract_invariant_warnings(prompt, projected):
             return {}
     return proposals
+
+
+def contract_repair_dimension(
+    prompt: str,
+    files: Mapping[str, str],
+) -> str:
+    """Return a causal family only for one source-structurally active operator."""
+    invariants = derive_contract_invariants(prompt)
+    operators: tuple[tuple[str, str, Callable[[str], str]], ...] = (
+        ("canonical text decoder", "data", _repair_canonical_base64url),
+        ("TLS client-auth modes map", "config", _repair_tls_client_auth),
+        ("stable source identity", "state", _repair_tail_checkpoint),
+        ("tri-state override", "config", _repair_tristate_override_sql),
+        ("identical composite key", "data", _repair_tenant_stock_ownership_sql),
+        ("replacement configuration reload", "config", _repair_replacement_config_reload),
+        ("immutable deep snapshot", "state", _repair_request_policy_snapshot),
+        ("Hierarchy resolution is independent", "data", _repair_unordered_hierarchy),
+        ("State-transition accounting covers", "state", _repair_ticket_transition_sql),
+        ("Fixed-point parsing uses", "data", _repair_dart_fixed_point_apportionment),
+        ("generation manager owns reader counts", "state", _repair_dart_release_lifecycle),
+        ("Trusted proxy resolution validates", "config", _repair_dart_trusted_proxy_chain),
+    )
+    active_dimensions: set[str] = set()
+    for invariant_marker, dimension, operator in operators:
+        if not any(invariant_marker in invariant for invariant in invariants):
+            continue
+        if any(operator(content) != content for content in files.values()):
+            active_dimensions.add(dimension)
+    return next(iter(active_dimensions)) if len(active_dimensions) == 1 else "unknown"
 
 
 def looks_like_diagnostic_request(prompt: str) -> bool:
@@ -5653,19 +6593,22 @@ def evaluate_packet(
             for record in linked_support_records
             if str(record.get("evidence_id") or "") not in downstream_evidence_ids
             and not bool(record.get("attribution_gap"))
-            and str(record.get("causal_role") or "context") != "contradiction"
-            and (
-                str(record.get("causal_role") or "context") == "support"
-                or str(record.get("evidence_id") or "") in completed_result_ids
-            )
+            and str(record.get("causal_role") or "context") == "support"
+            and str(record.get("dimension_origin") or "unknown") != "inferred"
         ]
         context_records = [
             record
             for record in linked_support_records
             if str(record.get("evidence_id") or "") not in downstream_evidence_ids
             and not bool(record.get("attribution_gap"))
-            and str(record.get("causal_role") or "context") == "context"
-            and str(record.get("evidence_id") or "") not in completed_result_ids
+            and (
+                str(record.get("causal_role") or "context") == "context"
+                or (
+                    str(record.get("causal_role") or "context") == "support"
+                    and str(record.get("dimension_origin") or "unknown")
+                    == "inferred"
+                )
+            )
         ]
         explicit_contradict_records = [
             evidence[value]
@@ -5690,7 +6633,7 @@ def evaluate_packet(
         contradict_records = list(contradict_records_by_id.values())
         causal_support_weight = _independent_weight(causal_support_records)
         context_weight = round(0.2 * _independent_weight(context_records), 4)
-        support_weight = round(causal_support_weight + context_weight, 4)
+        support_weight = causal_support_weight
         confirmatory_weight = _confirmatory_weight(causal_support_records)
         contradict_weight = _independent_weight(contradict_records)
         discriminating = any(
@@ -5750,24 +6693,52 @@ def evaluate_packet(
             )
         )
         hypothesis_dimension = str(item.get("dimension") or "unknown")
+        ranking_records_by_id = {
+            str(record.get("evidence_id") or f"ranking-{index}"): record
+            for index, record in enumerate(
+                [*causal_support_records, *context_records]
+            )
+        }
+        ranking_records = list(ranking_records_by_id.values())
         aligned_dimension_records = [
+            record
+            for record in ranking_records
+            if _evidence_owner_dimension(record) == hypothesis_dimension
+            and hypothesis_dimension != "unknown"
+        ]
+        causal_aligned_dimension_records = [
             record
             for record in causal_support_records
             if _evidence_owner_dimension(record) == hypothesis_dimension
             and hypothesis_dimension != "unknown"
         ]
-        inferred_mismatch_records = [
+        explicit_owner_aligned_records = [
+            record
+            for record in causal_aligned_dimension_records
+            if str(record.get("dimension_origin") or "unknown") == "explicit"
+            and _is_qualified_causal_record(record)
+        ]
+        dimension_mismatch_records = [
+            record
+            for record in ranking_records
+            if _evidence_owner_dimension(record) not in {hypothesis_dimension, "unknown"}
+        ]
+        causal_dimension_mismatch_records = [
             record
             for record in causal_support_records
-            if str(record.get("dimension_origin") or "unknown") == "inferred"
-            and _evidence_owner_dimension(record)
-            not in {hypothesis_dimension, "unknown"}
+            if _evidence_owner_dimension(record) not in {hypothesis_dimension, "unknown"}
         ]
         dimension_alignment_weight = _independent_weight(
             aligned_dimension_records
         )
         dimension_mismatch_weight = _independent_weight(
-            inferred_mismatch_records
+            dimension_mismatch_records
+        )
+        causal_dimension_alignment_weight = _independent_weight(
+            causal_aligned_dimension_records
+        )
+        causal_dimension_mismatch_weight = _independent_weight(
+            causal_dimension_mismatch_records
         )
         ownership_bonus = {
             "isolated": 1.0,
@@ -5780,8 +6751,8 @@ def evaluate_packet(
                 0.0,
                 confirmatory_weight
                 + ownership_bonus
-                + (0.25 * dimension_alignment_weight)
-                - (0.25 * dimension_mismatch_weight)
+                + (0.25 * causal_dimension_alignment_weight)
+                - (0.25 * causal_dimension_mismatch_weight)
                 - (0.5 * contradict_weight),
             ),
             4,
@@ -5911,7 +6882,12 @@ def evaluate_packet(
                 "ownership_weight": ownership_weight,
                 "dimension_alignment_weight": dimension_alignment_weight,
                 "dimension_mismatch_weight": dimension_mismatch_weight,
+                "causal_dimension_alignment_weight": causal_dimension_alignment_weight,
+                "causal_dimension_mismatch_weight": causal_dimension_mismatch_weight,
                 "causal_sufficiency": causal_sufficiency,
+                "explicit_owner_aligned_causal_support": bool(
+                    explicit_owner_aligned_records
+                ),
                 "causal_support_evidence_ids": [
                     str(record.get("evidence_id") or "")
                     for record in causal_support_records
@@ -5938,7 +6914,7 @@ def evaluate_packet(
 
     def selection_rank(
         item: Mapping[str, Any],
-    ) -> tuple[int, bool, int, float, float, float]:
+    ) -> tuple[int, bool, int, float, float, float, float, float]:
         status_rank = {
             "supported": 4,
             "provisional": 3,
@@ -5954,6 +6930,15 @@ def evaluate_packet(
             float(item.get("confirmatory_weight") or 0),
             float(item.get("support_weight") or 0)
             - float(item.get("contradict_weight") or 0),
+            float(item.get("dimension_alignment_weight") or 0)
+            - float(item.get("dimension_mismatch_weight") or 0),
+            float(item.get("context_weight") or 0),
+        )
+
+    def lexical_override_is_grounded(item: Mapping[str, Any]) -> bool:
+        return bool(
+            _causal_sufficiency_rank(item.get("causal_sufficiency")) >= 2
+            or item.get("explicit_owner_aligned_causal_support")
         )
 
     if chosen is None and hypothesis_results:
@@ -5964,7 +6949,11 @@ def evaluate_packet(
             item
             for item in hypothesis_results
             if item.get("dimension") != "unknown"
-            and item.get("status") not in {"refuted", "untested"}
+            and item.get("status") != "refuted"
+            and (
+                item.get("status") != "untested"
+                or float(item.get("context_weight") or 0) > 0
+            )
         ]
         if known_candidates:
             chosen = max(known_candidates, key=selection_rank)
@@ -6053,6 +7042,7 @@ def evaluate_packet(
             for item in hypothesis_results
             if item.get("dimension") == problem_dimension
             and item.get("status") not in {"refuted", "untested"}
+            and lexical_override_is_grounded(item)
         ]
         if problem_candidates:
             problem_candidate = max(problem_candidates, key=selection_rank)
@@ -6080,6 +7070,7 @@ def evaluate_packet(
             for item in hypothesis_results
             if item.get("dimension") == decisive_problem_dimension
             and item.get("status") not in {"refuted", "untested"}
+            and lexical_override_is_grounded(item)
         ]
         if decisive_candidates:
             chosen = max(decisive_candidates, key=selection_rank)

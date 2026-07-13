@@ -19,6 +19,9 @@ TENTH_FIXTURE_ROOT = (
 ELEVENTH_FIXTURE_ROOT = (
     Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_eleventh"
 )
+TWELFTH_FIXTURE_ROOT = (
+    Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_twelfth"
+)
 
 
 def test_fixture_manifest_keeps_hidden_oracles_out_of_cases_and_labels_evaluation_role():
@@ -325,7 +328,7 @@ def test_repair_plan_label_cannot_overwrite_accepted_causal_family():
     ]
 
 
-def test_initial_diagnosis_uses_decisive_taxonomy_over_observational_label():
+def test_initial_diagnosis_keeps_prompt_taxonomy_advisory_without_causal_evidence():
     diagnosis = {
         "report": {"conclusion": {"dimension": "code"}},
         "case": {
@@ -338,10 +341,11 @@ def test_initial_diagnosis_uses_decisive_taxonomy_over_observational_label():
 
     benchmark._initialize_accepted_diagnosis(diagnosis)
 
-    assert diagnosis["accepted_conclusion"]["dimension"] == "clock"
-    assert diagnosis["accepted_conclusion"]["stage"] == "decisive_taxonomy_gate"
+    assert diagnosis["accepted_conclusion"]["dimension"] == "code"
+    assert diagnosis["accepted_conclusion"]["stage"] == "diagnostic_judge"
     assert diagnosis["accepted_conclusion"]["accepted"] is False
     assert diagnosis["accepted_conclusion"]["causal_status"] == "working_hypothesis"
+    assert diagnosis["accepted_conclusion"]["taxonomy_advisory_dimension"] == "clock"
 
 
 def test_decisive_taxonomy_does_not_override_isolated_causal_evidence():
@@ -366,6 +370,59 @@ def test_decisive_taxonomy_does_not_override_isolated_causal_evidence():
     assert diagnosis["accepted_conclusion"]["dimension"] == "runtime"
     assert diagnosis["accepted_conclusion"]["stage"] == "diagnostic_judge"
     assert diagnosis["accepted_conclusion"]["accepted"] is True
+
+
+def test_same_family_partial_repair_progress_does_not_claim_causal_acceptance():
+    diagnosis = {
+        "report": {"conclusion": {"dimension": "state"}},
+        "accepted_conclusion": {
+            "dimension": "state",
+            "stage": "diagnostic_judge",
+            "accepted": False,
+        },
+        "diagnosis_history": [],
+    }
+
+    recorded = benchmark._accept_diagnosis_proposal(
+        diagnosis,
+        "state",
+        stage="repair_1_validated",
+        validation_evidence="one feedback contract improved while another remains red",
+    )
+
+    assert recorded is True
+    assert diagnosis["accepted_conclusion"]["accepted"] is False
+    assert diagnosis["accepted_conclusion"]["repair_progress_validated"] is True
+    assert diagnosis["accepted_conclusion"]["causal_status"] == "working_hypothesis"
+    assert diagnosis["accepted_conclusion"]["stage"] == "repair_1_validated"
+
+
+def test_prompt_contract_closure_surfaces_hidden_boundary_without_final_oracle(
+    tmp_path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "settings.py").write_text(
+        "def reload_config(payload):\n    current.update(payload)\n",
+        encoding="utf-8",
+    )
+    case = {
+        "prompt": "A replacement config reload must clear omitted overrides.",
+        "candidate_paths": ["settings.py"],
+    }
+
+    unresolved = benchmark._prompt_contract_closure(repo, case)
+
+    assert len(unresolved) == 1
+    contract_id, detail = next(iter(unresolved.items()))
+    assert contract_id.startswith("prompt_contract::")
+    assert "retained configuration" in detail
+
+    (repo / "settings.py").write_text(
+        "def reload_config(payload):\n    current = {**DEFAULTS, **payload}\n",
+        encoding="utf-8",
+    )
+    assert benchmark._prompt_contract_closure(repo, case) == {}
 
 
 def test_shadow_verdict_requires_every_case_check_not_only_high_average():
@@ -423,13 +480,16 @@ def test_multifile_edit_group_rolls_back_when_one_member_is_rejected(
     (repo / "first.py").write_text("VALUE = 1\n", encoding="utf-8")
     (repo / "second.py").write_text("VALUE = 2\n", encoding="utf-8")
 
-    def fake_edit(repo_path, selected, *_args, **_kwargs):
-        if selected == "first.py":
-            (repo_path / selected).write_text("VALUE = 10\n", encoding="utf-8")
-            return {"patch_applied": True, "warnings": []}
-        return {"patch_applied": False, "warnings": ["rejected second edit"]}
+    def fake_bundle(repo_path, paths, *_args, **_kwargs):
+        (repo_path / paths[0]).write_text("VALUE = 10\n", encoding="utf-8")
+        return {
+            "patch_applied": False,
+            "applied_files": [],
+            "satisfied_files": [],
+            "warnings": ["rejected second edit"],
+        }
 
-    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    monkeypatch.setattr(benchmark, "_apply_local_edit_bundle", fake_bundle)
     outcome = benchmark._apply_planned_edits(
         repo,
         {
@@ -446,6 +506,7 @@ def test_multifile_edit_group_rolls_back_when_one_member_is_rejected(
         [],
         1.0,
         stage_prefix="edit",
+        allow_model_recovery=False,
     )
 
     assert outcome["patch_applied"] is False
@@ -463,17 +524,16 @@ def test_multifile_edit_group_continues_past_already_satisfied_member(
     (repo / "first.py").write_text("VALUE = 10\n", encoding="utf-8")
     (repo / "second.py").write_text("VALUE = 2\n", encoding="utf-8")
 
-    def fake_edit(repo_path, selected, *_args, **_kwargs):
-        if selected == "first.py":
-            return {
-                "patch_applied": False,
-                "already_satisfied": True,
-                "warnings": ["already satisfied"],
-            }
-        (repo_path / selected).write_text("VALUE = 20\n", encoding="utf-8")
-        return {"patch_applied": True, "warnings": []}
+    def fake_bundle(repo_path, paths, *_args, **_kwargs):
+        (repo_path / paths[1]).write_text("VALUE = 20\n", encoding="utf-8")
+        return {
+            "patch_applied": True,
+            "applied_files": ["second.py"],
+            "satisfied_files": ["first.py"],
+            "warnings": [],
+        }
 
-    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    monkeypatch.setattr(benchmark, "_apply_local_edit_bundle", fake_bundle)
     outcome = benchmark._apply_planned_edits(
         repo,
         {
@@ -490,12 +550,146 @@ def test_multifile_edit_group_continues_past_already_satisfied_member(
         [],
         1.0,
         stage_prefix="edit",
+        allow_model_recovery=False,
     )
 
     assert outcome["patch_applied"] is True
     assert outcome["satisfied_files"] == ["first.py"]
     assert outcome["applied_files"] == ["second.py"]
     assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 20\n"
+
+
+def test_multifile_bundle_is_generated_once_and_applied_atomically(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    stages: list[str] = []
+
+    def fake_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        return json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "producer.py",
+                        "blocks": [{"search": "VALUE = 1", "replace": "VALUE = 2"}],
+                    },
+                    {
+                        "path": "consumer.py",
+                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Keep producer and consumer on the same generation.",
+        "local-model",
+        [],
+        1.0,
+        stage="coordinated_bundle",
+    )
+
+    assert stages == ["coordinated_bundle"]
+    assert outcome["patch_applied"] is True
+    assert outcome["applied_files"] == ["producer.py", "consumer.py"]
+    assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 2\n"
+
+
+def test_multifile_bundle_rejects_omitted_owner_without_partial_write(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        benchmark,
+        "_local_call",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "producer.py",
+                        "blocks": [{"search": "VALUE = 1", "replace": "VALUE = 2"}],
+                    }
+                ]
+            }
+        ),
+    )
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Coordinate both owners.",
+        "local-model",
+        [],
+        1.0,
+        stage="coordinated_bundle",
+    )
+
+    assert outcome["patch_applied"] is False
+    assert any("omitted required path consumer.py" in value for value in outcome["warnings"])
+    assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_base_multifile_repairs_keep_per_file_adapter_with_shared_plan_context(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    edited: list[str] = []
+
+    def fake_edit(repo_path, selected, *_args, **_kwargs):
+        edited.append(selected)
+        target = repo_path / selected
+        target.write_text(
+            target.read_text(encoding="utf-8").replace("1", "2"),
+            encoding="utf-8",
+        )
+        return {"patch_applied": True, "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_local_edit_bundle",
+        lambda *_args, **_kwargs: pytest.fail("base repair must not use compact bundle"),
+    )
+
+    outcome = benchmark._apply_planned_edits(
+        repo,
+        {
+            "prompt": "Coordinate both modules.",
+            "candidate_paths": ["producer.py", "consumer.py"],
+        },
+        {},
+        [
+            {"path": "producer.py", "description": "Update producer."},
+            {"path": "consumer.py", "description": "Update consumer."},
+        ],
+        {"report": {}},
+        "local-model",
+        [],
+        1.0,
+        stage_prefix="edit",
+        allow_model_recovery=True,
+    )
+
+    assert outcome["patch_applied"] is True
+    assert edited == ["producer.py", "consumer.py"]
 
 
 def test_optional_owner_rejection_does_not_cancel_required_sibling(
@@ -762,8 +956,16 @@ def test_plan_file_filter_drops_explicit_noop_members():
     selected = benchmark._plan_file_items(
         {
             "files": [
-                {"path": "producer.py", "description": "Copy rows defensively."},
-                {"path": "consumer.py", "description": "No changes needed in this file."},
+                {
+                    "path": "producer.py",
+                    "action": "modify",
+                    "description": "Copy rows defensively.",
+                },
+                {
+                    "path": "consumer.py",
+                    "action": "modify",
+                    "description": "No changes needed in this file.",
+                },
                 {
                     "path": "review_only.py",
                     "action": "review",
@@ -852,6 +1054,127 @@ def test_repair_review_skip_requires_complete_stable_contract_ownership():
         ["producer.py", "consumer.py"],
         evidence,
     ) is False
+
+
+def test_contract_coverage_deduplicates_pytest_error_suffix_and_accepts_unique_short_ids():
+    plan = {
+        "files": [
+            {"path": "owner.py", "action": "modify", "description": "Fix both contracts."}
+        ],
+        "contract_coverage": [
+            {
+                "contract": "test_alpha preserves provenance",
+                "owner_paths": ["owner.py"],
+                "postcondition": "Provenance survives a checkpoint round trip.",
+            },
+            {
+                "contract": "tests/test_owner.py::test_beta",
+                "owner_paths": ["owner.py"],
+                "postcondition": "Replacement input is read from its beginning.",
+            },
+        ],
+    }
+    evidence = {
+        "failed_ids": [
+            "tests/test_owner.py::test_alpha",
+            "tests/test_owner.py::test_alpha - TypeError: old signature",
+            "tests/test_owner.py::test_beta",
+        ]
+    }
+
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        plan,
+        ["owner.py"],
+        evidence,
+    ) is True
+
+
+def test_contract_coverage_count_cannot_hide_an_unmapped_failure():
+    plan = {
+        "files": [
+            {"path": "owner.py", "action": "modify", "description": "Fix alpha."}
+        ],
+        "contract_coverage": [
+            {
+                "contract": "test_alpha first assertion",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The alpha output is retained.",
+            },
+            {
+                "contract": "test_alpha second assertion",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The alpha identity is retained.",
+            },
+        ],
+    }
+
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        plan,
+        ["owner.py"],
+        {
+            "failed_ids": [
+                "tests/test_owner.py::test_alpha",
+                "tests/test_owner.py::test_beta",
+            ]
+        },
+    ) is False
+
+
+def test_prompt_contract_closure_uses_semantic_guard_not_a_fake_test_identity():
+    plan = {
+        "files": [
+            {"path": "owner.py", "action": "modify", "description": "Close the invariant."}
+        ],
+        "contract_coverage": [
+            {
+                "contract": "replacement reload boundary",
+                "owner_paths": ["owner.py"],
+                "postcondition": "Omitted overrides no longer survive a replacement reload.",
+            }
+        ],
+    }
+
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        plan,
+        ["owner.py"],
+        {
+            "failed_ids": [],
+            "prompt_contract_details": {
+                "prompt_contract::abc": "replacement reload retained old configuration"
+            },
+        },
+    ) is True
+
+
+def test_contract_owner_mapping_replaces_unowned_draft_file_selection():
+    plan = benchmark._align_plan_files_to_contract_coverage(
+        {
+            "files": [
+                {
+                    "path": "distractor.py",
+                    "action": "modify",
+                    "description": "Change the wrapper.",
+                }
+            ],
+            "contract_coverage": [
+                {
+                    "contract": "tests/test_owner.py::test_value",
+                    "owner_paths": ["owner.py"],
+                    "postcondition": "The owner returns the required value.",
+                }
+            ],
+        },
+        ["owner.py", "distractor.py"],
+        2,
+    )
+
+    assert plan["files"] == [
+        {
+            "path": "owner.py",
+            "action": "modify",
+            "description": "Implement the owned validation contracts: The owner returns the required value.",
+        }
+    ]
 
 
 def test_complete_contract_repair_plan_skips_redundant_model_review(
@@ -962,7 +1285,81 @@ def test_empty_repair_plan_stops_before_review_and_cannot_gain_feedback_edit_aut
     assert result["selected_files"] == []
 
 
-def test_incomplete_contract_owner_plan_cannot_edit_a_distractor(
+def test_repeated_plan_fingerprint_does_not_fan_out_edits(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    plan = {
+        "dimension": "code",
+        "analysis": "The value owner violates the visible contract.",
+        "files": [
+            {
+                "path": "owner.py",
+                "action": "modify",
+                "description": "Set the required value.",
+            }
+        ],
+        "contract_coverage": [
+            {
+                "contract": "tests/test_owner.py::test_value",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The owner returns the required value.",
+            }
+        ],
+    }
+    edit_calls = 0
+
+    def fake_apply(*_args, **_kwargs):
+        nonlocal edit_calls
+        edit_calls += 1
+        return {"patch_applied": True, "applied_files": ["owner.py"], "warnings": []}
+
+    monkeypatch.setattr(
+        benchmark,
+        "_local_call",
+        lambda *_args, **_kwargs: json.dumps(plan),
+    )
+    monkeypatch.setattr(benchmark, "_apply_planned_edits", fake_apply)
+    fingerprints: set[str] = set()
+    kwargs = {
+        "feedback_context": "from owner import VALUE",
+        "contract_evidence": {"failed_ids": ["tests/test_owner.py::test_value"]},
+        "failure_signature": "same-red-contract",
+        "attempted_plan_fingerprints": fingerprints,
+    }
+
+    first = benchmark._repair_after_failure(
+        repo,
+        {"prompt": "Repair the value.", "candidate_paths": ["owner.py"]},
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "tests/test_owner.py::test_value FAILED",
+        "local-model",
+        [],
+        1.0,
+        1,
+        **kwargs,
+    )
+    second = benchmark._repair_after_failure(
+        repo,
+        {"prompt": "Repair the value.", "candidate_paths": ["owner.py"]},
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "tests/test_owner.py::test_value FAILED",
+        "local-model",
+        [],
+        1.0,
+        2,
+        **kwargs,
+    )
+
+    assert first["patch_applied"] is True
+    assert second["patch_applied"] is False
+    assert second["duplicate_plan"] is True
+    assert edit_calls == 1
+
+
+def test_contract_owner_plan_edits_mapped_owner_instead_of_distractor(
     tmp_path,
     monkeypatch,
 ):
@@ -992,11 +1389,13 @@ def test_incomplete_contract_owner_plan_cannot_edit_a_distractor(
         "_local_call",
         lambda *_args, **_kwargs: json.dumps(plan),
     )
-    monkeypatch.setattr(
-        benchmark,
-        "_apply_planned_edits",
-        lambda *_args, **_kwargs: pytest.fail("incomplete owner union must not edit"),
-    )
+    captured: dict[str, object] = {}
+
+    def fake_apply(_repo, _case, _plan, selected, *_args, **_kwargs):
+        captured["selected"] = selected
+        return {"patch_applied": True, "applied_files": ["owner.py"], "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_apply_planned_edits", fake_apply)
 
     result = benchmark._repair_after_failure(
         repo,
@@ -1015,9 +1414,14 @@ def test_incomplete_contract_owner_plan_cannot_edit_a_distractor(
         contract_evidence={"failed_ids": ["tests/test_owner.py::test_value"]},
     )
 
-    assert result["patch_applied"] is False
-    assert result["selected_files"] == []
-    assert "every failed contract" in result["warnings"][0]
+    assert result["patch_applied"] is True
+    assert result["selected_files"] == ["owner.py"]
+    assert captured["selected"] == [
+        {
+            "path": "owner.py",
+            "description": "Implement the owned validation contracts: The owner returns the required value.",
+        }
+    ]
 
 
 def test_empty_local_edit_response_does_not_trigger_adapter_retry(tmp_path, monkeypatch):
@@ -1747,6 +2151,57 @@ def test_disclosed_eleventh_structural_repairs_pass_feedback_and_final(
     assert final["passed"] is True, final["output"]
 
 
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        "dart_decimal_apportionment",
+        "dart_release_reader_lifecycle",
+        "dart_trusted_proxy_chain",
+        "node_base64url_blob_ids",
+        "node_policy_reload_consistency",
+        "node_tls_client_auth_config",
+        "py_config_reload",
+        "py_tail_checkpoint",
+        "py_unordered_category_hierarchy",
+        "sql_notification_override_tristate",
+        "sql_tenant_stock_ownership",
+        "sql_ticket_archive_transitions",
+    ],
+)
+def test_disclosed_twelfth_structural_repairs_pass_feedback_and_final(
+    tmp_path,
+    case_id,
+):
+    case = benchmark._read_json(
+        TWELFTH_FIXTURE_ROOT / "cases" / f"{case_id}.json"
+    )
+    oracle = benchmark._read_json(
+        TWELFTH_FIXTURE_ROOT / "oracles" / f"{case_id}.json"
+    )
+    final_oracle = benchmark._read_json(
+        TWELFTH_FIXTURE_ROOT / "final_oracles" / f"{case_id}.json"
+    )
+    repo = tmp_path / case_id
+    benchmark._init_repo(repo, case["repo_files"])
+
+    repair = benchmark._apply_deterministic_contract_repair(repo, case)
+    public = benchmark._run_case_tests(repo, case, public_only=True)
+    benchmark._write_files(repo, oracle["feedback_files"])
+    feedback = benchmark._run_case_tests(repo, case, public_only=False)
+    final = benchmark._run_final_adjudication(
+        case,
+        final_oracle["final_files"],
+        candidate_repo=repo,
+    )
+
+    assert repair["patch_applied"] is True, repair
+    assert repair["proposed_dimension"] == oracle["expected_dimension"]
+    assert set(repair["selected_files"]) == set(oracle["expected_files"])
+    assert public["passed"] is True, public["output"]
+    assert feedback["passed"] is True, feedback["output"]
+    assert final["passed"] is True, final["output"]
+
+
 def test_recognized_contract_uses_initial_non_generative_edit_lane(
     tmp_path,
     monkeypatch,
@@ -1799,6 +2254,67 @@ def test_recognized_contract_uses_initial_non_generative_edit_lane(
     assert case_result["functional_repair_passed"] is True
     assert case_result["model_calls"] == []
     assert case_result["deterministic_contract_repair"]["patch_applied"] is True
+
+
+def test_validated_structural_intervention_revises_family_and_labels_disclosed_replay(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: ["qwen2.5-coder:7b"],
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_diagnose",
+        lambda _repo, case, *_args, **_kwargs: {
+            "report": {
+                "conclusion": {
+                    "dimension": "state",
+                    "causal_sufficiency": "observational",
+                    "status": "provisional",
+                }
+            },
+            "packet": {},
+            "stages": [],
+            "case": {"problem_statement": case["prompt"]},
+        },
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_generate_patch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recognized structural contract should bypass generation")
+        ),
+    )
+    args = argparse.Namespace(
+        fixture_root=str(TWELFTH_FIXTURE_ROOT),
+        model="qwen2.5-coder:7b",
+        escalation_model="",
+        case=["node_tls_client_auth_config"],
+        timeout=1.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        validate_fixtures=False,
+        evaluation_context="disclosed_replay",
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "result.json"),
+        json=False,
+    )
+
+    result = benchmark.run(args)
+    case_result = result["cases"][0]
+
+    assert result["evaluation_context"] == "disclosed_replay"
+    assert result["evaluation_verdict"] == "disclosed_replay_passed"
+    assert result["blinded_holdout_case_count"] == 0
+    assert case_result["original_evaluation_role"] == "blinded_holdout"
+    assert case_result["evaluation_role"] == "development_regression"
+    assert case_result["diagnosis_dimension"] == "config"
+    assert case_result["accepted_diagnosis_conclusion"]["accepted"] is True
+    assert case_result["functional_repair_passed"] is True
+    assert case_result["score"] == 100
 
 
 def test_initial_patch_generation_does_not_run_repair_reviewer(tmp_path, monkeypatch):

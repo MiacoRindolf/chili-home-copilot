@@ -43,11 +43,43 @@ class TestParsePlanJson:
         assert _parse_plan_json("No JSON here") is None
         assert _parse_plan_json("```json\nnot valid json\n```") is None
 
-    def test_plan_action_classifier_blocks_advisory_entries(self):
-        assert _is_mutating_plan_action("modify") is True
-        assert _is_mutating_plan_action("create") is True
-        assert _is_mutating_plan_action("review") is False
-        assert _is_mutating_plan_action("no change") is False
+    @pytest.mark.parametrize(
+        "action",
+        ["modify", "create", " MODIFY ", "Create"],
+    )
+    def test_plan_action_classifier_allows_supported_mutations(self, action):
+        assert _is_mutating_plan_action(action) is True
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "read-only",
+            "read only",
+            "context",
+            "verify",
+            "review",
+            "noop",
+            "no-op",
+            "no change",
+            "inspect",
+            "analyze",
+            "read",
+            "none",
+            "skip",
+            "unchanged",
+            "edit",
+            "update",
+            "delete",
+            "rename",
+            "unexpected-action",
+            "",
+            None,
+            False,
+            1,
+        ],
+    )
+    def test_plan_action_classifier_blocks_non_mutating_and_unknown_entries(self, action):
+        assert _is_mutating_plan_action(action) is False
 
 
 class TestValidateDiff:

@@ -29,6 +29,25 @@ def test_quiet_pytest_failure_summary_is_not_a_complete_contract_inventory():
     assert evidence["complete"] is False
 
 
+def test_pytest_verbose_parser_does_not_join_summary_to_next_failed_row():
+    evidence = validation_contracts.test_contract_evidence(
+        {
+            "runner": "pytest",
+            "output": (
+                "tests/test_owner.py::test_alpha FAILED [ 50%]\n"
+                "tests/test_owner.py::test_beta FAILED [100%]\n"
+                "FAILED tests/test_owner.py::test_alpha - TypeError: bad input\n"
+                "FAILED tests/test_owner.py::test_beta - AssertionError\n"
+            ),
+        }
+    )
+
+    assert evidence["failed_ids"] == [
+        "tests/test_owner.py::test_alpha",
+        "tests/test_owner.py::test_beta",
+    ]
+
+
 def test_sectioned_node_output_scopes_equal_names_to_their_test_files():
     evidence = validation_contracts.test_contract_evidence(
         {

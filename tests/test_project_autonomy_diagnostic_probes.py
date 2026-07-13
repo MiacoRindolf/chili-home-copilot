@@ -27,6 +27,34 @@ def _committed_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def test_synthetic_fixture_history_is_not_causal_code_evidence():
+    synthetic = diagnostic_probes._probe_evidence_semantics(
+        {
+            "kind": "git_history",
+            "status": "completed",
+            "dimension": "code",
+            "output": "abc123 [chili-synthetic-fixture] seed held-out case",
+        }
+    )
+    authored = diagnostic_probes._probe_evidence_semantics(
+        {
+            "kind": "git_history",
+            "status": "completed",
+            "dimension": "code",
+            "output": (
+                "abc123 [chili-synthetic-fixture] seed held-out case\n"
+                "def456 fix: repair checkpoint provenance"
+            ),
+        }
+    )
+
+    assert synthetic["dimension"] == "unknown"
+    assert synthetic["kind"] == "metric"
+    assert synthetic["discriminating"] is False
+    assert authored["dimension"] == "code"
+    assert authored["kind"] == "artifact"
+
+
 def test_probe_catalog_has_no_raw_command_and_rejects_unsafe_paths():
     assert "command" not in diagnostic_probes.PROBE_KINDS
     unknown = diagnostic_probes.normalize_probe_spec(

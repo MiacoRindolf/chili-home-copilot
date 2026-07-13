@@ -13,8 +13,8 @@ from typing import Any, Mapping
 
 _STATUS_VALUES = frozenset({"passed", "failed", "error", "skipped"})
 _PYTEST_STATUS_RE = re.compile(
-    r"^\s*(?P<test>.+?::[^\r\n]+?)\s+"
-    r"(?P<status>PASSED|FAILED|ERROR|SKIPPED)(?:\s|$)",
+    r"^\s*(?P<test>.+?::[^\r\n]+?)[ \t]+"
+    r"(?P<status>PASSED|FAILED|ERROR|SKIPPED)(?:[ \t]|$)",
     re.MULTILINE,
 )
 _PYTEST_SUMMARY_RE = re.compile(

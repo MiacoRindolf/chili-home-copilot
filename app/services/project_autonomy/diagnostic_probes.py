@@ -1023,6 +1023,18 @@ def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
             "discriminating": bool(dirty_lines),
         }
     if probe_kind == "git_history":
+        authored_lines = [
+            line
+            for line in output.splitlines()
+            if line.strip() and "[chili-synthetic-fixture]" not in line.lower()
+        ]
+        if not authored_lines:
+            return {
+                "dimension": "unknown",
+                "kind": "metric",
+                "reliability": 0.6,
+                "discriminating": False,
+            }
         return {
             "dimension": "code",
             "kind": "artifact",

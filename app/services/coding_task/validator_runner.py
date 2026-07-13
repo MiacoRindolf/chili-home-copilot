@@ -7,6 +7,7 @@ import ast
 import logging
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,7 @@ PHASE1_STEP_KEYS: tuple[str, ...] = (
 
 _MAX_PY_FILES = 200
 _CHANGED_SYNTAX_SUFFIXES = frozenset(
-    {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".dart"}
+    {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".dart", ".sql"}
 )
 _NODE_TYPESCRIPT_PARSE_SCRIPT = (
     'import { readFileSync } from "node:fs"; '
@@ -214,6 +215,63 @@ def _dart_analyzer_severities(stdout: str, stderr: str) -> dict[str, list[str]]:
     return severities
 
 
+def _sqlite_authorizer(
+    action_code: int,
+    parameter_one: str | None,
+    parameter_two: str | None,
+    _database_name: str | None,
+    _trigger_name: str | None,
+) -> int:
+    """Keep changed-SQL validation inside the in-memory database."""
+    denied_actions = {
+        action
+        for action in (
+            getattr(sqlite3, "SQLITE_ATTACH", None),
+            getattr(sqlite3, "SQLITE_DETACH", None),
+        )
+        if action is not None
+    }
+    if action_code in denied_actions:
+        return sqlite3.SQLITE_DENY
+    if action_code == getattr(sqlite3, "SQLITE_FUNCTION", -1):
+        function_name = str(parameter_two or parameter_one or "").lower()
+        if function_name == "load_extension":
+            return sqlite3.SQLITE_DENY
+    if action_code == getattr(sqlite3, "SQLITE_PRAGMA", -1):
+        pragma_name = str(parameter_one or "").lower()
+        if pragma_name in {"data_store_directory", "temp_store_directory"}:
+            return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _run_sqlite_changed_files(
+    sql_files: list[tuple[str, Path]],
+) -> tuple[list[str], list[str], int]:
+    """Materialize changed SQLite scripts in order without an external DB."""
+    output_lines: list[str] = []
+    validated_files: list[str] = []
+    errors = 0
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.enable_load_extension(False)
+        connection.execute("PRAGMA temp_store = MEMORY")
+        connection.execute("PRAGMA journal_mode = MEMORY")
+        connection.set_authorizer(_sqlite_authorizer)
+        for relative, path in sql_files:
+            validated_files.append(relative)
+            try:
+                script = path.read_text(encoding="utf-8", errors="replace")
+                connection.executescript(script)
+            except (OSError, sqlite3.Error) as exc:
+                errors += 1
+                output_lines.append(f"SyntaxError {relative}: SQLite validation failed: {exc}")
+                break
+            output_lines.append(f"ok {relative}")
+    finally:
+        connection.close()
+    return output_lines, validated_files, errors
+
+
 def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
     """Run bounded, allowlisted syntax checks for changed source files."""
     if changed_files is None:
@@ -236,6 +294,11 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
             break
 
     python_files = [relative for relative, path in scoped if path.suffix.lower() == ".py"]
+    sql_files = [
+        (relative, path)
+        for relative, path in scoped
+        if path.suffix.lower() == ".sql"
+    ]
     python_result = (
         _run_python_ast_syntax(root, changed_files=python_files)
         if python_files
@@ -253,9 +316,18 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
     node = shutil.which("node") or ""
     dart = _dart_executable()
 
+    if sql_files:
+        sql_output, validated_sql_files, sql_errors = _run_sqlite_changed_files(
+            sql_files,
+        )
+        output_lines.extend(sql_output)
+        validated_files.extend(validated_sql_files)
+        languages.add("sql")
+        errors += sql_errors
+
     for relative, path in scoped:
         suffix = path.suffix.lower()
-        if suffix == ".py":
+        if suffix in {".py", ".sql"}:
             continue
         if suffix in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}:
             if not node:

@@ -282,7 +282,7 @@ def test_reconstructs_earliest_break_from_shuffled_cross_service_events():
         "dependency-timeout",
     ]
     assert timeline["runtime_source_parity"]["status"] == "mismatch"
-    assert results["h-code"]["status"] == "blocked"
+    assert results["h-code"]["status"] == "untested"
     assert results["h-state"]["downstream_only_support"] is True
     assert results["h-dependency"]["downstream_only_support"] is True
     assert report["conclusion"]["dimension"] == "runtime"
@@ -518,7 +518,7 @@ def test_heuristic_evidence_polarity_does_not_count_healthy_controls_as_support(
     assert dependency["support_evidence_ids"] == []
     assert dependency["contradict_evidence_ids"] == []
     assert report["conclusion"]["dimension"] == "runtime"
-    assert report["conclusion"]["status"] == "confirmed"
+    assert report["conclusion"]["status"] == "inconclusive"
 
 
 def test_strong_independent_support_outweighs_weaker_same_family_counterevidence():
@@ -1215,7 +1215,7 @@ def test_same_code_and_input_with_different_outcome_blocks_code_attribution():
 
     code_result = report["hypothesis_results"][0]
     assert report["baseline_drift"]
-    assert code_result["status"] == "blocked"
+    assert code_result["status"] == "untested"
     assert report["conclusion"]["status"] == "inconclusive"
     assert report["decision"] == "instrument_first"
     assert any(item["dimension"] == "data" for item in report["next_experiments"])
@@ -1243,7 +1243,7 @@ def test_baseline_drift_blocks_provisional_code_attribution_too():
 
     report = reasoning.evaluate_packet(_nbbo_drift_case(), packet)
 
-    assert report["hypothesis_results"][0]["status"] == "blocked"
+    assert report["hypothesis_results"][0]["status"] == "untested"
     assert report["conclusion"]["status"] == "inconclusive"
     assert report["decision"] == "instrument_first"
 
@@ -1337,7 +1337,7 @@ def test_new_counter_evidence_retracts_a_previous_confirmed_conclusion():
         previous_report=previous,
     )
 
-    assert report["conclusion"]["status"] == "confirmed"
+    assert report["conclusion"]["status"] == "inconclusive"
     assert report["conclusion"]["dimension"] == "data"
     assert report["retractions"] == [
         {
@@ -1484,7 +1484,7 @@ def test_local_debate_runs_investigator_skeptic_and_judge_without_premium_calls(
 
     assert [stage for stage, _prompt in calls] == ["investigator", "skeptic", "judge"]
     assert result["report"]["conclusion"]["dimension"] == "data"
-    assert result["report"]["conclusion"]["status"] == "confirmed"
+    assert result["report"]["conclusion"]["status"] == "inconclusive"
     assert result["premium_calls"] == 0
     assert all(stage["accepted"] for stage in result["stages"])
 
@@ -1578,6 +1578,74 @@ def test_mechanism_contracts_are_derived_without_model_output():
     report = reasoning.evaluate_packet(case, reasoning.heuristic_packet(case))
     assert report["contract_invariants"] == state
     assert "mechanism invariant" in reasoning.report_context(report)
+
+
+def test_cross_boundary_mechanism_contracts_are_derived_without_fixture_labels():
+    prompts = {
+        "decoder": "Reject non-canonical base64url aliases through the shared canonical decoder.",
+        "reload": "A replacement config reload must clear omitted overrides and rebind runtime state.",
+        "snapshot": "An async policy request must audit the same generation snapshot it authorized.",
+        "checkpoint": "A file checkpoint must reset after source replacement or truncation.",
+        "graph": "An unordered category hierarchy must detect unknown parents and cycles.",
+        "lifecycle": "Release reader handles survive generation activation until the last reader closes.",
+        "proxy": "Resolve a trusted proxy CIDR and forwarded multi-hop chain.",
+        "tristate": "A member override is tri-state: explicit disable wins and NULL inherits workspace config.",
+        "transition": "Archive, restore, and project move transitions must keep counters exact.",
+    }
+
+    derived = {
+        name: reasoning.derive_contract_invariants(prompt)
+        for name, prompt in prompts.items()
+    }
+
+    assert all(derived.values())
+    assert any("decode-then-encode" in value for value in derived["decoder"])
+    assert any("fresh candidate from defaults" in value for value in derived["reload"])
+    assert any("immutable deep snapshot" in value for value in derived["snapshot"])
+    assert any("stable source identity" in value for value in derived["checkpoint"])
+    assert any("independent of input row order" in value for value in derived["graph"])
+    assert any("reader counts and retirement" in value for value in derived["lifecycle"])
+    assert any("walks forwarded hops" in value for value in derived["proxy"])
+    assert any("preserves NULL as inherit" in value for value in derived["tristate"])
+    assert any("cross-product" in value for value in derived["transition"])
+
+
+def test_cross_boundary_contract_guards_reject_known_partial_mechanisms():
+    assert any(
+        "textual aliases" in value
+        for value in reasoning.contract_invariant_warnings(
+            "Reject non-canonical base64url aliases through the canonical decoder.",
+            {"decoder.js": "export const decode = value => Buffer.from(value, 'base64url');"},
+        )
+    )
+    assert any(
+        "retained configuration" in value
+        for value in reasoning.contract_invariant_warnings(
+            "A replacement config reload clears omitted overrides.",
+            {"settings.py": "def reload_config(payload): current.update(payload)"},
+        )
+    )
+    assert any(
+        "stable source identity" in value
+        for value in reasoning.contract_invariant_warnings(
+            "A checkpoint resets after source replacement or truncation.",
+            {"checkpoint.py": "class CheckpointStore:\n def save(self, offset): pass\n def load(self): pass"},
+        )
+    )
+    assert any(
+            "forbids NULL" in value
+            for value in reasoning.contract_invariant_warnings(
+                "A member override is tri-state and NULL inherits workspace config.",
+                {
+                    "schema.sql": (
+                        "CREATE TABLE member_override (\n"
+                        "  member_id INTEGER PRIMARY KEY,\n"
+                        "  enabled INTEGER NOT NULL DEFAULT 0\n"
+                        ");"
+                    )
+                },
+            )
+        )
 
 
 def test_contract_invariant_guard_rejects_and_accepts_known_mechanisms():
@@ -2334,15 +2402,15 @@ def test_unknown_hypothesis_cannot_be_confirmed_when_known_family_has_evidence()
     report = reasoning.evaluate_packet(case, packet)
 
     assert report["conclusion"]["dimension"] == "data"
-    assert report["conclusion"]["status"] == "provisional"
-    assert report["decision"] == "instrument_first"
+    assert report["conclusion"]["status"] == "inconclusive"
+    assert report["decision"] == "investigate"
     unknown = next(
         item for item in report["hypothesis_results"] if item["hypothesis_id"] == "h-unknown"
     )
-    assert unknown["status"] == "provisional"
+    assert unknown["status"] == "untested"
 
 
-def test_full_operator_contract_breaks_non_discriminating_causal_family_tie():
+def test_operator_wording_does_not_break_noncausal_family_tie():
     case = {
         "case_id": "state-over-trigger",
         "problem_statement": (
@@ -2402,8 +2470,8 @@ def test_full_operator_contract_breaks_non_discriminating_causal_family_tie():
 
     report = reasoning.evaluate_packet(case, packet)
 
-    assert report["conclusion"]["dimension"] == "state"
-    assert report["conclusion"]["status"] == "provisional"
+    assert report["conclusion"]["dimension"] == "dependency"
+    assert report["conclusion"]["status"] == "inconclusive"
 
 
 def test_local_judge_cannot_relabel_clock_evidence_as_data_support():
@@ -3641,7 +3709,7 @@ def test_event_level_harness_gap_blocks_sparse_experiment_confirmation():
     assert report["decision"] == "instrument_first"
 
 
-def test_omitted_contrastive_proof_can_promote_the_correct_clock_family():
+def test_omitted_inferred_contrastive_proof_cannot_promote_clock_family():
     case = {
         "case_id": "clock-proof-completion",
         "problem_statement": "Elapsed duration is wrong during a repeated local hour.",
@@ -3685,8 +3753,8 @@ def test_omitted_contrastive_proof_can_promote_the_correct_clock_family():
     report = reasoning.evaluate_packet(case, packet)
 
     assert report["conclusion"]["dimension"] == "clock"
-    assert report["conclusion"]["status"] == "confirmed"
-    assert report["decision"] == "patch_root_cause"
+    assert report["conclusion"]["status"] == "inconclusive"
+    assert report["decision"] == "investigate"
     assert any(
         item.get("origin") == "deterministic_evidence_gate"
         and item["dimension"] == "clock"
@@ -3708,6 +3776,220 @@ def test_ambiguous_counterfactual_experiment_remains_context():
     )
 
     assert evidence["causal_role"] == "context"
+
+
+def test_context_and_inferred_observations_rank_without_causal_support():
+    observations = [
+        {
+            "evidence_id": "context-only",
+            "statement": "The policy dashboard reports a retained lifecycle mismatch.",
+            "dimension": "state",
+            "kind": "metric",
+            "causal_role": "context",
+            "independence_key": "dashboard",
+            "reliability": 0.99,
+            "discriminating": True,
+        },
+        {
+            "evidence_id": "inferred-only",
+            "statement": (
+                "Changing only durable workflow lifecycle state restores processing "
+                "without changing source, settings, or dependencies."
+            ),
+            "kind": "experiment",
+            "independence_key": "inferred-replay",
+            "reliability": 0.99,
+            "discriminating": True,
+        },
+    ]
+
+    for observation in observations:
+        normalized = reasoning.normalize_evidence(observation)
+        assert normalized["dimension"] != "unknown"
+        if observation["evidence_id"] == "inferred-only":
+            assert normalized["dimension_origin"] == "inferred"
+            assert normalized["causal_role"] == "support"
+
+        report = reasoning.evaluate_packet(
+            {
+                "case_id": observation["evidence_id"],
+                "problem_statement": "A workflow outcome changed.",
+                "observations": [observation],
+            },
+            {
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h-ranked-only",
+                        "claim": "The observed family owns the workflow failure.",
+                        "dimension": normalized["dimension"],
+                        "support_evidence_ids": [observation["evidence_id"]],
+                        "falsification": "Run an explicit owner-aligned intervention.",
+                    }
+                ],
+                "experiments": [
+                    {
+                        "experiment_id": "x-ranked-only",
+                        "hypothesis_ids": ["h-ranked-only"],
+                        "changed_dimensions": [normalized["dimension"]],
+                        "held_constant_dimensions": ["code", "config"],
+                        "expected_if_true": "The workflow outcome changes.",
+                        "expected_if_false": "The workflow outcome remains unchanged.",
+                        "result_evidence_ids": [observation["evidence_id"]],
+                        "safety": "isolated",
+                        "status": "completed",
+                    }
+                ],
+                "conclusion": {
+                    "hypothesis_id": "h-ranked-only",
+                    "status": "confirmed",
+                },
+            },
+        )
+        result = report["hypothesis_results"][0]
+
+        assert result["context_weight"] > 0
+        assert result["causal_support_weight"] == 0
+        assert result["support_weight"] == 0
+        assert result["status"] == "untested"
+        assert report["conclusion"]["status"] == "inconclusive"
+
+
+def test_proxy_policy_config_paraphrases_cannot_lexically_override_state_owner():
+    problem_statements = [
+        "The rendered policy denies the exact trusted proxy principal.",
+        "Policy configuration rejects a trusted proxy principal and wildcard response.",
+        "Vary header values use mixed casing and a wildcard response follows the wrong policy.",
+    ]
+    observations = [
+        {
+            "evidence_id": "state-owner",
+            "statement": "The reader generation retires while an active handle still owns it.",
+            "dimension": "state",
+            "kind": "artifact",
+            "causal_role": "support",
+            "expected_state": "retained_until_last_reader_closes",
+            "actual_state": "retired_with_active_reader",
+            "independence_key": "reader-lifecycle",
+            "reliability": 0.99,
+            "discriminating": True,
+        },
+        {
+            "evidence_id": "policy-surface",
+            "statement": "The same lifecycle mismatch appears at the rendered policy boundary.",
+            "dimension": "state",
+            "kind": "artifact",
+            "causal_role": "support",
+            "expected_state": "stable_generation",
+            "actual_state": "stale_generation",
+            "independence_key": "policy-surface",
+            "reliability": 0.99,
+            "discriminating": True,
+        },
+    ]
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-state",
+                "claim": "Reader ownership and retirement state are inconsistent.",
+                "dimension": "state",
+                "support_evidence_ids": ["state-owner"],
+                "falsification": "Trace reader counts through retirement.",
+            },
+            {
+                "hypothesis_id": "h-config",
+                "claim": "Rendered proxy policy configuration is inconsistent.",
+                "dimension": "config",
+                "support_evidence_ids": ["policy-surface"],
+                "falsification": "Compare the effective proxy policy.",
+            },
+        ],
+        "conclusion": {"hypothesis_id": "h-state", "status": "provisional"},
+    }
+
+    for problem_statement in problem_statements:
+        assert reasoning.infer_dimension(problem_statement) == "config"
+        assert reasoning.decisive_inferred_dimension(problem_statement) == "config"
+        report = reasoning.evaluate_packet(
+            {
+                "case_id": "lexical-policy-dispute",
+                "problem_statement": problem_statement,
+                "observations": observations,
+            },
+            packet,
+        )
+        results = {
+            item["hypothesis_id"]: item for item in report["hypothesis_results"]
+        }
+
+        assert results["h-state"]["explicit_owner_aligned_causal_support"] is True
+        assert results["h-config"]["explicit_owner_aligned_causal_support"] is False
+        assert report["conclusion"]["dimension"] == "state"
+        assert report["conclusion"]["status"] == "provisional"
+
+
+def test_prompt_taxonomy_override_requires_and_accepts_explicit_owner_support():
+    problem_statement = "The rendered policy denies the exact trusted proxy principal."
+    case = {
+        "case_id": "grounded-lexical-policy",
+        "problem_statement": problem_statement,
+        "observations": [
+            {
+                "evidence_id": "state-owner",
+                "statement": "The reader generation changed unexpectedly.",
+                "dimension": "state",
+                "kind": "artifact",
+                "causal_role": "support",
+                "expected_state": "active",
+                "actual_state": "retired",
+                "independence_key": "reader-state",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "config-owner",
+                "statement": "The effective trusted-principal setting differs from the approved value.",
+                "dimension": "config",
+                "kind": "artifact",
+                "causal_role": "support",
+                "expected_state": "approved_principal",
+                "actual_state": "stale_principal",
+                "independence_key": "effective-config",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-state",
+                "claim": "Reader lifecycle state caused the rejection.",
+                "dimension": "state",
+                "support_evidence_ids": ["state-owner"],
+                "falsification": "Hold reader lifecycle constant.",
+            },
+            {
+                "hypothesis_id": "h-config",
+                "claim": "The effective trusted-principal setting caused the rejection.",
+                "dimension": "config",
+                "support_evidence_ids": ["config-owner"],
+                "falsification": "Restore only the approved principal.",
+            },
+        ],
+        "conclusion": {"hypothesis_id": "h-state", "status": "provisional"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+    config_result = next(
+        item
+        for item in report["hypothesis_results"]
+        if item["hypothesis_id"] == "h-config"
+    )
+
+    assert reasoning.decisive_inferred_dimension(problem_statement) == "config"
+    assert config_result["explicit_owner_aligned_causal_support"] is True
+    assert report["conclusion"]["dimension"] == "config"
+    assert report["conclusion"]["status"] == "provisional"
 
 
 def test_isolated_intervention_outranks_multiple_downstream_symptoms():
@@ -3768,13 +4050,15 @@ def test_isolated_intervention_outranks_multiple_downstream_symptoms():
     results = {item["hypothesis_id"]: item for item in report["hypothesis_results"]}
 
     assert results["h-runtime"]["context_weight"] > 0
+    assert results["h-runtime"]["support_weight"] == 0
+    assert results["h-runtime"]["status"] == "untested"
     assert results["h-runtime"]["ownership_weight"] == 0
     assert results["h-config"]["causal_sufficiency"] == "isolated"
     assert report["conclusion"]["dimension"] == "config"
     assert report["conclusion"]["status"] == "confirmed"
 
 
-def test_inferred_dimension_alignment_breaks_cross_family_causal_ties_softly():
+def test_inferred_dimension_alignment_ranks_without_resolving_causal_ties():
     case = {
         "case_id": "soft-dimension-alignment",
         "problem_statement": "An event-order replay changes the final state.",
@@ -3817,8 +4101,11 @@ def test_inferred_dimension_alignment_breaks_cross_family_causal_ties_softly():
     assert report["valid"] is True
     assert results["h-dependency"]["dimension_mismatch_weight"] == 0.99
     assert results["h-clock"]["dimension_alignment_weight"] == 0.99
-    assert report["conclusion"]["dimension"] == "clock"
-    assert report["conclusion"]["status"] == "confirmed"
+    assert results["h-clock"]["causal_dimension_alignment_weight"] == 0
+    assert results["h-clock"]["causal_support_weight"] == 0
+    assert results["h-clock"]["status"] == "untested"
+    assert report["conclusion"]["dimension"] == "dependency"
+    assert report["conclusion"]["status"] == "inconclusive"
 
 
 def test_edge_break_is_earliest_and_same_correlation_sink_is_downstream():
@@ -4106,7 +4393,7 @@ def test_visual_baseline_drift_selects_test_harness_without_claiming_exact_compo
 
     assert report["baseline_drift"]
     assert report["conclusion"]["dimension"] == "test_harness"
-    assert report["conclusion"]["status"] == "provisional"
+    assert report["conclusion"]["status"] == "inconclusive"
     assert report["decision"] == "instrument_first"
 
 

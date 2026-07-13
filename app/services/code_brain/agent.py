@@ -24,9 +24,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_FILE_LINES = 600
 _MAX_FILES_PER_EDIT = 8
-_NON_MUTATING_PLAN_ACTIONS = frozenset(
-    {"review", "inspect", "read", "analyze", "none", "skip", "unchanged", "no_change"}
-)
+_MUTATING_PLAN_ACTIONS = frozenset({"modify", "create"})
 
 
 def _snapshots_by_repo(db: Session, repo_ids: list[int]) -> dict[int, list[CodeSnapshot]]:
@@ -724,8 +722,10 @@ def _parse_plan_json(reply: str) -> Optional[Dict[str, Any]]:
 
 
 def _is_mutating_plan_action(value: object) -> bool:
-    action = str(value or "modify").strip().lower().replace("-", "_").replace(" ", "_")
-    return action not in _NON_MUTATING_PLAN_ACTIONS
+    if not isinstance(value, str):
+        return False
+    action = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return action in _MUTATING_PLAN_ACTIONS
 
 
 def _validate_diff(diff_text: str, file_path: str, file_content: Optional[str]) -> Dict[str, Any]:

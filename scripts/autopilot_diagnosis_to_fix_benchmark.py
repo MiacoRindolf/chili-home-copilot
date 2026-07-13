@@ -65,6 +65,7 @@ REPAIR_PLAN_SCHEMA = {
             "items": {
                 "type": "object",
                 "required": ["path", "action", "description"],
+                "properties": {"action": {"enum": ["modify"]}},
             },
         },
         "contract_coverage": {
@@ -358,7 +359,12 @@ def _init_repo(root: Path, files: Mapping[str, Any]) -> None:
         ["git", "config", "user.email", "benchmark@example.test"],
         ["git", "config", "user.name", "CHILI Benchmark"],
         ["git", "add", "."],
-        ["git", "commit", "-m", "seed held-out case"],
+        [
+            "git",
+            "commit",
+            "-m",
+            "[chili-synthetic-fixture] seed held-out case",
+        ],
     ):
         code, output, _ = _run(args, root, timeout=30)
         if code != 0:
@@ -786,15 +792,11 @@ def _initialize_accepted_diagnosis(diagnosis: dict[str, Any]) -> None:
     )
     stage = "diagnostic_judge"
     validation_evidence = "pre-repair evidence decision"
-    if (
-        decisive_dimension != "unknown"
-        and dimension != decisive_dimension
-        and causal_sufficiency not in {"graph_linked", "isolated"}
-    ):
-        dimension = decisive_dimension
-        stage = "decisive_taxonomy_gate"
+    taxonomy_advisory = ""
+    if decisive_dimension != "unknown" and dimension != decisive_dimension:
+        taxonomy_advisory = decisive_dimension
         validation_evidence = (
-            "decisive prompt taxonomy retained because no stronger causal intervention evidence was available"
+            "prompt taxonomy remained advisory because it is not causal evidence"
         )
     record = {
         "dimension": dimension,
@@ -803,6 +805,7 @@ def _initialize_accepted_diagnosis(diagnosis: dict[str, Any]) -> None:
         "json_parsed": True,
         "causal_status": "accepted" if causally_accepted else "working_hypothesis",
         "validation_evidence": validation_evidence,
+        "taxonomy_advisory_dimension": taxonomy_advisory,
     }
     diagnosis["accepted_conclusion"] = dict(record)
     diagnosis["diagnosis_history"] = [record]
@@ -832,10 +835,18 @@ def _accept_diagnosis_proposal(
             }
         )
         return False
+    current_record = (
+        diagnosis.get("accepted_conclusion")
+        if isinstance(diagnosis.get("accepted_conclusion"), Mapping)
+        else {}
+    )
+    causally_accepted = bool(current_record.get("accepted"))
     record = {
         "dimension": normalized,
         "stage": stage,
-        "accepted": True,
+        "accepted": causally_accepted,
+        "causal_status": "accepted" if causally_accepted else "working_hypothesis",
+        "repair_progress_validated": True,
         "validation_evidence": validation_evidence[:2_000],
     }
     diagnosis["accepted_conclusion"] = dict(record)
@@ -865,6 +876,28 @@ def _candidate_snapshot(repo: Path, case: Mapping[str, Any]) -> dict[str, str]:
         if path is not None and path.is_file():
             snapshot[relative] = path.read_text(encoding="utf-8", errors="replace")
     return snapshot
+
+
+def _prompt_contract_closure(
+    repo: Path,
+    case: Mapping[str, Any],
+) -> dict[str, str]:
+    contents = {
+        relative: (repo / relative).read_text(encoding="utf-8", errors="replace")
+        for value in case.get("candidate_paths") or []
+        for relative in [_safe_rel(value)]
+        if relative and (repo / relative).is_file()
+    }
+    warnings = diagnostic_reasoning.contract_invariant_warnings(
+        str(case.get("prompt") or ""),
+        contents,
+    )
+    return {
+        f"prompt_contract::{hashlib.sha256(str(warning).encode('utf-8')).hexdigest()[:12]}": str(
+            warning
+        )
+        for warning in sorted(set(warnings))
+    }
 
 
 def _restore_candidate_snapshot(repo: Path, snapshot: Mapping[str, str]) -> None:
@@ -909,6 +942,10 @@ def _apply_deterministic_contract_repair(
     case: Mapping[str, Any],
 ) -> dict[str, Any]:
     snapshot = _candidate_snapshot(repo, case)
+    proposed_dimension = diagnostic_reasoning.contract_repair_dimension(
+        str(case.get("prompt") or ""),
+        snapshot,
+    )
     proposals = diagnostic_reasoning.contract_repair_proposals(
         str(case.get("prompt") or ""),
         snapshot,
@@ -919,6 +956,7 @@ def _apply_deterministic_contract_repair(
             "patch_applied": False,
             "selected_files": [],
             "warnings": [],
+            "proposed_dimension": "unknown",
         }
     for relative, content in proposals.items():
         (repo / relative).write_text(content, encoding="utf-8")
@@ -934,14 +972,40 @@ def _apply_deterministic_contract_repair(
             "patch_applied": False,
             "selected_files": sorted(proposals),
             "warnings": [f"contract invariant guard: {value}" for value in warnings],
+            "proposed_dimension": proposed_dimension,
         }
     return {
         "attempted": True,
         "patch_applied": True,
         "selected_files": sorted(proposals),
         "warnings": [],
+        "proposed_dimension": proposed_dimension,
         "_snapshot": snapshot,
     }
+
+
+def _accept_validated_contract_repair_diagnosis(
+    diagnosis: dict[str, Any],
+    dimension: str,
+    *,
+    stage: str,
+    validation_evidence: str,
+) -> bool:
+    normalized = str(dimension or "").strip().lower()
+    if normalized not in REPAIR_DIMENSION_RUBRIC:
+        return False
+    record = {
+        "dimension": normalized,
+        "stage": stage,
+        "accepted": True,
+        "causal_status": "accepted",
+        "causal_sufficiency": "graph_linked",
+        "repair_progress_validated": True,
+        "validation_evidence": validation_evidence[:2_000],
+    }
+    diagnosis["accepted_conclusion"] = dict(record)
+    diagnosis.setdefault("diagnosis_history", []).append(record)
+    return True
 
 
 def _patch_from_deterministic_contract_repair(
@@ -1149,12 +1213,26 @@ def _repair_plan_has_complete_contract_coverage(
         if isinstance(item, Mapping)
     ]
     raw_failed = (contract_evidence or {}).get("failed_ids") or []
-    failed_ids = (
+    prompt_contract_details = (
+        (contract_evidence or {}).get("prompt_contract_details") or {}
+    )
+    failed_values = (
         [value for value in re.split(r"\s+", raw_failed) if value]
         if isinstance(raw_failed, str)
         else [str(value) for value in raw_failed if str(value)]
     )
-    if not failed_ids or not coverage:
+    failed_ids: list[str] = []
+    for value in failed_values:
+        normalized = validation_contracts.normalize_contract_id(value)
+        if re.match(r"^tests/.+\.py::", normalized):
+            normalized = re.sub(
+                r"\s+-\s+[a-z_][\w.]*?(?:error|exception)(?::|\s).*$",
+                "",
+                normalized,
+            ).strip()
+        if normalized and normalized not in failed_ids:
+            failed_ids.append(normalized)
+    if not coverage or (not failed_ids and not prompt_contract_details):
         return False
     owner_union: set[str] = set()
     for item in coverage:
@@ -1177,15 +1255,116 @@ def _repair_plan_has_complete_contract_coverage(
     }
     if not owner_union <= selected:
         return False
-    coverage_text = json.dumps(coverage, sort_keys=True).casefold()
-    named_failures = [
-        re.split(r"::|/|\\", value)[-1].casefold()
-        for value in failed_ids
+    if not failed_ids:
+        return True
+    terminal_counts: dict[str, int] = {}
+    for value in failed_ids:
+        terminal = value.rsplit("::", 1)[-1]
+        terminal_counts[terminal] = terminal_counts.get(terminal, 0) + 1
+    coverage_contracts = [
+        validation_contracts.normalize_contract_id(item.get("contract"))
+        for item in coverage
     ]
-    return bool(
-        len(coverage) >= len(failed_ids)
-        or all(name and name in coverage_text for name in named_failures)
-    )
+    for value in failed_ids:
+        terminal = value.rsplit("::", 1)[-1]
+        aliases = [value]
+        if terminal_counts.get(terminal) == 1:
+            aliases.append(terminal)
+        if not any(
+            alias and alias in contract
+            for contract in coverage_contracts
+            for alias in aliases
+        ):
+            return False
+    return True
+
+
+def _align_plan_files_to_contract_coverage(
+    plan: Mapping[str, Any],
+    candidates: Sequence[str],
+    max_files: int,
+) -> dict[str, Any]:
+    """Make explicit contract ownership authoritative over draft file guesses."""
+    allowed = {str(value) for value in candidates if str(value)}
+    original_files = [
+        dict(item)
+        for item in plan.get("files") or []
+        if isinstance(item, Mapping)
+    ]
+    by_path = {
+        relative: item
+        for item in original_files
+        if (relative := _safe_rel(item.get("path"))) in allowed
+    }
+    owner_contracts: dict[str, list[Mapping[str, Any]]] = {}
+    owner_order: list[str] = []
+    for contract in plan.get("contract_coverage") or []:
+        if not isinstance(contract, Mapping):
+            continue
+        for value in contract.get("owner_paths") or []:
+            relative = _safe_rel(value)
+            if not relative or relative not in allowed:
+                continue
+            if relative not in owner_contracts:
+                owner_contracts[relative] = []
+                owner_order.append(relative)
+            owner_contracts[relative].append(contract)
+    if not owner_order:
+        return dict(plan)
+    aligned: list[dict[str, Any]] = []
+    for relative in owner_order[:max_files]:
+        existing = by_path.get(relative, {})
+        description = str(existing.get("description") or "").strip()
+        if not description:
+            postconditions = [
+                str(item.get("postcondition") or "").strip()
+                for item in owner_contracts[relative]
+                if str(item.get("postcondition") or "").strip()
+            ]
+            description = "Implement the owned validation contracts: " + "; ".join(
+                postconditions
+            )
+        aligned.append(
+            {
+                "path": relative,
+                "action": "modify",
+                "description": description,
+            }
+        )
+    return {**dict(plan), "files": aligned}
+
+
+def _repair_plan_fingerprint(plan: Mapping[str, Any]) -> str:
+    canonical = {
+        "dimension": _plan_dimension(plan),
+        "files": sorted(
+            (
+                _safe_rel(item.get("path")) or "",
+                str(item.get("action") or "").strip().casefold(),
+                str(item.get("description") or "").strip().casefold(),
+            )
+            for item in plan.get("files") or []
+            if isinstance(item, Mapping)
+        ),
+        "contract_coverage": sorted(
+            (
+                validation_contracts.normalize_contract_id(item.get("contract")),
+                tuple(
+                    sorted(
+                        relative
+                        for value in item.get("owner_paths") or []
+                        if (relative := _safe_rel(value))
+                    )
+                ),
+                validation_contracts.normalize_contract_id(item.get("postcondition")),
+            )
+            for item in plan.get("contract_coverage") or []
+            if isinstance(item, Mapping)
+        ),
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def _plan_prompt(
@@ -1798,6 +1977,153 @@ def _compiler_diagnostic_guidance(relative: str, diagnostics: str) -> str:
     return "\n".join(guidance)
 
 
+def _apply_local_edit_bundle(
+    repo: Path,
+    paths: Sequence[str],
+    change: str,
+    model: str,
+    calls: list[dict[str, Any]],
+    timeout: float,
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    """Generate and apply one coordinated, all-or-nothing multi-file edit."""
+    originals = {
+        relative: (repo / relative).read_text(encoding="utf-8", errors="replace")
+        for relative in paths
+    }
+    schema = {
+        "edits": [
+            {
+                "path": "approved/source.ext",
+                "blocks": [
+                    {"search": "exact current text", "replace": "replacement text"}
+                ],
+            }
+        ]
+    }
+    current_files = "\n\n".join(
+        f"### {relative}\n{content}" for relative, content in originals.items()
+    )
+    response = _local_call(
+        model,
+        [
+            {
+                "role": "system",
+                "content": (
+                    "You are CHILI's coordinated source editor. Return one JSON object only. "
+                    "Every approved path must appear exactly once. Each SEARCH value must be copied exactly "
+                    "from that path's current content. Design the files together so signatures, state, schema, "
+                    "and callers remain compatible. Do not edit tests, invent dependencies, or add prose."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Required JSON shape:\n{json.dumps(schema, indent=2)}\n\n"
+                    f"Approved paths: {json.dumps(list(paths))}\n\n"
+                    f"Coordinated change:\n{change[:16_000]}\n\n"
+                    f"Exact current files:\n{current_files[:24_000]}"
+                ),
+            },
+        ],
+        stage=stage,
+        calls=calls,
+        timeout=timeout,
+        num_predict=3200,
+        json_mode=True,
+    )
+    payload: Mapping[str, Any] = {}
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", response or ""):
+        try:
+            value, _end = decoder.raw_decode((response or "")[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, Mapping) and isinstance(value.get("edits"), list):
+            payload = value
+            break
+    raw_edits = payload.get("edits") or []
+    entries: dict[str, Mapping[str, Any]] = {}
+    warnings: list[str] = []
+    for item in raw_edits:
+        if not isinstance(item, Mapping):
+            continue
+        relative = _safe_rel(item.get("path"))
+        if relative not in originals or relative in entries:
+            warnings.append(
+                f"Coordinated edit contained an unapproved or duplicate path: {relative or '(invalid)'}."
+            )
+            continue
+        entries[relative] = item
+    missing = [relative for relative in paths if relative not in entries]
+    if missing or warnings:
+        return {
+            "patch_applied": False,
+            "applied_files": [],
+            "satisfied_files": [],
+            "warnings": [
+                *warnings,
+                *(f"Coordinated edit omitted required path {relative}." for relative in missing),
+            ],
+        }
+    updates: dict[str, str] = {}
+    satisfied: list[str] = []
+    for relative in paths:
+        item = entries[relative]
+        blocks: list[tuple[str, str]] = []
+        for block in item.get("blocks") or []:
+            if not isinstance(block, Mapping):
+                continue
+            search = str(block.get("search") or "")
+            replace = str(block.get("replace") or "")
+            if search:
+                blocks.append((search, replace))
+        outcome = code_agent._apply_search_replace(originals[relative], blocks)
+        new_content = outcome.get("new_content")
+        if not isinstance(new_content, str) and (
+            outcome.get("already_satisfied")
+            or _replacement_already_satisfied(originals[relative], blocks)
+        ):
+            satisfied.append(relative)
+            continue
+        if not isinstance(new_content, str) or new_content.rstrip() == originals[
+            relative
+        ].rstrip():
+            return {
+                "patch_applied": False,
+                "applied_files": [],
+                "satisfied_files": satisfied,
+                "warnings": [
+                    *warnings,
+                    *(str(value) for value in outcome.get("warnings") or []),
+                    f"Coordinated edit for {relative} was rejected or made no change.",
+                ],
+            }
+        semantic_warnings = code_agent._semantic_replacement_warnings(
+            relative,
+            new_content,
+        )
+        if semantic_warnings:
+            return {
+                "patch_applied": False,
+                "applied_files": [],
+                "satisfied_files": satisfied,
+                "warnings": [
+                    *(f"semantic polarity guard: {value}" for value in semantic_warnings),
+                ],
+            }
+        updates[relative] = new_content
+    for relative, content in updates.items():
+        (repo / relative).write_text(content, encoding="utf-8")
+    return {
+        "patch_applied": bool(updates),
+        "applied_files": list(updates),
+        "satisfied_files": satisfied,
+        "warnings": warnings,
+    }
+
+
 def _apply_planned_edits(
     repo: Path,
     case: Mapping[str, Any],
@@ -1864,6 +2190,9 @@ def _apply_planned_edits(
     satisfied: list[str] = []
     skipped_optional: list[str] = []
     optional_rejected_diffs: list[dict[str, str]] = []
+    use_coordinated_bundle = bool(
+        len(paths) > 1 and not optional_paths and not allow_model_recovery
+    )
 
     def record_optional_rejection(
         rel: str,
@@ -1884,7 +2213,52 @@ def _apply_planned_edits(
             }
         )
 
-    for index, item in enumerate(selected, start=1):
+    if use_coordinated_bundle:
+        bundle_change = (
+            f"Overall request:\n{case.get('prompt')}\n\n"
+            f"Evidence-gated diagnosis:\n{diagnostic_reasoning.report_context(report)}\n"
+            f"Strongest causal evidence:\n{evidence_context or '(none)'}\n\n"
+            f"Deterministic mechanism invariants:\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
+            f"Coordinated file responsibilities:\n{plan_summary}\n"
+            "Contract-to-owner postconditions:\n"
+            f"{json.dumps(contract_coverage, indent=2, sort_keys=True)}\n"
+        )
+        if failure_output:
+            bundle_change += f"\nPrevious validation failure:\n{failure_output[:9000]}\n"
+        bundle = _apply_local_edit_bundle(
+            repo,
+            paths,
+            bundle_change,
+            model,
+            calls,
+            timeout,
+            stage=f"{stage_prefix}_bundle",
+        )
+        warnings.extend(str(value) for value in bundle.get("warnings") or [])
+        applied.extend(str(value) for value in bundle.get("applied_files") or [])
+        satisfied.extend(str(value) for value in bundle.get("satisfied_files") or [])
+        if not bundle.get("patch_applied") and not satisfied:
+            attempted_diff = current_attempted_diff()
+            for original_rel, content in originals.items():
+                (repo / original_rel).write_text(content, encoding="utf-8")
+            return {
+                "patch_applied": False,
+                "selected_files": paths,
+                "applied_files": [],
+                "satisfied_files": satisfied,
+                "skipped_optional_files": [],
+                "optional_rejected_diffs": [],
+                "attempted_diff": attempted_diff,
+                "warnings": [
+                    *warnings,
+                    "Rolled back coordinated multi-file edit group after bundle rejection.",
+                ],
+            }
+
+    for index, item in enumerate(
+        selected if not use_coordinated_bundle else [],
+        start=1,
+    ):
         rel = str(item.get("path") or "")
         description = str(item.get("description") or case.get("prompt") or "")
         if (
@@ -2346,6 +2720,8 @@ def _repair_after_failure(
     attempt_ledger: str = "",
     contract_evidence: Mapping[str, Any] | None = None,
     compact_escalation: bool = False,
+    failure_signature: str = "",
+    attempted_plan_fingerprints: set[str] | None = None,
 ) -> dict[str, Any]:
     candidates = [
         rel
@@ -2410,6 +2786,29 @@ def _repair_after_failure(
                 "Repair plan was empty or invalid; no review or edit authority was granted."
             ],
         }
+    plan = _align_plan_files_to_contract_coverage(plan, candidates, max_files)
+    plan_fingerprint = _repair_plan_fingerprint(plan)
+    attempt_key = f"{failure_signature}:{plan_fingerprint}"
+    if attempted_plan_fingerprints is not None and attempt_key in attempted_plan_fingerprints:
+        return {
+            "round": round_index,
+            "plan": plan,
+            "plan_fingerprint": plan_fingerprint,
+            "selected_file": "",
+            "selected_files": [],
+            "ownership_augmented_files": [],
+            "feedback_context_files": _feedback_exercised_candidates(
+                feedback_context,
+                candidates,
+            ),
+            "patch_applied": False,
+            "duplicate_plan": True,
+            "warnings": [
+                "Skipped repeated repair plan against an unchanged failure signature."
+            ],
+        }
+    if attempted_plan_fingerprints is not None:
+        attempted_plan_fingerprints.add(attempt_key)
     skip_repair_review = bool(
         mechanism_invariants
         and _repair_plan_has_complete_contract_coverage(
@@ -2474,7 +2873,11 @@ def _repair_after_failure(
         )
         reviewed = code_agent._parse_plan_json(reviewed_text) or {}
         if _plan_file_items(reviewed, candidates, max_files):
-            plan = reviewed
+            plan = _align_plan_files_to_contract_coverage(
+                reviewed,
+                candidates,
+                max_files,
+            )
     if contract_evidence and not _repair_plan_has_complete_contract_coverage(
         plan,
         candidates,
@@ -2500,23 +2903,7 @@ def _repair_after_failure(
         feedback_context,
         candidates,
     )
-    selected_paths = {str(item.get("path") or "") for item in selected}
     ownership_augmented_files: list[str] = []
-    for relative in feedback_context_files:
-        if relative in selected_paths or len(selected) >= max_files:
-            continue
-        selected.append(
-            {
-                "path": relative,
-                "description": (
-                    "Repair this directly exercised source boundary only if its current behavior violates a "
-                    "listed feedback contract; otherwise leave it unchanged."
-                ),
-                "optional": True,
-            }
-        )
-        selected_paths.add(relative)
-        ownership_augmented_files.append(relative)
     if not selected:
         return {
             "round": round_index,
@@ -2547,6 +2934,7 @@ def _repair_after_failure(
     return {
         "round": round_index,
         "plan": plan,
+        "plan_fingerprint": plan_fingerprint,
         "selected_file": selected_file_paths[0] if selected_file_paths else "",
         "selected_files": selected_file_paths,
         "ownership_augmented_files": ownership_augmented_files,
@@ -2658,6 +3046,10 @@ def validate_fixture(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     fixture_root = Path(args.fixture_root).resolve()
+    evaluation_context = str(
+        getattr(args, "evaluation_context", "protocol") or "protocol"
+    )
+    disclosed_replay = evaluation_context == "disclosed_replay"
     manifest, entries = _fixture_entries(fixture_root, set(args.case or []))
     if not entries:
         raise SystemExit("No diagnosis-to-fix cases selected.")
@@ -2812,16 +3204,36 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 patch["patch_applied"] = bool(patch["changed_files"])
                 public_tests = _run_case_tests(repo, case, public_only=True)
                 feedback_tests = _run_case_tests(repo, case, public_only=False)
-            elif patch.get("patch_applied") and initial_plan_dimension:
-                _accept_diagnosis_proposal(
-                    diagnosis,
-                    initial_plan_dimension,
-                    stage="initial_plan_validated",
-                    validation_evidence=_validation_failure_context(
-                        public_tests,
-                        feedback_tests,
-                    ),
-                )
+            elif patch.get("patch_applied"):
+                if (
+                    patch.get("deterministic_initial_patch")
+                    and public_tests.get("passed")
+                    and feedback_tests.get("passed")
+                ):
+                    _accept_validated_contract_repair_diagnosis(
+                        diagnosis,
+                        str(
+                            deterministic_contract_repair.get(
+                                "proposed_dimension"
+                            )
+                            or ""
+                        ),
+                        stage="deterministic_contract_repair_validated",
+                        validation_evidence=(
+                            "Recognized source-structural repair preserved public contracts "
+                            "and resolved every disclosed feedback contract."
+                        ),
+                    )
+                elif initial_plan_dimension:
+                    _accept_diagnosis_proposal(
+                        diagnosis,
+                        initial_plan_dimension,
+                        stage="initial_plan_validated",
+                        validation_evidence=_validation_failure_context(
+                            public_tests,
+                            feedback_tests,
+                        ),
+                    )
             if (
                 not (public_tests["passed"] and feedback_tests["passed"])
                 and not deterministic_contract_repair.get("attempted")
@@ -2840,6 +3252,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     if public_after_contract["passed"] and feedback_after_contract["passed"]:
                         public_tests = public_after_contract
                         feedback_tests = feedback_after_contract
+                        _accept_validated_contract_repair_diagnosis(
+                            diagnosis,
+                            str(
+                                deterministic_contract_repair.get(
+                                    "proposed_dimension"
+                                )
+                                or ""
+                            ),
+                            stage="deterministic_contract_repair_validated",
+                            validation_evidence=(
+                                "Recognized source-structural repair preserved public contracts "
+                                "and resolved every disclosed feedback contract."
+                            ),
+                        )
                         for relative in deterministic_contract_repair.get("selected_files") or []:
                             if relative not in patch.get("selected_files", []):
                                 patch.setdefault("selected_files", []).append(relative)
@@ -2857,8 +3283,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             deterministic_contract_repair.pop("_snapshot", None)
             repair_attempts: list[dict[str, Any]] = []
             rejected_attempt_fingerprints: set[str] = set()
+            attempted_plan_fingerprints: set[str] = set()
+            prompt_contract_closure = _prompt_contract_closure(repo, case)
             for repair_round, repair_model in enumerate(repair_schedule, start=1):
-                if public_tests["passed"] and feedback_tests["passed"]:
+                if (
+                    public_tests["passed"]
+                    and feedback_tests["passed"]
+                    and not prompt_contract_closure
+                ):
                     break
                 if isinstance(calls, _ModelCallLedger) and calls.budget_exhausted:
                     patch["warnings"] = [
@@ -2870,14 +3302,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     public_tests,
                     feedback_tests,
                 )
+                if prompt_contract_closure:
+                    failure_context += (
+                        "\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n"
+                        + "\n".join(
+                            f"- {contract_id}: {detail}"
+                            for contract_id, detail in prompt_contract_closure.items()
+                        )
+                    )
                 before_public_tests = dict(public_tests)
                 before_feedback_tests = dict(feedback_tests)
+                before_feedback_contracts = validation_contracts.test_contract_evidence(
+                    feedback_tests
+                )
+                before_prompt_contract_closure = dict(prompt_contract_closure)
                 before_repair = _candidate_snapshot(repo, case)
                 before_quality = _validation_quality(public_tests, feedback_tests)
                 before_failure_signature = _normalized_failure_signature(feedback_tests)
-                before_test_contracts = validation_contracts.test_contract_evidence(
-                    feedback_tests
-                )
+                before_test_contracts = dict(before_feedback_contracts)
+                if prompt_contract_closure:
+                    before_test_contracts["prompt_contract_details"] = dict(
+                        prompt_contract_closure
+                    )
+                before_failure_signature = hashlib.sha256(
+                    (
+                        before_failure_signature
+                        + json.dumps(prompt_contract_closure, sort_keys=True)
+                    ).encode("utf-8")
+                ).hexdigest()
                 repair = _repair_after_failure(
                     repo,
                     case,
@@ -2892,6 +3344,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     attempt_ledger=_attempt_ledger_context(repair_attempts),
                     contract_evidence=before_test_contracts,
                     compact_escalation=repair_model != str(args.model),
+                    failure_signature=before_failure_signature,
+                    attempted_plan_fingerprints=attempted_plan_fingerprints,
                 )
                 repair_attempts.append(repair)
                 repair["model"] = repair_model
@@ -2950,6 +3404,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     patch["patch_applied"] = bool(patch["changed_files"])
                     public_tests = _run_case_tests(repo, case, public_only=True)
                     feedback_tests = _run_case_tests(repo, case, public_only=False)
+                    prompt_contract_closure = _prompt_contract_closure(repo, case)
                     repair["after_failure_signature"] = _normalized_failure_signature(
                         feedback_tests
                     )
@@ -2967,12 +3422,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 patch["patch_applied"] = bool(patch["changed_files"])
                 public_tests = _run_case_tests(repo, case, public_only=True)
                 feedback_tests = _run_case_tests(repo, case, public_only=False)
+                prompt_contract_closure = _prompt_contract_closure(repo, case)
                 after_quality = _validation_quality(public_tests, feedback_tests)
                 after_failure_signature = _normalized_failure_signature(feedback_tests)
                 repair["after_failure_signature"] = after_failure_signature
-                repair["after_test_contracts"] = validation_contracts.test_contract_evidence(
+                after_feedback_contracts = validation_contracts.test_contract_evidence(
                     feedback_tests
                 )
+                repair["after_test_contracts"] = dict(after_feedback_contracts)
+                if prompt_contract_closure:
+                    repair["after_test_contracts"]["prompt_contract_details"] = dict(
+                        prompt_contract_closure
+                    )
                 repair["after_validation_output"] = _validation_failure_context(
                     public_tests,
                     feedback_tests,
@@ -2983,6 +3444,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     public_tests,
                     feedback_tests,
                 )
+                closure_advanced = bool(
+                    before_prompt_contract_closure
+                    and set(prompt_contract_closure)
+                    < set(before_prompt_contract_closure)
+                    and public_tests.get("passed")
+                    and not validation_contracts.contract_regressions(
+                        before_feedback_contracts,
+                        after_feedback_contracts,
+                    )
+                )
+                advanced = bool(advanced or closure_advanced)
                 if not advanced:
                     repair["validation_output"] = _validation_failure_context(
                         public_tests,
@@ -3012,6 +3484,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     patch["patch_applied"] = bool(patch["changed_files"])
                     public_tests = _run_case_tests(repo, case, public_only=True)
                     feedback_tests = _run_case_tests(repo, case, public_only=False)
+                    prompt_contract_closure = _prompt_contract_closure(repo, case)
                     continue
                 if revised_dimension:
                     _accept_diagnosis_proposal(
@@ -3061,6 +3534,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 partitions["final_files"],
                 candidate_repo=repo,
             )
+            accepted_conclusion = (
+                diagnosis.get("accepted_conclusion")
+                if isinstance(diagnosis.get("accepted_conclusion"), Mapping)
+                else {}
+            )
+            if (
+                str(accepted_conclusion.get("stage") or "")
+                == "deterministic_contract_repair_validated"
+                and not final_tests.get("passed")
+            ):
+                retracted = {
+                    **dict(accepted_conclusion),
+                    "accepted": False,
+                    "causal_status": "retracted",
+                    "retraction_reason": (
+                        "sealed final adjudication exposed an unresolved boundary"
+                    ),
+                }
+                diagnosis["accepted_conclusion"] = retracted
+                diagnosis.setdefault("diagnosis_history", []).append(retracted)
             if len(calls) != model_calls_before_final:
                 raise RuntimeError(
                     "A model call occurred after final adjudication began."
@@ -3073,22 +3566,51 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 public_tests,
                 final_tests,
             )
+            prompt_contract_closure = _prompt_contract_closure(repo, case)
+            checks["prompt_contract_closure"] = not bool(prompt_contract_closure)
             report = diagnosis.get("report") if isinstance(diagnosis.get("report"), Mapping) else {}
             conclusion = report.get("conclusion") if isinstance(report.get("conclusion"), Mapping) else {}
+            initial_report = (
+                diagnosis.get("initial_report")
+                if isinstance(diagnosis.get("initial_report"), Mapping)
+                else {}
+            )
+            initial_conclusion = (
+                initial_report.get("conclusion")
+                if isinstance(initial_report.get("conclusion"), Mapping)
+                else {}
+            )
             effective_dimension = _effective_diagnosis_dimension(diagnosis)
             case_results.append(
                 {
                     "case_id": case["case_id"],
                     "language": str(case.get("language") or "python"),
                     "test_runner": _case_test_runner(case),
-                    "evaluation_role": str(
+                    "evaluation_role": (
+                        "development_regression"
+                        if disclosed_replay
+                        else str(
+                            entry.get("evaluation_role")
+                            or "development_regression"
+                        )
+                    ),
+                    "original_evaluation_role": str(
                         entry.get("evaluation_role") or "development_regression"
                     ),
-                    "split": str(entry.get("split") or "holdout"),
+                    "split": (
+                        "disclosed_replay"
+                        if disclosed_replay
+                        else str(entry.get("split") or "holdout")
+                    ),
                     "score": score,
                     "checks": checks,
                     "diagnosis_dimension": effective_dimension,
                     "initial_diagnosis_dimension": str(
+                        initial_conclusion.get("dimension")
+                        or conclusion.get("dimension")
+                        or "unknown"
+                    ),
+                    "retained_diagnosis_dimension": str(
                         conclusion.get("dimension") or "unknown"
                     ),
                     "diagnosis_history": diagnosis.get("diagnosis_history") or [],
@@ -3097,11 +3619,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "diagnosis_report": report,
                     "diagnosis_packet": diagnosis.get("packet") or {},
                     "diagnosis_stages": diagnosis.get("stages") or [],
+                    "diagnosis_probe_run": diagnosis.get("probe_run") or {},
+                    "post_probe_conclusion_revision": diagnosis.get(
+                        "post_probe_conclusion_revision"
+                    )
+                    or {},
                     "selected_file": patch.get("selected_file") or "",
                     "selected_files": patch.get("selected_files") or [],
                     "changed_files": patch.get("changed_files") or [],
                     "patch_applied": bool(patch.get("patch_applied")),
                     "functional_repair_passed": bool(final_tests.get("passed")),
+                    "prompt_contract_closure_passed": not bool(
+                        prompt_contract_closure
+                    ),
+                    "prompt_contract_closure_warnings": prompt_contract_closure,
                     "patch_warnings": patch.get("warnings") or [],
                     "public_tests": public_tests,
                     "feedback_tests": feedback_tests,
@@ -3154,6 +3685,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         else None
     )
     evaluation_verdict = (
+        "disclosed_replay_passed"
+        if disclosed_replay and _verdict(case_results) == "shadow_ready"
+        else "disclosed_replay_failed"
+        if disclosed_replay
+        else
         "blinded_evaluation_passed"
         if blinded_holdouts and _verdict(blinded_holdouts) == "shadow_ready"
         else "blinded_evaluation_failed"
@@ -3181,6 +3717,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     accepted_diagnostic_stages = sum(
         1 for stage in diagnostic_stages if stage.get("accepted")
     )
+    causally_confirmed_diagnostic_stages = sum(
+        1
+        for stage in diagnostic_stages
+        if str(((stage.get("report") or {}).get("conclusion") or {}).get("status"))
+        == "confirmed"
+        and str(
+            ((stage.get("report") or {}).get("conclusion") or {}).get(
+                "causal_sufficiency"
+            )
+        )
+        in {"graph_linked", "isolated"}
+    )
     causally_accepted_diagnoses = sum(
         1
         for item in case_results
@@ -3189,6 +3737,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     results = {
         "schema": "chili.diagnosis-to-fix-results.v5",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "evaluation_context": evaluation_context,
         "model": args.model,
         "escalation_model": str(getattr(args, "escalation_model", "") or ""),
         "reference_family": manifest.get("reference_family") or "claude-fable-5",
@@ -3215,6 +3764,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "diagnostic_stage_count": len(diagnostic_stages),
         "diagnostic_stage_acceptance_rate": round(
             100 * accepted_diagnostic_stages / len(diagnostic_stages),
+            2,
+        )
+        if diagnostic_stages
+        else 0.0,
+        "diagnostic_stage_schema_acceptance_rate": round(
+            100 * accepted_diagnostic_stages / len(diagnostic_stages),
+            2,
+        )
+        if diagnostic_stages
+        else 0.0,
+        "diagnostic_stage_causal_confirmation_rate": round(
+            100 * causally_confirmed_diagnostic_stages / len(diagnostic_stages),
             2,
         )
         if diagnostic_stages
@@ -3265,6 +3826,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--escalation-model", default="")
     parser.add_argument("--max-escalation-repairs", type=int, default=0)
     parser.add_argument("--validate-fixtures", action="store_true")
+    parser.add_argument(
+        "--evaluation-context",
+        choices=("protocol", "disclosed_replay"),
+        default="protocol",
+    )
     parser.add_argument("--report", default=str(DEFAULT_REPORT))
     parser.add_argument("--results-json", default=str(DEFAULT_RESULTS))
     parser.add_argument("--json", action="store_true")

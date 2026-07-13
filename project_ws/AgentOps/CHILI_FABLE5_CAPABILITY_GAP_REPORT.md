@@ -490,6 +490,21 @@ from the seventh untouched 63.8 but remained below 90, while strict primary-fami
 failures hidden by a permissive oracle. The disclosed seventh 100 therefore did not generalize to independently
 authored causal language.
 
+### Twelfth Disclosed Transfer Repair
+
+After preserving the untouched twelfth result, the first generic replay regressed to **32.92/100, 0/12 finals,
+5/12 diagnosis families, and 0/12 exact owner sets**. That failure exposed over-strict fake prompt-contract IDs,
+a brittle 7B JSON bundle, and remaining ownership, SQL-validation, causal-accounting, and edit-authority gaps.
+
+The corrected disclosed development replay reached **100/100** with **12/12 sealed-final solves, 12/12 diagnosis
+families, 12/12 causally accepted conclusions, 12/12 exact owners, zero premium calls, 24 local diagnostic calls,
+and 7.7 minutes wall time**. Broad affected validation passed **277 tests**. The final result is explicitly labeled
+`disclosed_replay_passed` with zero blinded cases. Full details:
+`project_ws/AgentOps/FABLE5_CLASS_TWELFTH_DISCLOSED_TRANSFER_REPAIR.md`.
+
+This does not overwrite the untouched 49.17 score or prove Fable 5 parity. It proves disclosed mechanism capture;
+the next independently authored untouched suite is the transfer gate.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -517,14 +532,14 @@ authored causal language.
 
 ## Remaining Gaps
 
-1. The repair evidence now includes 13 small feedback-guided development repositories, two independently authored eight-case sealed suites, two full disclosed tenth-suite replays, and two twelve-case transfer suites. The eleventh scored 32.92/100 with 0/12 finals; the twelfth improved to 49.17/100 with 2/12 finals. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
+1. The repair evidence now includes 13 small feedback-guided development repositories, two independently authored eight-case sealed suites, two full disclosed tenth-suite replays, and two twelve-case transfer suites. The eleventh scored 32.92/100 with 0/12 finals; the twelfth improved to 49.17/100 with 2/12 finals. The disclosed twelfth replay now solves 12/12 recognized mechanisms, but large-repository, mixed-stack, Go, and Rust superiority remain untested.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The fourth through eighth untouched diagnostic slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The twelfth suite accepted 36/36 JSON stages and completed 126/126 7B calls, yet failed 10/12 finals. Strong structural reliability, causal labels, exact ownership, and frontier-level repair synthesis remain distinct capabilities.
+5. Local 7B output remains stochastic. The fourth through eighth untouched diagnostic slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The untouched twelfth suite accepted 36/36 JSON stages and completed 126/126 7B calls, yet failed 10/12 finals. The disclosed structural lane later reached 12/12, but unknown-mechanism reasoning remains a separate capability.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. The first disclosed contract-guided tenth replay averaged 791.8 seconds/case; the all-mechanical replay reached 75.7 seconds/case. Diagnostic council calls now dominate recognized cases. Adaptive diagnostic routing and a real host-loss recovery proof remain open, and unknown mechanisms can still take the full slow path.
-8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls, but still performs per-file synthesis for unknown multi-owner mechanisms. A single atomic edit-bundle call and materially higher sealed-final success remain open.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. The final twelfth disclosed structural replay averaged about 38.5 seconds/case end to end and used two diagnostic calls per case. Adaptive routing and a real host-loss recovery proof remain open, and unknown mechanisms can still take the full slow path.
+8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
 ## Promotion Gate

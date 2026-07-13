@@ -116,6 +116,55 @@ def test_changed_dart_syntax_uses_analyzer_when_available(tmp_path):
     assert bad.exit_code != 0
 
 
+def test_changed_sql_materializes_files_in_supplied_order(tmp_path):
+    _write(
+        tmp_path,
+        "schema/20_children.sql",
+        """
+        CREATE TABLE children (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER NOT NULL REFERENCES parents(id)
+        );
+        INSERT INTO children (id, parent_id) VALUES (10, 1);
+        """,
+    )
+    _write(
+        tmp_path,
+        "schema/10_parents.sql",
+        """
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE parents (id INTEGER PRIMARY KEY);
+        INSERT INTO parents (id) VALUES (1);
+        """,
+    )
+
+    result = run_ast_syntax(
+        tmp_path,
+        changed_files=["schema/10_parents.sql", "schema/20_children.sql"],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert result.metadata["changed_files"] == [
+        "schema/10_parents.sql",
+        "schema/20_children.sql",
+    ]
+    assert result.metadata["syntax_languages"] == ["sql"]
+    assert result.stdout.index("ok schema/10_parents.sql") < result.stdout.index(
+        "ok schema/20_children.sql"
+    )
+
+
+def test_changed_sql_reports_invalid_script_without_external_database(tmp_path):
+    _write(tmp_path, "schema/broken.sql", "CREATE TABLE broken (id INTEGER PRIMARY KEY,);\n")
+
+    result = run_ast_syntax(tmp_path, changed_files=["schema/broken.sql"])
+
+    assert result.exit_code == 1
+    assert "SyntaxError schema/broken.sql: SQLite validation failed" in result.stdout
+    assert result.metadata["changed_files"] == ["schema/broken.sql"]
+    assert result.metadata["syntax_languages"] == ["sql"]
+
+
 # ── run_validation end-to-end (the TypeError regression) ────────────────
 
 
