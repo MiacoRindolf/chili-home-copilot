@@ -1,0 +1,576 @@
+{
+  "average_case_duration_ms": 73408.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "clock",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 976,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-bxx5cx53\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_clock_feedback.py::test_month_end_uses_last_real_day_of_short_month FAILED [ 20%]\ntests/test_clock_feedback.py::test_runner_converts_completion_instant_before_scheduling FAILED [ 40%]\ntests/test_public.py::test_clock_returns_later_run_in_same_month PASSED  [ 60%]\ntests/test_public.py::test_clock_advances_after_this_months_run PASSED   [ 80%]\ntests/test_public.py::test_runner_keeps_same_zone_wall_time PASSED       [100%]\n\n================================== FAILURES ===================================\n______________ test_month_end_uses_last_real_day_of_short_month _______________\ntests\\test_clock_feedback.py:10: in test_month_end_uses_last_real_day_of_short_month\n    assert next_monthly_run(after, 31, 6) == datetime(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nbilling_clock.py:10: in next_monthly_run\n    candidate = after.replace(\nE   ValueError: day is out of range for month\n__________ test_runner_converts_completion_instant_before_scheduling __________\ntests\\test_clock_feedback.py:24: in test_runner_converts_completion_instant_before_scheduling\n    assert result == \"2025-01-15T20:00:00-08:00\"\nE   AssertionError: assert '2025-02-15T20:00:00-08:00' == '2025-01-15T20:00:00-08:00'\nE     \nE     - 2025-01-15T20:00:00-08:00\nE     ?       ^\nE     + 2025-02-15T20:00:00-08:00\nE     ?       ^\n=========================== short test summary info ===========================\nFAILED tests/test_clock_feedback.py::test_month_end_uses_last_real_day_of_short_month - ValueError: day is out of range for month\nFAILED tests/test_clock_feedback.py::test_runner_converts_completion_instant_before_scheduling - AssertionError: assert '2025-02-15T20:00:00-08:00' == '2025-01-15T20:00:00-08:00'\n  \n  - 2025-01-15T20:00:00-08:00\n  ?       ^\n  + 2025-02-15T20:00:00-08:00\n  ?       ^\n========================= 2 failed, 3 passed in 0.17s =========================",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_final_tests": {
+        "duration_ms": 571,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-h2id3t9d\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff FAILED [ 25%]\ntests/test_public.py::test_clock_returns_later_run_in_same_month PASSED  [ 50%]\ntests/test_public.py::test_clock_advances_after_this_months_run PASSED   [ 75%]\ntests/test_public.py::test_runner_keeps_same_zone_wall_time PASSED       [100%]\n\n================================== FAILURES ===================================\n________ test_utc_month_boundary_can_still_reach_local_leap_day_cutoff ________\ntests\\test_clock_final.py:13: in test_utc_month_boundary_can_still_reach_local_leap_day_cutoff\n    assert result == \"2024-02-29T17:00:00-08:00\"\nE   AssertionError: assert '2024-03-31T17:00:00-07:00' == '2024-02-29T17:00:00-08:00'\nE     \nE     - 2024-02-29T17:00:00-08:00\nE     ?       ^ ^^           ^\nE     + 2024-03-31T17:00:00-07:00\nE     ?       ^ ^^           ^\n=========================== short test summary info ===========================\nFAILED tests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff - AssertionError: assert '2024-03-31T17:00:00-07:00' == '2024-02-29T17:00:00-08:00'\n  \n  - 2024-02-29T17:00:00-08:00\n  ?       ^ ^^           ^\n  + 2024-03-31T17:00:00-07:00\n  ?       ^ ^^           ^\n========================= 1 failed, 3 passed in 0.09s =========================",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 551,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-bxx5cx53\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_clock_returns_later_run_in_same_month PASSED  [ 33%]\ntests/test_public.py::test_clock_advances_after_this_months_run PASSED   [ 66%]\ntests/test_public.py::test_runner_keeps_same_zone_wall_time PASSED       [100%]\n\n============================== 3 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "th13_py_monthly_settlement",
+      "changed_files": [
+        "billing_clock.py",
+        "settlement_runner.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "clock",
+        "selected_files": [
+          "billing_clock.py",
+          "settlement_runner.py"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "clock",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "runtime",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "clock",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Timezone conversion error near month end.",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Timezone conversion error near month end.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Correctly handle timezone conversions.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-2"
+            ]
+          },
+          {
+            "claim": "Incorrect clamping of billing day.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Clamp billing day to last real day of month.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-3"
+            ]
+          },
+          {
+            "claim": "External conditions causing unreliable schedules.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Isolate and test external dependencies.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "operator-2"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {},
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th13_py_monthly_settlement",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Timezone conversion error near month end.",
+          "confidence": 0.0,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "operator-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Timezone conversion error near month end.",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "Monthly local-wall-clock scheduling first converts the completed instant into the worker timezone, then clamps the requested billing day to the last real day of that local month before comparing candidates. Replacing tzinfo is not an instant conversion."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "runtime_source_parity"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Timezone conversion error near month end.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.31,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Correctly handle timezone conversions.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Incorrect clamping of billing day.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.31,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Clamp billing day to last real day of month.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-3"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "External conditions causing unreliable schedules.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Isolate and test external dependencies.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Correctly handle timezone conversions.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Clamp billing day to last real day of month.",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Isolate and test external dependencies.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Timezone conversion error near month end.",
+            "confidence": 0.0,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Timezone conversion error near month end.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Timezone conversion error near month end.",
+            "confidence": 0.0,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Timezone conversion error near month end.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Timezone conversion error near month end.",
+            "status": "provisional"
+          },
+          "response_chars": 1584,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Timezone conversion error near month end.",
+            "confidence": 0.0,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Timezone conversion error near month end.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Timezone conversion error near month end.",
+            "confidence": 0.0,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Timezone conversion error near month end.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Timezone conversion error near month end.",
+            "status": "provisional"
+          },
+          "response_chars": 1482,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 73408,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 710,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th13_py_monthly_settlement-q64d8nx2\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_clock_feedback.py::test_month_end_uses_last_real_day_of_short_month PASSED [ 20%]\ntests/test_clock_feedback.py::test_runner_converts_completion_instant_before_scheduling PASSED [ 40%]\ntests/test_public.py::test_clock_returns_later_run_in_same_month PASSED  [ 60%]\ntests/test_public.py::test_clock_advances_after_this_months_run PASSED   [ 80%]\ntests/test_public.py::test_runner_keeps_same_zone_wall_time PASSED       [100%]\n\n============================== 5 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "final_tests": {
+        "duration_ms": 521,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-noyb8bdj\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff PASSED [ 25%]\ntests/test_public.py::test_clock_returns_later_run_in_same_month PASSED  [ 50%]\ntests/test_public.py::test_clock_advances_after_this_months_run PASSED   [ 75%]\ntests/test_public.py::test_runner_keeps_same_zone_wall_time PASSED       [100%]\n\n============================== 4 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "runtime",
+      "language": "python",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 32962,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"Timezone conversion error near month end.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"operator-1\", \"source-2\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Correctly handle timezone conversions.\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Incorrect clamping of billing day.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"operator-1\", \"source-3\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Clamp billing day to last real day of month.\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"External conditions causing unreliable schedules.\",\n      \"dimension\": \"dependency\",\n      \"support_evidence_ids\": [\"operator-2\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Isolate and test external dependencies.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-log\",\n      \"kind\": \"log_search\",\n      \"paths\": [\"logs\"],\n      \"query\": \"timezone conversion error\",\n      \"tail_lines\": 5000,\n      \"dimension\": \"runtime\"\n    },\n    {\n      \"probe_id\": \"p-count\",\n      \"kind\": \"db_profile\",\n      \"table\": \"trading_events\",\n      \"timestamp_column\": \"created_at\",\n      \"lookback_minutes\": 60,\n      \"group_by\": \"reason\",\n      \"max_groups\": 15,\n      \"filters\": {\"status\": \"pending\"},\n      \"dimension\": \"data\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-1\", \"source-2\"],\n    \"reason\": \"Timezone conversion error near month end.\"\n  }\n}",
+          "stage": "diagnosis_investigator",
+          "tokens_out": 438,
+          "wall_ms": 32962
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 34878,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"Timezone conversion error near month end.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"operator-1\", \"source-2\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Correctly handle timezone conversions.\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Incorrect clamping of billing day.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"operator-1\", \"source-3\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Clamp billing day to last real day of month.\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"External conditions causing unreliable schedules.\",\n      \"dimension\": \"dependency\",\n      \"support_evidence_ids\": [\"operator-2\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Isolate and test external dependencies.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-code\",\n      \"kind\": \"isolated_compile\",\n      \"paths\": [\"settlement_runner.py\", \"billing_clock.py\"],\n      \"dimension\": \"runtime\"\n    },\n    {\n      \"probe_id\": \"p-test\",\n      \"kind\": \"one_targeted_test_selector\",\n      \"path\": \"tests/test_public.py\",\n      \"selector\": \"test_clock_returns_later_run_in_same_month\",\n      \"dimension\": \"runtime\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-1\", \"source-2\"],\n    \"reason\": \"Timezone conversion error near month end.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 400,
+          "wall_ms": 34878
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 734,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th13_py_monthly_settlement-q64d8nx2\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_clock_returns_later_run_in_same_month PASSED  [ 33%]\ntests/test_public.py::test_clock_advances_after_this_months_run PASSED   [ 66%]\ntests/test_public.py::test_runner_keeps_same_zone_wall_time PASSED       [100%]\n\n============================== 3 passed in 0.05s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "clock",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "billing_clock.py",
+        "settlement_runner.py"
+      ],
+      "split": "disclosed_replay",
+      "test_runner": "pytest"
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-13T10:38:45.175707+00:00",
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "qwen2.5-coder:14b",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_passed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 1,
+  "max_repair_rounds": 3,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v5",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "verdict": "shadow_ready"
+}
