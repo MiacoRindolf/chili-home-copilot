@@ -1,0 +1,13 @@
+{
+  "case_id": "th14_node_esm_plugin_loading",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "src/package-exports.mjs",
+    "src/plugin-loader.mjs"
+  ],
+  "feedback_files": {
+    "tests/feedback_data/channel#edge/package.json": "{\n  \"name\": \"channel-edge\",\n  \"exports\": \"./index.mjs\"\n}\n",
+    "tests/feedback_data/channel#edge/index.mjs": "export default Object.freeze({ channel: 'edge', loaded: true });\n",
+    "tests/feedback.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fileURLToPath } from 'node:url';\n\nimport { resolveExportTarget } from '../src/package-exports.mjs';\nimport { loadPlugin } from '../src/plugin-loader.mjs';\n\ntest('deployment conditions select the server plugin', () => {\n  assert.equal(\n    resolveExportTarget(\n      {\n        browser: './browser.mjs',\n        node: './node.mjs',\n        default: './fallback.mjs'\n      },\n      { conditions: ['node', 'import'] }\n    ),\n    './node.mjs'\n  );\n});\n\ntest('scoped vendor directories remain loadable', async () => {\n  const packageRoot = fileURLToPath(\n    new URL('./feedback_data/channel%23edge/', import.meta.url)\n  );\n\n  assert.deepEqual(await loadPlugin(packageRoot), {\n    channel: 'edge',\n    loaded: true\n  });\n});\n"
+  }
+}

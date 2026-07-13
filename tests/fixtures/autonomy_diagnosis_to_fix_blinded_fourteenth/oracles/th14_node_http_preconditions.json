@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_node_http_preconditions",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "src/entity-tag-list.mjs",
+    "src/request-preconditions.mjs"
+  ],
+  "feedback_files": {
+    "tests/feedback.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { parseEntityTagList } from '../src/entity-tag-list.mjs';\nimport { evaluatePreconditions } from '../src/request-preconditions.mjs';\n\ntest('gateway-formatted catalog validators retain one revision token', () => {\n  assert.deepEqual(\n    parseEntityTagList('W/\\\"catalog,2026\\\", \\\"fallback\\\"'),\n    ['W/\\\"catalog,2026\\\"', '\\\"fallback\\\"']\n  );\n});\n\ntest('a cache revalidation recognizes the deployed catalog revision', () => {\n  assert.deepEqual(\n    evaluatePreconditions({\n      method: 'GET',\n      currentTag: '\\\"catalog-7\\\"',\n      ifNoneMatch: 'W/\\\"catalog-7\\\"'\n    }),\n    { status: 304, proceed: false }\n  );\n});\n\ntest('an update cannot rely on a non-authoritative catalog copy', () => {\n  assert.deepEqual(\n    evaluatePreconditions({\n      method: 'PATCH',\n      currentTag: '\\\"catalog-7\\\"',\n      ifMatch: 'W/\\\"catalog-7\\\"'\n    }),\n    { status: 412, proceed: false }\n  );\n});\n"
+  }
+}

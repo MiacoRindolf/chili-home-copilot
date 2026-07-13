@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_node_esm_plugin_loading",
+  "final_files": {
+    "tests/final_data/vendor#suite/package.json": "{\n  \"name\": \"vendor-suite\",\n  \"exports\": {\n    \".\": {\n      \"browser\": \"./browser.mjs\",\n      \"node\": {\n        \"import\": \"./node.mjs\",\n        \"default\": \"./node-legacy.mjs\"\n      },\n      \"default\": \"./fallback.mjs\"\n    }\n  }\n}\n",
+    "tests/final_data/vendor#suite/browser.mjs": "export default Object.freeze({ runtime: 'browser', hooks: ['dom'] });\n",
+    "tests/final_data/vendor#suite/node.mjs": "export default Object.freeze({ runtime: 'node', hooks: ['startup', 'shutdown'] });\n",
+    "tests/final_data/vendor#suite/node-legacy.mjs": "export default Object.freeze({ runtime: 'node-legacy', hooks: [] });\n",
+    "tests/final_data/vendor#suite/fallback.mjs": "export default Object.freeze({ runtime: 'fallback', hooks: [] });\n",
+    "tests/final.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fileURLToPath } from 'node:url';\n\nimport { PluginRegistry } from '../src/plugin-registry.mjs';\n\ntest('registry activation uses the deployed module for a scoped vendor bundle', async () => {\n  const packageRoot = fileURLToPath(\n    new URL('./final_data/vendor%23suite/', import.meta.url)\n  );\n  const registry = new PluginRegistry();\n\n  const plugin = await registry.activate('vendor-suite', packageRoot);\n\n  assert.deepEqual(plugin, {\n    runtime: 'node',\n    hooks: ['startup', 'shutdown']\n  });\n  assert.strictEqual(registry.get('vendor-suite'), plugin);\n});\n"
+  }
+}

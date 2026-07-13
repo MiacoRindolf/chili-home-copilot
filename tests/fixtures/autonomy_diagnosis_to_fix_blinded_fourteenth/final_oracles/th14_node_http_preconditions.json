@@ -1,0 +1,6 @@
+{
+  "case_id": "th14_node_http_preconditions",
+  "final_files": {
+    "tests/final.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { serveCatalog } from '../src/catalog-response.mjs';\n\nconst representation = {\n  etag: '\\\"catalog,2026\\\"',\n  body: '{\\\"release\\\":\\\"summer\\\"}'\n};\n\ntest('mixed upstream validators preserve catalog read behavior', () => {\n  const response = serveCatalog(\n    {\n      method: 'GET',\n      headers: {\n        'if-none-match': '\\\"retired\\\", W/\\\"catalog,2026\\\"'\n      }\n    },\n    representation\n  );\n\n  assert.deepEqual(response, {\n    status: 304,\n    etag: '\\\"catalog,2026\\\"',\n    body: null\n  });\n});\n\ntest('mixed upstream validators preserve catalog write protection', () => {\n  const response = serveCatalog(\n    {\n      method: 'PUT',\n      headers: { 'if-match': 'W/\\\"catalog,2026\\\"' }\n    },\n    representation\n  );\n\n  assert.deepEqual(response, {\n    status: 412,\n    etag: '\\\"catalog,2026\\\"',\n    body: null\n  });\n});\n"
+  }
+}
