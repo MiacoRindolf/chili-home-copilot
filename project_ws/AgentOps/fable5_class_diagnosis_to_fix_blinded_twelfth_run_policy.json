@@ -1,0 +1,22 @@
+{
+  "schema": "chili.diagnosis-to-fix-run-policy.v1",
+  "fixture_root": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_twelfth",
+  "implementation_commit": "9b69cd8db6d9a97717422202e751b762b7ff7dc7",
+  "implementation_tree": "c9ab31d3f3a529bd50b8d326613c2a60fa475b52",
+  "primary_model": "qwen2.5-coder:7b",
+  "escalation_model": "qwen2.5-coder:14b",
+  "max_base_repairs": 2,
+  "max_escalation_repairs": 1,
+  "per_call_timeout_sec": 180,
+  "case_model_time_budget_sec": 690,
+  "premium_calls_allowed": 0,
+  "expected_case_count": 12,
+  "expected_language_counts": {
+    "dart": 3,
+    "python": 3,
+    "sql": 3,
+    "typescript": 3
+  },
+  "sealed_final_required": true,
+  "source_edits_after_fixture_freeze_allowed": false
+}
