@@ -3,9 +3,9 @@
   "reference_family": "claude-fable-5",
   "cases": [
     {
-      "case": "cases/th14_dart_keyset_pagination.json",
-      "oracle": "oracles/th14_dart_keyset_pagination.json",
-      "final_oracle": "final_oracles/th14_dart_keyset_pagination.json",
+      "case": "cases/th14_dart_redirect_handoffs.json",
+      "oracle": "oracles/th14_dart_redirect_handoffs.json",
+      "final_oracle": "final_oracles/th14_dart_redirect_handoffs.json",
       "evaluation_role": "blinded_holdout",
       "split": "holdout-sealed-dart-multifile"
     },
