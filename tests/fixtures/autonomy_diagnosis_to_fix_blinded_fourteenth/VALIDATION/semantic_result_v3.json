@@ -1,0 +1,302 @@
+{
+  "validator": "codex-independent-semantic-validator-v3",
+  "target_commit": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+  "verdict": "PASS",
+  "checks": {
+    "target_provenance": {
+      "passed": true,
+      "validation_branch": "codex/fourteenth-v3-semantic-validation",
+      "expected": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+      "head_before_outputs": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+      "merge_base": "a249993262ce5c2f621ed17ce67b7cccf8e74fef"
+    },
+    "validation_only_preflight": {
+      "passed": true,
+      "mode": "validation_only",
+      "command": "$env:PYTHONDONTWRITEBYTECODE='1'; python -B scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures --json",
+      "exit_code": 0,
+      "schema": "chili.diagnosis-to-fix-fixture-validation.v3",
+      "valid": true,
+      "case_count": 12,
+      "public_passed": 12,
+      "feedback_failed_as_required": 12,
+      "sealed_final_failed_as_required": 12,
+      "sealed_final_adjudication": 12,
+      "external_final_oracles": 12,
+      "models_invoked": [],
+      "forbidden_modes_invoked": []
+    },
+    "fixture_structure_and_dimensions": {
+      "passed": true,
+      "case_count": 12,
+      "unique_case_ids": 12,
+      "language_counts": {
+        "dart": 3,
+        "typescript": 3,
+        "python": 3,
+        "sql": 3
+      },
+      "dimension_counts": {
+        "data": 3,
+        "dependency": 5,
+        "runtime": 1,
+        "state": 3
+      },
+      "all_dimensions_fit_frozen_rubric": true,
+      "all_cases_have_three_candidates": true,
+      "all_cases_have_two_expected_owners": true,
+      "all_cases_have_one_distractor": true,
+      "all_cases_have_max_files_two": true,
+      "all_expected_owners_are_candidates": true,
+      "public_feedback_final_path_overlap": 0
+    },
+    "full_prior_corpus_novelty": {
+      "passed": true,
+      "manifest_roots_parsed": 17,
+      "manifest_cases_total": 151,
+      "active_case_count": 12,
+      "all_prior_case_count": 139,
+      "prior_reference_case_count": 129,
+      "prior_base_runtime_calibration_case_count": 10,
+      "active_to_all_prior_comparisons": 1668,
+      "active_to_reference_comparisons": 1548,
+      "active_to_calibration_comparisons": 120,
+      "active_internal_unordered_comparisons": 66,
+      "source_bearing_prior_diagnosis_to_fix_cases": 65,
+      "active_to_source_bearing_prior_comparisons": 780,
+      "exact_normalized_prompt_matches": [],
+      "exact_cross_fixture_payload_matches": [],
+      "exact_candidate_bundle_matches": [],
+      "active_internal_prompt_or_bundle_matches": [],
+      "material_mechanism_matches": [],
+      "material_assertion_family_matches": [],
+      "retired_keyset_collision_absent": true,
+      "finding": "Every active case was compared with all 139 earlier manifest-listed cases and the other 11 active cases. No material mechanism, assertion-family, or source-shape duplicate was found."
+    },
+    "deterministic_registry_novelty": {
+      "passed": true,
+      "source": "app/services/project_autonomy/diagnostic_reasoning.py",
+      "source_sha256": "6a081ca2d5d8b4775f299c3c54743c22d83d2bb77f8177c62f2e899069e0d8a7",
+      "invariant_template_count": 44,
+      "repair_operator_count": 36,
+      "cases_checked": 12,
+      "cases_with_derived_invariants": 0,
+      "cases_with_repair_dimension": 0,
+      "cases_with_repair_proposals": 0,
+      "cases_with_warnings": 0
+    },
+    "causal_ownership": {
+      "passed": true,
+      "cases_with_exactly_two_necessary_owners": 12,
+      "cases_with_direct_owner_isolation": 12,
+      "cases_with_two_owner_final_composition": 12,
+      "per_case": [
+        {
+          "case_id": "th14_dart_redirect_handoffs",
+          "owners": [
+            "lib/redirect_request.dart",
+            "lib/redirect_follower.dart"
+          ],
+          "owner_proof": "Direct RedirectPolicy 303 assertions bypass the follower; injected overriding policies bypass base derive and require post-dispatch cross-origin credential enforcement in the follower."
+        },
+        {
+          "case_id": "th14_dart_semver_selection",
+          "owners": [
+            "lib/semantic_version.dart",
+            "lib/release_selector.dart"
+          ],
+          "owner_proof": "Direct comparison assertions require SemVer precedence, while bounded selection independently requires conjunctive range evaluation."
+        },
+        {
+          "case_id": "th14_dart_websocket_fragments",
+          "owners": [
+            "lib/websocket_decoder.dart",
+            "lib/websocket_messages.dart"
+          ],
+          "owner_proof": "Direct decoder calls require retained transport bytes, while direct assembler calls require control frames not to clear an active fragmented message."
+        },
+        {
+          "case_id": "th14_node_esm_plugin_loading",
+          "owners": [
+            "src/package-exports.mjs",
+            "src/plugin-loader.mjs"
+          ],
+          "owner_proof": "Direct export resolution requires condition selection, while direct loading through a literal-hash directory requires encoded file-URL construction unavailable to the resolver."
+        },
+        {
+          "case_id": "th14_node_http_preconditions",
+          "owners": [
+            "src/entity-tag-list.mjs",
+            "src/request-preconditions.mjs"
+          ],
+          "owner_proof": "Direct parsing preserves quoted commas, while direct evaluation independently requires weak read matching and strong write matching."
+        },
+        {
+          "case_id": "th14_node_partition_commits",
+          "owners": [
+            "src/offset-tracker.mjs",
+            "src/batch-consumer.mjs"
+          ],
+          "owner_proof": "Direct tracker completion requires contiguous advancement, while a tracker spy directly proves the consumer must forward the record's actual partition."
+        },
+        {
+          "case_id": "th14_py_context_offload",
+          "owners": [
+            "request_scope.py",
+            "work_dispatch.py"
+          ],
+          "owner_proof": "Nested direct scope calls require token restoration, while submission to a reused worker independently requires submit-time context capture."
+        },
+        {
+          "case_id": "th14_py_decorated_handlers",
+          "owners": [
+            "trace_hooks.py",
+            "handler_dispatch.py"
+          ],
+          "owner_proof": "The tracing wrapper must finish after asynchronous work, while an unwrapped callable object directly requires dispatch to await returned awaitables."
+        },
+        {
+          "case_id": "th14_py_link_pagination",
+          "owners": [
+            "link_header.py",
+            "page_client.py"
+          ],
+          "owner_proof": "Direct parser output requires protected delimiter handling, while collection independently requires resolving a next target against the response URL."
+        },
+        {
+          "case_id": "th14_sql_partner_search",
+          "owners": [
+            "sql/search_inventory.sql",
+            "sql/search_delivery_lanes.sql"
+          ],
+          "owner_proof": "Feedback executes each independent query directly with literal wildcard-bearing input; neither SQL file can affect the other."
+        },
+        {
+          "case_id": "th14_sql_registry_refresh",
+          "owners": [
+            "sql/refresh_supplier.sql",
+            "sql/refresh_depot.sql"
+          ],
+          "owner_proof": "Supplier and depot refresh statements are loaded and executed independently, and each must avoid replacement cascades while retaining establishment time."
+        },
+        {
+          "case_id": "th14_sql_suppression_batches",
+          "owners": [
+            "sql/select_email_batch.sql",
+            "sql/select_webhook_batch.sql"
+          ],
+          "owner_proof": "Email and webhook batch statements are executed independently and each must prevent a NULL advisory target from poisoning its exclusion predicate."
+        }
+      ]
+    },
+    "redirect_single_owner_architecture_attack": {
+      "passed": true,
+      "sdk": "Dart SDK 3.11.1 stable windows_x64",
+      "scratch_outside_repository": true,
+      "scratch_removed": true,
+      "coordinated_two_owner": {
+        "changed_files": [
+          "lib/redirect_request.dart",
+          "lib/redirect_follower.dart"
+        ],
+        "analyze_exit": 0,
+        "public_exit": 0,
+        "feedback_exit": 0,
+        "final_exit": 0
+      },
+      "request_only_centralization": {
+        "changed_files": [
+          "lib/redirect_request.dart"
+        ],
+        "follower_byte_identical_to_packed": true,
+        "implemented": [
+          "303 method, body, and entity-header derivation",
+          "case-insensitive credential filtering",
+          "scheme, host, and effective-port origin comparison"
+        ],
+        "analyze_exit": 0,
+        "public_exit": 0,
+        "feedback_exit": 255,
+        "feedback_failure": "credentials from a redirect decision stay with their origin",
+        "final_exit": 255,
+        "final_failure": "credentials from one handoff do not enter the next decision"
+      },
+      "follower_only": {
+        "changed_files": [
+          "lib/redirect_follower.dart"
+        ],
+        "request_policy_byte_identical_to_packed": true,
+        "implemented": [
+          "post-policy 303 method, body, and entity-header derivation",
+          "post-policy cross-origin credential filtering"
+        ],
+        "analyze_exit": 0,
+        "public_exit": 0,
+        "feedback_exit": 255,
+        "feedback_failure": "see-other changes a write into a read",
+        "final_exit": 255,
+        "final_failure": "see-other changes PATCH into GET"
+      },
+      "single_owner_impossibility": "Follower-only work cannot affect direct RedirectPolicy calls. Request-only work in base RedirectPolicy is bypassed by an injected override, and RedirectRequest construction lacks the prior origin needed to distinguish the public same-origin credential case from a cross-origin handoff. Preserving the public subclass API therefore forces both owners."
+    },
+    "distractor_non_necessity": {
+      "passed": true,
+      "plausible_and_unnecessary_count": 12,
+      "distractors": [
+        "lib/redirect_response.dart",
+        "lib/package_release.dart",
+        "lib/websocket_frame.dart",
+        "src/plugin-registry.mjs",
+        "src/catalog-response.mjs",
+        "src/commit-report.mjs",
+        "audit_event.py",
+        "handler_registry.py",
+        "item_decoder.py",
+        "sql/record_search_audit.sql",
+        "sql/expire_registry_bindings.sql",
+        "sql/list_suppression_feed.sql"
+      ],
+      "finding": "Each distractor is on a public or final integration path, but its packed behavior already satisfies the asserted contract and it owns no failed primitive."
+    },
+    "materially_stronger_finals": {
+      "passed": true,
+      "materially_stronger_count": 12,
+      "feedback_final_payloads_byte_distinct": true,
+      "feedback_final_paths_disjoint": true,
+      "redirect_final_additions": [
+        "direct PATCH 303 derivation",
+        "two cross-origin preserving hops",
+        "credentials reintroduced by an injected policy on every hop",
+        "observation before the later policy decision",
+        "proxy-authorization and mixed-case header variants",
+        "ordinary metadata, method, and body preservation",
+        "normal 303 followed by relative 308 composition",
+        "explicit default HTTPS port equivalence",
+        "direct HEAD behavior"
+      ]
+    },
+    "prompt_and_source_leakage": {
+      "passed": true,
+      "cases_scanned": 12,
+      "forbidden_public_key_hits": 0,
+      "hidden_test_path_hits": 0,
+      "hidden_test_name_hits": 0,
+      "duplicate_hidden_payloads": 0,
+      "solution_comment_or_todo_hits": 0,
+      "finding": "Prompts describe symptoms and compatibility boundaries without hidden values or test names. The redirect prompt's injectable-policy constraint is a public API compatibility requirement and its public same-origin control does not disclose the sealed cross-origin payloads."
+    },
+    "authored_input_freeze": {
+      "passed": true,
+      "scope": "all files under the fourteenth fixture except VALIDATION",
+      "file_count": 42,
+      "byte_count": 149337,
+      "aggregate_algorithm": "SHA-256 over ordinally sorted UTF-8 records of fixture-relative-path, NUL, lowercase file SHA-256, LF",
+      "aggregate_sha256": "0fc6adfdc16f2e0662948333c4b431c3d9d7a1830d86a08603acd19daa0679c9",
+      "manifest_sha256": "899570e965437b3b028c73a5ddf5f30f52850e7556f3d00d27c418ce6dcab12f",
+      "redirect_triple_aggregate_sha256": "3e57947e1ef6d50514eba858a862d75e4e1ab9e70d5d958b7b783ea918adfaa9",
+      "worktree_clean_before_outputs": true
+    }
+  },
+  "findings": [],
+  "authored_files_unchanged": true
+}
