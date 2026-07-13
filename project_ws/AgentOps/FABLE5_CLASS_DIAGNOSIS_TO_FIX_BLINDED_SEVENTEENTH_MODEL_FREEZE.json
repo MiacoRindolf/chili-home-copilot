@@ -1,0 +1,38 @@
+{
+  "schema": "chili.diagnosis-to-fix-model-freeze.v1",
+  "created_at": "2026-07-13T23:22:54.3000226Z",
+  "reference_family": "claude-fable-5",
+  "selection_stage": "before_independent_fixture_payload_delivery",
+  "intended_fixture_root": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_seventeenth",
+  "implementation_commit": "19de897466158027d65742f06d5e562e4597d2f1",
+  "implementation_tree": "e7b93517dc121668579634afe8895f6681f5448c",
+  "primary_model": "qwen2.5-coder:7b",
+  "primary_model_local_id": "dae161e27b0e",
+  "reasoning_model": "qwen3:8b",
+  "reasoning_model_local_id": "500a1f067a9f",
+  "escalation_model": "disabled",
+  "max_base_repairs": 2,
+  "max_escalation_repairs": 0,
+  "per_call_timeout_sec": 150,
+  "case_model_time_budget_sec": 480,
+  "premium_calls_allowed": 0,
+  "evaluation_context": "protocol",
+  "expected_case_count": 8,
+  "expected_language_counts": {
+    "dart": 2,
+    "node": 2,
+    "python": 2,
+    "sql": 2
+  },
+  "selection_rationale": [
+    "The pair is fully local and already installed on the contestant host.",
+    "It preserves comparability with the fifteenth and sixteenth protocol configuration.",
+    "The 7B editor fits the 8 GB GPU; the installed 14B editor exceeds GPU memory and would add CPU spill without clean unseen evidence of higher solve quality.",
+    "Checkpoint and resume now address host-duration interruption without changing per-case reasoning allowance."
+  ],
+  "hardware_observation": {
+    "gpu": "NVIDIA GeForce RTX 2070",
+    "gpu_memory_mib": 8192
+  },
+  "authenticated_fable5_head_to_head_required_for_parity_claim": true
+}
