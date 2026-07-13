@@ -6219,11 +6219,11 @@ def _reasoning_model_supports_thinking(model: object) -> bool:
 
 
 def _diagnostic_stage_uses_thinking(model: object, stage: object) -> bool:
-    """Reserve Qwen3 thinking for causal analysis, not JSON reformatting."""
+    """Reserve Qwen3 thinking for hypothesis generation, not consolidation."""
     return bool(
         _reasoning_model_supports_thinking(model)
         and str(stage or "").strip().lower()
-        in {"investigator", "skeptic", "judge"}
+        in {"investigator", "skeptic"}
     )
 
 

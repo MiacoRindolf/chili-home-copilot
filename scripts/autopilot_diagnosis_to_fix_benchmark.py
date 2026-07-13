@@ -1717,9 +1717,7 @@ def _local_call(
     use_thinking = bool(
         json_mode
         and str(model).lower().startswith("qwen3")
-        and str(stage).startswith("diagnosis_")
-        and "schema_correction" not in str(stage)
-        and "json_retry" not in str(stage)
+        and str(stage) in {"diagnosis_investigator", "diagnosis_skeptic"}
     )
     result = ollama_client.chat(
         messages,

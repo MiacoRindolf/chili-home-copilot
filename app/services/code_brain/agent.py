@@ -814,6 +814,29 @@ def _fuzzy_exact_window(content: str, search: str) -> Optional[str]:
     return "".join(c_lines[i:i + n])
 
 
+def _whitespace_reflow_exact_span(content: str, search: str) -> Optional[str]:
+    """Map a uniquely reflowed SEARCH onto the exact source span.
+
+    Local models sometimes copy one expression as a single line even when the
+    formatter split it across several lines. This matcher permits whitespace
+    changes only: every non-whitespace token must remain byte-for-byte equal,
+    and exactly one source span must match.
+    """
+    tokens = re.findall(r"\S+", search)
+    if (
+        len(tokens) < 2
+        or len(tokens) > 400
+        or sum(len(token) for token in tokens) < 16
+    ):
+        return None
+    pattern = re.compile(r"\s+".join(re.escape(token) for token in tokens))
+    matches = list(pattern.finditer(content))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    return content[match.start() : match.end()]
+
+
 def _leading_ws(line: str) -> str:
     return line[: len(line) - len(line.lstrip(" \t"))]
 
@@ -868,6 +891,10 @@ def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
             # Forgiving fallback: re-find the block via whitespace/unicode
             # normalization, then operate on the EXACT original span.
             window = _fuzzy_exact_window(new_content, search)
+            match_kind = "whitespace/unicode normalization"
+            if window is None:
+                window = _whitespace_reflow_exact_span(new_content, search)
+                match_kind = "unique whitespace reflow"
             if window is not None:
                 # The model's copy often carries a uniform indentation shift
                 # (live: run 687 re-indented a module docstring by 4 spaces →
@@ -880,7 +907,7 @@ def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
                 search = window
                 count = new_content.count(search)
                 warnings.append(
-                    f"block {i}: matched via whitespace/unicode normalization"
+                    f"block {i}: matched via {match_kind}"
                 )
         if count == 0:
             if replace.strip() and new_content.count(replace) == 1:

@@ -99,7 +99,13 @@ def test_select_local_reasoning_model_prefers_explicit_installed_reasoner(monkey
     assert selected["model"] == "qwen3:8b"
     assert selected["fallback_to_coder"] is False
     assert orchestrator._reasoning_model_supports_thinking(selected["model"]) is True
-    assert orchestrator._diagnostic_stage_uses_thinking(selected["model"], "judge") is True
+    assert (
+        orchestrator._diagnostic_stage_uses_thinking(
+            selected["model"], "investigator"
+        )
+        is True
+    )
+    assert orchestrator._diagnostic_stage_uses_thinking(selected["model"], "judge") is False
     assert (
         orchestrator._diagnostic_stage_uses_thinking(
             selected["model"], "judge_schema_correction"
@@ -320,11 +326,10 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             call["options"]["format"] == "json"
             for call in diagnostic_calls
         )
-        assert all(
-            call["think"]
-            is orchestrator._reasoning_model_supports_thinking(call["model"])
-            for call in diagnostic_calls
+        assert diagnostic_calls[0]["think"] is orchestrator._reasoning_model_supports_thinking(
+            diagnostic_calls[0]["model"]
         )
+        assert all(call["think"] is False for call in diagnostic_calls[1:])
         assert calls[-1]["think"] is False
         assert all(
             "diagnostic_probe" in call["messages"][1]["content"]

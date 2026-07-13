@@ -210,6 +210,39 @@ def test_fuzzy_match_requires_uniqueness():
     assert out["applied"] == 0  # two normalized matches -> never guess
 
 
+def test_whitespace_reflow_maps_to_one_exact_source_span():
+    content = (
+        "const first = values[0];\n"
+        "return typeof first === 'string'\n"
+        "  ? first\n"
+        "  : null;\n"
+    )
+    out = _apply_search_replace(
+        content,
+        [
+            (
+                "return typeof first === 'string' ? first : null;",
+                "return typeof first === 'string' ? normalize(first) : null;",
+            )
+        ],
+    )
+
+    assert out["applied"] == 1
+    assert "normalize(first)" in out["new_content"]
+    assert any("unique whitespace reflow" in warning for warning in out["warnings"])
+
+
+def test_whitespace_reflow_still_rejects_ambiguous_spans():
+    expression = "return enabled\n  ? value\n  : null;\n"
+    out = _apply_search_replace(
+        expression + expression,
+        [("return enabled ? value : null;", "return value;")],
+    )
+
+    assert out["applied"] == 0
+    assert out["new_content"] is None
+
+
 def test_fuzzy_match_ignores_blank_only_search():
     out = _apply_search_replace("x = 1\n", [("   ", "y = 2")])
     assert out["applied"] == 0

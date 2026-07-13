@@ -265,7 +265,7 @@ def test_local_call_records_prompt_timing_and_distinguishes_call_timeout(monkeyp
     assert calls.model_time_used >= 0
 
 
-def test_qwen3_thinking_is_reserved_for_initial_diagnostic_roles(monkeypatch):
+def test_qwen3_thinking_is_reserved_for_hypothesis_generation(monkeypatch):
     captured = []
 
     def fake_chat(*_args, **kwargs):
@@ -285,6 +285,15 @@ def test_qwen3_thinking_is_reserved_for_initial_diagnostic_roles(monkeypatch):
     benchmark._local_call(
         "qwen3:8b",
         [{"role": "user", "content": "diagnose"}],
+        stage="diagnosis_investigator",
+        calls=calls,
+        timeout=10.0,
+        num_predict=100,
+        json_mode=True,
+    )
+    benchmark._local_call(
+        "qwen3:8b",
+        [{"role": "user", "content": "judge"}],
         stage="diagnosis_judge",
         calls=calls,
         timeout=10.0,
@@ -303,6 +312,7 @@ def test_qwen3_thinking_is_reserved_for_initial_diagnostic_roles(monkeypatch):
 
     assert captured[0]["think"] is True
     assert captured[1]["think"] is False
+    assert captured[2]["think"] is False
     assert calls[0]["thinking_enabled"] is True
     assert calls[0]["thinking_chars"] == len("bounded causal analysis")
     assert calls[1]["thinking_enabled"] is False
