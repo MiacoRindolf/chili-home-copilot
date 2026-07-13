@@ -93,6 +93,14 @@ _EXCEPTION_RE = re.compile(
     r")(?:\s*\[[^\]\r\n]+\])?\s*:\s*(?P<message>[^\r\n]+)",
     re.IGNORECASE,
 )
+_NODE_CODED_ERROR_RE = re.compile(
+    r"(?P<kind>[A-Za-z]*Error|Error)\s*\[(?P<code>[A-Z0-9_]+)\]\s*:\s*"
+    r"(?P<message>[^\r\n]+)",
+)
+_FILE_URL_FIELD_RE = re.compile(
+    r"^url\s*:\s*['\"](?P<url>file:[^'\"]+)['\"]\s*,?$",
+    re.IGNORECASE,
+)
 _DART_TYPE_ERROR_RE = re.compile(
     r"\btype\s+.+?\s+is\s+not\s+a\s+subtype\s+of\s+type\s+.+$",
     re.IGNORECASE,
@@ -317,6 +325,27 @@ def _runtime_error_facts(lines: list[str]) -> list[tuple[int, int, str]]:
     candidates: list[tuple[int, int, str]] = []
     for index, raw_line in enumerate(lines):
         line = _diagnostic_line(raw_line)
+        node_error = _NODE_CODED_ERROR_RE.search(line)
+        if node_error:
+            candidates.append(
+                (
+                    index,
+                    2,
+                    f"{node_error.group('kind')}[{node_error.group('code')}]: "
+                    f"{node_error.group('message').strip()}",
+                )
+            )
+        file_url = _FILE_URL_FIELD_RE.match(line)
+        if file_url and "#" in file_url.group("url"):
+            fragment = file_url.group("url").split("#", 1)[1]
+            candidates.append(
+                (
+                    index,
+                    0,
+                    "file URL contains a literal # fragment delimiter before the requested module suffix"
+                    + (f": fragment={fragment}" if fragment else ""),
+                )
+            )
         bad_state = re.search(r"\bBad state:\s*(.+)$", line, re.IGNORECASE)
         if bad_state:
             candidates.append((index, 2, f"Bad state: {bad_state.group(1).strip()}"))

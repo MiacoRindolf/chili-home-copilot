@@ -503,6 +503,9 @@ def _build_edit_prompt(file_path: str, file_content: str, change_description: st
         "- Several small blocks are better than one large block.",
         "- To insert new code, SEARCH for the nearest existing line(s) and repeat them in REPLACE together with the new code.",
         "- Do NOT use placeholder code like '# Implementation here' or 'pass' for real logic.",
+        "- Plan fields named algorithm, required_primitives, and forbidden_shortcuts are normative: implement the "
+        "algorithm, use the named existing primitives (including needed platform imports), and never emit a "
+        "forbidden shortcut.",
         "- If the change cannot be made from the provided content, explain why in plain text instead of guessing.",
         "",
     ]

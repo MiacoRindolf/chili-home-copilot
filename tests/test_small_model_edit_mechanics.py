@@ -181,6 +181,9 @@ def test_edit_prompt_teaches_search_replace_format():
     assert "<<<<<<< SEARCH" in p
     assert ">>>>>>> REPLACE" in p
     assert "EXACTLY ONCE" in p
+    assert "required_primitives" in p
+    assert "forbidden_shortcuts" in p
+    assert "normative" in p
 
 
 # ── fuzzy fallback: normalized match onto the exact original span ────────

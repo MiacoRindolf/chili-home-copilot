@@ -2400,8 +2400,10 @@ def _apply_local_edit_bundle(
         "from that path's current content and must match exactly once. Use a complete distinctive "
         "line or enough surrounding lines to make each SEARCH unique; never use bare punctuation, "
         "a common literal, or a lone identifier as SEARCH. Design the files together so signatures, "
-        "state, schema, and callers remain compatible. Do not edit tests, invent dependencies, or "
-        "add prose."
+        "state, schema, and callers remain compatible. The plan's algorithm, required_primitives, and "
+        "forbidden_shortcuts fields are normative: implement the algorithm, use the named existing primitives "
+        "with any required platform imports, and never emit a forbidden shortcut. Do not edit tests, invent "
+        "dependencies, or add prose."
     )
 
     def request_bundle(stage_name: str, adapter_feedback: str = "") -> str:

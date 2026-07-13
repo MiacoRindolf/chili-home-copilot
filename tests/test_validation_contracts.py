@@ -184,6 +184,24 @@ def test_node_failure_delta_extracts_full_output_diff_and_reference_error():
     }
 
 
+def test_node_module_error_surfaces_code_and_unescaped_file_url_fragment():
+    evidence = validation_contracts.failure_delta_evidence(
+        {
+            "output": (
+                "Error [ERR_MODULE_NOT_FOUND]: Cannot find module "
+                "'C:/workspace/vendor/channel' imported from C:/workspace/loader.mjs\n"
+                "  url: 'file:///C:/workspace/vendor/channel#edge/index.mjs'\n"
+            )
+        }
+    )
+
+    assert any(
+        fact.startswith("Error[ERR_MODULE_NOT_FOUND]:")
+        for fact in evidence["facts"]
+    )
+    assert any("literal # fragment delimiter" in fact for fact in evidence["facts"])
+
+
 def test_python_failure_delta_extracts_assertion_and_name_error():
     evidence = validation_contracts.failure_delta_evidence(
         {
