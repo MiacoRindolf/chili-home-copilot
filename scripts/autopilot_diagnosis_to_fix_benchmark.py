@@ -4607,7 +4607,9 @@ def _validate_run_policy(
         "max_base_repairs": base_repairs,
         "max_escalation_repairs": escalation_repairs,
         "per_call_timeout_sec": float(args.timeout),
-        "case_model_time_budget_sec": float(args.case_model_time_budget),
+        "case_model_time_budget_sec": float(
+            getattr(args, "case_model_time_budget", 690.0) or 690.0
+        ),
         "premium_calls_allowed": 0,
         "expected_case_count": len(prepared_entries),
     }
@@ -4833,6 +4835,170 @@ def validate_fixture(
     }
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _checkpoint_path(args: argparse.Namespace) -> Path:
+    configured = str(getattr(args, "checkpoint", "") or "").strip()
+    if configured:
+        return Path(configured).resolve()
+    return Path(f"{Path(args.results_json).resolve()}.checkpoint.json")
+
+
+def _checkpoint_binding(
+    args: argparse.Namespace,
+    *,
+    fixture_root: Path,
+    prepared_entries: Sequence[Mapping[str, Any]],
+    digest_inventory: Mapping[str, Any],
+    evaluation_context: str,
+    reasoning_model: str,
+    repair_schedule: Sequence[str],
+    run_policy_binding: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    source_hashes = {
+        relative: _sha256_bytes((ROOT / relative).read_bytes())
+        for relative in RUN_POLICY_SOURCE_PATHS
+    }
+    return {
+        "fixture_root": fixture_root.as_posix(),
+        "fixture_inventory_sha256": _sha256_bytes(
+            json.dumps(digest_inventory, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ),
+        "case_ids": [str(item.get("case_id") or "") for item in prepared_entries],
+        "evaluation_context": evaluation_context,
+        "primary_model": str(args.model),
+        "reasoning_model": reasoning_model,
+        "repair_schedule": list(repair_schedule),
+        "max_repairs": int(args.max_repairs),
+        "max_escalation_repairs": int(
+            getattr(args, "max_escalation_repairs", 0) or 0
+        ),
+        "per_call_timeout_sec": float(args.timeout),
+        "case_model_time_budget_sec": float(
+            getattr(args, "case_model_time_budget", 690.0) or 690.0
+        ),
+        "run_policy_sha256": str((run_policy_binding or {}).get("sha256") or ""),
+        "implementation_commit": str(
+            (run_policy_binding or {}).get("implementation_commit") or ""
+        ),
+        "source_hashes": source_hashes,
+    }
+
+
+def _checkpoint_digest(payload: Mapping[str, Any]) -> str:
+    unsigned = {key: value for key, value in payload.items() if key != "sha256"}
+    return _sha256_bytes(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def _write_run_checkpoint(
+    path: Path,
+    *,
+    binding: Mapping[str, Any],
+    case_results: Sequence[Mapping[str, Any]],
+    integrity_events: Sequence[Mapping[str, Any]],
+) -> None:
+    payload: dict[str, Any] = {
+        "schema": "chili.diagnosis-to-fix-run-checkpoint.v1",
+        "status": "in_progress",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "binding": dict(binding),
+        "completed_case_ids": [
+            str(item.get("case_id") or "") for item in case_results
+        ],
+        "case_results": [dict(item) for item in case_results],
+        "integrity_audit_events": [dict(item) for item in integrity_events],
+    }
+    payload["sha256"] = _checkpoint_digest(payload)
+    _atomic_write_text(
+        path,
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def _load_run_checkpoint(
+    path: Path,
+    *,
+    expected_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        payload = _read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise FixtureIntegrityError(f"Run checkpoint is unreadable: {exc}") from exc
+    if payload.get("schema") != "chili.diagnosis-to-fix-run-checkpoint.v1":
+        raise FixtureIntegrityError("Unsupported diagnosis-to-fix checkpoint schema.")
+    if payload.get("status") != "in_progress":
+        raise FixtureIntegrityError("Run checkpoint status must be in_progress.")
+    if str(payload.get("sha256") or "") != _checkpoint_digest(payload):
+        raise FixtureIntegrityError("Run checkpoint digest mismatch.")
+    if payload.get("binding") != dict(expected_binding):
+        raise FixtureIntegrityError("Run checkpoint binding does not match this execution.")
+    raw_case_results = payload.get("case_results")
+    if not isinstance(raw_case_results, list) or not all(
+        isinstance(item, Mapping) for item in raw_case_results
+    ):
+        raise FixtureIntegrityError("Run checkpoint case_results must be an object list.")
+    raw_completed_ids = payload.get("completed_case_ids")
+    if not isinstance(raw_completed_ids, list) or not all(
+        isinstance(item, str) and item for item in raw_completed_ids
+    ):
+        raise FixtureIntegrityError(
+            "Run checkpoint completed_case_ids must be a non-empty string list."
+        )
+    raw_events = payload.get("integrity_audit_events")
+    if not isinstance(raw_events, list) or not all(
+        isinstance(item, Mapping) for item in raw_events
+    ):
+        raise FixtureIntegrityError(
+            "Run checkpoint integrity_audit_events must be an object list."
+        )
+    case_results = [dict(item) for item in raw_case_results]
+    completed_ids = [str(item.get("case_id") or "") for item in case_results]
+    expected_ids = [str(value) for value in expected_binding.get("case_ids") or []]
+    if completed_ids != expected_ids[: len(completed_ids)]:
+        raise FixtureIntegrityError(
+            "Run checkpoint completed cases are not an ordered prefix of the fixture."
+        )
+    if completed_ids != raw_completed_ids:
+        raise FixtureIntegrityError("Run checkpoint completed-case index mismatch.")
+    for item in case_results:
+        if item.get("sealed_final_adjudication") is not True:
+            raise FixtureIntegrityError(
+                "Run checkpoint contains a case without sealed final adjudication."
+            )
+        if item.get("model_calls_after_final") != 0:
+            raise FixtureIntegrityError(
+                "Run checkpoint contains a post-final model call."
+            )
+        if item.get("premium_calls") != 0:
+            raise FixtureIntegrityError("Run checkpoint contains a premium model call.")
+    return {
+        **payload,
+        "case_results": case_results,
+        "completed_case_ids": completed_ids,
+    }
+
+
+def _renumber_audit_events(
+    events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {**dict(item), "sequence": index}
+        for index, item in enumerate(events, start=1)
+    ]
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     fixture_root = Path(args.fixture_root).resolve()
     evaluation_context = str(
@@ -4887,12 +5053,80 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "Local model(s) are not installed: " + ", ".join(repr(value) for value in missing_models)
         )
 
+    checkpoint_path = _checkpoint_path(args)
+    report_path = Path(args.report).resolve()
+    results_path = Path(args.results_json).resolve()
+    if len({checkpoint_path, report_path, results_path}) != 3:
+        raise FixtureIntegrityError(
+            "Checkpoint, report, and results JSON must use distinct paths."
+        )
+    checkpoint_binding = _checkpoint_binding(
+        args,
+        fixture_root=fixture_root,
+        prepared_entries=prepared_entries,
+        digest_inventory=digest_inventory,
+        evaluation_context=evaluation_context,
+        reasoning_model=reasoning_model,
+        repair_schedule=repair_schedule,
+        run_policy_binding=run_policy_binding,
+    )
+    resume_requested = bool(getattr(args, "resume", False))
+    restored_case_count = 0
     case_results: list[dict[str, Any]] = []
+    if checkpoint_path.exists():
+        if not resume_requested:
+            raise FixtureIntegrityError(
+                f"Run checkpoint already exists; pass --resume or remove it explicitly: {checkpoint_path}"
+            )
+        current_preflight_events = list(integrity_events)
+        checkpoint = _load_run_checkpoint(
+            checkpoint_path,
+            expected_binding=checkpoint_binding,
+        )
+        case_results = list(checkpoint["case_results"])
+        restored_case_count = len(case_results)
+        integrity_events = _renumber_audit_events(
+            [
+                *(checkpoint.get("integrity_audit_events") or []),
+                *current_preflight_events,
+            ]
+        )
+        _record_audit_event(
+            integrity_events,
+            "run_checkpoint_resumed",
+            checkpoint_path=checkpoint_path.as_posix(),
+            restored_case_count=restored_case_count,
+        )
+    elif resume_requested:
+        raise FixtureIntegrityError(
+            f"--resume requested but no run checkpoint exists: {checkpoint_path}"
+        )
+    else:
+        _record_audit_event(
+            integrity_events,
+            "run_checkpoint_initialized",
+            checkpoint_path=checkpoint_path.as_posix(),
+        )
+    _write_run_checkpoint(
+        checkpoint_path,
+        binding=checkpoint_binding,
+        case_results=case_results,
+        integrity_events=integrity_events,
+    )
+
+    completed_case_ids = {str(item.get("case_id") or "") for item in case_results}
     for prepared in prepared_entries:
-        case_event_start = len(integrity_events)
         entry = prepared["entry"]
         bindings = prepared["bindings"]
         case_id = str(prepared.get("case_id") or "")
+        if case_id in completed_case_ids:
+            _record_audit_event(
+                integrity_events,
+                "checkpoint_completed_case_skipped",
+                case_id=case_id,
+            )
+            continue
+        case_event_start = len(integrity_events)
         case = _read_bound_json(
             bindings["case"],
             events=integrity_events,
@@ -5490,8 +5724,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             effective_dimension = _effective_diagnosis_dimension(diagnosis)
             reasoning_metrics = _live_reasoning_metrics(calls, diagnosis)
-            case_results.append(
-                {
+            case_result = {
                     "case_id": case["case_id"],
                     "language": str(case.get("language") or "python"),
                     "test_runner": _case_test_runner(case),
@@ -5572,8 +5805,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "premium_calls": 0,
                     "duration_ms": int((time.monotonic() - started) * 1000),
                 }
+            case_results.append(case_result)
+            completed_case_ids.add(case_id)
+            _record_audit_event(
+                integrity_events,
+                "run_checkpoint_case_committed",
+                case_id=case_id,
+                completed_case_count=len(case_results),
+            )
+            _write_run_checkpoint(
+                checkpoint_path,
+                binding=checkpoint_binding,
+                case_results=case_results,
+                integrity_events=integrity_events,
             )
 
+    _record_audit_event(
+        integrity_events,
+        "run_checkpoint_all_cases_complete",
+        completed_case_count=len(case_results),
+        restored_case_count=restored_case_count,
+    )
     average = sum(item["score"] for item in case_results) / len(case_results)
     average_duration = sum(item["duration_ms"] for item in case_results) / len(case_results)
     holdouts = [item for item in case_results if str(item.get("split") or "").startswith("holdout")]
@@ -5827,18 +6079,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "fixture_digest_inventory": digest_inventory,
         "integrity_audit_events": integrity_events,
         "test_subprocess_assurance": dict(TEST_SUBPROCESS_ASSURANCE),
+        "run_checkpoint": {
+            "path": checkpoint_path.as_posix(),
+            "resume_requested": resume_requested,
+            "restored_case_count": restored_case_count,
+            "completed_case_count": len(case_results),
+            "binding_sha256": _sha256_bytes(
+                json.dumps(
+                    checkpoint_binding,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ),
+            "cleanup_after_atomic_outputs": True,
+        },
         "score_weights": SCORE_WEIGHTS,
         "maximum_score_without_final_pass": sum(
             weight for key, weight in SCORE_WEIGHTS.items() if key != "final_tests"
         ),
         "cases": case_results,
     }
-    report_path = Path(args.report).resolve()
-    results_path = Path(args.results_json).resolve()
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(_markdown(results), encoding="utf-8")
-    results_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(
+        results_path,
+        json.dumps(results, indent=2, sort_keys=True) + "\n",
+    )
+    _atomic_write_text(report_path, _markdown(results))
+    checkpoint_path.unlink(missing_ok=True)
     return results
 
 
@@ -5862,6 +6128,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--report", default=str(DEFAULT_REPORT))
     parser.add_argument("--results-json", default=str(DEFAULT_RESULTS))
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="Atomic per-case checkpoint path; defaults beside --results-json.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume only from an existing checkpoint with an exact execution binding.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 

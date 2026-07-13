@@ -140,6 +140,7 @@ def test_all_legacy_repair_fixtures_pass_public_and_fail_feedback_and_final(tmp_
         model="qwen2.5-coder:7b",
         case=[],
         timeout=1.0,
+        case_model_time_budget=30.0,
         max_repairs=0,
         validate_fixtures=True,
         evaluation_context="disclosed_replay",
@@ -3063,6 +3064,118 @@ def test_model_call_ledger_rejects_appends_after_freeze():
         calls.append({"stage": "repair_after_final", "ok": True})
 
 
+def test_run_checkpoint_fails_closed_on_digest_binding_and_order_drift(tmp_path):
+    path = tmp_path / "run.checkpoint.json"
+    binding = {
+        "case_ids": ["first", "second"],
+        "source_hashes": {"runner.py": "abc"},
+    }
+    first = {
+        "case_id": "first",
+        "sealed_final_adjudication": True,
+        "model_calls_after_final": 0,
+        "premium_calls": 0,
+    }
+    benchmark._write_run_checkpoint(
+        path,
+        binding=binding,
+        case_results=[first],
+        integrity_events=[{"sequence": 1, "event": "final"}],
+    )
+
+    restored = benchmark._load_run_checkpoint(path, expected_binding=binding)
+    assert restored["completed_case_ids"] == ["first"]
+    assert restored["case_results"] == [first]
+    assert not list(tmp_path.glob(".*.tmp"))
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="binding"):
+        benchmark._load_run_checkpoint(
+            path,
+            expected_binding={**binding, "source_hashes": {"runner.py": "changed"}},
+        )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["completed_case_ids"] = ["second"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(benchmark.FixtureIntegrityError, match="digest"):
+        benchmark._load_run_checkpoint(path, expected_binding=binding)
+
+
+def test_run_checkpoint_rejects_unsealed_or_post_final_case_results(tmp_path):
+    path = tmp_path / "run.checkpoint.json"
+    binding = {"case_ids": ["first"]}
+    invalid = {
+        "case_id": "first",
+        "sealed_final_adjudication": False,
+        "model_calls_after_final": 0,
+        "premium_calls": 0,
+    }
+    benchmark._write_run_checkpoint(
+        path,
+        binding=binding,
+        case_results=[invalid],
+        integrity_events=[],
+    )
+    with pytest.raises(benchmark.FixtureIntegrityError, match="sealed final"):
+        benchmark._load_run_checkpoint(path, expected_binding=binding)
+
+    invalid["sealed_final_adjudication"] = True
+    invalid["model_calls_after_final"] = 1
+    benchmark._write_run_checkpoint(
+        path,
+        binding=binding,
+        case_results=[invalid],
+        integrity_events=[],
+    )
+    with pytest.raises(benchmark.FixtureIntegrityError, match="post-final"):
+        benchmark._load_run_checkpoint(path, expected_binding=binding)
+
+
+def test_run_checkpoint_rejects_malformed_payload_and_output_path_collision(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "run.checkpoint.json"
+    binding = {"case_ids": ["first"]}
+    benchmark._write_run_checkpoint(
+        path,
+        binding=binding,
+        case_results=[],
+        integrity_events=[],
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["case_results"] = ["not-an-object"]
+    payload["sha256"] = benchmark._checkpoint_digest(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="object list"):
+        benchmark._load_run_checkpoint(path, expected_binding=binding)
+
+    fixture = tmp_path / "fixture"
+    _write_protocol_fixture(fixture)
+    monkeypatch.setattr(benchmark.ollama_client, "list_models", lambda: ["local-model"])
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        model="local-model",
+        reasoning_model="local-model",
+        escalation_model="",
+        case=[],
+        timeout=1.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        validate_fixtures=False,
+        evaluation_context="protocol",
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "collision.json"),
+        checkpoint=str(tmp_path / "collision.json"),
+        resume=False,
+        json=False,
+    )
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="distinct paths"):
+        benchmark.run(args)
+
+
 def test_frozen_ledger_blocks_model_transport_before_invocation(monkeypatch):
     calls = benchmark._ModelCallLedger()
     calls.freeze()
@@ -3153,6 +3266,8 @@ def test_protocol_run_records_ordered_integrity_audit_and_live_reasoning_metrics
         evaluation_context="protocol",
         report=str(tmp_path / "report.md"),
         results_json=str(tmp_path / "result.json"),
+        checkpoint=str(tmp_path / "run.checkpoint.json"),
+        resume=False,
         json=False,
     )
 
@@ -3190,6 +3305,176 @@ def test_protocol_run_records_ordered_integrity_audit_and_live_reasoning_metrics
         result["fixture_digest_inventory"]["cases"][0]["final_oracle"]["sha256"]
     ) == 64
     assert result["test_subprocess_assurance"]["hostile_process_proof"] is False
+    assert result["run_checkpoint"]["restored_case_count"] == 0
+    assert result["run_checkpoint"]["completed_case_count"] == 1
+    assert not Path(args.checkpoint).exists()
+
+    checkpoint_events = []
+    _, prepared_entries, digest_inventory = benchmark._preflight_fixture_integrity(
+        fixture.resolve(),
+        set(),
+        evaluation_context="protocol",
+        events=checkpoint_events,
+    )
+    binding = benchmark._checkpoint_binding(
+        args,
+        fixture_root=fixture.resolve(),
+        prepared_entries=prepared_entries,
+        digest_inventory=digest_inventory,
+        evaluation_context="protocol",
+        reasoning_model="local-model",
+        repair_schedule=[],
+        run_policy_binding=None,
+    )
+    benchmark._write_run_checkpoint(
+        Path(args.checkpoint),
+        binding=binding,
+        case_results=result["cases"],
+        integrity_events=result["integrity_audit_events"],
+    )
+
+    def forbidden_diagnose(*_args, **_kwargs):
+        raise AssertionError("a completed checkpoint case must not call the model again")
+
+    monkeypatch.setattr(benchmark, "_diagnose", forbidden_diagnose)
+    args.resume = True
+    resumed = benchmark.run(args)
+
+    assert resumed["cases"] == result["cases"]
+    assert resumed["run_checkpoint"]["restored_case_count"] == 1
+    assert resumed["run_checkpoint"]["completed_case_count"] == 1
+    assert any(
+        item["event"] == "run_checkpoint_resumed"
+        for item in resumed["integrity_audit_events"]
+    )
+    assert not Path(args.checkpoint).exists()
+
+
+def test_protocol_run_checkpoints_real_interruption_and_resumes_remaining_case(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = tmp_path / "fixture"
+    paths = _write_protocol_fixture(fixture)
+    manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    second_id = "integrity-case-second"
+    second_paths = {
+        "case": fixture / f"cases/{second_id}.json",
+        "oracle": fixture / f"oracles/{second_id}.json",
+        "final": fixture / f"final_oracles/{second_id}.json",
+    }
+    for source_key, target_key in (
+        ("case", "case"),
+        ("oracle", "oracle"),
+        ("final", "final"),
+    ):
+        payload = json.loads(paths[source_key].read_text(encoding="utf-8"))
+        payload["case_id"] = second_id
+        second_paths[target_key].write_text(json.dumps(payload), encoding="utf-8")
+    manifest["cases"].append(
+        {
+            "case": f"cases/{second_id}.json",
+            "oracle": f"oracles/{second_id}.json",
+            "final_oracle": f"final_oracles/{second_id}.json",
+            "evaluation_role": "blinded_holdout",
+            "split": "holdout-sealed-python-singlefile",
+        }
+    )
+    paths["manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(benchmark.ollama_client, "list_models", lambda: ["local-model"])
+
+    diagnose_calls = []
+    interrupt_second = True
+
+    def fake_diagnose(_repo, case, _model, calls, _timeout, **_kwargs):
+        nonlocal interrupt_second
+        diagnose_calls.append(case["case_id"])
+        if case["case_id"] == second_id and interrupt_second:
+            raise RuntimeError("simulated host interruption")
+        calls.append(
+            {
+                "stage": "diagnosis_investigator",
+                "model": "local-model",
+                "ok": True,
+                "response": "{}",
+            }
+        )
+        conclusion = {
+            "dimension": "code",
+            "status": "confirmed",
+            "causal_sufficiency": "isolated",
+        }
+        return {
+            "report": {"conclusion": conclusion},
+            "packet": {},
+            "stages": [
+                {
+                    "stage": "investigator",
+                    "accepted": True,
+                    "conclusion": conclusion,
+                }
+            ],
+            "case": {"problem_statement": case["prompt"]},
+        }
+
+    def fake_contract_repair(repo, _case):
+        (repo / "owner.py").write_text("VALUE = 2\n", encoding="utf-8")
+        return {
+            "attempted": True,
+            "patch_applied": True,
+            "selected_files": ["owner.py"],
+            "warnings": [],
+            "proposed_dimension": "code",
+        }
+
+    monkeypatch.setattr(benchmark, "_diagnose", fake_diagnose)
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_deterministic_contract_repair",
+        fake_contract_repair,
+    )
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        model="local-model",
+        reasoning_model="local-model",
+        escalation_model="",
+        case=[],
+        timeout=1.0,
+        case_model_time_budget=30.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        validate_fixtures=False,
+        evaluation_context="protocol",
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "result.json"),
+        checkpoint=str(tmp_path / "run.checkpoint.json"),
+        resume=False,
+        json=False,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated host interruption"):
+        benchmark.run(args)
+
+    checkpoint = json.loads(Path(args.checkpoint).read_text(encoding="utf-8"))
+    assert checkpoint["sha256"] == benchmark._checkpoint_digest(checkpoint)
+    assert checkpoint["completed_case_ids"] == ["integrity-case"]
+    assert diagnose_calls == ["integrity-case", second_id]
+    assert not Path(args.results_json).exists()
+    assert not Path(args.report).exists()
+
+    interrupt_second = False
+    diagnose_calls.clear()
+    args.resume = True
+    result = benchmark.run(args)
+
+    assert diagnose_calls == [second_id]
+    assert [item["case_id"] for item in result["cases"]] == [
+        "integrity-case",
+        second_id,
+    ]
+    assert result["run_checkpoint"]["restored_case_count"] == 1
+    assert result["run_checkpoint"]["completed_case_count"] == 2
+    assert not Path(args.checkpoint).exists()
 
 
 def test_candidate_snapshot_restores_only_manifest_approved_sources(tmp_path):
