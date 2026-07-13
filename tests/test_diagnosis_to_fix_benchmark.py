@@ -265,6 +265,49 @@ def test_local_call_records_prompt_timing_and_distinguishes_call_timeout(monkeyp
     assert calls.model_time_used >= 0
 
 
+def test_qwen3_thinking_is_reserved_for_initial_diagnostic_roles(monkeypatch):
+    captured = []
+
+    def fake_chat(*_args, **kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(
+            ok=True,
+            text='{"files":[]}',
+            latency_ms=1,
+            tokens_out=5,
+            error=None,
+            raw={"message": {"thinking": "bounded causal analysis"}},
+        )
+
+    monkeypatch.setattr(benchmark.ollama_client, "chat", fake_chat)
+    calls = benchmark._ModelCallLedger(model_time_budget=30.0)
+
+    benchmark._local_call(
+        "qwen3:8b",
+        [{"role": "user", "content": "diagnose"}],
+        stage="diagnosis_judge",
+        calls=calls,
+        timeout=10.0,
+        num_predict=100,
+        json_mode=True,
+    )
+    benchmark._local_call(
+        "qwen3:8b",
+        [{"role": "user", "content": "plan"}],
+        stage="plan",
+        calls=calls,
+        timeout=10.0,
+        num_predict=100,
+        json_mode=True,
+    )
+
+    assert captured[0]["think"] is True
+    assert captured[1]["think"] is False
+    assert calls[0]["thinking_enabled"] is True
+    assert calls[0]["thinking_chars"] == len("bounded causal analysis")
+    assert calls[1]["thinking_enabled"] is False
+
+
 def test_local_call_labels_deadline_clamped_timeout_as_case_budget(monkeypatch):
     monkeypatch.setattr(
         benchmark.ollama_client,

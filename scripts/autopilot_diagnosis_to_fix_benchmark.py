@@ -1714,16 +1714,25 @@ def _local_call(
     }
     if json_mode:
         options["format"] = "json"
+    use_thinking = bool(
+        json_mode
+        and str(model).lower().startswith("qwen3")
+        and str(stage).startswith("diagnosis_")
+        and "schema_correction" not in str(stage)
+        and "json_retry" not in str(stage)
+    )
     result = ollama_client.chat(
         messages,
         model,
         temperature=0.1,
         timeout_sec=timeout,
         options=options,
-        think=bool(json_mode and str(model).lower().startswith("qwen3")),
+        think=use_thinking,
     )
     raw_value = getattr(result, "raw", None)
     raw = raw_value if isinstance(raw_value, Mapping) else {}
+    raw_message = raw.get("message") if isinstance(raw.get("message"), Mapping) else {}
+    thinking_chars = len(str(raw_message.get("thinking") or ""))
     error_text = str(result.error or "")
     timed_out = "timed out" in error_text.lower() or "timeouterror" in error_text.lower()
     error_kind = (
@@ -1753,6 +1762,14 @@ def _local_call(
                 len(str(message.get("content") or "")) for message in messages
             ),
             "prompt_eval_count": int(raw.get("prompt_eval_count") or 0),
+            "thinking_enabled": use_thinking,
+            "thinking_chars": thinking_chars,
+            "thinking_budget_exhausted": bool(
+                use_thinking
+                and not str(result.text or "").strip()
+                and thinking_chars
+                and int(result.tokens_out or 0) >= int(num_predict)
+            ),
             "load_duration_ns": int(raw.get("load_duration") or 0),
             "prompt_eval_duration_ns": int(raw.get("prompt_eval_duration") or 0),
             "eval_duration_ns": int(raw.get("eval_duration") or 0),
@@ -3127,7 +3144,7 @@ def _generate_patch(
         stage="plan",
         calls=calls,
         timeout=timeout,
-        num_predict=450,
+        num_predict=700,
         json_mode=True,
     )
     plan = code_agent._parse_plan_json(plan_text) or {}
@@ -3244,7 +3261,7 @@ def _repair_after_failure(
         stage=f"repair_plan_{round_index}",
         calls=calls,
         timeout=timeout,
-        num_predict=550,
+        num_predict=700,
         json_mode=True,
     )
     plan = code_agent._parse_plan_json(plan_text) or {}

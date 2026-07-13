@@ -6218,6 +6218,15 @@ def _reasoning_model_supports_thinking(model: object) -> bool:
     return str(model or "").strip().lower().startswith("qwen3")
 
 
+def _diagnostic_stage_uses_thinking(model: object, stage: object) -> bool:
+    """Reserve Qwen3 thinking for causal analysis, not JSON reformatting."""
+    return bool(
+        _reasoning_model_supports_thinking(model)
+        and str(stage or "").strip().lower()
+        in {"investigator", "skeptic", "judge"}
+    )
+
+
 def _candidate_exists(repo_path: Path | None, rel_path: str) -> bool:
     rel = _safe_rel_path(rel_path)
     if rel is None:
@@ -6629,7 +6638,7 @@ def _run_local_diagnostic_reasoning(
                 "keep_alive": _OLLAMA_KEEP_ALIVE,
                 "format": "json",
             },
-            think=_reasoning_model_supports_thinking(model_name),
+            think=_diagnostic_stage_uses_thinking(model_name, stage),
         )
         _note_model_call_result(model_name, result)
         model_calls.append(
@@ -6978,7 +6987,10 @@ def build_local_plan(
             "keep_alive": _OLLAMA_KEEP_ALIVE,
             "format": "json",
         },
-        think=_reasoning_model_supports_thinking(reasoning_model_info["model"]),
+        # The diagnostic council already performed the long-form causal work.
+        # Direct JSON mode prevents Qwen3 from spending the whole bounded plan
+        # budget in an internal thinking field and returning empty content.
+        think=False,
     )
     _note_model_call_result(str(reasoning_model_info["model"]), result)
     _add_artifact(
