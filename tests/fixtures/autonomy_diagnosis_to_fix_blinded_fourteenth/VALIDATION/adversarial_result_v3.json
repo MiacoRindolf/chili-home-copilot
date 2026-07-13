@@ -1,0 +1,226 @@
+{
+  "validator": "Codex independent adversarial_v3 validator",
+  "target_commit": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "target_provenance",
+      "status": "PASS",
+      "evidence": {
+        "validation_branch": "codex/fourteenth-holdout-adversarial-v3",
+        "branch_base": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+        "head_before_validation_outputs": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+        "merge_base": "a249993262ce5c2f621ed17ce67b7cccf8e74fef"
+      }
+    },
+    {
+      "id": "validation_only_preflight",
+      "status": "PASS",
+      "evidence": {
+        "command": "python -B scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures --json",
+        "mode": "validation_only",
+        "exit_code": 0,
+        "schema": "chili.diagnosis-to-fix-fixture-validation.v3",
+        "valid": true,
+        "case_count": 12,
+        "public_passed": 12,
+        "feedback_failed_as_required": 12,
+        "sealed_final_failed_as_required": 12,
+        "sealed_final_adjudication": 12,
+        "external_final_oracles": 12,
+        "model_calls": 0
+      }
+    },
+    {
+      "id": "manifest_and_triple_structure",
+      "status": "PASS",
+      "evidence": {
+        "case_count": 12,
+        "unique_case_ids": 12,
+        "language_counts": {
+          "dart": 3,
+          "typescript": 3,
+          "python": 3,
+          "sql": 3
+        },
+        "dimension_counts": {
+          "data": 3,
+          "dependency": 5,
+          "runtime": 1,
+          "state": 3
+        },
+        "candidate_paths_per_case": 3,
+        "max_files_per_case": 2,
+        "expected_files_per_case": 2,
+        "expected_files_within_candidates": 12,
+        "public_feedback_final_path_overlap": 0,
+        "ascii_or_bom_errors": 0
+      }
+    },
+    {
+      "id": "v1_collision_absent",
+      "status": "PASS",
+      "evidence": {
+        "removed_case_id": "th14_dart_keyset_pagination",
+        "prior_collision_case_id": "dart-equal-time-event-order",
+        "active_manifest_references_to_removed_case": 0,
+        "active_case_oracle_final_files_for_removed_case": 0,
+        "active_payload_mentions_of_removed_case": 0,
+        "replacement_case_id": "th14_dart_redirect_handoffs",
+        "replacement_manifest_entries": 1,
+        "replacement_has_timestamp_cursor_or_compound_position_contract": false,
+        "historical_mentions_confined_to_author_receipts_and_preserved_validation": true,
+        "collision_reintroduced": false
+      }
+    },
+    {
+      "id": "full_all_prior_duplicate_audit",
+      "status": "PASS",
+      "evidence": {
+        "manifest_roots": 17,
+        "manifest_cases_total": 151,
+        "active_cases": 12,
+        "all_prior_cases": 139,
+        "source_bearing_diagnosis_cases_total": 77,
+        "source_bearing_diagnosis_prior_cases": 65,
+        "active_intraset_case_pairs": 66,
+        "active_to_all_prior_case_pairs": 1668,
+        "active_to_source_bearing_diagnosis_case_pairs": 780,
+        "active_embedded_payloads": 81,
+        "prior_embedded_payloads": 359,
+        "active_candidate_sources": 36,
+        "prior_candidate_sources": 169,
+        "exact_normalized_prompt_duplicates": 0,
+        "exact_cross_fixture_embedded_payload_duplicates": 0,
+        "exact_cross_prior_canonical_candidate_duplicates": 0,
+        "exact_active_cross_case_candidate_duplicates": 0,
+        "material_mechanism_duplicates": 0,
+        "material_assertion_family_duplicates": 0,
+        "material_source_shape_duplicates": 0
+      }
+    },
+    {
+      "id": "current_deterministic_operator_direct_solvability",
+      "status": "PASS",
+      "evidence": {
+        "cases_scanned": 12,
+        "registry_source_blob": "0b4b1366a471dc099a4866bd5870bafc2f5524ff",
+        "registry_unchanged_since_v1": true,
+        "invariant_templates": 44,
+        "repair_operators": 36,
+        "cases_with_derived_invariants": 0,
+        "cases_with_known_dimensions": 0,
+        "cases_with_repair_proposals": 0,
+        "cases_with_invariant_warnings": 0,
+        "operator_api": "derive_contract_invariants + contract_repair_dimension + contract_repair_proposals + contract_invariant_warnings"
+      }
+    },
+    {
+      "id": "v2_one_file_loophole_closed_under_plausible_alternatives",
+      "status": "PASS",
+      "evidence": {
+        "case_id": "th14_dart_redirect_handoffs",
+        "v2_single_file": "lib/redirect_request.dart",
+        "v2_unnecessary_file": "lib/redirect_follower.dart",
+        "request_only": "A request-file repair can implement base RedirectPolicy 303 and origin logic, but the hidden policies override derive and return fresh complete requests. The override bypasses all base-policy logic, and a fresh RedirectRequest has no source-origin input with which to distinguish the required same-origin preservation from cross-origin removal.",
+        "follower_only": "Direct RedirectPolicy().derive assertions in feedback and final never call RedirectFollower, so a follower-only repair cannot implement 303 method, body, and entity-header derivation.",
+        "response_only": "RedirectResponse only validates and resolves Location before policy dispatch; it cannot affect direct policy calls or inspect the request returned by an overriding policy.",
+        "request_plus_response_without_follower": "Neither file has a normal post-dispatch hook over the overriding policy's returned request. Closing that gap would require a public API change, wire-visible marker, hidden global provenance, or host-specific behavior, none of which is a plausible contract-preserving repair.",
+        "follower_plus_response_without_request": "The direct policy assertions remain unreachable from both files.",
+        "global_constructor_scrub_rejected_by_public_contract": "The public injected-policy test and final implicit-versus-explicit default-port test require same-origin credentials returned by a policy to survive.",
+        "end_of_chain_scrub_insufficient": "The final records whether first-hop credentials enter the second policy decision, requiring enforcement after every derive call.",
+        "plausible_one_file_end_to_end_repairs": 0,
+        "plausible_alternate_owner_pairs": 0,
+        "required_owner_pair": [
+          "lib/redirect_request.dart",
+          "lib/redirect_follower.dart"
+        ]
+      }
+    },
+    {
+      "id": "all_case_two_owner_and_triviality_audit",
+      "status": "PASS",
+      "evidence": {
+        "cases_reviewed": 12,
+        "cases_requiring_both_expected_owners": 12,
+        "cases_with_plausible_one_file_end_to_end_solution": 0,
+        "cases_with_plausible_alternate_owner_pair": 0,
+        "cases_with_sufficient_distractor": 0,
+        "cases_solved_end_to_end_by_literal_constant_substitution": 0,
+        "cases_with_only_a_renamed_or_repeated_assertion": 0,
+        "note": "Each feedback partition directly observes a failed primitive in each expected owner, and every final composes both primitives. Mechanically small local edits in the SQL and selector cases remain independently required in two owners."
+      }
+    },
+    {
+      "id": "weak_final_partition_independence",
+      "status": "PASS",
+      "evidence": {
+        "disjoint_public_feedback_final_paths": true,
+        "byte_identical_weak_final_payloads": 0,
+        "materially_strengthened_finals": 12,
+        "redirect_final_additions": [
+          "direct PATCH 303 derivation",
+          "two cross-origin preserving hops",
+          "credentials reintroduced by an overriding policy on each hop",
+          "observation before the second policy decision",
+          "mixed-case authorization, cookie, proxy authorization, and entity headers",
+          "normal 303 followed by relative 308",
+          "implicit and explicit default HTTPS port equivalence",
+          "HEAD behavior under 303"
+        ]
+      }
+    },
+    {
+      "id": "public_prompt_source_and_label_leakage",
+      "status": "PASS",
+      "evidence": {
+        "forbidden_oracle_keys_in_public_cases": 0,
+        "feedback_or_final_paths_in_public_cases": 0,
+        "feedback_test_or_check_labels_scanned": 33,
+        "final_test_or_check_labels_scanned": 40,
+        "hidden_label_hits_in_public_cases": 0,
+        "byte_identical_hidden_payloads_in_public_cases": 0,
+        "final_assertion_payloads_in_public_cases": 0,
+        "repair_recipe_leaks": 0,
+        "public_tests_cover_healthy_baselines": true,
+        "redirect_public_subclass_is_contract_evidence": "It establishes that a replaceable policy may return a complete same-origin request; it discloses neither the cross-origin hidden values nor a patch recipe."
+      }
+    },
+    {
+      "id": "case_level_review",
+      "status": "PASS",
+      "evidence": {
+        "PASS": [
+          "th14_dart_redirect_handoffs",
+          "th14_dart_semver_selection",
+          "th14_dart_websocket_fragments",
+          "th14_node_esm_plugin_loading",
+          "th14_node_http_preconditions",
+          "th14_node_partition_commits",
+          "th14_py_context_offload",
+          "th14_py_decorated_handlers",
+          "th14_py_link_pagination",
+          "th14_sql_partner_search",
+          "th14_sql_registry_refresh",
+          "th14_sql_suppression_batches"
+        ],
+        "REJECT": []
+      }
+    },
+    {
+      "id": "authored_input_integrity",
+      "status": "PASS",
+      "evidence": {
+        "authored_input_file_count": 42,
+        "authored_input_bytes": 149337,
+        "aggregate_sha256": "0fc6adfdc16f2e0662948333c4b431c3d9d7a1830d86a08603acd19daa0679c9",
+        "digest_definition": "SHA-256 over sorted UTF-8 records of fixture-relative path, NUL, lowercase file SHA-256, LF; VALIDATION excluded.",
+        "redirect_triple_aggregate_sha256": "3e57947e1ef6d50514eba858a862d75e4e1ab9e70d5d958b7b783ea918adfaa9",
+        "redirect_triple_aggregate_record_bytes": 322,
+        "changed_paths_outside_owned_validation_outputs": 0
+      }
+    }
+  ],
+  "findings": [],
+  "authored_files_unchanged": true
+}
