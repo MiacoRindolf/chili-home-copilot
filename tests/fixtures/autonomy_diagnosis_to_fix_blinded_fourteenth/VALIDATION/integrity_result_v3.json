@@ -1,0 +1,163 @@
+{
+  "validator": "codex-independent-integrity-validator/v3",
+  "target_commit": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+  "verdict": "PASS",
+  "checks": {
+    "target_commit_anchor": {
+      "status": "PASS",
+      "evidence": {
+        "branch": "codex/fourteenth-holdout-v3-integrity",
+        "target_parent": "5762ca76a005202de6111d706c5218260e317070",
+        "target_tree_oid_sha1": "c7fbbea2592871feb26e3f0ebda60b88685ce103",
+        "fixture_tree_oid_sha1": "def25574a37cbf4c090aef98f4add7f47d2e5f30",
+        "statement": "The validation branch was created directly from the exact requested target commit."
+      }
+    },
+    "active_manifest_completeness_and_json_shape": {
+      "status": "PASS",
+      "evidence": "The manifest has 12 ASCII-sorted entries and references exactly the 36 active case, repair-oracle, and final-oracle JSON payloads, with no missing or extra payload path. All 37 active JSON inputs parse as top-level objects without duplicate keys and use the exact ordered v3 role keys. Filename, case_id, language, runner, sealed split, and manifest identity agree for all 12 unique cases; counts are dart=3, typescript=3, python=3, and sql=3."
+    },
+    "path_partition_and_leak_safety": {
+      "status": "PASS",
+      "evidence": "All fixture, manifest, candidate, repo, expected-owner, feedback, and final paths are normalized relative ASCII paths with no case-fold collision. Every case has three candidates, two expected owners, max_files=2, a non-owner distractor, and a discoverable test in each partition. Seeded, feedback, and final paths are pairwise disjoint. No hidden path, complete hidden payload, oracle/final field label, or hidden test label appears on an earlier visible surface; 33 feedback labels and 41 final labels were scanned with zero matches."
+    },
+    "symlink_special_file_and_ascii_safety": {
+      "status": "PASS",
+      "evidence": "git ls-tree reports all 58 target-input entries as regular mode 100644 blobs. The checkout contains zero symlink, junction, or reparse-point entries. All 58 files and all normalized paths are 7-bit ASCII and contain no UTF BOM or embedded NUL byte."
+    },
+    "active_payload_and_receipt_hashes": {
+      "status": "PASS",
+      "evidence": {
+        "payloads": {
+          "cases/th14_dart_redirect_handoffs.json": {"bytes": 6114, "sha256": "3774b7d6688bf6d8f2dafa0c67a4500a18f468e4b45e838bfb9eac179da7477a"},
+          "cases/th14_dart_semver_selection.json": {"bytes": 5502, "sha256": "7012287493ce099f3f7102ed87956a3405e1dd88427fcf09beec68ea32c14695"},
+          "cases/th14_dart_websocket_fragments.json": {"bytes": 3949, "sha256": "7d5f463557768a3e1902197cb6ad81a10b7c4e6ab259a386b40ab37f118eb7f2"},
+          "cases/th14_node_esm_plugin_loading.json": {"bytes": 4644, "sha256": "bad66c237cf3eb929c1b597d607370aacbe1cf96ff40f2fd9f4f4aa9fa800a80"},
+          "cases/th14_node_http_preconditions.json": {"bytes": 4241, "sha256": "5a0bd7e893074609f3b07549c91be5f3aecdd34a4eed9c5f8989fc7474b464e3"},
+          "cases/th14_node_partition_commits.json": {"bytes": 4089, "sha256": "c66bb8c99531aae44bb6e559ace01b31345e32d7d36173fd5c4ffe5502be5e56"},
+          "cases/th14_py_context_offload.json": {"bytes": 2523, "sha256": "7f4b2a4a342b3b44f98926a0977cfa3d8afc36d493a38d0b9c0da402f654ecd2"},
+          "cases/th14_py_decorated_handlers.json": {"bytes": 2924, "sha256": "7439991beded730861d030359306a74fb87ee4740ac5bdece2e2456a3009f9f2"},
+          "cases/th14_py_link_pagination.json": {"bytes": 4038, "sha256": "55541cb878c94231253a26e1dc272910d6ad92c024bbae315b78ab2ced542293"},
+          "cases/th14_sql_partner_search.json": {"bytes": 3930, "sha256": "444d075c6ad611528691fd25e32fa36aba2bed852a991c955647f338d8af20e3"},
+          "cases/th14_sql_registry_refresh.json": {"bytes": 4531, "sha256": "a7710bdb10af50e8adc1647ceb62f9e8381ddb5d1f9204df5a83c017605807d4"},
+          "cases/th14_sql_suppression_batches.json": {"bytes": 4915, "sha256": "c7a04cf8931bc6085507105f3e8007519d6f6509f4436f3ae48ae7d187af8538"},
+          "final_oracles/th14_dart_redirect_handoffs.json": {"bytes": 7001, "sha256": "36d8f782b7f79b76b86d2b61edf2206ac6ad89914d50f6174e4805407b25f971"},
+          "final_oracles/th14_dart_semver_selection.json": {"bytes": 1484, "sha256": "fcf9fa2133d7f0ee4b733b0d70901bdd15e092d1f4c0caca175e4822c48b4100"},
+          "final_oracles/th14_dart_websocket_fragments.json": {"bytes": 1439, "sha256": "b45de56cc14d497ce84a1c7bbbf1e825286b19800c4b4e5a33458a76425b1391"},
+          "final_oracles/th14_node_esm_plugin_loading.json": {"bytes": 1594, "sha256": "bc9c25b33113e7bf0cd295fc273dcb54aeda38617258e58c55f1825940d41bdc"},
+          "final_oracles/th14_node_http_preconditions.json": {"bytes": 1079, "sha256": "3982592d1d5de00715a05247c1cb4db86f2e0ef293b37d33c346ef0454cc958e"},
+          "final_oracles/th14_node_partition_commits.json": {"bytes": 1784, "sha256": "7d2c2da5ce7cf638bf5c25e840b9157c9c191f219b7efde2c5ca6d625aa70cc5"},
+          "final_oracles/th14_py_context_offload.json": {"bytes": 1153, "sha256": "dff3f83b1efb73407d717f3292401e9cb68b5f9af4e83e7d5ee9a222288f541d"},
+          "final_oracles/th14_py_decorated_handlers.json": {"bytes": 982, "sha256": "0a2b2925f9a563e04acf5378f3b86637ee801c68620a6fa02318b7ce5f28ab2c"},
+          "final_oracles/th14_py_link_pagination.json": {"bytes": 1011, "sha256": "3f283d2774b7d9e0463e56f0a52a7decdaffabe6ab2c262a22100722809dac8b"},
+          "final_oracles/th14_sql_partner_search.json": {"bytes": 2671, "sha256": "33b99190352bc5370d0959ab42ac1a5236e05e2c1dd18442aff73678e20dab8c"},
+          "final_oracles/th14_sql_registry_refresh.json": {"bytes": 3902, "sha256": "2e3c0821b4a973e727b2fab547f892a2ad790f0233fbbcc636cad2f4ae427f4e"},
+          "final_oracles/th14_sql_suppression_batches.json": {"bytes": 3878, "sha256": "c7361ae323a1d1cc954f2acd3103e24bb5175739ce7fcefeecacc04b45675c75"},
+          "oracles/th14_dart_redirect_handoffs.json": {"bytes": 3141, "sha256": "d350364a517ef17b648c0afd3fac810c33637db032ffb02f5c3e5d76584ced8f"},
+          "oracles/th14_dart_semver_selection.json": {"bytes": 1301, "sha256": "187bfd6234dd34b30af34e457035f95288c32c93c4c5d83dc5cd139ec2fff382"},
+          "oracles/th14_dart_websocket_fragments.json": {"bytes": 1497, "sha256": "1b3d53b09f3fcfe3df71185c30905733786a37e3bb1ad29ca77bfc9f984d2a28"},
+          "oracles/th14_node_esm_plugin_loading.json": {"bytes": 1309, "sha256": "1562ba81d882c827abb82843f9b0643d2d6d077cf51e584e8542c0505a647250"},
+          "oracles/th14_node_http_preconditions.json": {"bytes": 1270, "sha256": "575f4170206f54794275c49f13f54610dd4c2e6fcfe7d24c36a65fc1104c1033"},
+          "oracles/th14_node_partition_commits.json": {"bytes": 1205, "sha256": "ec2bd3d87c535803fd0742c78838046b4a0502e3e06514cd1546d614e5080d4d"},
+          "oracles/th14_py_context_offload.json": {"bytes": 1142, "sha256": "9bbb8e6164bf14abd0876f91421078941aff2aab2e5e9632b7af970c239595ba"},
+          "oracles/th14_py_decorated_handlers.json": {"bytes": 1248, "sha256": "d0a28284525c0918babceda51e066144e67f56c9e9878e3f0381d3c4c504d6af"},
+          "oracles/th14_py_link_pagination.json": {"bytes": 1169, "sha256": "0c0bd0a9e6d6ea285a3b5158766181346087439a68d031447cfd5c3dfbb3535b"},
+          "oracles/th14_sql_partner_search.json": {"bytes": 2164, "sha256": "4e1359a8e49b93f22227d2b669e9968fca64e5ba899488b43120f0e673af861d"},
+          "oracles/th14_sql_registry_refresh.json": {"bytes": 3302, "sha256": "4497003459235977286dc0cdcf3d44923dce512e84a960ee78927b22ddf145c4"},
+          "oracles/th14_sql_suppression_batches.json": {"bytes": 2891, "sha256": "adf88f29a08449a4878a504ce52ffb6670c1276cfa8daef5c598a1925ed55416"}
+        },
+        "receipts": {
+          "AUTHORS/dart_AUTHOR_RECEIPT.md": {"bytes": 7771, "sha256": "1bc87fa434b822a2cae468510296e926e52ada671b76f2f1cc9de541bd42bd5d"},
+          "AUTHORS/dart_replacement_AUTHOR_RECEIPT.md": {"bytes": 16374, "sha256": "7dc4ca2676f6d599f747f731169c64a3ab94e1998896ba3a9228da41989b821d"},
+          "AUTHORS/node_AUTHOR_RECEIPT.md": {"bytes": 6613, "sha256": "5bb963e94908df8c2632c9ff626ccafe5a5dd539a1ee396bb2bdecb35c448558"},
+          "AUTHORS/python_AUTHOR_RECEIPT.md": {"bytes": 7444, "sha256": "14b85e4c433f81e02c290e3f94db03aa9d78c35f115b40ac0ba67f587c288267"},
+          "AUTHORS/sql_AUTHOR_RECEIPT.md": {"bytes": 6516, "sha256": "c1fe5d079f17ea455ec71e0fd790c5c414b518f58d3eb218061361913bff6c68"}
+        },
+        "receipt_claims": "All 39 payload SHA-256 claims match authoritative bytes, all 30 stated byte counts match, and receipt authority covers each of the 36 active payloads exactly once."
+      }
+    },
+    "replacement_receipt_aggregates": {
+      "status": "PASS",
+      "evidence": {
+        "algorithm": "Sort the three fixture-relative paths by ordinal ASCII; for each, append UTF-8(path), one NUL byte, lowercase raw-file SHA-256 hex, and one LF byte; SHA-256 the 322 concatenated record bytes.",
+        "historical_v2": {
+          "files": {
+            "cases/th14_dart_redirect_handoffs.json": {"bytes": 4955, "sha256": "341e60251684055963e94b350f4d08a387dbbafb310196921322183b95011418"},
+            "final_oracles/th14_dart_redirect_handoffs.json": {"bytes": 3313, "sha256": "08df7e56fe05393631b6927e81ccd7bbf40912f44265a1244bb79780e95a7e84"},
+            "oracles/th14_dart_redirect_handoffs.json": {"bytes": 2716, "sha256": "895add9c4ee93bb1ffe914b47ee9a9ec092815c80d97c5e40fe92bd86ce1e48a"}
+          },
+          "sha256": "769c2ede2a2c29d35bb83f5badc2602820e4b0d5eb50c123a1d3d976eaf20caa",
+          "receipt_line": 78
+        },
+        "active_v3": {
+          "files": {
+            "cases/th14_dart_redirect_handoffs.json": {"bytes": 6114, "sha256": "3774b7d6688bf6d8f2dafa0c67a4500a18f468e4b45e838bfb9eac179da7477a"},
+            "final_oracles/th14_dart_redirect_handoffs.json": {"bytes": 7001, "sha256": "36d8f782b7f79b76b86d2b61edf2206ac6ad89914d50f6174e4805407b25f971"},
+            "oracles/th14_dart_redirect_handoffs.json": {"bytes": 3141, "sha256": "d350364a517ef17b648c0afd3fac810c33637db032ffb02f5c3e5d76584ced8f"}
+          },
+          "sha256": "3e57947e1ef6d50514eba858a862d75e4e1ab9e70d5d958b7b783ea918adfaa9",
+          "receipt_line": 324
+        },
+        "independent_implementations_agree": true
+      }
+    },
+    "five_receipt_provenance": {
+      "status": "PASS",
+      "evidence": {
+        "original_lanes": {
+          "python": {"source_commit": "ad882553038a0515517856d5005cea46db4456b3", "import_commit": "f396496cfd7cf62f0f386bbfdcacabce409ccc90", "files_each": 10, "source_import_bytes_identical": true},
+          "sql": {"source_commit": "5539dd61f547e9ecc9e8e105879b35aff6e142a3", "import_commit": "07a79b78042dac6543a7ea36b98e0854fd1b18e2", "files_each": 10, "source_import_bytes_identical": true},
+          "node": {"source_commit": "b3558518aae27bad283d4925494b07ca145fcb93", "import_commit": "fcf907b86c1c63e7ca5cda2713675d123ea81a4f", "files_each": 10, "source_import_bytes_identical": true},
+          "dart_v1": {"source_commit": "e96d620b4980ded143d2a53f3f6878a294337ca4", "import_commit": "096cb1ea9480f106fb7636c5cabed5542ea2a48a", "files_each": 10, "source_import_bytes_identical": true}
+        },
+        "replacement": {
+          "author_commit": "3de05be7f077de78d26034ae8e82563f3097a232",
+          "activation_commit": "86d328b7f136ebfbc6f3ace508dd53b401a04939",
+          "v3_start_commit": "5762ca76a005202de6111d706c5218260e317070",
+          "v3_hardening_commit": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+          "v2_receipt": {"bytes": 15175, "sha256": "ff01987f1d48c28a6bf40bb101a1ea98ac8523c7be245929b455951f098e7d01"},
+          "v3_receipt": {"bytes": 16374, "sha256": "7dc4ca2676f6d599f747f731169c64a3ab94e1998896ba3a9228da41989b821d"}
+        },
+        "retained_v1_authored_files_byte_identical": 37,
+        "historical_rejected_triple_absent_and_git_preserved": 3
+      }
+    },
+    "v1_v2_validation_preservation": {
+      "status": "PASS",
+      "evidence": {
+        "v1": {"tip": "83906c4cde8bf4a1e0f99223f6ed3347baa29b04", "files": 8, "bytes": 141129, "sha256": "138e35069458d8ede63de606d5e08a05584f00946b59f2abc8f5adc89baf0579"},
+        "v2": {"tip": "5762ca76a005202de6111d706c5218260e317070", "files": 8, "bytes": 95123, "sha256": "a42c8e84917c1e983ee588da41ed3ccb85baa98664001bc25006b6ae9addf621"},
+        "statement": "All eight V1 and all eight V2 report/result files are byte-identical to their completed validation tips; their eight creation commits each add exactly one report and one result file."
+      }
+    },
+    "unauthorized_authored_changes": {
+      "status": "PASS",
+      "evidence": "Target commit a249993 modifies exactly AUTHORS/dart_replacement_AUTHOR_RECEIPT.md and the cases/oracles/final_oracles th14_dart_redirect_handoffs triple. Its exact parent is the completed V2 validation tip. No manifest, prior validation, rejected payload, application source, script, test outside the owned triple, project_ws, or other repository path changed. The manifest is byte-identical to activation commit 86d328b."
+    },
+    "canonical_aggregates": {
+      "status": "PASS",
+      "evidence": {
+        "algorithm": "For each selected fixture-relative path in ascending ordinal ASCII order, feed UTF-8(path), one NUL byte, raw file bytes, and one NUL byte into one SHA-256 state.",
+        "independent_python_powershell_agree": true,
+        "sets": {
+          "active_payloads_36": {"files": 36, "bytes": 101017, "sha256": "32aa8a8e73d1506d253a29736adf0fcbcc1aca422af6cc307a327b48c3fc0b2d"},
+          "receipts_5": {"files": 5, "bytes": 44718, "sha256": "c83140ecd4e4e99e054e2f7c95d48f8b09a01e71dbd45029bd61f83e32518c41"},
+          "authored_41": {"files": 41, "bytes": 145735, "sha256": "d82e0c6bf0057d82e33ec223721211ee168ebe4cf9c3a80fe4da474c5fad3524"},
+          "v3_core_42": {"files": 42, "bytes": 149337, "sha256": "eba357467b11829cfb552a40230804a78e586c5cddd91c25a514e0a61923960d"},
+          "preserved_v1_validation_8": {"files": 8, "bytes": 141129, "sha256": "138e35069458d8ede63de606d5e08a05584f00946b59f2abc8f5adc89baf0579"},
+          "preserved_v2_validation_8": {"files": 8, "bytes": 95123, "sha256": "a42c8e84917c1e983ee588da41ed3ccb85baa98664001bc25006b6ae9addf621"},
+          "preserved_validation_16": {"files": 16, "bytes": 236252, "sha256": "83019052781aa422066cb77a1640735e1f98ff1d29007eb1b5dee591c2ee78f8"},
+          "full_target_fixture_58": {"files": 58, "bytes": 385589, "sha256": "96f64d4f228309c78d3e3513144d8aa067bf765082b087dc47413d0f375b96f4"}
+        },
+        "target_inventory": {"files": 58, "file_bytes": 385589, "record_bytes": 6273, "record_sha256": "22f50d81ab99ebdeebe1e15a2dfecf2ce657f72b3b1620306d2f694b4cde6b5f"},
+        "manifest": {"bytes": 3602, "sha256": "899570e965437b3b028c73a5ddf5f30f52850e7556f3d00d27c418ce6dcab12f"}
+      }
+    },
+    "validation_only_preflight": {
+      "status": "PASS",
+      "evidence": "With PYTHONDONTWRITEBYTECODE=1, scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures exited 0 and printed fixtures_valid=True cases=12. No CHILI evaluation mode, Ollama, Claude, Fable 5, other coding model, network service, or package download was invoked."
+    }
+  },
+  "findings": [],
+  "authored_files_unchanged": true
+}
