@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_sql_partner_search",
+  "expected_dimension": "data",
+  "expected_files": [
+    "sql/search_inventory.sql",
+    "sql/search_delivery_lanes.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef read_sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"ascii\")\n\n\ndef make_db():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(\n        \"\"\"\n        CREATE TABLE inventory_item (\n            item_id INTEGER PRIMARY KEY,\n            reference_code TEXT NOT NULL,\n            active INTEGER NOT NULL CHECK (active IN (0, 1))\n        );\n        CREATE TABLE delivery_lane (\n            lane_id INTEGER PRIMARY KEY,\n            lane_label TEXT NOT NULL,\n            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))\n        );\n        CREATE TABLE search_audit (\n            audit_id INTEGER PRIMARY KEY,\n            search_area TEXT NOT NULL,\n            search_term TEXT NOT NULL,\n            matched_count INTEGER NOT NULL CHECK (matched_count >= 0)\n        );\n        \"\"\"\n    )\n    return db\n\n\ndef test_inventory_lookup_returns_only_the_requested_reference_family():\n    db = make_db()\n    db.executemany(\n        \"INSERT INTO inventory_item VALUES (?, ?, 1)\",\n        [\n            (20, \"LOT-100%-A\"),\n            (21, \"LOT-1000-A\"),\n            (22, \"LOT-100-A\"),\n        ],\n    )\n\n    rows = db.execute(\n        read_sql(\"search_inventory.sql\"),\n        {\"term\": \"100%\"},\n    ).fetchall()\n\n    assert len(rows) == 1\n    assert rows == [(20, \"LOT-100%-A\")]\n\n\ndef test_lane_lookup_does_not_expand_partner_labels():\n    db = make_db()\n    db.executemany(\n        \"INSERT INTO delivery_lane VALUES (?, ?, 1)\",\n        [\n            (30, \"ZONE_A\"),\n            (31, \"ZONE-A\"),\n            (32, \"ZONE-XA\"),\n        ],\n    )\n\n    rows = db.execute(\n        read_sql(\"search_delivery_lanes.sql\"),\n        {\"term\": \"ZONE_A\"},\n    ).fetchall()\n\n    assert len(rows) == 1\n    assert rows == [(30, \"ZONE_A\")]\n"
+  }
+}
