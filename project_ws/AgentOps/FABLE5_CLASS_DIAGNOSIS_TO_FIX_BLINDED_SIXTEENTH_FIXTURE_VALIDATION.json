@@ -1,0 +1,112 @@
+{
+  "schema": "chili.sixteenth-fixture-validation-receipt.v1",
+  "created_at": "2026-07-13T21:52:52.8356965Z",
+  "reference_family": "claude-fable-5",
+  "author": {
+    "agent_isolated": true,
+    "fork_context": false,
+    "commit": "881c41ca7eaacb2573ae469a109f0bcdb5d5e712",
+    "tree": "eb391f9def0f3e5dc64fb99a0b0b12a3856c380b",
+    "changed_path_count": 26,
+    "outside_author_fixture_path_count": 0,
+    "receipt_sha256": "f8d5438fba6fd97d8913a7b52770bcf54930761ded24bb526a7c489299db6ece",
+    "receipt_schema": "chili.fixture-author-receipt.v1",
+    "independence_declared": true,
+    "commit_in_contestant_history": false
+  },
+  "implementation_freeze": {
+    "commit": "674684602d0524c025e883466bd67e871bc154bb",
+    "tree": "fba9445ff6d917aad1a9f9caec639c498e8563ff",
+    "runner_sha256": "df499a9633fc15d3dac6905f26e35f132d36fc618c62e0bc0fba3d0f3a5b567e",
+    "diagnostic_reasoning_sha256": "e2e9316701768e503cbcbf30c82395b42bc4fbd6bda5e536de350cff56ab8156",
+    "audited_source_changed_after_freeze": false
+  },
+  "sanitized_fixture": {
+    "path": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_sixteenth",
+    "commit": "73f5200bc3a577f420c6691ed3700759c5380c22",
+    "tree": "2f7b5aa3bcf9fc6b569429c36ddb4db15000086c",
+    "changed_path_count": 25,
+    "outside_fixture_path_count": 0,
+    "validation_or_author_files_in_fixture": 0,
+    "payload_byte_mismatches_from_author": 0
+  },
+  "case_distribution": {
+    "case_count": 8,
+    "javascript": 2,
+    "python": 2,
+    "dart": 2,
+    "sql": 2,
+    "candidate_paths_exactly_three": 8,
+    "max_files_exactly_two": 8,
+    "expected_owner_count_exactly_two": 8
+  },
+  "author_validation": {
+    "public_baselines_passed": 8,
+    "feedback_baselines_failed_as_expected": 8,
+    "final_baselines_failed_as_expected": 8,
+    "disposable_two_owner_repairs_passed": 8,
+    "one_owner_variants_failed_as_expected": 16,
+    "temporary_repo_isolation": true,
+    "standard_library_only": true,
+    "unsafe_test_actions_detected": 0,
+    "model_calls": 0
+  },
+  "model_independent_runner_validation": {
+    "command_mode": "--validate-fixtures --evaluation-context protocol",
+    "validator_source_commit": "674684602d0524c025e883466bd67e871bc154bb",
+    "valid": true,
+    "cases_valid": 8,
+    "public_baselines_passed": 8,
+    "feedback_baselines_failed_as_expected": 8,
+    "external_final_baselines_failed_as_expected": 8,
+    "sealed_final_cases": 8,
+    "seeded_file_integrity_required": true,
+    "test_source_static_safety_scan_required": true,
+    "model_calls": 0,
+    "premium_calls": 0
+  },
+  "mechanism_disjointness": {
+    "status": "author_attested",
+    "author_received_explicit_prohibited_family_list": true,
+    "independent_semantic_model_review_completed": false,
+    "note": "Two independent validator-agent attempts were abandoned after host Git inventory plumbing stalled before a usable result. No failed attempt is counted as validation evidence."
+  },
+  "runtime_versions": {
+    "node": "v24.15.0",
+    "python": "3.13.11",
+    "dart": "3.11.1 stable windows_x64",
+    "sqlite": "3.51.0"
+  },
+  "payload_inventory": [
+    {"path": "cases/s16a_dart_form_codec.json", "sha256": "bcf593ca57b45a1cb64e4adabf836ec471a05db35fc8c3fc4aaba73c7b307383", "author_byte_equal": true},
+    {"path": "cases/s16a_dart_utf8_chunks.json", "sha256": "d9be94ab8d6cf27b7f91b010580878d844a4c02d33eb41b63ea6162e8dc71533", "author_byte_equal": true},
+    {"path": "cases/s16a_js_queue_metadata.json", "sha256": "ca083946fd542aced4aa352adfc54e920aa12b8328638aeee0097ae8d008b26c", "author_byte_equal": true},
+    {"path": "cases/s16a_js_redirect_credentials.json", "sha256": "0507380d749f313b426ba9b9d41511a599cb6d45f7e7b50f129486c501362647", "author_byte_equal": true},
+    {"path": "cases/s16a_py_decimal_wire.json", "sha256": "945a205260e1e0c018184b214770041013df3f2fe8390b181d14a5353dda0e4d", "author_byte_equal": true},
+    {"path": "cases/s16a_py_gzip_interop.json", "sha256": "8096ad7fbe67c00663c421ab65f0206cc142c0e0c8e664d31a5f5126c51683a3", "author_byte_equal": true},
+    {"path": "cases/s16a_sql_permission_mask.json", "sha256": "0ee70ccae06fafd4846b1fed240ee909e88f84e627ee8797396ac7dcbbcf4dae", "author_byte_equal": true},
+    {"path": "cases/s16a_sql_tenant_identity.json", "sha256": "b011c798485248b2192e43f5eae80c432487b3d50c88d55e66ff2d9067c824ee", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_dart_form_codec.json", "sha256": "bb727012c20533c54b459df2545e6b551602279edd8f737a75ddcdcc34adcec0", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_dart_utf8_chunks.json", "sha256": "cb4935cb038977867de83c0c9658f2904ba163d253b989f5411021710d9c0a96", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_js_queue_metadata.json", "sha256": "c11843a5ddc2a4b84e291c958d2117e43298c784b2defb43533a74609369d162", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_js_redirect_credentials.json", "sha256": "e2f0e89094b9ea281f6ce49a2d0e14298fb38edb33f9716b547632572e9e09f9", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_py_decimal_wire.json", "sha256": "6db8510e396057e9a196a74c88227219eb9182833ed8bbe2e1c265c9aa47ecc9", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_py_gzip_interop.json", "sha256": "7968bd4d53e7e41c876676bc45508f9f5e855c4de1d65a790aa309c73c6a6aa6", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_sql_permission_mask.json", "sha256": "73f209ea9026a7c8c8aa237af8c4279526bfaf8881b2d6b462951c7c3dff1ad5", "author_byte_equal": true},
+    {"path": "final_oracles/s16a_sql_tenant_identity.json", "sha256": "ea98917bf0f3a10b9b3f3ad3f47977402b9d06263d6168730baa5a77ee480d30", "author_byte_equal": true},
+    {"path": "manifest.json", "sha256": "e46c501686fad2fca7097d767b8dade75a9ad29634321d8c421f5f080df111ca", "author_byte_equal": true},
+    {"path": "oracles/s16a_dart_form_codec.json", "sha256": "616938592ed569a79d58de8baf09e1555a3880adb7e7ca7838304ba870cc5a2a", "author_byte_equal": true},
+    {"path": "oracles/s16a_dart_utf8_chunks.json", "sha256": "79daefb3d5d1727e720eb6d7526645e0681b75d9b8e221846b5f6ff3694e331f", "author_byte_equal": true},
+    {"path": "oracles/s16a_js_queue_metadata.json", "sha256": "59298a97b3b9e44007af2079c40d50cc5a6cb3765a866a025b30414dedb94183", "author_byte_equal": true},
+    {"path": "oracles/s16a_js_redirect_credentials.json", "sha256": "b78d90c898a856ff02bdf81617ae6dc79becaab31fbbb950f9fdd44a80bc3914", "author_byte_equal": true},
+    {"path": "oracles/s16a_py_decimal_wire.json", "sha256": "8d45f4f05f20fffecea10c5bfb15fddeab9ebb1a8ea1a08db5928a07d0c4333a", "author_byte_equal": true},
+    {"path": "oracles/s16a_py_gzip_interop.json", "sha256": "36ebff7da0491e6695870bac8239e707ef711cf3f2853f9ed62ba672a505a40d", "author_byte_equal": true},
+    {"path": "oracles/s16a_sql_permission_mask.json", "sha256": "d725b8505cc0aec1bfa0151e1eb70441802f2b437a8747e7e2315048b4fb72bf", "author_byte_equal": true},
+    {"path": "oracles/s16a_sql_tenant_identity.json", "sha256": "ed6a5f1bc0b13bbb652173553f4af53a423db02ae74084a408f9a97d35a1f510", "author_byte_equal": true}
+  ],
+  "residual_risks": [
+    "The completed independent validator is deterministic runner code executed by the controller, not a second context-isolated semantic model reviewer.",
+    "The subprocess assurance is static safety scanning plus seeded-file SHA-256 checks, not hostile-process OS sandbox proof.",
+    "Case filenames reveal broad domains, but no prompt, oracle assertion, expected dimension, owner set, or reference repair was exposed to the contestant before scoring."
+  ]
+}
