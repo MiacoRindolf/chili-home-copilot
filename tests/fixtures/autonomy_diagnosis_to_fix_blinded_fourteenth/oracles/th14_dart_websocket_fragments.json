@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_dart_websocket_fragments",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "lib/websocket_decoder.dart",
+    "lib/websocket_messages.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import 'dart:convert';\n\nimport '../lib/websocket_decoder.dart';\nimport '../lib/websocket_frame.dart';\nimport '../lib/websocket_messages.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  final decoder = WebSocketDecoder();\n  check(decoder.add(<int>[0x81]).isEmpty, 'waits for a partial frame header');\n  final completed = decoder.add(<int>[0x05, ...utf8.encode('hello')]);\n  check(\n    completed.length == 1 && utf8.decode(completed.single.payload) == 'hello',\n    'retains transport bytes until the frame is complete',\n  );\n\n  final assembler = WebSocketMessageAssembler();\n  assembler.add(\n    WebSocketFrame(\n      finalFragment: false,\n      opcode: 0x01,\n      payload: utf8.encode('hel'),\n    ),\n  );\n  assembler.add(\n    WebSocketFrame(finalFragment: true, opcode: 0x09, payload: const <int>[]),\n  );\n  final messages = assembler.add(\n    WebSocketFrame(\n      finalFragment: true,\n      opcode: 0x00,\n      payload: utf8.encode('lo'),\n    ),\n  );\n  check(\n    messages.length == 1 && messages.single == 'hello',\n    'control traffic does not discard an active fragmented message',\n  );\n\n  print('feedback tests passed');\n}\n"
+  }
+}
