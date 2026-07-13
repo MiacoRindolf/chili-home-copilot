@@ -1,0 +1,128 @@
+{
+  "validator": "codex-independent-integrity-validator/v1",
+  "target_commit": "64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3",
+  "verdict": "PASS",
+  "checks": {
+    "target_commit_anchor": {
+      "status": "PASS",
+      "evidence": "Validation branch codex/fourteenth-integrity-validation was created from and audited at 64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3."
+    },
+    "fixture_inventory_and_path_containment": {
+      "status": "PASS",
+      "evidence": "The target fixture contains exactly 41 files before validation: 36 case/oracle/final JSON payloads, 4 author receipts, and manifest.json. Every fixture path and every manifest, candidate, repo, expected-owner, feedback, and final path is normalized, relative, ASCII, and lexically contained. No case-insensitive collisions were found."
+    },
+    "symlinks_and_special_files": {
+      "status": "PASS",
+      "evidence": "git ls-tree reports 41 of 41 entries as mode 100644. The checked-out fixture contains no symlink, junction, or reparse-point entry."
+    },
+    "bom_ascii_policy": {
+      "status": "PASS",
+      "evidence": "All 41 target fixture files and all normalized paths are 7-bit ASCII. No UTF BOM or embedded NUL byte was found."
+    },
+    "json_shape": {
+      "status": "PASS",
+      "evidence": "All 37 JSON files parse as top-level objects with no duplicate keys. All 12 case objects use the exact ordered v3 case key set, all repair oracles use the exact ordered repair-oracle key set, all final oracles use the exact ordered final-oracle key set, and the manifest uses the exact v3 key sets."
+    },
+    "case_oracle_final_identity": {
+      "status": "PASS",
+      "evidence": "The case, oracle, final-oracle, filename, and manifest identities agree for all 12 unique case IDs. Counts are dart=3, typescript=3, python=3, and sql=3."
+    },
+    "partition_disjointness": {
+      "status": "PASS",
+      "evidence": "For every case, seeded repo paths, repair-feedback paths, and final-adjudication paths are pairwise disjoint under case folding. Feedback and final whole-file payloads are independently authored and disjoint. Each partition contains a discoverable test for its declared runner."
+    },
+    "author_receipt_hashes": {
+      "status": "PASS",
+      "evidence": {
+        "dart": "9/9 claimed payload SHA-256 values and recorded byte counts match",
+        "node": "9/9 claimed payload SHA-256 values and recorded byte counts match",
+        "python": "9/9 claimed payload SHA-256 values and recorded byte counts match",
+        "sql": "9/9 claimed payload SHA-256 values match",
+        "total": "36/36 claimed payload hashes match the imported target bytes"
+      }
+    },
+    "exact_author_commit_scopes": {
+      "status": "PASS",
+      "evidence": "Each original lane commit adds exactly 10 files: its three cases, three repair oracles, three final oracles, and its receipt, with no repository-wide changes outside that lane. Each imported lane commit has the same 10-file scope. The target commit itself adds only manifest.json."
+    },
+    "source_import_byte_identity": {
+      "status": "PASS",
+      "evidence": "Exact git diff comparisons from each source author commit to the target are empty for that lane, including the receipt. Original and imported patches also have matching stable patch IDs for all four lanes."
+    },
+    "source_test_path_containment": {
+      "status": "PASS",
+      "evidence": "Every candidate and expected owner is a contained source path present in repo_files; every hidden path is contained under tests/; every case has three unique candidates, exactly two expected owners, max_files=2, and at least one non-owner distractor."
+    },
+    "manifest_completeness_and_order": {
+      "status": "PASS",
+      "evidence": "The manifest has 12 ASCII-sorted entries, references every case/oracle/final triplet exactly once, has no missing or extra triplet reference, declares blinded_holdout for every entry, and uses the language-correct sealed split."
+    },
+    "hidden_leakage": {
+      "status": "PASS",
+      "evidence": "Public case surfaces contain no oracle field labels, hidden test paths, hidden test function names or titles, hidden assertion labels, or complete hidden payloads. Repair oracles contain no final_files field and expose no final test path, title, assertion label, or complete final payload. Generic ESM package-data filenames were not treated as hidden test labels."
+    },
+    "aggregate_sha256_candidates": {
+      "status": "PASS",
+      "evidence": "Independent Python and PowerShell implementations produced identical canonical aggregates for the 36 payload, 40 authored-file, and 41 integrated-file candidate sets."
+    },
+    "validation_only_preflight": {
+      "status": "PASS",
+      "evidence": "CHILI's explicit --validate-fixtures path exited 0 with output: fixtures_valid=True cases=12. No evaluation mode, Ollama, Claude, Fable 5, or coding model was invoked."
+    }
+  },
+  "findings": [],
+  "authored_files_unchanged": true,
+  "evidence": {
+    "target_parent": "096cb1ea9480f106fb7636c5cabed5542ea2a48a",
+    "fixture_git_tree_oid_sha1": "7c4fdbbaa776f809ff104e8433cef79e4a00ea26",
+    "report_input_inventory": {
+      "file_count": 41,
+      "total_bytes": 123423,
+      "format": "ASCII-sorted fixture-relative path<TAB>decimal byte count<TAB>lowercase SHA-256<LF>",
+      "sha256": "c4496a8f353b68ca81b867cebe377914fc5a2906e900320ffcc30b2c394643f7"
+    },
+    "important_input_sha256": {
+      "manifest.json": "f196fe7ca334ab3e88af2aa9c3d075a550ff67f1e253c3fa0aec4f5f6fec900c",
+      "AUTHORS/dart_AUTHOR_RECEIPT.md": "1bc87fa434b822a2cae468510296e926e52ada671b76f2f1cc9de541bd42bd5d",
+      "AUTHORS/node_AUTHOR_RECEIPT.md": "5bb963e94908df8c2632c9ff626ccafe5a5dd539a1ee396bb2bdecb35c448558",
+      "AUTHORS/python_AUTHOR_RECEIPT.md": "14b85e4c433f81e02c290e3f94db03aa9d78c35f115b40ac0ba67f587c288267",
+      "AUTHORS/sql_AUTHOR_RECEIPT.md": "c1fe5d079f17ea455ec71e0fd790c5c414b518f58d3eb218061361913bff6c68"
+    },
+    "aggregate_algorithm": "For each fixture-relative path in ascending ASCII order, feed UTF-8(path), one NUL byte, raw file bytes, and one NUL byte into one SHA-256 state.",
+    "aggregate_candidates": {
+      "payloads_36": "32629d6d402d5b879dcda6379d9b310d5c6245900ffec5359f168d85931b8913",
+      "authored_40_including_receipts": "e731294c5d64d8677e2a7608c3ae9db4456592fc221fc5acee0742099e310c8b",
+      "integrated_41_including_manifest": "4fd13aa188c344a562f22db44a7d0392e838c36b8903a2d194f830d0e43bcfd0"
+    },
+    "author_commit_map": {
+      "python": {
+        "source_commit": "ad882553038a0515517856d5005cea46db4456b3",
+        "source_parent": "395f4ef0348a2a3908e3f6946e06612b4b1652c8",
+        "import_commit": "f396496cfd7cf62f0f386bbfdcacabce409ccc90",
+        "import_parent": "5764a0f9d2919c19cdd2f85b62ee20b8ee553169",
+        "stable_patch_id": "e065db9da103f061eaad1b331afc4644a9bc0ff7"
+      },
+      "sql": {
+        "source_commit": "5539dd61f547e9ecc9e8e105879b35aff6e142a3",
+        "source_parent": "ad882553038a0515517856d5005cea46db4456b3",
+        "import_commit": "07a79b78042dac6543a7ea36b98e0854fd1b18e2",
+        "import_parent": "f396496cfd7cf62f0f386bbfdcacabce409ccc90",
+        "stable_patch_id": "2c7fc62621f25909ec83798dc92d284b7fb26abd"
+      },
+      "node": {
+        "source_commit": "b3558518aae27bad283d4925494b07ca145fcb93",
+        "source_parent": "5539dd61f547e9ecc9e8e105879b35aff6e142a3",
+        "import_commit": "fcf907b86c1c63e7ca5cda2713675d123ea81a4f",
+        "import_parent": "07a79b78042dac6543a7ea36b98e0854fd1b18e2",
+        "stable_patch_id": "62b2737adf9a05d7c9c8b984725282435a230d60"
+      },
+      "dart": {
+        "source_commit": "e96d620b4980ded143d2a53f3f6878a294337ca4",
+        "source_parent": "b3558518aae27bad283d4925494b07ca145fcb93",
+        "import_commit": "096cb1ea9480f106fb7636c5cabed5542ea2a48a",
+        "import_parent": "fcf907b86c1c63e7ca5cda2713675d123ea81a4f",
+        "stable_patch_id": "748569b2975e42f643bdf051ea7ab29b3c634809"
+      }
+    }
+  }
+}
