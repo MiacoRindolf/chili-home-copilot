@@ -3459,6 +3459,47 @@ def test_node_esm_contract_family_names_order_and_url_primitives():
     assert any("Manual file:// assembly" in value for value in invariants)
 
 
+def test_node_esm_contract_family_repairs_and_guards_structural_owners():
+    prompt = (
+        "A Node ESM host resolves browser, node, and default export conditions, "
+        "then imports a package from a vendor cache path containing a literal #."
+    )
+    files = {
+        "src/exports.mjs": (
+            "export function resolveExportTarget(entry, { conditions = ['node'] } = {}) {\n"
+            "  const firstTarget = Object.values(entry)[0];\n"
+            "  return typeof firstTarget === 'string' && firstTarget.startsWith('./')\n"
+            "    ? firstTarget\n"
+            "    : null;\n"
+            "}\n"
+        ),
+        "src/loader.mjs": (
+            "import { resolve } from 'node:path';\n"
+            "function rawFileUrl(absolutePath) {\n"
+            "  const normalized = absolutePath.replaceAll('\\\\', '/');\n"
+            "  return `file:///${normalized}`;\n"
+            "}\n"
+            "export async function load(packageRoot, target) {\n"
+            "  return import(rawFileUrl(resolve(packageRoot, target)));\n"
+            "}\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {**files, **proposals}
+
+    assert any("object insertion order" in value for value in rejected)
+    assert any("default fallback" in value for value in rejected)
+    assert any("pathToFileURL" in value for value in rejected)
+    assert set(proposals) == {"src/exports.mjs", "src/loader.mjs"}
+    assert "[...conditions, 'default']" in proposals["src/exports.mjs"]
+    assert "pathToFileURL(absolutePath).href" in proposals["src/loader.mjs"]
+    assert "from 'node:url'" in proposals["src/loader.mjs"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_dimension(prompt, files) == "dependency"
+
+
 def test_retry_contract_operator_transfers_across_field_and_local_names():
     prompt = (
         "Numeric Retry-After exceeds the remaining allowance; an explicit zero delay is "

@@ -2765,6 +2765,69 @@ def contract_invariant_warnings(
     }
     combined = "\n".join(lowered_files.values())
     warnings: list[str] = []
+    if any(
+        "Node conditional-export resolution" in value for value in invariants
+    ):
+        resolver_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if "conditions" in content
+            and re.search(
+                r"(?:\bfunction\s+resolveexporttarget\s*\(|"
+                r"\b(?:const|let)\s+resolveexporttarget\s*=)",
+                content,
+            )
+        ]
+        for path, content in resolver_sources:
+            if re.search(r"object\.values\s*\(\s*entry\s*\)\s*\[\s*0\s*\]", content):
+                warnings.append(
+                    f"{path} still selects the first conditional-export value by object insertion order"
+                )
+            ordered_conditions = bool(
+                re.search(
+                    r"for\s*\([^)]*\bof\s+(?:\[\s*\.\.\.\s*)?conditions\b",
+                    content,
+                )
+                or re.search(r"\bconditions\.(?:find|some|reduce)\s*\(", content)
+            )
+            if not ordered_conditions:
+                warnings.append(
+                    f"{path} does not walk the caller's declared export-condition order"
+                )
+            default_fallback = bool(
+                re.search(r"(?:\.|\[\s*['\"])default(?:['\"]\s*\])?", content)
+                or re.search(
+                    r"\[\s*\.\.\.\s*conditions\s*,\s*['\"]default['\"]\s*\]",
+                    content,
+                )
+            )
+            if not default_fallback:
+                warnings.append(
+                    f"{path} omits the conditional-export default fallback"
+                )
+    if any("An ESM import built from a filesystem path" in value for value in invariants):
+        loader_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if "import(" in content
+            and any(
+                marker in content
+                for marker in ("rawfileurl", "file://", "resolve(packageroot")
+            )
+        ]
+        for path, content in loader_sources:
+            if "pathtofileurl" not in content or "node:url" not in content:
+                warnings.append(
+                    f"{path} imports a filesystem path without node:url pathToFileURL"
+                )
+            if "encodeuricomponent" in content:
+                warnings.append(
+                    f"{path} applies encodeURIComponent to an ESM filesystem path"
+                )
+            if re.search(r"[`'\"]file://", content):
+                warnings.append(
+                    f"{path} still assembles a file:// URL manually"
+                )
     if any("configured field delimiter is one policy input" in value for value in invariants):
         delimiter_sources = [
             content
@@ -5345,6 +5408,76 @@ def _repair_dart_trusted_proxy_chain(content: str) -> str:
     return updated
 
 
+def _repair_node_conditional_exports(content: str) -> str:
+    if "resolveExportTarget" not in content or "Object.values(entry)[0]" not in content:
+        return content
+    pattern = re.compile(
+        r"(?P<indent>^[ \t]*)const\s+firstTarget\s*=\s*"
+        r"Object\.values\s*\(\s*entry\s*\)\s*\[\s*0\s*\]\s*;\s*"
+        r"return\s+typeof\s+firstTarget\s*===\s*['\"]string['\"]\s*&&\s*"
+        r"firstTarget\.startsWith\s*\(\s*['\"]\./['\"]\s*\)\s*"
+        r"\?\s*firstTarget\s*:\s*null\s*;",
+        re.MULTILINE,
+    )
+    match = pattern.search(content)
+    if not match:
+        return content
+    indent = match.group("indent")
+    inner = indent + "  "
+    replacement = (
+        f"{indent}for (const condition of [...conditions, 'default']) {{\n"
+        f"{inner}if (!Object.prototype.hasOwnProperty.call(entry, condition)) continue;\n"
+        f"{inner}const target = entry[condition];\n"
+        f"{inner}if (typeof target === 'string') {{\n"
+        f"{inner}  return target.startsWith('./') ? target : null;\n"
+        f"{inner}}}\n"
+        f"{inner}if (target && typeof target === 'object' && !Array.isArray(target)) {{\n"
+        f"{inner}  const nested = resolveExportTarget(target, {{ subpath: '.', conditions }});\n"
+        f"{inner}  if (nested !== null) return nested;\n"
+        f"{inner}}}\n"
+        f"{indent}}}\n"
+        f"{indent}return null;"
+    )
+    return content[: match.start()] + replacement + content[match.end() :]
+
+
+def _repair_node_esm_file_url(content: str) -> str:
+    if "import(" not in content or "rawFileUrl" not in content:
+        return content
+    updated = _replace_braced_function_body(
+        content,
+        "rawFileUrl",
+        "  return pathToFileURL(absolutePath).href;",
+    )
+    if not updated or updated == content:
+        return content
+    if re.search(
+        r"import\s*\{[^}]*\bpathToFileURL\b[^}]*\}\s*from\s*['\"]node:url['\"]",
+        updated,
+        re.DOTALL,
+    ):
+        return updated
+    node_url_import = re.search(
+        r"import\s*\{(?P<names>[^}]*)\}\s*from\s*['\"]node:url['\"]\s*;",
+        updated,
+        re.DOTALL,
+    )
+    if node_url_import:
+        names = node_url_import.group("names").strip()
+        replacement = f"import {{ {names}, pathToFileURL }} from 'node:url';"
+        return (
+            updated[: node_url_import.start()]
+            + replacement
+            + updated[node_url_import.end() :]
+        )
+    imports = list(re.finditer(r"(?m)^import\s+[^;]+;\s*$", updated))
+    insertion = "import { pathToFileURL } from 'node:url';\n"
+    if imports:
+        at = imports[-1].end()
+        return updated[:at] + "\n" + insertion + updated[at:]
+    return insertion + updated
+
+
 def contract_repair_proposals(
     prompt: str,
     files: Mapping[str, str],
@@ -5394,6 +5527,10 @@ def contract_repair_proposals(
             updated = _repair_dart_offset_schedule(updated)
         if any("Portable Windows path segments remove trailing periods/spaces" in value for value in invariants):
             updated = _repair_dart_portable_exports(updated)
+        if any("Node conditional-export resolution" in value for value in invariants):
+            updated = _repair_node_conditional_exports(updated)
+        if any("An ESM import built from a filesystem path" in value for value in invariants):
+            updated = _repair_node_esm_file_url(updated)
         if any("A claimed job attempt is a fencing token" in value for value in invariants):
             updated = _repair_job_attempt_fencing(updated)
         if any("state transition matches exactly its allowed predecessor" in value for value in invariants):
@@ -5683,6 +5820,8 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("Dependency report integration accepts both legacy component records", "dependency"),
     ("An offset transition is effective at its UTC boundary", "clock"),
     ("Portable Windows path segments remove trailing periods/spaces", "code"),
+    ("Node conditional-export resolution", "dependency"),
+    ("An ESM import built from a filesystem path", "dependency"),
     ("A claimed job attempt is a fencing token", "state"),
 )
 
@@ -5724,6 +5863,8 @@ def contract_repair_dimension(
         ("Dependency report integration accepts both legacy component records", "dependency", _repair_dart_dependency_report),
         ("An offset transition is effective at its UTC boundary", "clock", _repair_dart_offset_schedule),
         ("Portable Windows path segments remove trailing periods/spaces", "code", _repair_dart_portable_exports),
+        ("Node conditional-export resolution", "dependency", _repair_node_conditional_exports),
+        ("An ESM import built from a filesystem path", "dependency", _repair_node_esm_file_url),
         ("A claimed job attempt is a fencing token", "state", _repair_job_attempt_fencing),
         ("state transition matches exactly its allowed predecessor", "state", _repair_export_job_state_sql),
         ("Normalize every physical length", "data", _repair_package_unit_sql),
