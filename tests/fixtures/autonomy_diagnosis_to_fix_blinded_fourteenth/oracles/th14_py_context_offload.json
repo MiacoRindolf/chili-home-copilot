@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_py_context_offload",
+  "expected_dimension": "state",
+  "expected_files": [
+    "request_scope.py",
+    "work_dispatch.py"
+  ],
+  "feedback_files": {
+    "tests/test_context_feedback.py": "from concurrent.futures import ThreadPoolExecutor\n\nfrom audit_event import audit_event\nfrom request_scope import current_request_id, request_scope\nfrom work_dispatch import submit_with_request\n\n\ndef test_surrounding_request_returns_after_temporary_scope():\n    with request_scope(\"req-outer\"):\n        with request_scope(\"req-inner\"):\n            assert current_request_id() == \"req-inner\"\n\n        assert current_request_id() == \"req-outer\"\n\n    assert current_request_id() is None\n\n\ndef test_submitted_audit_keeps_its_request_identity():\n    with ThreadPoolExecutor(max_workers=1) as executor:\n        with request_scope(\"req-200\"):\n            future = submit_with_request(\n                executor, lambda: audit_event(\"exported\")\n            )\n\n        assert future.result(timeout=2) == {\n            \"action\": \"exported\",\n            \"request_id\": \"req-200\",\n        }\n"
+  }
+}

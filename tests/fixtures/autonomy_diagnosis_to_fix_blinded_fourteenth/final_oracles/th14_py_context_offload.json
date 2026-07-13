@@ -1,0 +1,6 @@
+{
+  "case_id": "th14_py_context_offload",
+  "final_files": {
+    "tests/test_context_final.py": "from concurrent.futures import ThreadPoolExecutor\n\nfrom audit_event import audit_event\nfrom request_scope import current_request_id, request_scope\nfrom work_dispatch import submit_with_request\n\n\ndef test_reused_worker_observes_each_submission_scope_without_leakage():\n    with ThreadPoolExecutor(max_workers=1) as executor:\n        with request_scope(\"req-parent\"):\n            with request_scope(\"req-first\"):\n                first = submit_with_request(\n                    executor, lambda: audit_event(\"first\")\n                )\n\n            assert current_request_id() == \"req-parent\"\n\n            with request_scope(\"req-second\"):\n                second = submit_with_request(\n                    executor, lambda: audit_event(\"second\")\n                )\n\n            assert current_request_id() == \"req-parent\"\n\n        assert first.result(timeout=2)[\"request_id\"] == \"req-first\"\n        assert second.result(timeout=2)[\"request_id\"] == \"req-second\"\n\n    assert current_request_id() is None\n"
+  }
+}

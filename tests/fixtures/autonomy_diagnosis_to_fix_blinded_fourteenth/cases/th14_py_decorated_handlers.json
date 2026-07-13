@@ -1,0 +1,18 @@
+{
+  "case_id": "th14_py_decorated_handlers",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "Message delivery can return before handler work finishes when an asynchronous handler is wrapped with the tracing helper or implemented as a callable object. Traces for wrapped handlers can consequently record completion before the handler's own event. Plain functions, directly declared coroutine functions, and registry lookup still behave normally. Preserve synchronous wrapper behavior for synchronous handlers and keep the tracing, registry, and dispatch APIs unchanged.",
+  "candidate_paths": [
+    "trace_hooks.py",
+    "handler_dispatch.py",
+    "handler_registry.py"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "trace_hooks.py": "from collections.abc import Callable\nfrom functools import wraps\nfrom typing import Any\n\n\ndef traced(\n    handler: Callable[[str], Any],\n    events: list[tuple[str, str]],\n) -> Callable[[str], Any]:\n    @wraps(handler)\n    def wrapper(message: str) -> Any:\n        events.append((\"started\", message))\n        result = handler(message)\n        events.append((\"finished\", message))\n        return result\n\n    return wrapper\n",
+    "handler_dispatch.py": "from inspect import iscoroutinefunction\nfrom typing import Any\n\n\nasync def dispatch(handler: object, message: str) -> Any:\n    if iscoroutinefunction(handler):\n        return await handler(message)\n    return handler(message)\n",
+    "handler_registry.py": "class HandlerRegistry:\n    def __init__(self) -> None:\n        self._handlers: dict[str, object] = {}\n\n    def register(self, topic: str, handler: object) -> None:\n        self._handlers[topic] = handler\n\n    def resolve(self, topic: str) -> object:\n        try:\n            return self._handlers[topic]\n        except KeyError:\n            raise KeyError(f\"no handler for {topic!r}\") from None\n",
+    "tests/test_public.py": "import asyncio\n\nfrom handler_dispatch import dispatch\nfrom handler_registry import HandlerRegistry\nfrom trace_hooks import traced\n\n\ndef test_synchronous_trace_preserves_return_and_event_order():\n    events = []\n\n    def handle(message):\n        events.append((\"handled\", message))\n        return message.upper()\n\n    wrapped = traced(handle, events)\n\n    assert wrapped(\"ready\") == \"READY\"\n    assert events == [\n        (\"started\", \"ready\"),\n        (\"handled\", \"ready\"),\n        (\"finished\", \"ready\"),\n    ]\n\n\ndef test_direct_coroutine_handler_is_completed():\n    async def handle(message):\n        await asyncio.sleep(0)\n        return f\"done:{message}\"\n\n    assert asyncio.run(dispatch(handle, \"job\")) == \"done:job\"\n\n\ndef test_registry_returns_the_registered_handler():\n    registry = HandlerRegistry()\n    handler = object()\n    registry.register(\"orders\", handler)\n\n    assert registry.resolve(\"orders\") is handler\n"
+  }
+}
