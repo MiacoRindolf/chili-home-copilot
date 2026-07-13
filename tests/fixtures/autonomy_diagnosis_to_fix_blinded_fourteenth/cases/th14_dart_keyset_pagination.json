@@ -1,0 +1,18 @@
+{
+  "case_id": "th14_dart_keyset_pagination",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "Audit operators report that records sharing the same recorded instant can disappear when they follow a continuation cursor, and repeated exports of the same data do not always agree on the order of those tied records. Feeds whose event times are all distinct paginate normally. Preserve the existing event, ordering, and pager APIs while restoring deterministic, gap-free traversal.",
+  "candidate_paths": [
+    "lib/audit_event.dart",
+    "lib/audit_order.dart",
+    "lib/audit_pager.dart"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "lib/audit_event.dart": "class AuditEvent {\n  final String id;\n  final DateTime occurredAt;\n  final String action;\n\n  AuditEvent({\n    required this.id,\n    required this.occurredAt,\n    required this.action,\n  }) {\n    if (id.isEmpty) {\n      throw ArgumentError.value(id, 'id', 'must not be empty');\n    }\n    if (!occurredAt.isUtc) {\n      throw ArgumentError.value(occurredAt, 'occurredAt', 'must be UTC');\n    }\n  }\n}\n",
+    "lib/audit_order.dart": "import 'audit_event.dart';\n\nint compareAuditEvents(AuditEvent left, AuditEvent right) {\n  return right.occurredAt.compareTo(left.occurredAt);\n}\n",
+    "lib/audit_pager.dart": "import 'dart:math';\n\nimport 'audit_event.dart';\nimport 'audit_order.dart';\n\nclass AuditPage {\n  final List<AuditEvent> events;\n  final String? nextCursor;\n\n  AuditPage(Iterable<AuditEvent> events, this.nextCursor)\n    : events = List<AuditEvent>.unmodifiable(events);\n}\n\nclass AuditPager {\n  AuditPage page(\n    Iterable<AuditEvent> events, {\n    required int limit,\n    String? after,\n  }) {\n    if (limit <= 0) {\n      throw ArgumentError.value(limit, 'limit', 'must be positive');\n    }\n\n    final ordered = List<AuditEvent>.of(events)..sort(compareAuditEvents);\n    var start = 0;\n    if (after != null) {\n      final boundary = DateTime.parse(after);\n      start = ordered.indexWhere(\n        (event) => event.occurredAt.isBefore(boundary),\n      );\n      if (start < 0) {\n        return AuditPage(const <AuditEvent>[], null);\n      }\n    }\n\n    final end = min(start + limit, ordered.length);\n    final selected = ordered.sublist(start, end);\n    final nextCursor = end < ordered.length\n        ? selected.last.occurredAt.toIso8601String()\n        : null;\n    return AuditPage(selected, nextCursor);\n  }\n}\n",
+    "tests/public_test.dart": "import '../lib/audit_event.dart';\nimport '../lib/audit_order.dart';\nimport '../lib/audit_pager.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nAuditEvent event(String id, int minute) {\n  return AuditEvent(\n    id: id,\n    occurredAt: DateTime.utc(2026, 4, 20, 12, minute),\n    action: 'viewed',\n  );\n}\n\nvoid main() {\n  check(\n    compareAuditEvents(event('newer', 3), event('older', 2)) < 0,\n    'newer events sort first',\n  );\n\n  final events = <AuditEvent>[\n    event('evt-a', 1),\n    event('evt-c', 3),\n    event('evt-b', 2),\n  ];\n  final pager = AuditPager();\n  final first = pager.page(events, limit: 2);\n  check(\n    first.events.map((event) => event.id).join(',') == 'evt-c,evt-b',\n    'returns the first page in event-time order',\n  );\n  check(first.nextCursor != null, 'provides a cursor when records remain');\n\n  final second = pager.page(events, limit: 2, after: first.nextCursor);\n  check(\n    second.events.map((event) => event.id).join(',') == 'evt-a',\n    'continues after a distinct event time',\n  );\n  check(second.nextCursor == null, 'ends the cursor chain at the last page');\n\n  print('public tests passed');\n}\n"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_dart_semver_selection",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "lib/semantic_version.dart",
+    "lib/release_selector.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/package_release.dart';\nimport '../lib/release_selector.dart';\nimport '../lib/semantic_version.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nPackageRelease release(String version) {\n  return PackageRelease.fromText('renderer', version);\n}\n\nvoid main() {\n  check(\n    SemanticVersion.parse(\n          '1.4.0',\n        ).compareTo(SemanticVersion.parse('1.4.0-rc.2')) >\n        0,\n    'a stable release outranks its prerelease',\n  );\n  check(\n    SemanticVersion.parse(\n          '1.4.0-rc.10',\n        ).compareTo(SemanticVersion.parse('1.4.0-rc.2')) >\n        0,\n    'numeric prerelease identifiers use numeric precedence',\n  );\n\n  final selected = ReleaseSelector().bestCompatible(<PackageRelease>[\n    release('1.3.9'),\n    release('1.5.0'),\n    release('2.1.0'),\n  ], '>=1.4.0 <2.0.0');\n  check(\n    selected?.version.toString() == '1.5.0',\n    'all clauses in one compatibility range must hold',\n  );\n\n  print('feedback tests passed');\n}\n"
+  }
+}
