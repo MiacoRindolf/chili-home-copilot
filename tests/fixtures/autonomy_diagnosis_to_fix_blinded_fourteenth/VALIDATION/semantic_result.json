@@ -1,0 +1,899 @@
+{
+  "schema": "chili.semantic-validation-result.v1",
+  "validator": "codex-independent-semantic-validator-v1",
+  "target_commit": "64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3",
+  "verdict": "PASS",
+  "checks": {
+    "target_commit": {
+      "passed": true,
+      "expected": "64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3",
+      "observed": "64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3",
+      "validation_branch": "codex/fourteenth-semantic-validation"
+    },
+    "fixture_preflight": {
+      "passed": true,
+      "mode": "validation_only",
+      "case_count": 12,
+      "command": "$env:PYTHONDONTWRITEBYTECODE='1'\npython -B scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures",
+      "exit_code": 0,
+      "output": "fixtures_valid=True cases=12",
+      "models_invoked": []
+    },
+    "fixture_shape": {
+      "passed": true,
+      "unique_case_ids": 12,
+      "dimension_counts": {
+        "data": 4,
+        "dependency": 4,
+        "runtime": 1,
+        "state": 3
+      },
+      "all_dimensions_fit_rubric": true,
+      "all_cases_have_three_candidates": true,
+      "all_cases_have_two_expected_owners": true,
+      "all_cases_have_one_distractor": true,
+      "all_cases_have_max_files_two": true,
+      "all_expected_owners_are_candidates": true
+    },
+    "rubric": {
+      "passed": true,
+      "source": "app/services/project_autonomy/diagnostic_reasoning.py::CAUSAL_DIMENSION_RUBRIC",
+      "applicable_definitions": {
+        "data": "representation, schema, identity, joins, byte/range boundaries, or aggregation",
+        "dependency": "package, provider, service, wire protocol, compatibility, key rotation, or version",
+        "runtime": "coercion, decoding, process/container, loaded revision, or execution semantics",
+        "state": "ownership, lifecycle, transition, queue, idempotency, isolation, or vector-clock state"
+      }
+    },
+    "thirteenth_novelty": {
+      "passed": true,
+      "reference_case_count": 12,
+      "fourteenth_case_count": 12,
+      "pairwise_comparisons": 144,
+      "material_matches": [],
+      "internal_fourteenth_material_matches": [],
+      "reference_case_ids": [
+        "th13_dart_dependency_report",
+        "th13_dart_offset_schedule",
+        "th13_dart_portable_exports",
+        "th13_node_facility_rollup",
+        "th13_node_job_recovery",
+        "th13_node_response_compression",
+        "th13_py_factory_binding",
+        "th13_py_monthly_settlement",
+        "th13_py_task_teardown",
+        "th13_sql_delimited_profile",
+        "th13_sql_export_job_state",
+        "th13_sql_package_units"
+      ],
+      "reference_fingerprints": [
+        {
+          "id": "th13_dart_dependency_report",
+          "dimension": "dependency",
+          "mechanism": "dual-schema scan-report adaptation plus precedence-aware Boolean license-expression evaluation",
+          "combined_source_skeleton_sha256": "a247b5e8afcece29db174cfee8ca72bd15b058fb1974c7823990023c9bb0d839"
+        },
+        {
+          "id": "th13_dart_offset_schedule",
+          "dimension": "clock",
+          "mechanism": "inclusive offset-transition lookup plus target-time local-wall-clock to UTC resolution",
+          "combined_source_skeleton_sha256": "621e4119b0b4ea4eab1b10657f61c969c8442cc67c2fb73bf3260f95023a2cf4"
+        },
+        {
+          "id": "th13_dart_portable_exports",
+          "dimension": "code",
+          "mechanism": "Windows segment normalization plus case-insensitive deterministic entry allocation",
+          "combined_source_skeleton_sha256": "a9f6207937b8a207b44c9e89b82aa481a63a8d72ca54181fddccf7e8dcfe754d"
+        },
+        {
+          "id": "th13_node_facility_rollup",
+          "dimension": "data",
+          "mechanism": "null-versus-zero preservation through normalization and aggregation",
+          "combined_source_skeleton_sha256": "01945435a9bb47029ff2a21284dd404ad55727fec521eab8c0450743e81d696b"
+        },
+        {
+          "id": "th13_node_job_recovery",
+          "dimension": "state",
+          "mechanism": "attempt-token fencing for late asynchronous job settlement",
+          "combined_source_skeleton_sha256": "8e43d8921c0c0f74a0e01605d343ec5cb4dc7097b72cb442b84f5e424a11a719"
+        },
+        {
+          "id": "th13_node_response_compression",
+          "dimension": "config",
+          "mechanism": "comma-list token normalization combined with media-type parameter matching",
+          "combined_source_skeleton_sha256": "fc645df81cb3ff9cc6903470a8d68c0fe0943e0ca4d498ef2ff22551dd18bd35"
+        },
+        {
+          "id": "th13_py_factory_binding",
+          "dimension": "dependency",
+          "mechanism": "inspect.Parameter kind discovery plus positional/keyword factory invocation",
+          "combined_source_skeleton_sha256": "01a1c8f9f15f4365f0cc1e537bcdd675b8a424d9278c3c665146f84b19c813ea"
+        },
+        {
+          "id": "th13_py_monthly_settlement",
+          "dimension": "clock",
+          "mechanism": "end-of-month day clamping plus instant-preserving timezone conversion",
+          "combined_source_skeleton_sha256": "972643e4469bc901f9141f6da11520db9d148da74dc4cf3a1bc44b6ecf0d2b60"
+        },
+        {
+          "id": "th13_py_task_teardown",
+          "dimension": "runtime",
+          "mechanism": "BaseException-safe task cleanup plus continuation and exception precedence for callbacks",
+          "combined_source_skeleton_sha256": "48c5d0c1694bae23be5e0f9140837dfd7614766fdc904b53bc1103fc79112f65"
+        },
+        {
+          "id": "th13_sql_delimited_profile",
+          "dimension": "config",
+          "mechanism": "profile-selected field/record separators with delimiter-sensitive quoting",
+          "combined_source_skeleton_sha256": "f4fde1ad6acc10e29d0ac33312f6d9618a8c2869306b483ff4a3b31860df774b"
+        },
+        {
+          "id": "th13_sql_export_job_state",
+          "dimension": "state",
+          "mechanism": "guarded UPDATE state transitions using current state and worker ownership",
+          "combined_source_skeleton_sha256": "278caf0ae1994a97c246c9284e5a5c08984795dcb0518181c23578297d5fc71e"
+        },
+        {
+          "id": "th13_sql_package_units",
+          "dimension": "data",
+          "mechanism": "lookup-table unit normalization for cubic volume and oversize filtering",
+          "combined_source_skeleton_sha256": "f4d32d13b5e58c2a37775cc282a247174db180293152b280d49334812d485f70"
+        }
+      ]
+    },
+    "deterministic_registry_novelty": {
+      "passed": true,
+      "source": "app/services/project_autonomy/diagnostic_reasoning.py",
+      "unique_invariant_family_count": 44,
+      "repair_operator_count": 36,
+      "canonical_registry_sha256": "06aed5350e2e5e26c2fea9f389172d534750b3d531a82d54460339d19a603954",
+      "prompt_family_matches": {
+        "th14_dart_keyset_pagination": [],
+        "th14_dart_semver_selection": [],
+        "th14_dart_websocket_fragments": [],
+        "th14_node_esm_plugin_loading": [],
+        "th14_node_http_preconditions": [],
+        "th14_node_partition_commits": [],
+        "th14_py_context_offload": [],
+        "th14_py_decorated_handlers": [],
+        "th14_py_link_pagination": [],
+        "th14_sql_partner_search": [],
+        "th14_sql_registry_refresh": [],
+        "th14_sql_suppression_batches": []
+      },
+      "repair_operators": [
+        "_repair_canonical_base64url",
+        "_repair_tls_client_auth",
+        "_repair_tail_checkpoint",
+        "_repair_tristate_override_sql",
+        "_repair_tenant_stock_ownership_sql",
+        "_repair_replacement_config_reload",
+        "_repair_request_policy_snapshot",
+        "_repair_unordered_hierarchy",
+        "_repair_ticket_transition_sql",
+        "_repair_dart_fixed_point_apportionment",
+        "_repair_dart_release_lifecycle",
+        "_repair_dart_trusted_proxy_chain",
+        "_repair_configured_delimiter_sql",
+        "_repair_python_factory_bindings",
+        "_repair_python_monthly_schedule",
+        "_repair_python_teardown_lifecycle",
+        "_repair_dart_dependency_report",
+        "_repair_dart_offset_schedule",
+        "_repair_dart_portable_exports",
+        "_repair_job_attempt_fencing",
+        "_repair_export_job_state_sql",
+        "_repair_package_unit_sql",
+        "_repair_async_rejection_slot",
+        "_repair_ordered_sequence_identity",
+        "_repair_monotonic_sql_head",
+        "_repair_cross_file_monotonic_head",
+        "_repair_vary_pipeline",
+        "_repair_repeated_query_pairs",
+        "_repair_relay_key_window",
+        "_repair_relay_timestamp",
+        "_repair_retry_policy",
+        "_repair_scoped_retry_identity",
+        "_repair_scoped_temporal_sql",
+        "_repair_dart_vector_state",
+        "_repair_inclusive_ranges",
+        "_repair_telemetry_sql"
+      ]
+    },
+    "causal_ownership": {
+      "passed": true,
+      "cases_with_exactly_two_necessary_owners": 12,
+      "cases_with_owner_isolating_feedback": 12,
+      "cases_with_two-owner_final_composition": 12,
+      "finding": "Each disclosed partition isolates one contract in each expected owner, and each final either directly composes both contracts or makes the complete final suite fail when either owner contract is absent. No distractor owns a failed primitive."
+    },
+    "distractors": {
+      "passed": true,
+      "plausible_and_unnecessary_count": 12,
+      "finding": "Every distractor is on the observed or final integration path, while its packed behavior already satisfies the asserted contract and requires no change."
+    },
+    "final_boundaries": {
+      "passed": true,
+      "materially_stronger_count": 12,
+      "feedback_payloads_disjoint_from_final_payloads": true,
+      "finding": "Every final adds a new boundary, adversarial value class, concurrency composition, protocol nesting, or multi-step integration beyond the disclosed feedback."
+    },
+    "prompt_source_leaks": {
+      "passed": true,
+      "cases_scanned": 12,
+      "forbidden_public_key_hits": 0,
+      "hidden_test_name_hits": 0,
+      "duplicate_hidden_payloads": 0,
+      "suspicious_prompt_or_candidate_source_lines": 0,
+      "manual_solution_recipe_hits": 0,
+      "finding": "Prompts state symptoms and compatibility constraints but do not name repair APIs or hidden values. Candidate sources contain no TODO, oracle label, hidden test name, solution comment, or repair recipe."
+    },
+    "report_inputs": {
+      "fourteenth_authored_inventory": {
+        "file_count": 41,
+        "byte_count": 123423,
+        "sha256": "3352f0916908ce0aac893230177be1a299c3c6ae1c3df5f2462d027d5020428e",
+        "scope": "all fourteenth files except VALIDATION, sorted as relative_path<TAB>sha256<TAB>bytes with LF terminator"
+      },
+      "thirteenth_case_triples_inventory": {
+        "file_count": 37,
+        "sha256": "48864439434cbb8c55aab2343e79f6bfe65608b5ebf727149666fd0379c2a25c",
+        "scope": "manifest plus 12 case/oracle/final triples"
+      },
+      "thirteenth_semantic_result_v2_sha256": "963e995bdbd63752bf650c287e12254f7b57667521bd990b3e49af0f51a842d3",
+      "thirteenth_semantic_report_v2_sha256": "ace570a4fe2903aa86ff23e924bdd3cde8e249a97ad4c281ca707e716673dd3f",
+      "diagnostic_reasoning_sha256": "6a081ca2d5d8b4775f299c3c54743c22d83d2bb77f8177c62f2e899069e0d8a7",
+      "benchmark_sha256": "8a1ffe4b7ea68824892330e218154e1601f18619b4cba1af8f3181087254b361",
+      "fourteenth_manifest_sha256": "f196fe7ca334ab3e88af2aa9c3d075a550ff67f1e253c3fa0aec4f5f6fec900c"
+    }
+  },
+  "findings": [
+    {
+      "case_id": "th14_dart_keyset_pagination",
+      "verdict": "PASS",
+      "language": "dart",
+      "expected_dimension": "data",
+      "dimension_fit": "The defect is a representation and identity boundary: event time alone is not a total key and the cursor omits stable record identity.",
+      "expected_owners": [
+        "lib/audit_order.dart",
+        "lib/audit_pager.dart"
+      ],
+      "distractor": "lib/audit_event.dart",
+      "mechanism_fingerprint": {
+        "id": "data.compound_keyset_cursor.total_order_timestamp_desc_id_asc",
+        "sha256": "fbe1a5558e9ae0c08b3fa3aeb6065529f8797b45b89878243b07a9885c0fc301",
+        "candidate_source_bundle_sha256": "c2438f1392179b5460ffc7f4bfc7025e78987c0d359882cbde8f5d300ae15c17",
+        "owner_source_bundle_sha256": "59f2bceeccb9c68af734ad7697eda786bce61cd371a2df642bf65eab398801d6"
+      },
+      "mechanism": "Descending event time and ascending stable event id form one total order; the continuation cursor must carry and compare that complete compound boundary.",
+      "assertion_family": "Comparator sign, ordered page identities, cursor progress, exactly-once traversal, and termination.",
+      "owner_necessity": [
+        {
+          "path": "lib/audit_order.dart",
+          "necessary_because": "Feedback directly requires deterministic id ordering at equal instants; pager-only work cannot satisfy that exported comparator contract."
+        },
+        {
+          "path": "lib/audit_pager.dart",
+          "necessary_because": "A fixed comparator still loses tied peers when the timestamp-only cursor advances; the pager must encode and apply the compound key."
+        }
+      ],
+      "distractor_finding": "AuditEvent supplies the stable id and UTC timestamp correctly, so it is plausible on the ordering path but needs no change.",
+      "feedback_boundary": "One tie comparison and a one-record continuation across two records sharing an instant.",
+      "final_boundary": "A multi-page walk crosses a three-record tie with delimiter-bearing ids, newer and older neighbors, progress checks, exactly-once order, and bounded termination.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_dart_portable_exports"
+        ],
+        "distinction": "Portable exports allocate case-folded filenames after normalization; this case defines a compound database-style traversal key and continuation boundary."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "stable ordered-sequence identity",
+          "monotonic materialized head",
+          "source-aware tail checkpoint"
+        ],
+        "distinction": "None of those families constructs a keyset cursor over tied rows; they preserve caller priority, choose an atomic latest tuple, or reset a file offset on source replacement."
+      },
+      "leak_audit": "PASS: no compound-key encoding, hidden ids, test names, oracle labels, or solution comments appear in the prompt or candidate sources."
+    },
+    {
+      "case_id": "th14_dart_semver_selection",
+      "verdict": "PASS",
+      "language": "dart",
+      "expected_dimension": "dependency",
+      "dimension_fit": "Package version precedence and compatibility constraints are explicitly covered by the dependency rubric's package, compatibility, and version clauses.",
+      "expected_owners": [
+        "lib/semantic_version.dart",
+        "lib/release_selector.dart"
+      ],
+      "distractor": "lib/package_release.dart",
+      "mechanism_fingerprint": {
+        "id": "dependency.semver_precedence.conjunctive_range",
+        "sha256": "d7611573346eaa4a3da017a1654aee728877c756188e9ab6173d625e1b461978",
+        "candidate_source_bundle_sha256": "603f780932da4218d360e91b33f4d08007c221b6ccc595afac004b9fb5fd542b",
+        "owner_source_bundle_sha256": "2fef369d0f2c805e3d9fcf7f91dfb980f34b6f025391b5692b3743b782047b6d"
+      },
+      "mechanism": "SemVer precedence distinguishes stable from prerelease, numeric from text identifiers, and shorter equal prefixes while ignoring build metadata; every clause in one range is conjunctive.",
+      "assertion_family": "Version comparison signs, build-metadata equality, withdrawal exclusion, and selected release identity.",
+      "owner_necessity": [
+        {
+          "path": "lib/semantic_version.dart",
+          "necessary_because": "Feedback and final directly assert prerelease ordering; selector-only filtering cannot repair the public Comparable contract."
+        },
+        {
+          "path": "lib/release_selector.dart",
+          "necessary_because": "Correct precedence alone still admits releases satisfying only one bound because the packed selector uses disjunction."
+        }
+      ],
+      "distractor_finding": "PackageRelease is plausibly implicated by withdrawal and package identity, but it already preserves parsed versions and withdrawal state correctly.",
+      "feedback_boundary": "Stable versus rc, numeric rc ordering, and a stable two-clause bounded range.",
+      "final_boundary": "Numeric-versus-text identifiers, prefix length, ignored build metadata, and a prerelease-only bounded catalog compose comparison and range selection.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_dart_dependency_report"
+        ],
+        "distinction": "The thirteenth case adapts report schemas and parses Boolean license expressions; it does not implement SemVer precedence or package range selection."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "dependency report and license-expression evaluation",
+          "required factory parameter binding"
+        ],
+        "distinction": "The shared dependency label is taxonomic only; no current invariant or operator compares prerelease identifiers or applies conjunctive version bounds."
+      },
+      "leak_audit": "PASS: symptoms identify version-selection failures but no comparison algorithm, every-clause repair, hidden version set, or test name is disclosed."
+    },
+    {
+      "case_id": "th14_dart_websocket_fragments",
+      "verdict": "PASS",
+      "language": "dart",
+      "expected_dimension": "dependency",
+      "dimension_fit": "WebSocket framing and message assembly are wire-protocol compatibility contracts, which the dependency rubric names directly.",
+      "expected_owners": [
+        "lib/websocket_decoder.dart",
+        "lib/websocket_messages.dart"
+      ],
+      "distractor": "lib/websocket_frame.dart",
+      "mechanism_fingerprint": {
+        "id": "dependency.websocket.incremental_frame_buffer.fragment_control_preservation",
+        "sha256": "26bdacaf50cb44883cbb96f9206deafb2cbcb562cb0bad435a1744090eef46ad",
+        "candidate_source_bundle_sha256": "bb6d9cf7e3252ff51b6fcae7a079fd10db091fba3eec0c14259f673ad4fb1658",
+        "owner_source_bundle_sha256": "ff415eaf0d4642176a550166f7eb7094446d184447fd3a493efb0eba4a75ae11"
+      },
+      "mechanism": "An incremental frame decoder retains incomplete transport bytes and drains every coalesced frame; the text assembler preserves an active fragmented message across interleaved control frames.",
+      "assertion_family": "Decoded frame count/payload and emitted text-message sequence across transport and protocol fragmentation.",
+      "owner_necessity": [
+        {
+          "path": "lib/websocket_decoder.dart",
+          "necessary_because": "The split-header feedback contract requires retained bytes, and the final arbitrary cuts cannot reach the assembler correctly without a stateful multi-frame decoder."
+        },
+        {
+          "path": "lib/websocket_messages.dart",
+          "necessary_because": "Even correctly decoded frames fail when the packed assembler clears active text state on ping before the continuation."
+        }
+      ],
+      "distractor_finding": "WebSocketFrame owns frame validation and is exercised by feedback, but its final/control constraints and immutable payload are already correct.",
+      "feedback_boundary": "A header split across calls and a direct text-fragment/ping/continuation sequence are isolated separately.",
+      "final_boundary": "Arbitrary transport cuts, partial and coalesced frames, an interleaved ping, a continuation, and a following complete text frame are processed end to end.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_node_response_compression"
+        ],
+        "distinction": "Response compression normalizes configuration tokens and media-type parameters; it has no incremental binary stream or fragmented-message state machine."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "inclusive byte ranges",
+          "active subscription lifecycle",
+          "exact cancellation signal"
+        ],
+        "distinction": "Range arithmetic, subscription cancellation, and abort propagation do not buffer WebSocket frame bytes or preserve fragmentation state across control traffic."
+      },
+      "leak_audit": "PASS: no buffering implementation, control-frame rule, hidden chunk cuts, final messages, or oracle labels appear publicly."
+    },
+    {
+      "case_id": "th14_node_esm_plugin_loading",
+      "verdict": "PASS",
+      "language": "typescript",
+      "expected_dimension": "dependency",
+      "dimension_fit": "Node package exports and ESM module URL activation are package and compatibility contracts under dependency.",
+      "expected_owners": [
+        "src/package-exports.mjs",
+        "src/plugin-loader.mjs"
+      ],
+      "distractor": "src/plugin-registry.mjs",
+      "mechanism_fingerprint": {
+        "id": "dependency.node_exports.conditional_resolution.file_url_encoding",
+        "sha256": "dfc78febabefec0b06927c4d30050fc9d0695d937ec5b1346939d96a5abc8534",
+        "candidate_source_bundle_sha256": "19f8e7662aa19e7112431aed6ce6b06efc8cc45344e45ab600bdd70abcd08294",
+        "owner_source_bundle_sha256": "314299a120831587c6355f2e3b405b8a01c4c1e1e3c10fe88275357d31d4cee9"
+      },
+      "mechanism": "Conditional package exports are resolved recursively against active node/import/default conditions, and filesystem module paths become encoded file URLs so literal URL-significant characters remain path data.",
+      "assertion_family": "Resolved export target, imported namespace value, registry activation result, and registry identity.",
+      "owner_necessity": [
+        {
+          "path": "src/package-exports.mjs",
+          "necessary_because": "Feedback directly checks conditional selection, while the final nested node/import object cannot resolve correctly through loader-only work."
+        },
+        {
+          "path": "src/plugin-loader.mjs",
+          "necessary_because": "A correct export target still fails import when the literal # in the package root is interpolated into an unencoded URL."
+        }
+      ],
+      "distractor_finding": "PluginRegistry is the final activation surface and therefore plausible, but it correctly delegates loading and stores the returned plugin unchanged.",
+      "feedback_boundary": "A flat conditional object and a direct-export package under a # directory are tested independently.",
+      "final_boundary": "Registry activation combines a # directory with a nested node/import/default export tree and verifies both value and stored identity.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_dart_dependency_report",
+          "th13_py_factory_binding"
+        ],
+        "distinction": "Those cases adapt scanner records/license rules or bind callable parameters; neither resolves Node exports or serializes filesystem paths as ESM URLs."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "canonical text decoder",
+          "unordered hierarchy"
+        ],
+        "distinction": "Percent-encoding a file URL is not canonical base64url validation, and conditional export recursion follows ordered condition keys rather than resolving an unordered parent graph."
+      },
+      "leak_audit": "PASS: public material names the observed browser/# failures but not pathToFileURL, recursive selection code, hidden package names, or final condition nesting."
+    },
+    {
+      "case_id": "th14_node_http_preconditions",
+      "verdict": "PASS",
+      "language": "typescript",
+      "expected_dimension": "dependency",
+      "dimension_fit": "HTTP entity tags and request preconditions are wire-protocol compatibility semantics, explicitly within dependency.",
+      "expected_owners": [
+        "src/entity-tag-list.mjs",
+        "src/request-preconditions.mjs"
+      ],
+      "distractor": "src/catalog-response.mjs",
+      "mechanism_fingerprint": {
+        "id": "dependency.http_etag.quote_aware_list.weak_strong_preconditions",
+        "sha256": "e37b776ad91d8f53774553bcef7de242366e8b6f543c719b9ed22c56c61382d3",
+        "candidate_source_bundle_sha256": "aaa60f66c321cf4b45f93b9b507d15b458cd8d537affb03e9ad3a91118bedddd",
+        "owner_source_bundle_sha256": "f0a778776311a65a9633ea90a27d946569040c8a5bc484149732f6adf62f0439"
+      },
+      "mechanism": "Entity-tag lists split only at commas outside quoted opaque tags; If-None-Match uses weak comparison while If-Match requires strong comparison.",
+      "assertion_family": "Parsed tag sequence and exact precondition/response status, proceed flag, body, and ETag shape.",
+      "owner_necessity": [
+        {
+          "path": "src/entity-tag-list.mjs",
+          "necessary_because": "Feedback directly asserts one comma-bearing weak tag token, and the final mixed read list cannot match if that token is split."
+        },
+        {
+          "path": "src/request-preconditions.mjs",
+          "necessary_because": "Correct parsing alone exposes the packed comparison reversal: weak read validators miss and weak write validators match."
+        }
+      ],
+      "distractor_finding": "CatalogResponse is the user-visible path and composes the final, but it correctly maps the precondition decision into the existing response shape.",
+      "feedback_boundary": "Comma-bearing opaque-tag parsing, weak read revalidation, and weak write rejection are asserted separately.",
+      "final_boundary": "The response path composes a comma-bearing current tag with a mixed weak read list and a weak write guard while preserving body/null behavior.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_node_response_compression"
+        ],
+        "distinction": "Both touch HTTP headers, but compression handles configured media types; this case parses ETag grammar and applies asymmetric protocol comparison rules."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "Vary header normalization and wildcard cacheability",
+          "TLS client authentication"
+        ],
+        "distinction": "Neither current HTTP family handles validators, quoted opaque commas, or weak-versus-strong precondition comparison."
+      },
+      "leak_audit": "PASS: weak/strong symptoms are protocol evidence, not a repair recipe; no parser state machine, hidden validator, test name, or oracle field is public."
+    },
+    {
+      "case_id": "th14_node_partition_commits",
+      "verdict": "PASS",
+      "language": "typescript",
+      "expected_dimension": "state",
+      "dimension_fit": "Committed offsets are partition-owned lifecycle state, and safe advancement depends on queue completion isolation.",
+      "expected_owners": [
+        "src/offset-tracker.mjs",
+        "src/batch-consumer.mjs"
+      ],
+      "distractor": "src/commit-report.mjs",
+      "mechanism_fingerprint": {
+        "id": "state.partition_checkpoint.contiguous_watermark.actual_partition",
+        "sha256": "a66251360008cb372f891bf9c6e57ae1d0e3dd6b6ba8fd5a0c0c367579888eef",
+        "candidate_source_bundle_sha256": "f1479b3f78373d1b3873feaa2c0f0b1948fecf2de609759c6ccfac89bdb1568d",
+        "owner_source_bundle_sha256": "5609eebc4e188d286afd8aae5231f316382cf2e9dbf65605dafed3e9e6672c5d"
+      },
+      "mechanism": "Each topic-partition owns a contiguous committed watermark that retains later completions behind gaps, and the concurrent consumer reports completion to the record's actual partition.",
+      "assertion_family": "Committed watermark, tracker call arguments, outcome order, partition snapshot, and formatted restart report.",
+      "owner_necessity": [
+        {
+          "path": "src/offset-tracker.mjs",
+          "necessary_because": "The tracker feedback contract requires offset 22 to remain pending behind missing 21; forwarding fixes cannot prevent premature advancement."
+        },
+        {
+          "path": "src/batch-consumer.mjs",
+          "necessary_because": "A gap-aware tracker still corrupts partition zero when the consumer hard-codes completion attribution instead of forwarding record.partition."
+        }
+      ],
+      "distractor_finding": "CommitReport displays the observed state and is used by the final, but it deterministically formats the snapshot it receives and owns no checkpoint mutation.",
+      "feedback_boundary": "Out-of-order completion within one partition and nonzero-partition forwarding are isolated.",
+      "final_boundary": "A gated concurrent batch spans two partitions, resolves a same-partition gap out of order, checks the intermediate safe watermark, and verifies the final operator report.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_node_job_recovery",
+          "th13_sql_export_job_state"
+        ],
+        "distinction": "Those cases fence worker attempts or guard lifecycle transitions; neither buffers completed offsets to advance a per-partition contiguous watermark."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "source-aware tail checkpoint",
+          "monotonic materialized head",
+          "vector-clock convergence",
+          "job attempt fencing"
+        ],
+        "distinction": "The new contract is gap-aware completion aggregation by partition, not source replacement reset, latest-winner selection, replica clock join, or attempt ownership."
+      },
+      "leak_audit": "PASS: no pending-offset data structure, actual forwarding line, hidden gate order, final report, or test name is disclosed."
+    },
+    {
+      "case_id": "th14_py_context_offload",
+      "verdict": "PASS",
+      "language": "python",
+      "expected_dimension": "state",
+      "dimension_fit": "ContextVar scope ownership, nesting restoration, and isolation between executor jobs are state contracts.",
+      "expected_owners": [
+        "request_scope.py",
+        "work_dispatch.py"
+      ],
+      "distractor": "audit_event.py",
+      "mechanism_fingerprint": {
+        "id": "state.contextvars.token_restore.submit_context_propagation",
+        "sha256": "21689aa999121941e40587f9f192fe79fde1847e195093e2530801bc196528bc",
+        "candidate_source_bundle_sha256": "4bbe2bd76e9bafa775179cc0095f96d9f56f2efde0b27fda0b773c15654d089d",
+        "owner_source_bundle_sha256": "fc50ead7558975de1273da242fa20576d71a2cb48744fabf74e1157e53c3bb07"
+      },
+      "mechanism": "Nested ContextVar scopes restore the token they replaced, and executor submission captures the caller's execution context at submit time and runs the operation inside that copy.",
+      "assertion_family": "Current request id and audit payload equality across nesting, scope exit, offload, and worker reuse.",
+      "owner_necessity": [
+        {
+          "path": "request_scope.py",
+          "necessary_because": "Feedback directly requires the outer request id after an inner scope exits; dispatch changes cannot repair local token restoration."
+        },
+        {
+          "path": "work_dispatch.py",
+          "necessary_because": "Correct local restoration does not propagate ContextVar state into a different executor thread at submission."
+        }
+      ],
+      "distractor_finding": "AuditEvent is the observed attribution surface and reads request state, but it faithfully formats the state supplied by current_request_id.",
+      "feedback_boundary": "Nested outer/inner restoration and one submit-time request identity are asserted separately.",
+      "final_boundary": "Two nested submissions with distinct identities reuse one worker while the parent scope is restored after each and no request state leaks after shutdown.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_node_job_recovery"
+        ],
+        "distinction": "Attempt fencing rejects a late worker's mutation using a claim token; this case transports and restores language execution context without a job-state mutation."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "immutable request policy snapshot",
+          "async rejection slot eviction"
+        ],
+        "distinction": "The closest family deep-copies mutable policy plus generation for one authorization/audit decision across reload. This case restores ContextVar tokens and propagates execution context into reused threads; it has no policy generation, reload, or shared in-flight cache."
+      },
+      "leak_audit": "PASS: no token reset, copy_context operation, hidden request ids, worker-reuse boundary, test name, or solution comment is public."
+    },
+    {
+      "case_id": "th14_py_decorated_handlers",
+      "verdict": "PASS",
+      "language": "python",
+      "expected_dimension": "runtime",
+      "dimension_fit": "The failure is Python invocation and await execution semantics, which are runtime ownership under the rubric.",
+      "expected_owners": [
+        "trace_hooks.py",
+        "handler_dispatch.py"
+      ],
+      "distractor": "handler_registry.py",
+      "mechanism_fingerprint": {
+        "id": "runtime.python_awaitability.wrapper_completion.dispatch_result",
+        "sha256": "2ffac9d6c2ba4cc58c62bd139d2fc9ae43bf2cde6472fd568718e42c6cbd64d8",
+        "candidate_source_bundle_sha256": "48c997ac58867907b1e940d54a19a4583bad422517771a1b1672e0be2703f943",
+        "owner_source_bundle_sha256": "c499079b9d9d46f28584849a6b47409071d228c3fee25a7c1b42e14b5b3b2421"
+      },
+      "mechanism": "Tracing records finish only after an invocation's awaitable result settles, and dispatch determines awaitability from the invocation result rather than only the callable declaration.",
+      "assertion_family": "Completed return value and exact event timeline for sync functions, wrapped coroutines, async callable objects, and registry composition.",
+      "owner_necessity": [
+        {
+          "path": "trace_hooks.py",
+          "necessary_because": "Dispatcher awaiting alone cannot move the packed wrapper's finished event after the wrapped coroutine's own events."
+        },
+        {
+          "path": "handler_dispatch.py",
+          "necessary_because": "A tracing fix cannot make an unwrapped async callable object pass when dispatch inspects only iscoroutinefunction(handler)."
+        }
+      ],
+      "distractor_finding": "HandlerRegistry participates in the sealed path and could plausibly alter handler identity, but it returns the exact registered object correctly.",
+      "feedback_boundary": "A traced async function timeline and an unwrapped async callable object's completed result are isolated.",
+      "final_boundary": "A registered, traced async callable object composes both runtime boundaries into one completed result and one exact timeline.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_py_task_teardown"
+        ],
+        "distinction": "Task teardown handles BaseException precedence and LIFO cleanup; this case preserves awaitability and completion ordering through wrappers and callable objects."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "BaseException-safe teardown",
+          "async rejection slot eviction",
+          "exact cancellation signal"
+        ],
+        "distinction": "No existing operator classifies invocation-result awaitability or delays wrapper completion instrumentation until the awaited result settles."
+      },
+      "leak_audit": "PASS: no isawaitable recipe, async-wrapper implementation, hidden event sequence, test name, or oracle label appears publicly."
+    },
+    {
+      "case_id": "th14_py_link_pagination",
+      "verdict": "PASS",
+      "language": "python",
+      "expected_dimension": "data",
+      "dimension_fit": "HTTP Link syntax boundaries and resolved URI identity are representation and identity concerns under data.",
+      "expected_owners": [
+        "link_header.py",
+        "page_client.py"
+      ],
+      "distractor": "item_decoder.py",
+      "mechanism_fingerprint": {
+        "id": "data.http_link.quoted_delimiters.relative_resolution",
+        "sha256": "8076b7421cd14597b8d32a07d4144d0094ac4713b19b2c063839606b0a868d1a",
+        "candidate_source_bundle_sha256": "21ca45f018284d4c3b83addbedc86b81ff8105e021bfa942f17155dd42546397",
+        "owner_source_bundle_sha256": "89fb0f2de610eec6791f00a2c9be9431154463c1b5f8b5abe40228a64b71fb56"
+      },
+      "mechanism": "Link field delimiters are recognized only outside angle-bracket targets and quoted parameters, relation tokens remain grouped, and relative targets resolve against the URL of the response that supplied them.",
+      "assertion_family": "Parsed Link object equality and collected item sequence across absolute and relative page references.",
+      "owner_necessity": [
+        {
+          "path": "link_header.py",
+          "necessary_because": "Feedback directly requires a comma-bearing target/title to remain one link entry; client-only resolution cannot recover a relation the parser discarded."
+        },
+        {
+          "path": "page_client.py",
+          "necessary_because": "A grammar-correct parser still returns a relative reference that the packed client sends directly rather than resolving against current_url."
+        }
+      ],
+      "distractor_finding": "ItemDecoder runs for every page and is therefore plausible, but it correctly decodes unchanged item payloads and owns no Link or URL behavior.",
+      "feedback_boundary": "A comma in target/title and one root-relative next reference are tested independently.",
+      "final_boundary": "A parent-relative target, comma and semicolon inside protected contexts, multiple link entries, a multi-token rel parameter, and collection across an archive path compose end to end.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_node_response_compression"
+        ],
+        "distinction": "Compression parses a startup comma list and strips media-type parameters; this case parses HTTP Link field grammar and resolves URI references during pagination."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "canonical repeated query pairs",
+          "Vary header normalization",
+          "source-aware tail checkpoint"
+        ],
+        "distinction": "Those contracts preserve query pairs, normalize header lookup, or resume file offsets; none parses protected Link delimiters or resolves response-relative navigation."
+      },
+      "leak_audit": "PASS: public symptoms mention punctuation and relative references but disclose no parser state machine, URL-join API, hidden metadata string, final path, or test name."
+    },
+    {
+      "case_id": "th14_sql_partner_search",
+      "verdict": "PASS",
+      "language": "sql",
+      "expected_dimension": "data",
+      "dimension_fit": "Literal operator text versus SQL pattern representation is a data matching-semantics defect.",
+      "expected_owners": [
+        "sql/search_inventory.sql",
+        "sql/search_delivery_lanes.sql"
+      ],
+      "distractor": "sql/record_search_audit.sql",
+      "mechanism_fingerprint": {
+        "id": "data.sql_like.literal_metachar_escape",
+        "sha256": "2680c6e1031b92f951649e7cb8ee9b969264d3fd1bcc418430e946f6500df8a7",
+        "candidate_source_bundle_sha256": "2d41d873b369863b8d7d9612839039e9dd04d57b3f789502cb5df14bb742c040",
+        "owner_source_bundle_sha256": "79cb165bb43ef2482cb84a00909eb68d6664e5a29b20b6ca3822d0259ca53bcb"
+      },
+      "mechanism": "Operator input is treated as a literal substring by escaping LIKE metacharacters consistently in both query owners while preserving SQLite's normal case-insensitive matching.",
+      "assertion_family": "Exact ordered search row sets plus verbatim audit term and rowcount.",
+      "owner_necessity": [
+        {
+          "path": "sql/search_inventory.sql",
+          "necessary_because": "The inventory feedback and final execute this SQL directly; no shared wrapper or lane-query change can alter its LIKE semantics."
+        },
+        {
+          "path": "sql/search_delivery_lanes.sql",
+          "necessary_because": "The delivery feedback and final independently execute the second packed query with the same representation defect."
+        }
+      ],
+      "distractor_finding": "SearchAudit handles the same term and appears in the final incident flow, but exact verbatim storage is already the required behavior and escaping it would be wrong.",
+      "feedback_boundary": "A literal percent in inventory and a literal underscore in a lane label are isolated.",
+      "final_boundary": "Both metacharacters plus the chosen escape punctuation and mixed casing are composed in each search, with verbatim audit preservation checked alongside them.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_sql_delimited_profile"
+        ],
+        "distinction": "Delimited profile renders and quotes output fields using a configured separator; this case escapes pattern-language metacharacters so input remains literal."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "configured delimiter quoting",
+          "case-insensitive header lookup"
+        ],
+        "distinction": "Neither family provides SQL LIKE literalization in independent substring queries."
+      },
+      "leak_audit": "PASS: percent and underscore are incident inputs, but no ESCAPE expression, replacement order, hidden composed term, test name, or solution comment is public."
+    },
+    {
+      "case_id": "th14_sql_registry_refresh",
+      "verdict": "PASS",
+      "language": "sql",
+      "expected_dimension": "state",
+      "dimension_fit": "Parent identity, immutable establishment metadata, and child relationship survival are lifecycle and ownership state.",
+      "expected_owners": [
+        "sql/refresh_supplier.sql",
+        "sql/refresh_depot.sql"
+      ],
+      "distractor": "sql/expire_registry_bindings.sql",
+      "mechanism_fingerprint": {
+        "id": "state.sqlite_upsert.preserve_identity_children_immutable_fields",
+        "sha256": "20d823e8017a9fb5e4e9d209bfe1a8cbd6f0f645fbd9a5409669e4dd1ff9a74d",
+        "candidate_source_bundle_sha256": "a193803ed2736be8acfc1bb24108a2771d0409d7057d1ce05c5b6749718a1bae",
+        "owner_source_bundle_sha256": "84cb0bbf977ebef0e928b2525a01f693525c0a080876237622350db1bd05cc80"
+      },
+      "mechanism": "Conflict updates mutate only display_name and synced_at on the existing parent identity; they do not use SQLite REPLACE deletion/reinsertion, so established_at and child bindings survive.",
+      "assertion_family": "Affected-row counts and persisted parent metadata plus child-binding row sets across registration, refresh, repetition, and cleanup.",
+      "owner_necessity": [
+        {
+          "path": "sql/refresh_supplier.sql",
+          "necessary_because": "Supplier feedback/final execute this statement directly and prove its independent replacement cascade and immutable-field loss."
+        },
+        {
+          "path": "sql/refresh_depot.sql",
+          "necessary_because": "Depot feedback/final execute the symmetric second statement directly; supplier-only work leaves depot relationships vulnerable."
+        }
+      ],
+      "distractor_finding": "ExpiryCleanup legitimately deletes only due child bindings and composes with depot refresh in the final; changing it would not preserve parents and would break intended cleanup.",
+      "feedback_boundary": "One existing supplier and one existing depot each retain one binding and original establishment time after a refresh.",
+      "final_boundary": "Repeated supplier refreshes retain multiple links and immutable metadata, while depot refresh composes with explicit expiry so only the due route is removed.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_sql_export_job_state"
+        ],
+        "distinction": "Export job state guards allowed lifecycle transitions and worker ownership; registry refresh preserves parent identity and children during mutable metadata upsert."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "replacement configuration reload",
+          "monotonic materialized head",
+          "guarded SQL state transition"
+        ],
+        "distinction": "Configuration replacement intentionally discards omitted overrides, materialized-head repair chooses a newer tuple, and state-transition repair restricts predecessor rows. This case avoids SQLite delete/reinsert while preserving immutable parent state and foreign-key children."
+      },
+      "leak_audit": "PASS: no ON CONFLICT update recipe, hidden repeated values, cleanup composition, test name, or oracle label is public."
+    },
+    {
+      "case_id": "th14_sql_suppression_batches",
+      "verdict": "PASS",
+      "language": "sql",
+      "expected_dimension": "data",
+      "dimension_fit": "Nullable target representation and SQL three-valued anti-join semantics are data concerns.",
+      "expected_owners": [
+        "sql/select_email_batch.sql",
+        "sql/select_webhook_batch.sql"
+      ],
+      "distractor": "sql/list_suppression_feed.sql",
+      "mechanism_fingerprint": {
+        "id": "data.sql_antijoin.null_safe_scoped_suppression",
+        "sha256": "db48de9c60f13cbc2cc4e5c86c2ca4b7344c33a9b9681e5c7cb5fb582979d9ea",
+        "candidate_source_bundle_sha256": "e639755643f926b0a939c68a27a9879a903143b53beb2aea123b982c507d26c0",
+        "owner_source_bundle_sha256": "ab649a58fbf18d65fe1d7330249b3bd59974703e0fd910b19b918f06e057df58"
+      },
+      "mechanism": "Each outbound batch uses a scope-correlated, NULL-safe anti-semijoin so advisory rows without a target do not poison eligibility while targeted suppressions still exclude exact ids.",
+      "assertion_family": "Exact ordered eligible row sets and review-feed rows across targeted, duplicate, advisory, and cross-scope records.",
+      "owner_necessity": [
+        {
+          "path": "sql/select_email_batch.sql",
+          "necessary_because": "Email feedback/final execute the query directly; webhook or review changes cannot prevent its NOT IN subquery from returning UNKNOWN for every candidate."
+        },
+        {
+          "path": "sql/select_webhook_batch.sql",
+          "necessary_because": "Webhook feedback/final independently exercise the same defect in the second query owner."
+        }
+      ],
+      "distractor_finding": "SuppressionFeed correctly displays both advisory and targeted rows and is deliberately exercised by the final; filtering NULL there would hide valid review data without fixing either batch.",
+      "feedback_boundary": "Each channel combines one targeted suppression with one NULL advisory in one scope.",
+      "final_boundary": "Duplicate targeted rows, target reuse in another scope, NULL advisories, deterministic ordering, and review-feed preservation are composed for both channel families.",
+      "final_materially_stronger": true,
+      "thirteenth_audit": {
+        "compared_case_count": 12,
+        "material_matches": [],
+        "closest_cases": [
+          "th13_node_facility_rollup"
+        ],
+        "distinction": "Facility rollup preserves missing null versus measured zero through normalization and aggregation; this case prevents SQL NOT IN NULL poisoning with a scoped anti-join."
+      },
+      "deterministic_audit": {
+        "invariant_families_compared": 44,
+        "repair_operators_compared": 36,
+        "prompt_matches": [],
+        "nearest_families": [
+          "tri-state override",
+          "sibling one-to-many preaggregation",
+          "partial uniqueness"
+        ],
+        "distinction": "NULL-as-inherit, duplicate-sum prevention, and active-row uniqueness do not implement a NULL-safe scoped exclusion anti-semijoin."
+      },
+      "leak_audit": "PASS: the public incident identifies nullable advisory rows but discloses no NOT EXISTS repair, hidden duplicates/cross-scope values, test name, or solution comment."
+    }
+  ],
+  "authored_files_unchanged": true
+}
