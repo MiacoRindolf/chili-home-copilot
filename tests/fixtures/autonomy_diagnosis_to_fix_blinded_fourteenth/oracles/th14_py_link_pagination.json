@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_py_link_pagination",
+  "expected_dimension": "data",
+  "expected_files": [
+    "link_header.py",
+    "page_client.py"
+  ],
+  "feedback_files": {
+    "tests/test_pagination_feedback.py": "from link_header import Link, parse_link_header\nfrom page_client import collect_items\n\n\ndef test_relation_survives_descriptive_metadata():\n    value = (\n        '<catalog?page=2&fields=id,name>; '\n        'title=\"recent, reviewed\"; rel=\"next\"'\n    )\n\n    assert parse_link_header(value) == (\n        Link(\n            \"catalog?page=2&fields=id,name\",\n            (\"next\",),\n        ),\n    )\n\n\ndef test_collection_follows_the_service_location():\n    pages = {\n        \"https://api.example.test/v1/catalog?page=1\": (\n            '{\"items\": [{\"id\": 1}]}',\n            {\"Link\": '</v1/catalog?page=2>; rel=\"next\"'},\n        ),\n        \"https://api.example.test/v1/catalog?page=2\": (\n            '{\"items\": [{\"id\": 2}]}',\n            {},\n        ),\n    }\n\n    assert collect_items(\n        \"https://api.example.test/v1/catalog?page=1\",\n        pages.__getitem__,\n    ) == ({\"id\": 1}, {\"id\": 2})\n"
+  }
+}

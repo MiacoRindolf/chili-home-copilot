@@ -1,0 +1,6 @@
+{
+  "case_id": "th14_py_decorated_handlers",
+  "final_files": {
+    "tests/test_delivery_final.py": "import asyncio\n\nfrom handler_dispatch import dispatch\nfrom handler_registry import HandlerRegistry\nfrom trace_hooks import traced\n\n\ndef test_registered_traced_object_has_one_complete_timeline():\n    events = []\n\n    class Handler:\n        async def __call__(self, message):\n            events.append((\"entered\", message))\n            await asyncio.sleep(0)\n            events.append((\"handled\", message))\n            return message.upper()\n\n    registry = HandlerRegistry()\n    registry.register(\"billing\", traced(Handler(), events))\n\n    result = asyncio.run(\n        dispatch(registry.resolve(\"billing\"), \"renewal\")\n    )\n\n    assert result == \"RENEWAL\"\n    assert events == [\n        (\"started\", \"renewal\"),\n        (\"entered\", \"renewal\"),\n        (\"handled\", \"renewal\"),\n        (\"finished\", \"renewal\"),\n    ]\n"
+  }
+}

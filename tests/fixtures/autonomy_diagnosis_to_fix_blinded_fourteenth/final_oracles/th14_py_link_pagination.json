@@ -1,0 +1,6 @@
+{
+  "case_id": "th14_py_link_pagination",
+  "final_files": {
+    "tests/test_pagination_final.py": "from page_client import collect_items\n\n\ndef test_collection_crosses_archive_boundary_with_rich_metadata():\n    start = \"https://api.example.test/v1/archive/page-one\"\n    second = (\n        \"https://api.example.test/v1/catalog\"\n        \"?page=2&fields=id,name\"\n    )\n    pages = {\n        start: (\n            '{\"items\": [{\"id\": 10}]}',\n            {\n                \"Link\": (\n                    '<../catalog?page=2&fields=id,name>; '\n                    'title=\"priority; recent, batch\"; '\n                    'type=\"application/json\"; rel=\"alternate next\", '\n                    '<page-zero>; rel=\"prev\"'\n                )\n            },\n        ),\n        second: (\n            '{\"items\": [{\"id\": 20}]}',\n            {},\n        ),\n    }\n\n    assert collect_items(start, pages.__getitem__) == (\n        {\"id\": 10},\n        {\"id\": 20},\n    )\n"
+  }
+}

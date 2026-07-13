@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_py_decorated_handlers",
+  "expected_dimension": "runtime",
+  "expected_files": [
+    "trace_hooks.py",
+    "handler_dispatch.py"
+  ],
+  "feedback_files": {
+    "tests/test_delivery_feedback.py": "import asyncio\n\nfrom handler_dispatch import dispatch\nfrom trace_hooks import traced\n\n\ndef test_delivery_timeline_closes_after_handler_work():\n    events = []\n\n    async def handle(message):\n        events.append((\"entered\", message))\n        await asyncio.sleep(0)\n        events.append((\"handled\", message))\n        return f\"done:{message}\"\n\n    wrapped = traced(handle, events)\n\n    assert asyncio.run(dispatch(wrapped, \"invoice\")) == \"done:invoice\"\n    assert events == [\n        (\"started\", \"invoice\"),\n        (\"entered\", \"invoice\"),\n        (\"handled\", \"invoice\"),\n        (\"finished\", \"invoice\"),\n    ]\n\n\ndef test_object_handler_returns_completed_result():\n    class Handler:\n        async def __call__(self, message):\n            await asyncio.sleep(0)\n            return {\"message\": message, \"status\": \"done\"}\n\n    assert asyncio.run(dispatch(Handler(), \"shipment\")) == {\n        \"message\": \"shipment\",\n        \"status\": \"done\",\n    }\n"
+  }
+}
