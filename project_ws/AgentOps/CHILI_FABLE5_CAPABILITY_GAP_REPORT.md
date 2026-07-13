@@ -5,9 +5,9 @@ Date: 2026-07-12
 ## Current Verdict
 
 CHILI is qualified for local-only development shadow use **only on recognized and regression-tested contracts**.
-It is not yet a credible Fable 5 replacement for unseen complex diagnosis-to-fix work. A fresh 12-case transfer
-suite scored 32.92/100 with 0/12 sealed-final solves, despite zero premium calls and complete public-regression
-preservation.
+It is not yet a credible Fable 5 replacement for unseen complex diagnosis-to-fix work. The newest independently
+authored 12-case transfer suite scored **49.17/100 with 2/12 sealed-final solves**, despite zero premium calls and
+complete public-regression preservation.
 
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
@@ -41,6 +41,14 @@ Node and SQL transfer cases then passed public, repair-feedback, and fresh isola
 validation passed 183 tests plus 14 focused production-repair tests. This is development replay evidence only.
 The next readiness evidence must come from a newly authored untouched suite.
 
+That new twelfth suite has now completed. It contained three independently authored cases each in Python, Node
+ESM, Dart, and SQLite SQL. Two independent rejection rounds removed disclosed-family and cross-language semantic
+duplicates before a V3 validator passed all 12 cases. The untouched run scored **49.17/100**, solved **2/12**
+sealed finals, selected **7/12** correct causal families and **6/12** exact owner sets, preserved **12/12** public
+suites, and used zero premium calls. Operationally, it completed in **59.9 minutes** with **140/141** successful
+local calls, versus 243.3 minutes and 204/226 successful calls on the eleventh suite. This is meaningful progress,
+but 10/12 unseen final failures still decisively reject replacement readiness.
+
 ## Requirement Audit
 
 | Requirement | Authoritative evidence | Status |
@@ -58,10 +66,10 @@ The next readiness evidence must come from a newly authored untouched suite.
 | Runtime database evidence | Schema metadata and aggregate-only PostgreSQL profiles through an explicit read-only DSN, read-only transactions, short timeouts, bounded lookback, safe identifiers, and no raw SQL or raw rows | Proven in `_test` integration and development-regression tests; live production credential proof not performed |
 | No arbitrary diagnostic shell | Probe schema has no command kind; paths, selectors, time, count, and output are bounded | Proven by source and tests |
 | Workspace isolation for dynamic probes | Compile uses temporary copies; pytest uses a validated `git archive` snapshot and credential-stripped environment | Proven for repository isolation; hardened OS sandboxing remains open |
-| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+repair-feedback validation, assertion-contract extraction, rollback, bounded repair, and isolated final adjudication | Eleventh sealed transfer: 32.92/100, 0/12 final, 4/12 diagnosis families, and 1/12 exact file sets. Failed replacement gate |
+| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+repair-feedback validation, assertion-contract extraction, rollback, bounded repair, and isolated final adjudication | Twelfth sealed transfer: 49.17/100, 2/12 final, 7/12 diagnosis families, and 6/12 exact file sets. Improved, but failed replacement gate |
 | Cross-language syntax validation | Python AST, parser-only Node TypeScript/JavaScript validation, and Dart analysis with isolated analyzer state; exact changed-file coverage required | Proven by safety and orchestration tests |
-| Recognized contract repair | Prompt-derived invariants, repository-shape guards, and CHILI-owned mechanical repair operators | Eight disclosed mechanisms pass full development replay. Post-eleventh development added name-independent ordered identity, private async-slot eviction, and cross-file monotonic-head operators; the disclosed Node and SQL transfer cases now pass isolated finals. No fresh transfer score yet |
-| Production validation repair | Project Autonomy reads full targeted test contracts, pins the original test selectors, maps tests to bounded source-owner candidates, requires contract-owner coverage, snapshots every repair scope, retains only measurable same-scope validation progress, and atomically rolls back incomplete/regressive groups | Post-eleventh tests prove four-owner bounded scope, no partial required groups, compact escalation, incomplete-inventory handling, and transport-failure short-circuiting. Untouched evidence remains 0/12 final and therefore unready |
+| Recognized contract repair | Prompt-derived invariants, repository-shape guards, and CHILI-owned mechanical repair operators | Eight disclosed mechanisms and two disclosed eleventh mechanisms pass development replay. Twelfth transfer recognized 0/12 deterministic repairs, so broad abstraction remains open |
+| Production validation repair | Project Autonomy reads full targeted test contracts, pins original selectors, maps bounded source-owner candidates, requires contract-owner coverage, snapshots every repair scope, retains measurable same-scope progress, and atomically rolls back incomplete/regressive groups | Twelfth transfer retained 7 patches, passed feedback in 5/12, exact owners in 6/12, and finals in 2/12. Better boundedness and ownership; synthesis remains unready |
 | Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
 | Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Eight eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100; all below the 90 shadow threshold. The eighth oracle was dimension-lenient; strict primary-family scoring is 70.62/100 |
 | Durable local benchmark execution | Atomic per-case checkpoints bound to source, runner, public inputs, model, stages, and inference parameters; incompatible resumes fail closed | Proven by simulated interruption and compatible resume; real host-loss recovery remains untested |
@@ -509,14 +517,14 @@ authored causal language.
 
 ## Remaining Gaps
 
-1. The repair evidence now includes 13 small feedback-guided development repositories, two independently authored eight-case sealed suites, two full disclosed tenth-suite replays, and one twelve-case eleventh transfer suite. The eleventh scored 32.92/100 with 0/12 final passes. Disclosed repair now solves its Node ordered-cache/slot case and SQL monotonic-head case mechanically, but this does not alter the untouched score. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
+1. The repair evidence now includes 13 small feedback-guided development repositories, two independently authored eight-case sealed suites, two full disclosed tenth-suite replays, and two twelve-case transfer suites. The eleventh scored 32.92/100 with 0/12 finals; the twelfth improved to 49.17/100 with 2/12 finals. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through eighth untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The untouched tenth suite completed 141/141 local calls but chose the wrong diagnosis family in 5/8 cases and failed 6/8 final contracts. Its disclosed contract-guided replay improved diagnosis to 6/8 but still failed the same 6/8 final contracts. Strong structural reliability, causal labels, exact ownership, and frontier-level repair synthesis remain distinct capabilities.
+5. Local 7B output remains stochastic. The fourth through eighth untouched diagnostic slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The twelfth suite accepted 36/36 JSON stages and completed 126/126 7B calls, yet failed 10/12 finals. Strong structural reliability, causal labels, exact ownership, and frontier-level repair synthesis remain distinct capabilities.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. The first disclosed contract-guided tenth replay averaged 791.8 seconds/case; the all-mechanical replay reached 75.7 seconds/case. Diagnostic council calls now dominate recognized cases. Adaptive diagnostic routing and a real host-loss recovery proof remain open, and unknown mechanisms can still take the full slow path.
-8. The 14B local model is too slow and unreliable for default routing on current hardware. Compact escalation now removes review/adapter/compiler fan-out, uses one per-case wall budget, and stops host fallback after a reachable timeout. It still performs per-file synthesis for unknown multi-owner mechanisms; a single atomic edit-bundle call and fresh latency proof remain open.
+8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls, but still performs per-file synthesis for unknown multi-owner mechanisms. A single atomic edit-bundle call and materially higher sealed-final success remain open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
 ## Promotion Gate
