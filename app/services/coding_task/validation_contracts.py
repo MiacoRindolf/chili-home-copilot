@@ -155,8 +155,17 @@ def contract_regressions(
     before: Mapping[str, Any],
     after: Mapping[str, Any],
 ) -> list[str]:
-    """Previously passing contracts must remain explicitly passing."""
-    return sorted(set(before.get("passed_ids") or []) - set(after.get("passed_ids") or []))
+    """Return previously passing contracts known to no longer pass."""
+    regressions = set(before.get("passed_ids") or []) - set(
+        after.get("passed_ids") or []
+    )
+    if after.get("complete"):
+        return sorted(regressions)
+
+    observed = set(after.get("observed_ids") or [])
+    observed.update(after.get("passed_ids") or [])
+    observed.update(after.get("failed_ids") or [])
+    return sorted(regressions & observed)
 
 
 def contract_progressed(

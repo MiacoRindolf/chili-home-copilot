@@ -1433,9 +1433,36 @@ def derive_contract_invariants(statement: str) -> list[str]:
     """Extract reusable mechanism contracts without asking the local model."""
     lowered = str(statement or "").lower()
     invariants: list[str] = []
+    rejected_retry_is_coalesced = (
+        any(token in lowered for token in ("rejected", "rejection", "failure", "failing"))
+        and any(token in lowered for token in ("retry", "restarts", "restart"))
+        and any(
+            token in lowered
+            for token in (
+                "coalesc",
+                "concurrent miss",
+                "loader once",
+                "one producer",
+                "shared miss",
+                "same request",
+                "process-local",
+            )
+        )
+    )
+    async_rejection_slot = (
+        (
+            any(token in lowered for token in ("async", "promise", "rejected", "rejection", "failure"))
+            and any(token in lowered for token in ("slot", "keyed", "map", "cache"))
+            and any(token in lowered for token in ("evict", "retain", "reuse", "retry", "stale"))
+        )
+        or rejected_retry_is_coalesced
+    )
     if (
-        any(token in lowered for token in ("single-flight", "singleflight", "in-flight", "poison"))
-        and any(token in lowered for token in ("retry", "later", "same key", "start fresh"))
+        (
+            any(token in lowered for token in ("single-flight", "singleflight", "in-flight", "poison"))
+            and any(token in lowered for token in ("retry", "later", "same key", "start fresh"))
+        )
+        or async_rejection_slot
     ):
         invariants.append(
             "Failed per-key in-flight work must be evicted by the state owner; the original error remains "
@@ -1522,6 +1549,25 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "Canonical query rendering preserves every repeated parameter and blank value, then sorts the complete "
             "(key, value) pair sequence deterministically; converting pairs to a map loses wire information."
         )
+    ordered_preference_identity = (
+        any(
+            token in lowered
+            for token in (
+                "preference order",
+                "ordered preference",
+                "caller order",
+                "priority order",
+                "order is contractual",
+                "order remains contractual",
+            )
+        )
+        and any(token in lowered for token in ("cache", "identity", "same tenant", "same account", "same user"))
+    )
+    if ordered_preference_identity:
+        invariants.append(
+            "Stable ordered-sequence identity preserves normalized first-occurrence order through serialization; "
+            "normalization and deduplication must not sort a caller-priority sequence."
+        )
     if "rotation" in lowered and any(token in lowered for token in ("key", "secret")):
         invariants.append(
             "Verification considers the current key plus only recently retired keys inside the configured grace "
@@ -1571,10 +1617,42 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "Retry attempt number is not part of stable request/event identity; replay returns the original result "
             "without repeating stock/state mutation, and publishes creation only for the first successful creation."
         )
-    if "out of order" in lowered and any(token in lowered for token in ("correction", "replay")):
+    monotonic_materialized_head = (
+        any(
+            token in lowered
+            for token in (
+                "materialized head",
+                "materialized row",
+                "current head",
+                "stored head",
+                "head metadata",
+                "current version",
+                "current-document",
+            )
+        )
+        and any(
+            token in lowered
+            for token in (
+                "monotonic",
+                "newer",
+                "older",
+                "stale",
+                "out of order",
+                "late-arriving",
+                "authoritative ordering",
+                "logical clock",
+                "sequence",
+                "version",
+            )
+        )
+    )
+    if (
+        "out of order" in lowered
+        and any(token in lowered for token in ("correction", "replay"))
+    ) or monotonic_materialized_head:
         invariants.append(
-            "One winner predicate guards the complete out-of-order correction tuple: value, observation time, "
-            "receipt/version time, and metadata update atomically; a stale replay changes none of them."
+            "One winner predicate guards the complete out-of-order or materialized-head tuple: value, ordering "
+            "position, and metadata update atomically; a stale replay changes none of them."
         )
     if "event-time" in lowered or (
         "observation" in lowered and "hourly bucket" in lowered
@@ -1630,6 +1708,790 @@ def _singleflight_owner_evicts_key(content: str) -> bool:
     return bool(re.search(r"\b[a-z_$]\w*\.delete\s*\(", content))
 
 
+def _closing_brace_index(content: str, opening: int) -> int | None:
+    depth = 0
+    for index in range(opening, len(content)):
+        if content[index] == "{":
+            depth += 1
+        elif content[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _recognize_async_rejection_slot(content: str) -> dict[str, Any] | None:
+    """Bind one unguarded keyed promise slot without relying on fixture names."""
+    if len(content) > 100_000:
+        return None
+    candidates: list[dict[str, Any]] = []
+    signatures = re.finditer(
+        r"(?P<header>(?:export\s+)?(?P<async>async\s+)?function\s+"
+        r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\((?P<parameters>.*?)\)"
+        r"\s*(?::\s*(?P<return_type>[^\{]+))?\s*)\{",
+        content,
+        re.DOTALL,
+    )
+    for signature in signatures:
+        opening = signature.end() - 1
+        closing = _closing_brace_index(content, opening)
+        if closing is None:
+            continue
+        body_start = opening + 1
+        body = content[body_start:closing]
+        slot_writes = list(
+            re.finditer(
+                r"(?m)^(?P<indent>[ \t]*)(?P<map>[A-Za-z_$][A-Za-z0-9_$]*)"
+                r"\.set\(\s*(?P<key>[A-Za-z_$][A-Za-z0-9_$]*)\s*,\s*"
+                r"(?P<operation>[A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*;",
+                body,
+            )
+        )
+        if len(slot_writes) != 1:
+            continue
+        slot_write = slot_writes[0]
+        map_name = slot_write.group("map")
+        key_name = slot_write.group("key")
+        operation_name = slot_write.group("operation")
+        map_declaration = re.search(
+            rf"(?:\b(?:const|let|var)\s+|^[ \t]*(?:private\s+|protected\s+|public\s+)?"
+            rf"(?:readonly\s+)?){re.escape(map_name)}\s*(?::[^=\n]+)?=\s*new\s+Map"
+            rf"(?P<map_type><[^;\n]+>)?\s*\(",
+            content,
+            re.MULTILINE,
+        )
+        if map_declaration is None:
+            continue
+        return_type = str(signature.group("return_type") or "")
+        map_type = str(map_declaration.group("map_type") or "")
+        if not signature.group("async") and "promise" not in f"{return_type} {map_type}".lower():
+            continue
+        operation_assignments = list(
+            re.finditer(
+                rf"(?m)^(?P<indent>[ \t]*)(?:const|let)\s+{re.escape(operation_name)}"
+                rf"(?:\s*:[^=;\n]+)?\s*=\s*[^;\n]+;",
+                body,
+            )
+        )
+        if len(operation_assignments) != 1:
+            continue
+        operation_assignment = operation_assignments[0]
+        if operation_assignment.end() >= slot_write.start():
+            continue
+        returns = list(
+            re.finditer(
+                rf"\breturn\s+(?:await\s+)?{re.escape(operation_name)}\s*;",
+                body[slot_write.end() :],
+            )
+        )
+        if len(returns) != 1:
+            continue
+        if re.search(
+            rf"\b{re.escape(operation_name)}\s*\.(?:catch|finally|then)\s*\(",
+            body,
+        ) or re.search(
+            rf"\b{re.escape(map_name)}\.delete\s*\(\s*{re.escape(key_name)}\s*\)",
+            body,
+        ):
+            continue
+        candidates.append(
+            {
+                "function_name": signature.group("name"),
+                "map_name": map_name,
+                "key_name": key_name,
+                "operation_name": operation_name,
+                "operation_start": body_start + operation_assignment.start(),
+                "operation_indent": operation_assignment.group("indent"),
+                "slot_end": body_start + slot_write.end(),
+                "slot_indent": slot_write.group("indent"),
+                "has_lookup": bool(
+                    re.search(
+                        rf"\b{re.escape(map_name)}\.get\s*\(\s*{re.escape(key_name)}\s*\)",
+                        body[: operation_assignment.start()],
+                    )
+                ),
+                "body": body,
+            }
+        )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _recognize_class_async_rejection_slot(content: str) -> dict[str, Any] | None:
+    """Bind one class-owned promise slot with an explicitly empty rejection arm."""
+    if len(content) > 100_000:
+        return None
+    candidates: list[dict[str, Any]] = []
+    methods = (
+        match
+        for match in re.finditer(
+            r"(?m)^(?P<indent>[ \t]+)(?:async\s+)?(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
+            r"\s*\([^\n{}]*\)\s*(?::\s*[^\n\{]+)?\s*\{",
+            content,
+        )
+        if match.group("name") not in {"if", "for", "while", "switch", "catch"}
+    )
+    for method in methods:
+        opening = method.end() - 1
+        closing = _closing_brace_index(content, opening)
+        if closing is None:
+            continue
+        body_start = opening + 1
+        body = content[body_start:closing]
+        for slot_write in re.finditer(
+            r"(?m)^(?P<indent>[ \t]*)(?P<map>this\.#?[A-Za-z_$][A-Za-z0-9_$]*)"
+            r"\.set\(\s*(?P<key>[A-Za-z_$][A-Za-z0-9_$]*)\s*,\s*"
+            r"(?P<operation>[A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*;",
+            body,
+        ):
+            map_name = slot_write.group("map")
+            field_name = map_name.removeprefix("this.")
+            if not re.search(
+                rf"(?m)^[ \t]*(?:(?:private|protected|public)\s+)?(?:readonly\s+)?"
+                rf"{re.escape(field_name)}\s*(?::[^=\n]+)?=\s*new\s+Map(?:<[^;\n]+>)?\s*\(",
+                content,
+            ):
+                continue
+            key_name = slot_write.group("key")
+            operation_name = slot_write.group("operation")
+            assignments = list(
+                re.finditer(
+                    rf"(?m)^(?P<indent>[ \t]*)(?:const|let)\s+{re.escape(operation_name)}"
+                    rf"(?:\s*:[^=;\n]+)?\s*=\s*(?P<rhs>[^;\n]+);",
+                    body,
+                )
+            )
+            if len(assignments) != 1 or assignments[0].end() >= slot_write.start():
+                continue
+            assignment = assignments[0]
+            if not re.search(
+                rf"\breturn\s+(?:await\s+)?{re.escape(operation_name)}\s*;",
+                body[slot_write.end() :],
+            ):
+                continue
+            if not re.search(
+                rf"{re.escape(map_name)}\.get\s*\(\s*{re.escape(key_name)}\s*\)",
+                body[: assignment.start()],
+            ):
+                continue
+            rejection_arms = list(
+                re.finditer(
+                    rf"\b{re.escape(operation_name)}\.then\s*\("
+                    rf"(?P<success>.{{0,4000}}?),\s*"
+                    rf"(?P<handler>\(\s*[^)]*\)\s*=>\s*\{{\s*\}})\s*\)\s*;",
+                    body,
+                    re.DOTALL,
+                )
+            )
+            if len(rejection_arms) != 1:
+                continue
+            rejection = rejection_arms[0]
+            handler_start = body_start + rejection.start("handler")
+            line_start = content.rfind("\n", 0, handler_start) + 1
+            handler_indent = content[line_start:handler_start]
+            if handler_indent.strip():
+                continue
+            candidates.append(
+                {
+                    "function_name": method.group("name"),
+                    "map_name": map_name,
+                    "key_name": key_name,
+                    "operation_name": operation_name,
+                    "mode": "replace_noop_rejection",
+                    "handler_start": handler_start,
+                    "handler_end": body_start + rejection.end("handler"),
+                    "handler_indent": handler_indent,
+                }
+            )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _recognize_async_rejection_contract(content: str) -> dict[str, Any] | None:
+    candidates = [
+        metadata
+        for metadata in (
+            _recognize_async_rejection_slot(content),
+            _recognize_class_async_rejection_slot(content),
+        )
+        if metadata is not None
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _repair_async_rejection_slot(content: str, recognition: Mapping[str, Any]) -> str:
+    operation_name = str(recognition["operation_name"])
+    map_name = str(recognition["map_name"])
+    key_name = str(recognition["key_name"])
+    if recognition.get("mode") == "replace_noop_rejection":
+        indent = str(recognition["handler_indent"])
+        handler = (
+            "() => {\n"
+            f"{indent}  if ({map_name}.get({key_name}) === {operation_name}) {{\n"
+            f"{indent}    {map_name}.delete({key_name});\n"
+            f"{indent}  }}\n"
+            f"{indent}}}"
+        )
+        start = int(recognition["handler_start"])
+        end = int(recognition["handler_end"])
+        return content[:start] + handler + content[end:]
+    insertions: list[tuple[int, str]] = []
+    if not bool(recognition["has_lookup"]):
+        body = str(recognition["body"])
+        existing_name = "existing"
+        if re.search(r"\bexisting\b", body):
+            existing_name = f"existing{operation_name[:1].upper()}{operation_name[1:]}"
+        if re.search(rf"\b{re.escape(existing_name)}\b", body):
+            return content
+        indent = str(recognition["operation_indent"])
+        insertions.append(
+            (
+                int(recognition["operation_start"]),
+                f"{indent}const {existing_name} = {map_name}.get({key_name});\n"
+                f"{indent}if ({existing_name}) return {existing_name};\n",
+            )
+        )
+    indent = str(recognition["slot_indent"])
+    insertions.append(
+        (
+            int(recognition["slot_end"]),
+            "\n"
+            f"{indent}void {operation_name}.catch(() => {{\n"
+            f"{indent}  if ({map_name}.get({key_name}) === {operation_name}) "
+            f"{map_name}.delete({key_name});\n"
+            f"{indent}}});",
+        )
+    )
+    updated = content
+    for offset, insertion in sorted(insertions, reverse=True):
+        updated = updated[:offset] + insertion + updated[offset:]
+    return updated
+
+
+def _recognize_ordered_sequence_identity(content: str) -> dict[str, Any] | None:
+    """Bind one normalized, insertion-ordered Set that is sorted before serialization."""
+    if len(content) > 100_000:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for assignment in re.finditer(
+        r"(?m)^[ \t]*(?:const|let)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*"
+        r"(?P<sequence>\[\s*\.\.\.\s*new\s+Set\([^;\n]+\)\s*\]|"
+        r"Array\.from\(\s*new\s+Set\([^;\n]+\)\s*\))"
+        r"(?P<sort>\.sort\(\s*\))\s*;",
+        content,
+    ):
+        sequence = assignment.group("sequence")
+        if ".map(" not in sequence or not any(
+            token in sequence
+            for token in ("toLowerCase", "toUpperCase", ".normalize(", ".trim(")
+        ):
+            continue
+        name = assignment.group("name")
+        tail = content[assignment.end() : assignment.end() + 4_000]
+        if not re.search(
+            rf"\bJSON\.stringify\s*\([^;]*\b{re.escape(name)}\b[^;]*\)",
+            tail,
+            re.DOTALL,
+        ):
+            continue
+        if re.search(rf"\b{re.escape(name)}\s*=", tail):
+            continue
+        candidates.append(
+            {
+                "sequence_name": name,
+                "sort_start": assignment.start("sort"),
+                "sort_end": assignment.end("sort"),
+            }
+        )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _repair_ordered_sequence_identity(content: str, recognition: Mapping[str, Any]) -> str:
+    start = int(recognition["sort_start"])
+    end = int(recognition["sort_end"])
+    return content[:start] + content[end:]
+
+
+def _recognize_monotonic_sql_head(
+    content: str,
+    *,
+    include_guarded: bool = False,
+) -> dict[str, Any] | None:
+    """Bind one mixed SQL head update to its structurally proven ordering column."""
+    if len(content) > 100_000:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for update in re.finditer(
+        r"\bON\s+CONFLICT\b(?:\s*\([^;]*?\)|\s+ON\s+CONSTRAINT\s+[A-Za-z_]\w*)?"
+        r"\s+DO\s+UPDATE\s+SET\s+",
+        content,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        statement_end = content.find(";", update.end())
+        if statement_end < 0:
+            continue
+        update_tail = content[update.end() : statement_end]
+        where_match = re.search(r"\bWHERE\b", update_tail, re.IGNORECASE)
+        assignments = update_tail[: where_match.start()] if where_match else update_tail
+        where_clause = update_tail[where_match.end() :] if where_match else ""
+        statement_start = content.rfind(";", 0, update.start()) + 1
+        statement_prefix = content[statement_start : update.start()]
+        inserts = list(
+            re.finditer(
+                r"\bINSERT\s+INTO\s+(?P<table>(?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)"
+                r"(?:\s+AS\s+(?P<alias>[A-Za-z_]\w*))?",
+                statement_prefix,
+                re.IGNORECASE,
+            )
+        )
+        if len(inserts) != 1:
+            continue
+        table_name = inserts[0].group("table").split(".")[-1]
+        qualifiers = {table_name.lower()}
+        if inserts[0].group("alias"):
+            qualifiers.add(inserts[0].group("alias").lower())
+        maxima: set[tuple[str, str]] = set()
+        for maximum in re.finditer(
+            r"\b(?:MAX|GREATEST)\s*\(\s*(?P<left_owner>[A-Za-z_]\w*)\."
+            r"(?P<left_column>[A-Za-z_]\w*)\s*,\s*(?P<right_owner>[A-Za-z_]\w*)\."
+            r"(?P<right_column>[A-Za-z_]\w*)\s*\)",
+            assignments,
+            re.IGNORECASE,
+        ):
+            left_owner = maximum.group("left_owner").lower()
+            right_owner = maximum.group("right_owner").lower()
+            left_column = maximum.group("left_column").lower()
+            right_column = maximum.group("right_column").lower()
+            if left_column != right_column:
+                continue
+            if left_owner == "excluded" and right_owner in qualifiers:
+                maxima.add((right_owner, left_column))
+            elif right_owner == "excluded" and left_owner in qualifiers:
+                maxima.add((left_owner, left_column))
+        comparisons: list[tuple[str, str, str]] = []
+        for comparison in re.finditer(
+            r"\bexcluded\.(?P<incoming>[A-Za-z_]\w*)\s*(?P<operator>>=|>)\s*"
+            r"(?P<owner>[A-Za-z_]\w*)\.(?P<stored>[A-Za-z_]\w*)",
+            assignments,
+            re.IGNORECASE,
+        ):
+            incoming = comparison.group("incoming").lower()
+            stored = comparison.group("stored").lower()
+            owner = comparison.group("owner").lower()
+            if incoming == stored and owner in qualifiers:
+                comparisons.append((owner, incoming, comparison.group("operator")))
+        bindings = {
+            (owner, column, operator)
+            for owner, column in maxima
+            for comparison_owner, comparison_column, operator in comparisons
+            if owner == comparison_owner and column == comparison_column
+        }
+        if len(bindings) != 1:
+            continue
+        owner, order_column, operator = next(iter(bindings))
+        guarded = bool(
+            where_match
+            and re.search(
+                rf"\bexcluded\.{re.escape(order_column)}\s*{re.escape(operator)}\s*"
+                rf"{re.escape(owner)}\.{re.escape(order_column)}\b",
+                where_clause,
+                re.IGNORECASE,
+            )
+        )
+        if where_match and (not include_guarded or not guarded):
+            continue
+        assignment_targets = re.findall(
+            r"(?:^|,)\s*([A-Za-z_]\w*)\s*=",
+            assignments,
+            re.IGNORECASE,
+        )
+        direct_incoming = re.findall(
+            r"(?:^|,)\s*([A-Za-z_]\w*)\s*=\s*excluded\.([A-Za-z_]\w*)\s*(?=,|$)",
+            assignments,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if len(assignment_targets) < 2 or not any(
+            target.lower() != order_column and source.lower() != order_column
+            for target, source in direct_incoming
+        ):
+            continue
+        candidates.append(
+            {
+                "statement_end": statement_end,
+                "owner": owner,
+                "order_column": order_column,
+                "operator": operator,
+                "guarded": guarded,
+            }
+        )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _repair_monotonic_sql_head(content: str, recognition: Mapping[str, Any]) -> str:
+    statement_end = int(recognition["statement_end"])
+    owner = str(recognition["owner"])
+    order_column = str(recognition["order_column"])
+    operator = str(recognition["operator"])
+    guard = f"\nWHERE excluded.{order_column} {operator} {owner}.{order_column}"
+    return content[:statement_end] + guard + content[statement_end:]
+
+
+def _is_order_like_sql_column(column: str) -> bool:
+    lowered = str(column or "").lower()
+    if lowered == "rowid" or lowered.endswith(("_id", "_key")):
+        return False
+    return bool(
+        re.search(
+            r"(?:^|_)(?:logical_)?(?:clock|sequence|revision|generation|offset|ordinal|"
+            r"counter|epoch|position|version)(?:_|$)",
+            lowered,
+        )
+    )
+
+
+def _recognize_direct_sql_head_upsert(content: str) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for update in re.finditer(
+        r"\bON\s+CONFLICT\s*\((?P<conflict>[^)]+)\)\s+DO\s+UPDATE\s+SET\s+",
+        content,
+        re.IGNORECASE,
+    ):
+        statement_end = content.find(";", update.end())
+        if statement_end < 0:
+            continue
+        assignments = content[update.end() : statement_end]
+        if re.search(r"\bWHERE\b", assignments, re.IGNORECASE):
+            continue
+        statement_start = content.rfind(";", 0, update.start()) + 1
+        prefix = content[statement_start : update.start()]
+        inserts = list(
+            re.finditer(
+                r"\bINSERT\s+INTO\s+(?P<table>(?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)"
+                r"(?:\s+AS\s+(?P<alias>[A-Za-z_]\w*))?\s*\((?P<columns>[^)]+)\)",
+                prefix,
+                re.IGNORECASE,
+            )
+        )
+        if len(inserts) != 1:
+            continue
+        direct_assignments = re.findall(
+            r"(?:^|,)\s*(?P<target>[A-Za-z_]\w*)\s*=\s*"
+            r"excluded\.(?P<source>[A-Za-z_]\w*)\s*(?=,|$)",
+            assignments,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if len(direct_assignments) < 2 or any(
+            target.lower() != source.lower() for target, source in direct_assignments
+        ):
+            continue
+        order_columns = {
+            target.lower()
+            for target, _source in direct_assignments
+            if _is_order_like_sql_column(target)
+        }
+        if len(order_columns) != 1:
+            continue
+        table = inserts[0].group("table").split(".")[-1]
+        owner = inserts[0].group("alias") or table
+        conflict_columns = [
+            value.strip().lower()
+            for value in update.group("conflict").split(",")
+            if re.fullmatch(r"[A-Za-z_]\w*", value.strip())
+        ]
+        insert_columns = [
+            value.strip().lower()
+            for value in inserts[0].group("columns").split(",")
+            if re.fullmatch(r"[A-Za-z_]\w*", value.strip())
+        ]
+        order_column = next(iter(order_columns))
+        if not conflict_columns or order_column not in insert_columns:
+            continue
+        candidates.append(
+            {
+                "table": table.lower(),
+                "owner": owner.lower(),
+                "conflict_columns": conflict_columns,
+                "order_column": order_column,
+                "statement_end": statement_end,
+            }
+        )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _recognize_head_history_identity(
+    files: Mapping[str, str],
+    head_table: str,
+    conflict_columns: Sequence[str],
+    order_column: str,
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for path, content in files.items():
+        for table in re.finditer(
+            rf"\bCREATE\s+TABLE\s+{re.escape(head_table)}\s*\((?P<body>.*?)\)\s*;",
+            content,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            for foreign_key in re.finditer(
+                r"\bFOREIGN\s+KEY\s*\((?P<local>[^)]+)\)\s*REFERENCES\s+"
+                r"(?P<table>[A-Za-z_]\w*)\s*\((?P<remote>[^)]+)\)",
+                table.group("body"),
+                re.IGNORECASE,
+            ):
+                local_columns = [
+                    value.strip().lower() for value in foreign_key.group("local").split(",")
+                ]
+                remote_columns = [
+                    value.strip().lower() for value in foreign_key.group("remote").split(",")
+                ]
+                if (
+                    len(local_columns) < 2
+                    or len(local_columns) != len(remote_columns)
+                    or not set(conflict_columns).issubset(local_columns)
+                ):
+                    continue
+                history_table = foreign_key.group("table").lower()
+                pair_by_local = dict(zip(local_columns, remote_columns))
+                remote_scope = [
+                    pair_by_local[column]
+                    for column in conflict_columns
+                    if column in pair_by_local
+                ]
+                if len(remote_scope) != len(conflict_columns):
+                    continue
+                required_unique = {*remote_scope, str(order_column).lower()}
+                history_definitions = [
+                    match.group("body")
+                    for source in files.values()
+                    for match in re.finditer(
+                        rf"\bCREATE\s+TABLE\s+{re.escape(history_table)}\s*"
+                        r"\((?P<body>.*?)\)\s*;",
+                        source,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                ]
+                unique_sets = [
+                    {
+                        value.strip().lower()
+                        for value in unique.group("columns").split(",")
+                    }
+                    for definition in history_definitions
+                    for unique in re.finditer(
+                        r"\bUNIQUE\s*\((?P<columns>[^)]+)\)",
+                        definition,
+                        re.IGNORECASE,
+                    )
+                ]
+                if len(history_definitions) != 1 or required_unique not in unique_sets:
+                    continue
+                candidates.append(
+                    {
+                        "schema_path": str(path),
+                        "history_table": history_table,
+                        "identity_pairs": list(zip(local_columns, remote_columns)),
+                    }
+                )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _recognize_rowid_head_read(
+    content: str,
+    *,
+    head_table: str,
+    history_table: str,
+    identity_pairs: Sequence[tuple[str, str]],
+    conflict_columns: Sequence[str],
+) -> dict[str, Any] | None:
+    head_joins = list(
+        re.finditer(
+            rf"\bJOIN\s+{re.escape(head_table)}\s+(?:AS\s+)?(?P<alias>[A-Za-z_]\w*)\s+ON\b",
+            content,
+            re.IGNORECASE,
+        )
+    )
+    history_joins = list(
+        re.finditer(
+            rf"\bJOIN\s+{re.escape(history_table)}\s+(?:AS\s+)?(?P<alias>[A-Za-z_]\w*)"
+            r"\s+ON\s+(?P<condition>.*?)(?=\b(?:JOIN|WHERE|ORDER\s+BY|GROUP\s+BY|LIMIT)\b|;)",
+            content,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+    if len(head_joins) != 1 or len(history_joins) != 1:
+        return None
+    head_alias = head_joins[0].group("alias")
+    history_join = history_joins[0]
+    history_alias = history_join.group("alias")
+    condition = history_join.group("condition").strip()
+    simple_equalities = re.fullmatch(
+        r"[A-Za-z_]\w*\.[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\.[A-Za-z_]\w*"
+        r"(?:\s+AND\s+[A-Za-z_]\w*\.[A-Za-z_]\w*\s*=\s*"
+        r"[A-Za-z_]\w*\.[A-Za-z_]\w*)*",
+        condition,
+        re.IGNORECASE,
+    )
+    if not simple_equalities:
+        return None
+    rowid_reads = list(
+        re.finditer(
+            rf"\bWHERE\s+{re.escape(history_alias)}\.rowid\s*=\s*\(\s*"
+            r"SELECT\s+MAX\s*\(\s*(?:(?P<max_alias>[A-Za-z_]\w*)\.)?rowid\s*\)\s+"
+            rf"FROM\s+{re.escape(history_table)}\s+(?:AS\s+)?(?P<candidate>[A-Za-z_]\w*)\s+"
+            r"WHERE\s+(?P<subquery>.*?)\)\s*(?=ORDER\s+BY|;|$)",
+            content,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+    if len(rowid_reads) != 1:
+        return None
+    rowid_read = rowid_reads[0]
+    candidate_alias = rowid_read.group("candidate")
+    if rowid_read.group("max_alias") and (
+        rowid_read.group("max_alias").lower() != candidate_alias.lower()
+    ):
+        return None
+    pair_by_local = {local: remote for local, remote in identity_pairs}
+    authoritative_identity = [
+        pair_by_local[column]
+        for column in conflict_columns
+        if column in pair_by_local
+    ]
+    subquery = rowid_read.group("subquery")
+    if len(authoritative_identity) != len(conflict_columns) or not all(
+        re.search(
+            rf"\b{re.escape(candidate_alias)}\.{re.escape(column)}\b",
+            subquery,
+            re.IGNORECASE,
+        )
+        for column in authoritative_identity
+    ):
+        return None
+    join_indent_match = re.search(r"(?m)^(?P<indent>[ \t]*)ON\s+", history_join.group(0))
+    join_indent = join_indent_match.group("indent") if join_indent_match else "  "
+    join_condition = ("\n" + join_indent + "AND ").join(
+        f"{history_alias}.{remote} = {head_alias}.{local}"
+        for local, remote in identity_pairs
+    )
+    return {
+        "join_start": history_join.start("condition"),
+        "join_end": history_join.end("condition"),
+        "join_condition": join_condition + "\n",
+        "where_start": rowid_read.start(),
+        "where_end": rowid_read.end(),
+    }
+
+
+def _recognize_cross_file_monotonic_head(
+    files: Mapping[str, str],
+) -> dict[str, Mapping[str, Any]]:
+    upserts = [
+        (str(path), metadata)
+        for path, content in files.items()
+        if (metadata := _recognize_direct_sql_head_upsert(content)) is not None
+    ]
+    if len(upserts) != 1:
+        return {}
+    upsert_path, upsert = upserts[0]
+    identity = _recognize_head_history_identity(
+        files,
+        str(upsert["table"]),
+        list(upsert["conflict_columns"]),
+        str(upsert["order_column"]),
+    )
+    if identity is None:
+        return {}
+    reads = [
+        (str(path), metadata)
+        for path, content in files.items()
+        if path != upsert_path
+        and (
+            metadata := _recognize_rowid_head_read(
+                content,
+                head_table=str(upsert["table"]),
+                history_table=str(identity["history_table"]),
+                identity_pairs=list(identity["identity_pairs"]),
+                conflict_columns=list(upsert["conflict_columns"]),
+            )
+        )
+        is not None
+    ]
+    if len(reads) != 1:
+        return {}
+    read_path, read = reads[0]
+    return {
+        upsert_path: {"role": "direct_head_upsert", **upsert},
+        read_path: {"role": "rowid_head_read", **read},
+    }
+
+
+def _repair_cross_file_monotonic_head(
+    content: str,
+    recognition: Mapping[str, Any],
+) -> str:
+    if recognition["role"] == "direct_head_upsert":
+        statement_end = int(recognition["statement_end"])
+        guard = (
+            f"\nWHERE excluded.{recognition['order_column']} > "
+            f"{recognition['owner']}.{recognition['order_column']}"
+        )
+        return content[:statement_end] + guard + content[statement_end:]
+    replacements = [
+        (
+            int(recognition["join_start"]),
+            int(recognition["join_end"]),
+            str(recognition["join_condition"]),
+        ),
+        (int(recognition["where_start"]), int(recognition["where_end"]), ""),
+    ]
+    updated = content
+    for start, end, replacement in sorted(replacements, reverse=True):
+        updated = updated[:start] + replacement + updated[end:]
+    return updated
+
+
+def _contract_repair_recognition(
+    invariants: Sequence[str],
+    files: Mapping[str, str],
+) -> dict[str, dict[str, Mapping[str, Any]]]:
+    recognized: dict[str, dict[str, Mapping[str, Any]]] = {}
+    recognize_async = any("in-flight work must be evicted" in value for value in invariants)
+    recognize_ordered_identity = any(
+        "Stable ordered-sequence identity" in value for value in invariants
+    )
+    recognize_sql_head = any("One winner predicate guards" in value for value in invariants)
+
+    def bind(path: str, family: str, metadata: Mapping[str, Any]) -> None:
+        recognized.setdefault(path, {})[family] = metadata
+
+    if recognize_async:
+        candidates = [
+            (str(path), metadata)
+            for path, content in files.items()
+            if (metadata := _recognize_async_rejection_contract(content)) is not None
+        ]
+        if len(candidates) == 1:
+            path, metadata = candidates[0]
+            bind(path, "async_rejection_slot", metadata)
+    if recognize_ordered_identity:
+        candidates = [
+            (str(path), metadata)
+            for path, content in files.items()
+            if (metadata := _recognize_ordered_sequence_identity(content)) is not None
+        ]
+        if len(candidates) == 1:
+            path, metadata = candidates[0]
+            bind(path, "ordered_sequence_identity", metadata)
+    if recognize_sql_head:
+        candidates = [
+            (str(path), metadata)
+            for path, content in files.items()
+            if (metadata := _recognize_monotonic_sql_head(content)) is not None
+        ]
+        if len(candidates) == 1:
+            path, metadata = candidates[0]
+            bind(path, "monotonic_sql_head", metadata)
+        for path, metadata in _recognize_cross_file_monotonic_head(files).items():
+            bind(path, "cross_file_monotonic_head", metadata)
+    return recognized
+
+
 def _provider_forwards_exact_signal(content: str) -> bool:
     signature = re.search(
         r"function\s+callprovider\s*\((.*?)\)\s*(?::\s*[^\{]+)?\s*\{",
@@ -1681,12 +2543,19 @@ def contract_invariant_warnings(
     combined = "\n".join(lowered_files.values())
     warnings: list[str] = []
     if any("in-flight work must be evicted" in value for value in invariants):
+        structurally_unguarded = any(
+            _recognize_async_rejection_contract(content) is not None
+            for content in files.values()
+        )
         owners = [
             content
             for content in lowered_files.values()
             if "new map" in content and any(token in content for token in ("pending", "flight"))
         ]
-        if owners and not any(_singleflight_owner_evicts_key(content) for content in owners):
+        named_owner_is_unguarded = owners and not any(
+            _singleflight_owner_evicts_key(content) for content in owners
+        )
+        if named_owner_is_unguarded or structurally_unguarded:
             warnings.append(
                 "failed per-key in-flight state is retained; the state owner must delete/remove the key on rejection"
             )
@@ -1697,6 +2566,14 @@ def contract_invariant_warnings(
             warnings.append("rejected work is cached instead of evicted")
         if re.search(r"catch\s*(?:\([^)]*\))?\s*\{[^{}]*\breturn\b", combined, re.DOTALL):
             warnings.append("the wrapper swallows the original error by returning from catch")
+    if any("Stable ordered-sequence identity" in value for value in invariants):
+        if any(
+            _recognize_ordered_sequence_identity(content) is not None
+            for content in files.values()
+        ):
+            warnings.append(
+                "ordered preference identity is sorted before serialization and loses caller priority"
+            )
     if any("exact cancellation signal" in value for value in invariants):
         provider_sources = [
             content
@@ -2035,12 +2912,22 @@ def contract_invariant_warnings(
         if any("tostring().compareto" in content for content in assembler_sources):
             warnings.append("chunk offsets are sorted lexically instead of numerically")
     if any("One winner predicate guards" in value for value in invariants):
+        structurally_unguarded = any(
+            _recognize_monotonic_sql_head(content) is not None
+            for content in files.values()
+        ) or bool(_recognize_cross_file_monotonic_head(files))
         upsert_sources = [
             content
-            for content in lowered_files.values()
-            if "on conflict" in content and "observed_at" in content and "received_at" in content
+            for path, content in lowered_files.items()
+            if "on conflict" in content
+            and "observed_at" in content
+            and "received_at" in content
+            and not (
+                (metadata := _recognize_monotonic_sql_head(files[path], include_guarded=True))
+                and metadata["guarded"]
+            )
         ]
-        if any(
+        if structurally_unguarded or any(
             "where excluded.received_at" not in content
             and "where excluded.version" not in content
             for content in upsert_sources
@@ -2067,7 +2954,7 @@ def contract_invariant_warnings(
         ]
         if temporal_sources:
             warnings.append("temporal read still uses inclusive BETWEEN at the expiration boundary")
-    return warnings
+    return list(dict.fromkeys(warnings))
 
 
 def _replace_matched_braced_body(
@@ -2725,14 +3612,21 @@ def contract_repair_proposals(
     prompt: str,
     files: Mapping[str, str],
 ) -> dict[str, str]:
-    """Synthesize narrow repairs only when a known invariant is violated."""
-    warnings = contract_invariant_warnings(prompt, files)
-    if not warnings:
-        return {}
+    """Synthesize structurally recognized repairs and guard the projected result."""
     invariants = derive_contract_invariants(prompt)
+    recognition = _contract_repair_recognition(invariants, files)
     proposals: dict[str, str] = {}
     for path, content in files.items():
         updated = content
+        bindings = recognition.get(str(path), {})
+        if metadata := bindings.get("async_rejection_slot"):
+            updated = _repair_async_rejection_slot(updated, metadata)
+        if metadata := bindings.get("ordered_sequence_identity"):
+            updated = _repair_ordered_sequence_identity(updated, metadata)
+        if metadata := bindings.get("monotonic_sql_head"):
+            updated = _repair_monotonic_sql_head(updated, metadata)
+        if metadata := bindings.get("cross_file_monotonic_head"):
+            updated = _repair_cross_file_monotonic_head(updated, metadata)
         if any(
             token in value
             for value in invariants
@@ -2769,15 +3663,25 @@ def contract_repair_proposals(
             updated = _repair_dart_vector_state(updated)
         if any("Strict overlap is rejected" in value for value in invariants):
             updated = _repair_inclusive_ranges(updated)
-        if any(
-            token in value
-            for value in invariants
-            for token in ("One winner predicate guards", "never receipt time in either expression")
+        recognized_head = any(
+            family in bindings
+            for family in ("monotonic_sql_head", "cross_file_monotonic_head")
+        )
+        if recognized_head or any(
+            "never receipt time in either expression" in value for value in invariants
         ):
             updated = _repair_telemetry_sql(updated)
         if updated != content:
             proposals[str(path)] = updated
-    if any("in-flight work must be evicted" in value for value in invariants):
+    recognized_async_owners = [
+        path
+        for path, bindings in recognition.items()
+        if "async_rejection_slot" in bindings
+    ]
+    if (
+        any("in-flight work must be evicted" in value for value in invariants)
+        and len(recognized_async_owners) == 1
+    ):
         for path, content in files.items():
             map_match = re.search(r"(?:const|let)\s+(\w+)\s*=\s*new\s+Map", content)
             signature = re.search(
@@ -2966,6 +3870,13 @@ def contract_repair_proposals(
             updated = _preaggregate_sibling_sum_joins(content)
             if updated and updated != content:
                 proposals[str(path)] = updated
+    if proposals:
+        projected = {
+            str(path): proposals.get(str(path), content)
+            for path, content in files.items()
+        }
+        if contract_invariant_warnings(prompt, projected):
+            return {}
     return proposals
 
 

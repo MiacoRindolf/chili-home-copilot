@@ -2252,6 +2252,124 @@ def test_generate_diffs_retries_one_mixed_adapter_response(monkeypatch, tmp_path
         db.close()
 
 
+def test_compact_production_repair_does_not_retry_rejected_adapter(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        (tmp_path / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        run = ProjectAutonomyRun(
+            run_id="pa_compact_adapter",
+            prompt="Repair the owner value.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen", "available": True},
+        )
+        monkeypatch.setattr(
+            orchestrator.insights_mod,
+            "get_insights",
+            lambda *args, **kwargs: [],
+        )
+        calls: list[dict] = []
+
+        def fake_gateway(*_args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "reply": "mixed prose without an applicable edit",
+                "model": "qwen",
+                "local_only": True,
+                "premium_calls": 0,
+            }
+
+        monkeypatch.setattr(
+            "app.services.context_brain.llm_gateway.gateway_chat",
+            fake_gateway,
+        )
+
+        with pytest.raises(orchestrator.AutonomyBlocked):
+            orchestrator.generate_diffs_from_plan(
+                db,
+                run,
+                tmp_path,
+                [{"path": "owner.py", "description": "Set VALUE to 2."}],
+                validation_context="test_owner failed",
+                local_model_override="qwen2.5-coder:14b",
+                compact_repair=True,
+            )
+
+        assert len(calls) == 1
+        assert calls[0]["max_tokens"] == 4096
+    finally:
+        db.close()
+
+
+def test_generate_repair_diffs_rejects_partial_required_group(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        (tmp_path / "first.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tmp_path / "second.py").write_text("VALUE = 1\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        run = ProjectAutonomyRun(
+            run_id="pa_atomic_repair_group",
+            prompt="Repair both required owners.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen", "available": True},
+        )
+        monkeypatch.setattr(
+            orchestrator.insights_mod,
+            "get_insights",
+            lambda *args, **kwargs: [],
+        )
+        monkeypatch.setattr(
+            "app.services.context_brain.llm_gateway.gateway_chat",
+            lambda *_args, **_kwargs: {
+                "reply": (
+                    "<<<<<<< SEARCH\nVALUE = 1\n=======\nVALUE = 2\n>>>>>>> REPLACE"
+                ),
+                "model": "qwen",
+                "local_only": True,
+                "premium_calls": 0,
+            },
+        )
+        real_validate = orchestrator._validate_diff
+
+        def reject_second(diff, relative, content):
+            if relative == "second.py":
+                return {"valid": False, "warnings": ["synthetic invalid owner diff"]}
+            return real_validate(diff, relative, content)
+
+        monkeypatch.setattr(orchestrator, "_validate_diff", reject_second)
+
+        with pytest.raises(orchestrator.AutonomyBlocked) as exc:
+            orchestrator.generate_diffs_from_plan(
+                db,
+                run,
+                tmp_path,
+                [
+                    {"path": "first.py", "description": "Repair first owner."},
+                    {"path": "second.py", "description": "Repair second owner."},
+                ],
+                validation_context="Both source owners are required by failed contracts.",
+                local_model_override="qwen2.5-coder:14b",
+            )
+
+        assert "no partial repair was retained" in str(exc.value)
+    finally:
+        db.close()
+
+
 def test_small_desktop_fallback_diff_handles_bad_model_patch(monkeypatch, tmp_path):
     db = _sqlite_autonomy_session()
     try:
@@ -3097,6 +3215,28 @@ def test_validation_failure_text_uses_structured_contract_summary():
     assert "observed: KeyError: 'XYZ'" in text
 
 
+def test_diagnostic_plan_prompt_requires_contract_owner_coverage():
+    prompt = orchestrator._build_autonomy_plan_prompt(
+        {
+            "request": "Repair a cross-file lifecycle failure.",
+            "diagnostic_context": "Decision: patch_root_cause",
+            "repos": [],
+            "candidate_files": [
+                "app/source.py",
+                "app/state.py",
+                "app/service.py",
+                "app/report.py",
+            ],
+        },
+        None,
+    )
+
+    assert '"contract_coverage"' in prompt
+    assert '"owner_paths"' in prompt
+    assert "max 4 files" in prompt
+    assert "Imports nominate owners but do not prove ownership" in prompt
+
+
 def test_validation_repair_context_reads_tests_and_maps_source_owner(tmp_path):
     owner = tmp_path / "app/services/owner.py"
     wrong = tmp_path / "app/services/wrong.py"
@@ -3173,6 +3313,32 @@ def test_repair_file_scope_expands_only_for_full_autopilot_policy():
         max_new_files=0,
     )
     assert [item["path"] for item in exhausted] == ["app/services/wrong.py"]
+
+
+def test_repair_file_scope_can_cover_three_independent_source_owners():
+    files = [{"path": "app/service.py", "action": "modify"}]
+    owners = [
+        {
+            "path": f"app/owner_{index}.py",
+            "score": 90,
+            "evidence": f"test imports owner {index}",
+        }
+        for index in range(1, 4)
+    ]
+
+    expanded = orchestrator.repair_files_with_source_owners(
+        files,
+        owners,
+        allow_expand=True,
+        max_new_files=3,
+    )
+
+    assert [item["path"] for item in expanded] == [
+        "app/service.py",
+        "app/owner_1.py",
+        "app/owner_2.py",
+        "app/owner_3.py",
+    ]
 
 
 def test_repair_mutable_files_enforces_read_only_test_contracts():

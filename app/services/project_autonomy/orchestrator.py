@@ -2522,6 +2522,7 @@ _EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_S
 _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
 _EDIT_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_CTX") or "4096")
 _EDIT_MAX_FILE_LINES = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_MAX_FILE_LINES") or "260")
+_MAX_DIAGNOSTIC_REPAIR_FILES = min(4, _MAX_FILES_PER_EDIT)
 _VALIDATION_REPAIR_ROUNDS = max(
     0,
     min(
@@ -6224,7 +6225,7 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
     request = str(context.get("operator_request") or "")
     candidates = _plan_candidate_files(context, repo_path, request)
     diagnostic_context = str(context.get("diagnostic_context") or "").strip()
-    max_files = 3 if diagnostic_context else 2
+    max_files = _MAX_DIAGNOSTIC_REPAIR_FILES if diagnostic_context else 2
     parts = [
         "Return one compact JSON object for a safe local autonomous code run.",
         "No markdown. No prose outside JSON. Keep strings short.",
@@ -6276,10 +6277,21 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
         [
             "",
             "JSON shape:",
-            '{"analysis":"<=18 words","files":[{"path":"candidate/path","action":"modify","description":"<=12 words"}],"notes":"<=12 words"}',
+            (
+                '{"analysis":"<=18 words","files":[{"path":"candidate/path","action":"modify","description":"<=12 words"}],'
+                '"contract_coverage":[{"contract":"independent behavior","owner_paths":["candidate/path"],'
+                '"postcondition":"observable result"}],"notes":"<=12 words"}'
+                if diagnostic_context
+                else '{"analysis":"<=18 words","files":[{"path":"candidate/path","action":"modify","description":"<=12 words"}],"notes":"<=12 words"}'
+            ),
             f"Rules: max {max_files} files, prefer existing candidate files exactly, include only repo-relative paths.",
         ]
     )
+    if diagnostic_context:
+        parts.append(
+            "Every independent failed contract needs a causal source owner, and every owner_path must also "
+            "appear as a mutating files entry. Imports nominate owners but do not prove ownership."
+        )
     return _clip("\n".join(parts), _PLAN_PROMPT_CHAR_LIMIT)
 
 
@@ -7111,6 +7123,7 @@ def generate_diffs_from_plan(
     *,
     validation_context: str | None = None,
     local_model_override: str | None = None,
+    compact_repair: bool = False,
 ) -> list[str]:
     model_info = select_local_model()
     if not model_info.get("model"):
@@ -7215,7 +7228,11 @@ def generate_diffs_from_plan(
             system_prompt=prompt,
             trace_id=f"autopilot-edit-{rel}",
             user_message=desc,
-            max_tokens=_settings.chili_code_gen_max_tokens,
+            max_tokens=(
+                min(_settings.chili_code_gen_max_tokens, 4096)
+                if compact_repair
+                else _settings.chili_code_gen_max_tokens
+            ),
             strict_escalation=False,
             local_only=True,
             local_model_override=local_model_override,
@@ -7351,6 +7368,7 @@ def generate_diffs_from_plan(
         if (
             not diff
             and full_content is not None
+            and not compact_repair
             and code_agent_mod._retryable_edit_adapter_rejection(adapter_warnings)
         ):
             retry_started = _time.monotonic()
@@ -7517,6 +7535,11 @@ def generate_diffs_from_plan(
             continue
         diffs.append(diff)
         _add_artifact(db, run.run_id, "diff", rel, content=diff)
+    if validation_context and rejections:
+        raise AutonomyBlocked(
+            "Required repair group was incomplete; no partial repair was retained. "
+            + " ".join(rejections[:3])
+        )
     if not diffs and rejections:
         raise AutonomyBlocked("No usable implementation diffs were produced. " + " ".join(rejections[:3]))
     return diffs
@@ -8527,7 +8550,7 @@ def validation_source_owner_candidates(
     validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
     plan_files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
     *,
-    limit: int = 2,
+    limit: int = _MAX_DIAGNOSTIC_REPAIR_FILES,
 ) -> list[dict[str, Any]]:
     """Map failed read-only test contracts to bounded source owners."""
     contracts = _read_validation_test_contracts(worktree, validation)
@@ -8600,7 +8623,9 @@ def validation_source_owner_candidates(
     ranked = sorted(scores.items(), key=lambda item: (-item[1][0], item[0]))
     return [
         {"path": relative, "score": score, "evidence": evidence}
-        for relative, (score, evidence) in ranked[: max(0, min(2, limit))]
+        for relative, (score, evidence) in ranked[
+            : max(0, min(_MAX_DIAGNOSTIC_REPAIR_FILES, limit))
+        ]
     ]
 
 
@@ -8609,7 +8634,7 @@ def repair_files_with_source_owners(
     owner_candidates: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
     *,
     allow_expand: bool,
-    max_new_files: int = 2,
+    max_new_files: int = _MAX_DIAGNOSTIC_REPAIR_FILES,
 ) -> list[dict[str, Any]]:
     expanded = [dict(item) for item in files if isinstance(item, Mapping)]
     seen = {
@@ -8626,8 +8651,9 @@ def repair_files_with_source_owners(
         if (
             not rel
             or rel in seen
-            or len(expanded) >= _MAX_FILES_PER_EDIT
-            or added >= max(0, min(2, max_new_files))
+            or len(expanded) >= _MAX_DIAGNOSTIC_REPAIR_FILES
+            or added
+            >= max(0, min(_MAX_DIAGNOSTIC_REPAIR_FILES, max_new_files))
         ):
             continue
         expanded.append(
@@ -9522,7 +9548,10 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
                 worktree=worktree,
                 prior_attempts=repair_attempts,
             )
-            remaining_owner_budget = max(0, 2 - len(owner_expansion_paths))
+            remaining_owner_budget = max(
+                0,
+                _MAX_DIAGNOSTIC_REPAIR_FILES - len(files),
+            )
             owner_candidates = list(
                 repair_packet.get("source_owner_candidates") or []
             )[:remaining_owner_budget]
@@ -9625,6 +9654,7 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
                     editable_files,
                     validation_context=repair_context,
                     local_model_override=str(route.get("model") or "") or None,
+                    compact_repair=route.get("tier") == "local_escalation",
                 )
             except AutonomyBlocked as exc:
                 attempt = {

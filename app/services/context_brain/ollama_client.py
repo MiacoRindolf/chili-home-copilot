@@ -36,14 +36,16 @@ _FALLBACK_OLLAMA_HOSTS = (
     "http://localhost:11434",
     "http://ollama:11434",
 )
-_LAST_WORKING_OLLAMA_HOST: Optional[str] = None
+_LAST_WORKING_OLLAMA_HOSTS: dict[str, str] = {}
+_LAST_MODEL_LIST_HOST: Optional[str] = None
 
 
-def _candidate_hosts(base_url: Optional[str]) -> list[str]:
+def _candidate_hosts(base_url: Optional[str], *, model: str = "") -> list[str]:
     if base_url:
         return [base_url]
     ordered = [
-        _LAST_WORKING_OLLAMA_HOST,
+        _LAST_WORKING_OLLAMA_HOSTS.get(model),
+        _LAST_MODEL_LIST_HOST,
         _DEFAULT_OLLAMA_HOST,
         *_FALLBACK_OLLAMA_HOSTS,
     ]
@@ -112,17 +114,31 @@ def chat(
         payload["format"] = str(options["format"])
     if think is not None:
         payload["think"] = bool(think)
-    global _LAST_WORKING_OLLAMA_HOST
-    bases = _candidate_hosts(base_url)
+    bases = _candidate_hosts(base_url, model=model)
     errors: list[str] = []
     t0 = time.monotonic()
+    deadline = t0 + max(0.001, float(timeout_sec))
+    body: dict[str, Any] | None = None
     for raw_base in bases:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.append("total request deadline exhausted before host fallback")
+            break
         base = raw_base.rstrip("/")
         url = f"{base}/api/chat"
         try:
-            body = _post_json(url, payload, timeout=timeout_sec)
+            body = _post_json(url, payload, timeout=remaining)
             if base_url is None:
-                _LAST_WORKING_OLLAMA_HOST = base
+                _LAST_WORKING_OLLAMA_HOSTS[model] = base
+            break
+        except TimeoutError as e:
+            errors.append(f"{base}: {type(e).__name__}: {e}")
+            logger.warning(
+                "[context_brain.ollama] reachable host timed out model=%s at %s: %s",
+                model,
+                base,
+                e,
+            )
             break
         except urllib.error.HTTPError as e:
             try:
@@ -134,12 +150,21 @@ def chat(
                 "[context_brain.ollama] HTTP %s for model=%s at %s: %s",
                 e.code, model, base, err_body,
             )
-        except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError) as e:
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
             errors.append(f"{base}: {type(e).__name__}: {e}")
             logger.warning(
                 "[context_brain.ollama] call failed model=%s at %s: %s", model, base, e,
             )
     else:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        return OllamaResult(
+            ok=False,
+            model=model,
+            latency_ms=latency_ms,
+            error="; ".join(errors) or "Ollama call failed",
+        )
+
+    if body is None:
         latency_ms = int((time.monotonic() - t0) * 1000)
         return OllamaResult(
             ok=False,
@@ -165,18 +190,24 @@ def chat(
 
 def list_models(base_url: Optional[str] = None, timeout_sec: float = 5.0) -> list[str]:
     """Return list of locally-available model tags. Empty list on failure."""
-    global _LAST_WORKING_OLLAMA_HOST
+    global _LAST_MODEL_LIST_HOST
     bases = _candidate_hosts(base_url)
+    deadline = time.monotonic() + max(0.001, float(timeout_sec))
     for raw_base in bases:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         base = raw_base.rstrip("/")
         url = f"{base}/api/tags"
         try:
-            with urllib.request.urlopen(url, timeout=timeout_sec) as resp:
+            with urllib.request.urlopen(url, timeout=remaining) as resp:
                 body = json.loads(resp.read().decode("utf-8", errors="replace"))
             models = [str(m.get("name") or "") for m in (body.get("models") or []) if m.get("name")]
             if models:
                 if base_url is None:
-                    _LAST_WORKING_OLLAMA_HOST = base
+                    _LAST_MODEL_LIST_HOST = base
+                    for model in models:
+                        _LAST_WORKING_OLLAMA_HOSTS[model] = base
                 return models
         except Exception:
             continue

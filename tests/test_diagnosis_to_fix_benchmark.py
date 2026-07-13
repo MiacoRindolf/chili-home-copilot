@@ -4,6 +4,7 @@ import argparse
 import inspect
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,9 @@ from scripts import autopilot_diagnosis_to_fix_benchmark as benchmark
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix"
 TENTH_FIXTURE_ROOT = (
     Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_tenth"
+)
+ELEVENTH_FIXTURE_ROOT = (
+    Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_eleventh"
 )
 
 
@@ -198,6 +202,33 @@ def test_invalid_diagnostic_json_gets_one_compact_retry(monkeypatch):
     assert calls[1]["json_object_valid"] is True
 
 
+def test_local_call_uses_one_total_case_model_deadline(monkeypatch):
+    calls = benchmark._ModelCallLedger(deadline=time.monotonic() - 1)
+    invoked = False
+
+    def unexpected_chat(*_args, **_kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("expired case budget must stop before transport")
+
+    monkeypatch.setattr(benchmark.ollama_client, "chat", unexpected_chat)
+
+    response = benchmark._local_call(
+        "local-model",
+        [{"role": "user", "content": "repair"}],
+        stage="repair",
+        calls=calls,
+        timeout=240.0,
+        num_predict=100,
+        json_mode=False,
+    )
+
+    assert response == ""
+    assert invoked is False
+    assert calls[-1]["budget_exhausted"] is True
+    assert calls[-1]["error"] == "case_model_time_budget_exhausted"
+
+
 def test_scoring_requires_real_final_repair_and_correct_ownership():
     oracle = {"expected_dimension": "clock", "expected_file": "session_gate.py"}
     diagnosis = {"report": {"conclusion": {"dimension": "clock"}}}
@@ -309,6 +340,8 @@ def test_initial_diagnosis_uses_decisive_taxonomy_over_observational_label():
 
     assert diagnosis["accepted_conclusion"]["dimension"] == "clock"
     assert diagnosis["accepted_conclusion"]["stage"] == "decisive_taxonomy_gate"
+    assert diagnosis["accepted_conclusion"]["accepted"] is False
+    assert diagnosis["accepted_conclusion"]["causal_status"] == "working_hypothesis"
 
 
 def test_decisive_taxonomy_does_not_override_isolated_causal_evidence():
@@ -317,6 +350,7 @@ def test_decisive_taxonomy_does_not_override_isolated_causal_evidence():
             "conclusion": {
                 "dimension": "runtime",
                 "causal_sufficiency": "isolated",
+                "status": "confirmed",
             }
         },
         "case": {
@@ -331,6 +365,7 @@ def test_decisive_taxonomy_does_not_override_isolated_causal_evidence():
 
     assert diagnosis["accepted_conclusion"]["dimension"] == "runtime"
     assert diagnosis["accepted_conclusion"]["stage"] == "diagnostic_judge"
+    assert diagnosis["accepted_conclusion"]["accepted"] is True
 
 
 def test_shadow_verdict_requires_every_case_check_not_only_high_average():
@@ -886,6 +921,183 @@ def test_complete_contract_repair_plan_skips_redundant_model_review(
     assert stages == ["repair_plan_1"]
     assert result["plan"]["review_skipped_reason"]
     assert result["patch_applied"] is True
+
+
+def test_empty_repair_plan_stops_before_review_and_cannot_gain_feedback_edit_authority(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    stages: list[str] = []
+
+    def failed_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        return ""
+
+    monkeypatch.setattr(benchmark, "_local_call", failed_call)
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_planned_edits",
+        lambda *_args, **_kwargs: pytest.fail("empty plan must not authorize edits"),
+    )
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {"prompt": "Repair the owner.", "candidate_paths": ["owner.py"]},
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "tests/test_owner.py::test_value FAILED",
+        "local-model",
+        [],
+        1.0,
+        1,
+        feedback_context="from owner import VALUE",
+        contract_evidence={"failed_ids": ["tests/test_owner.py::test_value"]},
+    )
+
+    assert stages == ["repair_plan_1"]
+    assert result["transport_failed"] is True
+    assert result["selected_files"] == []
+
+
+def test_incomplete_contract_owner_plan_cannot_edit_a_distractor(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "distractor.py").write_text("OTHER = 1\n", encoding="utf-8")
+    plan = {
+        "dimension": "code",
+        "files": [
+            {
+                "path": "distractor.py",
+                "action": "modify",
+                "description": "Change the unrelated wrapper.",
+            }
+        ],
+        "contract_coverage": [
+            {
+                "contract": "test_value",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The owner returns the required value.",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        benchmark,
+        "_local_call",
+        lambda *_args, **_kwargs: json.dumps(plan),
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_planned_edits",
+        lambda *_args, **_kwargs: pytest.fail("incomplete owner union must not edit"),
+    )
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {
+            "prompt": "Repair the owner.",
+            "candidate_paths": ["owner.py", "distractor.py"],
+            "max_files": 2,
+        },
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "tests/test_owner.py::test_value FAILED",
+        "local-model",
+        [],
+        1.0,
+        1,
+        contract_evidence={"failed_ids": ["tests/test_owner.py::test_value"]},
+    )
+
+    assert result["patch_applied"] is False
+    assert result["selected_files"] == []
+    assert "every failed contract" in result["warnings"][0]
+
+
+def test_empty_local_edit_response_does_not_trigger_adapter_retry(tmp_path, monkeypatch):
+    (tmp_path / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    stages: list[str] = []
+
+    def failed_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        return ""
+
+    monkeypatch.setattr(benchmark, "_local_call", failed_call)
+
+    result = benchmark._apply_local_edit(
+        tmp_path,
+        "owner.py",
+        "Set VALUE to 2.",
+        "local-model",
+        [],
+        1.0,
+        stage="repair_edit_1",
+    )
+
+    assert stages == ["repair_edit_1"]
+    assert result["transport_failed"] is True
+    assert (tmp_path / "owner.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_compact_escalation_skips_review_and_adapter_recovery(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    stages: list[str] = []
+    plan = {
+        "dimension": "code",
+        "files": [
+            {
+                "path": "owner.py",
+                "action": "modify",
+                "description": "Set the required value.",
+            }
+        ],
+        "contract_coverage": [
+            {
+                "contract": "test_value",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The owner returns the required value.",
+            }
+        ],
+    }
+
+    def fake_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        return json.dumps(plan)
+
+    captured: dict[str, object] = {}
+
+    def fake_apply(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"patch_applied": True, "applied_files": ["owner.py"], "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+    monkeypatch.setattr(benchmark, "_apply_planned_edits", fake_apply)
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {"prompt": "Repair the returned value.", "candidate_paths": ["owner.py"]},
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "tests/test_owner.py::test_value FAILED",
+        "local-escalation-model",
+        [],
+        1.0,
+        1,
+        contract_evidence={"failed_ids": ["tests/test_owner.py::test_value"]},
+        compact_escalation=True,
+    )
+
+    assert stages == ["repair_plan_1"]
+    assert result["plan"]["review_skipped_reason"].startswith("compact local escalation")
+    assert captured["allow_model_recovery"] is False
 
 
 def test_validation_failure_context_keeps_public_and_feedback_failures():
@@ -1481,6 +1693,46 @@ def test_disclosed_tenth_contract_operators_pass_feedback_and_final(
 
     repair = benchmark._apply_deterministic_contract_repair(repo, case)
     public = benchmark._run_case_tests(repo, case, public_only=True)
+    feedback = benchmark._run_case_tests(repo, case, public_only=False)
+    final = benchmark._run_final_adjudication(
+        case,
+        final_oracle["final_files"],
+        candidate_repo=repo,
+    )
+
+    assert repair["patch_applied"] is True, repair
+    assert set(repair["selected_files"]) == set(oracle["expected_files"])
+    assert public["passed"] is True, public["output"]
+    assert feedback["passed"] is True, feedback["output"]
+    assert final["passed"] is True, final["output"]
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        "node-cache-locale-order-retry-slot",
+        "sql_out_of_order_document_heads",
+    ],
+)
+def test_disclosed_eleventh_structural_repairs_pass_feedback_and_final(
+    tmp_path,
+    case_id,
+):
+    case = benchmark._read_json(
+        ELEVENTH_FIXTURE_ROOT / "cases" / f"{case_id}.json"
+    )
+    oracle = benchmark._read_json(
+        ELEVENTH_FIXTURE_ROOT / "oracles" / f"{case_id}.json"
+    )
+    final_oracle = benchmark._read_json(
+        ELEVENTH_FIXTURE_ROOT / "final_oracles" / f"{case_id}.json"
+    )
+    repo = tmp_path / case_id
+    benchmark._init_repo(repo, case["repo_files"])
+
+    repair = benchmark._apply_deterministic_contract_repair(repo, case)
+    public = benchmark._run_case_tests(repo, case, public_only=True)
+    benchmark._write_files(repo, oracle["feedback_files"])
     feedback = benchmark._run_case_tests(repo, case, public_only=False)
     final = benchmark._run_final_adjudication(
         case,

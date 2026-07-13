@@ -779,6 +779,11 @@ def _initialize_accepted_diagnosis(diagnosis: dict[str, Any]) -> None:
         str(case.get("problem_statement") or "")
     )
     causal_sufficiency = str(conclusion.get("causal_sufficiency") or "observational")
+    conclusion_status = str(conclusion.get("status") or "inconclusive")
+    causally_accepted = bool(
+        conclusion_status == "confirmed"
+        and causal_sufficiency in {"graph_linked", "isolated"}
+    )
     stage = "diagnostic_judge"
     validation_evidence = "pre-repair evidence decision"
     if (
@@ -794,7 +799,9 @@ def _initialize_accepted_diagnosis(diagnosis: dict[str, Any]) -> None:
     record = {
         "dimension": dimension,
         "stage": stage,
-        "accepted": True,
+        "accepted": causally_accepted,
+        "json_parsed": True,
+        "causal_status": "accepted" if causally_accepted else "working_hypothesis",
         "validation_evidence": validation_evidence,
     }
     diagnosis["accepted_conclusion"] = dict(record)
@@ -1248,7 +1255,8 @@ def _markdown(results: Mapping[str, Any]) -> str:
         f"- Functional sealed-final solve rate: **{results['functional_solve_rate']:.1f}%**",
         f"- Causal-diagnosis accuracy: **{results['diagnosis_accuracy']:.1f}%**",
         f"- Exact changed-file-set accuracy: **{results['exact_file_set_accuracy']:.1f}%**",
-        f"- Accepted diagnostic stages: **{results['diagnostic_stage_acceptance_rate']:.1f}%**",
+        f"- JSON-valid diagnostic stages: **{results['diagnostic_stage_acceptance_rate']:.1f}%**",
+        f"- Causally accepted diagnoses: **{results['causal_diagnosis_acceptance_rate']:.1f}%**",
         f"- Autonomy verdict: **{results['verdict']}**",
         f"- Comparison verdict: **{results['evaluation_verdict']}**",
         "- Premium calls: **0**",
@@ -1301,6 +1309,25 @@ def _local_call(
     num_predict: int,
     json_mode: bool,
 ) -> str:
+    deadline = getattr(calls, "deadline", None)
+    if isinstance(deadline, (int, float)):
+        remaining = float(deadline) - time.monotonic()
+        if remaining <= 0:
+            calls.append(
+                {
+                    "stage": stage,
+                    "model": model,
+                    "ok": False,
+                    "latency_ms": 0,
+                    "wall_ms": 0,
+                    "tokens_out": 0,
+                    "error": "case_model_time_budget_exhausted",
+                    "response": "",
+                    "budget_exhausted": True,
+                }
+            )
+            return ""
+        timeout = min(timeout, remaining)
     started = time.monotonic()
     options: dict[str, Any] = {
         "num_predict": num_predict,
@@ -1329,6 +1356,16 @@ def _local_call(
         }
     )
     return result.text if result.ok else ""
+
+
+class _ModelCallLedger(list[dict[str, Any]]):
+    def __init__(self, *, deadline: float | None = None):
+        super().__init__()
+        self.deadline = deadline
+
+    @property
+    def budget_exhausted(self) -> bool:
+        return bool(self.deadline is not None and time.monotonic() >= self.deadline)
 
 
 def _diagnostic_json_call(
@@ -1489,6 +1526,7 @@ def _apply_local_edit(
     timeout: float,
     *,
     stage: str,
+    allow_model_recovery: bool = True,
 ) -> dict[str, Any]:
     path = repo / selected
     original = path.read_text(encoding="utf-8", errors="replace")
@@ -1505,6 +1543,15 @@ def _apply_local_edit(
         num_predict=1200,
         json_mode=False,
     )
+    if not edit_text.strip():
+        return {
+            "patch_applied": False,
+            "transport_failed": True,
+            "warnings": [
+                "Local edit call returned no usable response; adapter retries were skipped."
+            ],
+        }
+
     def parse_outcome(response: str) -> dict[str, Any]:
         blocks = code_agent._parse_search_replace_blocks(response)
         return (
@@ -1529,8 +1576,12 @@ def _apply_local_edit(
     stale_search_rejection = any(
         "SEARCH text not found" in warning for warning in initial_warnings
     )
-    if not isinstance(new_content, str) and _retryable_edit_adapter_rejection(
+    if (
+        allow_model_recovery
+        and not isinstance(new_content, str)
+        and _retryable_edit_adapter_rejection(
         initial_warnings
+        )
     ):
         retry_stage = f"{stage}_retry" if stale_search_rejection else f"{stage}_adapter_retry"
         retry_instruction = (
@@ -1759,6 +1810,7 @@ def _apply_planned_edits(
     *,
     stage_prefix: str,
     failure_output: str = "",
+    allow_model_recovery: bool = True,
 ) -> dict[str, Any]:
     """Apply one bounded edit group and roll it back if any member fails."""
     paths = [str(item.get("path") or "") for item in selected]
@@ -1908,6 +1960,7 @@ def _apply_planned_edits(
             calls,
             timeout,
             stage=f"{stage_prefix}_{index}",
+            allow_model_recovery=allow_model_recovery,
         )
         warnings.extend(str(value) for value in edit.get("warnings") or [])
         if edit.get("already_satisfied"):
@@ -2012,7 +2065,10 @@ def _apply_planned_edits(
                         for rel in applied
                         if rel.casefold() in detail.replace("\\", "/").casefold()
                     ] or list(applied)
-            if syntax.exit_code != 0 or syntax.timed_out:
+            if (
+                allow_model_recovery
+                and (syntax.exit_code != 0 or syntax.timed_out)
+            ):
                 correction_succeeded = True
                 corrected_files: list[str] = []
                 for index, rel in enumerate(diagnostic_paths, start=1):
@@ -2033,6 +2089,7 @@ def _apply_planned_edits(
                         calls,
                         timeout,
                         stage=f"{stage_prefix}_compiler_correction_{index}",
+                        allow_model_recovery=allow_model_recovery,
                     )
                     warnings.extend(
                         str(value) for value in correction.get("warnings") or []
@@ -2078,6 +2135,24 @@ def _apply_planned_edits(
                             "Rolled back edit group after compiler-guided correction failed.",
                         ],
                     }
+            if syntax.exit_code != 0 or syntax.timed_out:
+                attempted_diff = current_attempted_diff()
+                for original_rel, content in originals.items():
+                    (repo / original_rel).write_text(content, encoding="utf-8")
+                return {
+                    "patch_applied": False,
+                    "selected_files": paths,
+                    "applied_files": [],
+                    "satisfied_files": satisfied,
+                    "skipped_optional_files": skipped_optional,
+                    "optional_rejected_diffs": optional_rejected_diffs,
+                    "attempted_diff": attempted_diff,
+                    "warnings": [
+                        *warnings,
+                        f"Changed-file syntax validation failed:\n{detail[:5000]}",
+                        "Rolled back edit group without another generative recovery call.",
+                    ],
+                }
     applied_optional = [rel for rel in applied if rel in optional_paths]
     if (
         applied_optional
@@ -2216,6 +2291,17 @@ def _generate_patch(
         json_mode=True,
     )
     plan = code_agent._parse_plan_json(plan_text) or {}
+    if not plan:
+        return {
+            "plan": {},
+            "selected_file": "",
+            "selected_files": [],
+            "patch_applied": False,
+            "transport_failed": not bool(plan_text.strip()),
+            "warnings": [
+                "Initial plan was empty or invalid; no edit authority was granted."
+            ],
+        }
     selected = _plan_file_items(plan, candidates, max_files)
     if not selected:
         return {
@@ -2259,6 +2345,7 @@ def _repair_after_failure(
     feedback_context: str = "",
     attempt_ledger: str = "",
     contract_evidence: Mapping[str, Any] | None = None,
+    compact_escalation: bool = False,
 ) -> dict[str, Any]:
     candidates = [
         rel
@@ -2309,6 +2396,20 @@ def _repair_after_failure(
         json_mode=True,
     )
     plan = code_agent._parse_plan_json(plan_text) or {}
+    if not plan:
+        return {
+            "round": round_index,
+            "plan": {},
+            "selected_file": "",
+            "selected_files": [],
+            "ownership_augmented_files": [],
+            "feedback_context_files": [],
+            "patch_applied": False,
+            "transport_failed": not bool(plan_text.strip()),
+            "warnings": [
+                "Repair plan was empty or invalid; no review or edit authority was granted."
+            ],
+        }
     skip_repair_review = bool(
         mechanism_invariants
         and _repair_plan_has_complete_contract_coverage(
@@ -2346,11 +2447,13 @@ def _repair_after_failure(
         "Do not use action=review as a placeholder for a causal owner. If a source file must change to satisfy "
         "an invariant, select action=modify with a concrete responsibility; otherwise omit it."
     )
-    if skip_repair_review:
+    if skip_repair_review or compact_escalation:
         plan = {
             **plan,
             "review_skipped_reason": (
-                "deterministic invariants and complete stable-contract ownership made another generative review redundant"
+                "compact local escalation permits one planning decision and no generative review"
+                if compact_escalation
+                else "deterministic invariants and complete stable-contract ownership made another generative review redundant"
             ),
         }
     else:
@@ -2372,6 +2475,26 @@ def _repair_after_failure(
         reviewed = code_agent._parse_plan_json(reviewed_text) or {}
         if _plan_file_items(reviewed, candidates, max_files):
             plan = reviewed
+    if contract_evidence and not _repair_plan_has_complete_contract_coverage(
+        plan,
+        candidates,
+        contract_evidence,
+    ):
+        return {
+            "round": round_index,
+            "plan": plan,
+            "selected_file": "",
+            "selected_files": [],
+            "ownership_augmented_files": [],
+            "feedback_context_files": _feedback_exercised_candidates(
+                feedback_context,
+                candidates,
+            ),
+            "patch_applied": False,
+            "warnings": [
+                "Repair plan did not cover every failed contract with selected source owners."
+            ],
+        }
     selected = _plan_file_items(plan, candidates, max_files)
     feedback_context_files = _feedback_exercised_candidates(
         feedback_context,
@@ -2418,6 +2541,7 @@ def _repair_after_failure(
         failure_output=(
             f"{failure_output}\n\nREAD-ONLY REPAIR-FEEDBACK TEST CONTRACTS:\n{feedback_context}"
         )[:20_000],
+        allow_model_recovery=not compact_escalation,
     )
     selected_file_paths = [str(item.get("path") or "") for item in selected]
     return {
@@ -2574,7 +2698,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     for entry in entries:
         case = _read_json(_fixture_path(fixture_root, entry.get("case"), "case"))
         started = time.monotonic()
-        calls: list[dict[str, Any]] = []
+        case_model_budget = max(
+            1.0,
+            float(getattr(args, "case_model_time_budget", 690.0) or 690.0),
+        )
+        calls: list[dict[str, Any]] = _ModelCallLedger(
+            deadline=started + case_model_budget,
+        )
         with tempfile.TemporaryDirectory(prefix=f"chili-fix-{case['case_id']}-") as temp:
             repo = Path(temp) / "repo"
             _init_repo(repo, case.get("repo_files") or {})
@@ -2730,6 +2860,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for repair_round, repair_model in enumerate(repair_schedule, start=1):
                 if public_tests["passed"] and feedback_tests["passed"]:
                     break
+                if isinstance(calls, _ModelCallLedger) and calls.budget_exhausted:
+                    patch["warnings"] = [
+                        *(patch.get("warnings") or []),
+                        "Stopped local repair because the per-case model wall budget was exhausted.",
+                    ]
+                    break
                 failure_context = _validation_failure_context(
                     public_tests,
                     feedback_tests,
@@ -2755,6 +2891,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     feedback_context=feedback_context,
                     attempt_ledger=_attempt_ledger_context(repair_attempts),
                     contract_evidence=before_test_contracts,
+                    compact_escalation=repair_model != str(args.model),
                 )
                 repair_attempts.append(repair)
                 repair["model"] = repair_model
@@ -3044,6 +3181,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     accepted_diagnostic_stages = sum(
         1 for stage in diagnostic_stages if stage.get("accepted")
     )
+    causally_accepted_diagnoses = sum(
+        1
+        for item in case_results
+        if bool((item.get("accepted_diagnosis_conclusion") or {}).get("accepted"))
+    )
     results = {
         "schema": "chili.diagnosis-to-fix-results.v5",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -3077,6 +3219,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         if diagnostic_stages
         else 0.0,
+        "causally_accepted_diagnosis_count": causally_accepted_diagnoses,
+        "causal_diagnosis_acceptance_rate": round(
+            100 * causally_accepted_diagnoses / total_cases,
+            2,
+        ),
         "average_case_duration_ms": round(average_duration, 2),
         "verdict": _verdict(case_results),
         "evaluation_verdict": evaluation_verdict,
@@ -3113,6 +3260,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="qwen2.5-coder:7b")
     parser.add_argument("--case", action="append")
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--case-model-time-budget", type=float, default=690.0)
     parser.add_argument("--max-repairs", type=int, default=5)
     parser.add_argument("--escalation-model", default="")
     parser.add_argument("--max-escalation-repairs", type=int, default=0)

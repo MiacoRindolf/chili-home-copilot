@@ -72,6 +72,57 @@ def test_contract_progress_requires_resolved_identity_and_preserves_green_set():
     assert validation_contracts.contract_regressions(before, swap) == ["alpha"]
 
 
+def test_incomplete_after_inventory_treats_omitted_pass_as_unknown():
+    before = {
+        "passed_ids": ["alpha"],
+        "failed_ids": ["beta"],
+        "complete": True,
+    }
+    after = {
+        "passed_ids": ["beta"],
+        "failed_ids": [],
+        "observed_ids": ["beta"],
+        "complete": False,
+    }
+
+    assert validation_contracts.contract_regressions(before, after) == []
+    assert validation_contracts.contract_progressed(before, after) is True
+
+
+def test_incomplete_after_inventory_preserves_explicit_pass_to_fail_regression():
+    before = {
+        "passed_ids": ["alpha"],
+        "failed_ids": ["beta"],
+        "complete": True,
+    }
+    after = {
+        "passed_ids": ["beta"],
+        "failed_ids": ["alpha"],
+        "observed_ids": ["alpha", "beta"],
+        "complete": False,
+    }
+
+    assert validation_contracts.contract_regressions(before, after) == ["alpha"]
+    assert validation_contracts.contract_progressed(before, after) is False
+
+
+def test_complete_after_inventory_keeps_omitted_pass_as_regression():
+    before = {
+        "passed_ids": ["alpha"],
+        "failed_ids": ["beta"],
+        "complete": True,
+    }
+    after = {
+        "passed_ids": ["beta"],
+        "failed_ids": [],
+        "observed_ids": ["beta"],
+        "complete": True,
+    }
+
+    assert validation_contracts.contract_regressions(before, after) == ["alpha"]
+    assert validation_contracts.contract_progressed(before, after) is False
+
+
 def test_failure_normalization_ignores_addresses_times_and_temp_paths():
     first = (
         "C:/Temp/chili-fix-one/repo/tests/test_owner.py:12 "

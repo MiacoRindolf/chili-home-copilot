@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from app.services.project_autonomy import diagnostic_reasoning as reasoning
 
@@ -1832,6 +1833,455 @@ def test_contract_repair_proposals_satisfy_supported_state_dart_and_sql_guards()
         subscription_prompt,
         projected_subscription,
     ) == []
+
+
+def test_async_rejection_slot_recognition_is_name_independent_and_guarded_after_rewrite(
+    monkeypatch,
+):
+    prompt = (
+        "Rejected async work remains in a keyed slot and gets reused; evict failures before retry."
+    )
+    source = (
+        "const workByToken = new Map<string, Promise<number>>();\n"
+        "export async function shareWork(\n"
+        "  token: string, produce: () => Promise<number>,\n"
+        "): Promise<number> {\n"
+        "  const active = workByToken.get(token);\n"
+        "  if (active) return active;\n"
+        "  const request = produce();\n"
+        "  workByToken.set(token, request);\n"
+        "  return request;\n"
+        "}\n"
+    )
+    guard_calls = []
+    original_guard = reasoning.contract_invariant_warnings
+
+    def recording_guard(statement, projected):
+        guard_calls.append(dict(projected))
+        return original_guard(statement, projected)
+
+    monkeypatch.setattr(reasoning, "contract_invariant_warnings", recording_guard)
+
+    proposals = reasoning.contract_repair_proposals(prompt, {"lib/work.ts": source})
+
+    assert set(proposals) == {"lib/work.ts"}
+    repaired = proposals["lib/work.ts"]
+    assert "request.catch" in repaired
+    assert "workByToken.get(token) === request" in repaired
+    assert "workByToken.delete(token)" in repaired
+    assert guard_calls == [{"lib/work.ts": repaired}]
+
+
+def test_async_rejection_slot_recognition_adds_coalescing_without_fixture_names():
+    prompt = "An async rejection is retained in a keyed cache slot and stale work is reused on retry."
+    source = (
+        "const jobs = new Map();\n"
+        "export async function reuseOrStart(resource, createJob) {\n"
+        "  const execution = createJob();\n"
+        "  jobs.set(resource, execution);\n"
+        "  return execution;\n"
+        "}\n"
+    )
+
+    proposals = reasoning.contract_repair_proposals(prompt, {"runtime/share.mjs": source})
+    repaired = proposals["runtime/share.mjs"]
+
+    assert "const existing = jobs.get(resource);" in repaired
+    assert "if (existing) return existing;" in repaired
+    assert "jobs.get(resource) === execution" in repaired
+    assert "jobs.delete(resource)" in repaired
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_async_rejection_slot_repair_abstains_when_the_owner_is_ambiguous():
+    prompt = "Rejected async work remains in keyed slots and must be evicted before retry."
+    source = (
+        "const slots = new Map();\n"
+        "async function first(key, start) {\n"
+        "  const operation = start();\n"
+        "  slots.set(key, operation);\n"
+        "  return operation;\n"
+        "}\n"
+        "async function second(key, start) {\n"
+        "  const operation = start();\n"
+        "  slots.set(key, operation);\n"
+        "  return operation;\n"
+        "}\n"
+    )
+
+    assert reasoning.contract_repair_proposals(prompt, {"runtime/slots.mjs": source}) == {}
+
+
+def test_class_slot_and_ordered_identity_repairs_transfer_across_names():
+    prompt = (
+        "A transient producer rejection survives every retry until restart while concurrent misses "
+        "coalesce. Cache identity must preserve caller order after case normalization."
+    )
+    files = {
+        "lib/priority-key.mjs": (
+            "export function priorityKey(scope, choices) {\n"
+            "  const canonical = Array.from(new Set(choices.map((item) => item.trim().toUpperCase()))).sort();\n"
+            "  return JSON.stringify({ scope, canonical });\n"
+            "}\n"
+        ),
+        "lib/work-registry.mjs": (
+            "export class WorkRegistry {\n"
+            "  #finished = new Map();\n"
+            "  #running = new Map();\n"
+            "  load(scope, producer) {\n"
+            "    if (this.#running.has(scope)) return this.#running.get(scope);\n"
+            "    const request = Promise.resolve().then(producer);\n"
+            "    this.#running.set(scope, request);\n"
+            "    request.then(\n"
+            "      (result) => { this.#finished.set(scope, result); this.#running.delete(scope); },\n"
+            "      (_reason) => {}\n"
+            "    );\n"
+            "    return request;\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert set(proposals) == set(files)
+    assert "new Set(choices.map" in proposals["lib/priority-key.mjs"]
+    assert ")).sort()" not in proposals["lib/priority-key.mjs"]
+    assert "this.#running.get(scope) === request" in proposals["lib/work-registry.mjs"]
+    assert proposals["lib/work-registry.mjs"].count("this.#running.delete(scope)") == 2
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_structural_contract_repairs_abstain_across_multiple_candidate_owners():
+    prompt = (
+        "A rejected promise fails on every retry until restart despite coalescing, and caller order "
+        "is contractual for cache identity."
+    )
+    slot = (
+        "const slots = new Map();\n"
+        "async function share(key, start) {\n"
+        "  const pending = start();\n"
+        "  slots.set(key, pending);\n"
+        "  return pending;\n"
+        "}\n"
+    )
+    key_owner = (
+        "export function key(scope, values) {\n"
+        "  const normalized = [...new Set(values.map((value) => value.toLowerCase()))].sort();\n"
+        "  return JSON.stringify([scope, normalized]);\n"
+        "}\n"
+    )
+
+    assert reasoning.contract_repair_proposals(
+        prompt,
+        {
+            "lib/left-slot.mjs": slot,
+            "lib/right-slot.mjs": slot.replace("slots", "requests"),
+        },
+    ) == {}
+    assert reasoning.contract_repair_proposals(
+        prompt,
+        {"lib/left-key.mjs": key_owner, "lib/right-key.mjs": key_owner},
+    ) == {}
+
+
+def test_disclosed_node_cache_order_and_private_slot_fixture_is_repaired():
+    prompt = (
+        "After a caller requests French before English, a later caller requesting English before French "
+        "can receive the French catalog. One transient loader rejection leaves every retry failing until "
+        "the worker restarts. Concurrent successful misses invoke the loader once, locale tags compare "
+        "case-insensitively, and caller preference order is contractual. Preserve request coalescing and "
+        "cached object identity."
+    )
+    files = {
+        "src/catalog-cache-key.mjs": (
+            "export function catalogCacheKey({ tenant, preferredLocales }) {\n"
+            "  const normalized = [...new Set(preferredLocales.map((locale) => locale.toLowerCase()))].sort();\n"
+            "  return JSON.stringify([tenant, normalized]);\n"
+            "}\n"
+        ),
+        "src/async-slot-cache.mjs": (
+            "export class AsyncSlotCache {\n"
+            "  #values = new Map();\n"
+            "  #inflight = new Map();\n\n"
+            "  get(key, loader) {\n"
+            "    if (this.#values.has(key)) return Promise.resolve(this.#values.get(key));\n"
+            "    if (this.#inflight.has(key)) return this.#inflight.get(key);\n"
+            "    const pending = Promise.resolve().then(loader);\n"
+            "    this.#inflight.set(key, pending);\n"
+            "    pending.then(\n"
+            "      (value) => { this.#values.set(key, value); this.#inflight.delete(key); },\n"
+            "      () => {}\n"
+            "    );\n"
+            "    return pending;\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/locale-choice.mjs": "export function chooseLocale(values) { return values[0]; }\n",
+        "src/catalog-service.mjs": "export class CatalogService {}\n",
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert set(proposals) == {"src/catalog-cache-key.mjs", "src/async-slot-cache.mjs"}
+    assert ")).sort()" not in proposals["src/catalog-cache-key.mjs"]
+    assert "this.#inflight.get(key) === pending" in proposals["src/async-slot-cache.mjs"]
+    assert reasoning.contract_invariant_warnings(prompt, {**files, **proposals}) == []
+
+
+def test_monotonic_materialized_head_recognition_transfers_across_sql_names():
+    prompt = "A monotonic SQL materialized head lets stale sequence data replace newer metadata."
+    variants = {
+        "sql/document_head.sql": (
+            "INSERT INTO document_heads "
+            "(document_key, generation_no, body_json, observed_at, received_at)\n"
+            "VALUES (:document_key, :generation_no, :body_json, :observed_at, :received_at)\n"
+            "ON CONFLICT(document_key) DO UPDATE SET\n"
+            "  generation_no = MAX(document_heads.generation_no, excluded.generation_no),\n"
+            "  body_json = CASE WHEN excluded.generation_no > document_heads.generation_no "
+            "THEN excluded.body_json ELSE document_heads.body_json END,\n"
+            "  observed_at = excluded.observed_at,\n"
+            "  received_at = excluded.received_at;\n"
+        ),
+        "sql/projection_head.sql": (
+            "INSERT INTO projection_state AS current "
+            "(stream_key, source_offset, rendered, checksum)\n"
+            "VALUES (:stream_key, :source_offset, :rendered, :checksum)\n"
+            "ON CONFLICT(stream_key) DO UPDATE SET\n"
+            "  source_offset = GREATEST(excluded.source_offset, current.source_offset),\n"
+            "  rendered = CASE WHEN excluded.source_offset >= current.source_offset "
+            "THEN excluded.rendered ELSE current.rendered END,\n"
+            "  checksum = excluded.checksum;\n"
+        ),
+    }
+
+    proposals = {
+        path: reasoning.contract_repair_proposals(prompt, {path: source})[path]
+        for path, source in variants.items()
+    }
+
+    assert (
+        "WHERE excluded.generation_no > document_heads.generation_no;"
+        in proposals["sql/document_head.sql"]
+    )
+    assert (
+        "WHERE excluded.source_offset >= current.source_offset;"
+        in proposals["sql/projection_head.sql"]
+    )
+    assert "observed_at = excluded.observed_at" in proposals["sql/document_head.sql"]
+    assert "received_at = excluded.received_at" in proposals["sql/document_head.sql"]
+    assert "checksum = excluded.checksum" in proposals["sql/projection_head.sql"]
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_monotonic_materialized_head_repair_abstains_on_conflicting_order_signals():
+    prompt = "A monotonic SQL materialized head must ignore stale updates."
+    source = (
+        "INSERT INTO aggregate_heads AS stored (item_key, revision_no, source_offset, payload, note)\n"
+        "VALUES (:item_key, :revision_no, :source_offset, :payload, :note)\n"
+        "ON CONFLICT(item_key) DO UPDATE SET\n"
+        "  revision_no = MAX(stored.revision_no, excluded.revision_no),\n"
+        "  payload = CASE WHEN excluded.source_offset > stored.source_offset "
+        "THEN excluded.payload ELSE stored.payload END,\n"
+        "  note = excluded.note;\n"
+    )
+
+    assert reasoning.contract_repair_proposals(prompt, {"sql/ambiguous.sql": source}) == {}
+
+
+def test_cross_file_monotonic_head_repair_transfers_across_sql_names():
+    prompt = (
+        "An older reconnect can regress stored head metadata and the current version read. "
+        "Source sequence is the authoritative ordering for each scope."
+    )
+    files = {
+        "sql/schema.sql": (
+            "CREATE TABLE scopes (scope TEXT PRIMARY KEY);\n"
+            "CREATE TABLE snapshots (\n"
+            "  scope TEXT NOT NULL, snapshot_id TEXT NOT NULL, source_sequence INTEGER NOT NULL, payload TEXT,\n"
+            "  PRIMARY KEY (scope, snapshot_id), UNIQUE (scope, source_sequence)\n"
+            ");\n"
+            "CREATE TABLE visible_snapshots (\n"
+            "  scope TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, source_sequence INTEGER NOT NULL,\n"
+            "  FOREIGN KEY (scope, snapshot_id) REFERENCES snapshots(scope, snapshot_id)\n"
+            ");\n"
+        ),
+        "sql/update-visible.sql": (
+            "CREATE TRIGGER snapshot_updates_visible AFTER INSERT ON snapshots BEGIN\n"
+            "  INSERT INTO visible_snapshots(scope, snapshot_id, source_sequence)\n"
+            "  VALUES (NEW.scope, NEW.snapshot_id, NEW.source_sequence)\n"
+            "  ON CONFLICT(scope) DO UPDATE SET\n"
+            "    snapshot_id = excluded.snapshot_id,\n"
+            "    source_sequence = excluded.source_sequence;\n"
+            "END;\n"
+        ),
+        "sql/read-visible.sql": (
+            "SELECT s.scope, r.snapshot_id, r.payload, h.source_sequence\n"
+            "FROM scopes AS s\n"
+            "JOIN visible_snapshots AS h ON h.scope = s.scope\n"
+            "JOIN snapshots AS r ON r.scope = s.scope\n"
+            "WHERE r.rowid = (\n"
+            "  SELECT MAX(candidate.rowid) FROM snapshots AS candidate\n"
+            "  WHERE candidate.scope = s.scope\n"
+            ") ORDER BY s.scope;\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert set(proposals) == {"sql/update-visible.sql", "sql/read-visible.sql"}
+    assert (
+        "WHERE excluded.source_sequence > visible_snapshots.source_sequence;"
+        in proposals["sql/update-visible.sql"]
+    )
+    assert "r.scope = h.scope" in proposals["sql/read-visible.sql"]
+    assert "r.snapshot_id = h.snapshot_id" in proposals["sql/read-visible.sql"]
+    assert "rowid" not in proposals["sql/read-visible.sql"].lower()
+    assert reasoning.contract_invariant_warnings(prompt, {**files, **proposals}) == []
+
+
+def test_cross_file_monotonic_head_repair_abstains_on_order_or_owner_ambiguity():
+    prompt = (
+        "A stale import regresses the stored head and current version; sequence and revision ordering "
+        "must remain monotonic."
+    )
+    schema = (
+        "CREATE TABLE history (scope TEXT, item_id TEXT, sequence_no INTEGER, revision_no INTEGER, "
+        "PRIMARY KEY(scope, item_id));\n"
+        "CREATE TABLE heads (scope TEXT PRIMARY KEY, item_id TEXT, sequence_no INTEGER, revision_no INTEGER, "
+        "FOREIGN KEY(scope, item_id) REFERENCES history(scope, item_id));\n"
+    )
+    ambiguous_upsert = (
+        "INSERT INTO heads(scope, item_id, sequence_no, revision_no)\n"
+        "VALUES (NEW.scope, NEW.item_id, NEW.sequence_no, NEW.revision_no)\n"
+        "ON CONFLICT(scope) DO UPDATE SET item_id = excluded.item_id, "
+        "sequence_no = excluded.sequence_no, revision_no = excluded.revision_no;\n"
+    )
+    read = (
+        "SELECT r.* FROM scopes s JOIN heads h ON h.scope = s.scope "
+        "JOIN history r ON r.scope = s.scope "
+        "WHERE r.rowid = (SELECT MAX(c.rowid) FROM history c WHERE c.scope = s.scope);\n"
+    )
+
+    assert reasoning.contract_repair_proposals(
+        prompt,
+        {"schema.sql": schema, "head.sql": ambiguous_upsert, "read.sql": read},
+    ) == {}
+    single_order_upsert = ambiguous_upsert.replace(
+        ", revision_no = excluded.revision_no",
+        "",
+    )
+    assert reasoning.contract_repair_proposals(
+        prompt,
+        {
+            "schema.sql": schema,
+            "head-a.sql": single_order_upsert,
+            "head-b.sql": single_order_upsert,
+            "read.sql": read,
+        },
+    ) == {}
+
+
+def test_cross_file_monotonic_head_repair_requires_unique_scoped_order():
+    prompt = (
+        "A stale import regresses the stored head and current version; source sequence is the "
+        "authoritative ordering."
+    )
+    schema = (
+        "CREATE TABLE history (scope TEXT, item_id TEXT, source_sequence INTEGER, "
+        "PRIMARY KEY(scope, item_id));\n"
+        "CREATE TABLE heads (scope TEXT PRIMARY KEY, item_id TEXT, source_sequence INTEGER, "
+        "FOREIGN KEY(scope, item_id) REFERENCES history(scope, item_id));\n"
+    )
+    upsert = (
+        "INSERT INTO heads(scope, item_id, source_sequence) "
+        "VALUES (NEW.scope, NEW.item_id, NEW.source_sequence) "
+        "ON CONFLICT(scope) DO UPDATE SET item_id = excluded.item_id, "
+        "source_sequence = excluded.source_sequence;\n"
+    )
+    read = (
+        "SELECT r.* FROM scopes s JOIN heads h ON h.scope = s.scope "
+        "JOIN history r ON r.scope = s.scope "
+        "WHERE r.rowid = (SELECT MAX(c.rowid) FROM history c WHERE c.scope = s.scope);\n"
+    )
+
+    assert reasoning.contract_repair_proposals(
+        prompt,
+        {"schema.sql": schema, "head.sql": upsert, "read.sql": read},
+    ) == {}
+
+
+def test_disclosed_sql_document_head_fixture_replays_monotonically():
+    prompt = (
+        "After an older reconnect batch is imported behind a newer approved current version, stored head "
+        "metadata and the endpoint regress. Logical clocks are unique per document and are the authoritative "
+        "ordering; SQLite row order is operational metadata only."
+    )
+    files = {
+        "sql/001_schema.sql": (
+            "CREATE TABLE documents (document_id TEXT PRIMARY KEY, title TEXT NOT NULL);\n"
+            "CREATE TABLE document_versions (\n"
+            "  document_id TEXT NOT NULL, version_id TEXT NOT NULL, logical_clock INTEGER NOT NULL,\n"
+            "  body TEXT NOT NULL, import_batch TEXT NOT NULL,\n"
+            "  PRIMARY KEY (document_id, version_id), UNIQUE (document_id, logical_clock)\n"
+            ");\n"
+            "CREATE TABLE document_heads (\n"
+            "  document_id TEXT PRIMARY KEY, version_id TEXT NOT NULL, logical_clock INTEGER NOT NULL,\n"
+            "  FOREIGN KEY (document_id, version_id)\n"
+            "    REFERENCES document_versions(document_id, version_id)\n"
+            ");\n"
+        ),
+        "sql/002_head_triggers.sql": (
+            "CREATE TRIGGER document_version_updates_head AFTER INSERT ON document_versions BEGIN\n"
+            "  INSERT INTO document_heads(document_id, version_id, logical_clock)\n"
+            "  VALUES (NEW.document_id, NEW.version_id, NEW.logical_clock)\n"
+            "  ON CONFLICT(document_id) DO UPDATE SET\n"
+            "    version_id = excluded.version_id, logical_clock = excluded.logical_clock;\n"
+            "END;\n"
+        ),
+        "sql/read_current.sql": (
+            "SELECT d.document_id, v.version_id, v.body, h.logical_clock\n"
+            "FROM documents AS d\n"
+            "JOIN document_heads AS h ON h.document_id = d.document_id\n"
+            "JOIN document_versions AS v ON v.document_id = d.document_id\n"
+            "WHERE v.rowid = (SELECT MAX(candidate.rowid) FROM document_versions AS candidate "
+            "WHERE candidate.document_id = d.document_id)\n"
+            "ORDER BY d.document_id;\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {**files, **proposals}
+
+    assert set(proposals) == {"sql/002_head_triggers.sql", "sql/read_current.sql"}
+    database = sqlite3.connect(":memory:")
+    database.row_factory = sqlite3.Row
+    database.executescript(projected["sql/001_schema.sql"])
+    database.executescript(projected["sql/002_head_triggers.sql"])
+    database.executemany(
+        "INSERT INTO documents(document_id, title) VALUES (?, ?)",
+        [("policy", "Policy"), ("runbook", "Runbook")],
+    )
+    database.executemany(
+        "INSERT INTO document_versions VALUES (?, ?, ?, ?, ?)",
+        [
+            ("policy", "p20", 20, "draft", "live-a"),
+            ("runbook", "r4", 4, "boot", "live-a"),
+            ("policy", "p35", 35, "ratified", "live-b"),
+            ("runbook", "r7", 7, "recovered", "live-c"),
+            ("policy", "p30", 30, "archive replay", "archive-restore"),
+        ],
+    )
+    visible = {
+        row["document_id"]: (row["version_id"], row["body"], row["logical_clock"])
+        for row in database.execute(projected["sql/read_current.sql"])
+    }
+
+    assert visible == {
+        "policy": ("p35", "ratified", 35),
+        "runbook": ("r7", "recovered", 7),
+    }
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
 
 
 def test_unknown_hypothesis_cannot_be_confirmed_when_known_family_has_evidence():
