@@ -1,0 +1,275 @@
+{
+  "schema": "chili.fourteenth.runtime-validation.v3",
+  "validator": "codex-independent-runtime-v3-validator",
+  "target_commit": "a249993262ce5c2f621ed17ce67b7cccf8e74fef",
+  "target_tree": "c7fbbea2592871feb26e3f0ebda60b88685ce103",
+  "validation_branch": "codex/fourteenth-holdout-v3-runtime-validation",
+  "verdict": "PASS",
+  "authored_files_unchanged": true,
+  "checks": {
+    "target_commit_exact": true,
+    "branch_created_from_target_commit": true,
+    "validation_only_preflight_exit_zero": true,
+    "validation_only_preflight_valid": true,
+    "active_manifest_has_12_cases": true,
+    "all_12_public_green": true,
+    "all_12_feedback_red": true,
+    "all_12_final_red": true,
+    "all_direct_syntax_checks_green": true,
+    "feedback_public_rechecks_green": true,
+    "final_public_rechecks_green": true,
+    "declared_runners_correct": true,
+    "v3_redirect_artifact_hashes_match_receipt": true,
+    "v3_redirect_feedback_baseline_confirmed": true,
+    "v3_redirect_final_baseline_confirmed": true,
+    "no_evaluation_mode": true,
+    "no_model_calls": true,
+    "process_allowlist_only": true,
+    "exactly_two_owners_each": true,
+    "owners_within_candidate_paths": true,
+    "max_files_exactly_two_each": true,
+    "separate_public_feedback_final_repos": true,
+    "fresh_final_repos": true,
+    "feedback_absent_from_final_repos": true,
+    "final_paths_present": true,
+    "final_seed_trees_match_repo_files": true,
+    "final_seed_hashes_match_case_inputs": true,
+    "authored_files_unchanged": true,
+    "manifest_source_script_project_ws_unchanged": true,
+    "prior_v1_v2_validation_files_unchanged": true,
+    "only_requested_validation_files_written": true
+  },
+  "environment": {
+    "os": "windows_x64",
+    "python": "3.13.11",
+    "pytest": "9.0.2",
+    "node": "24.15.0",
+    "dart": "3.11.1 stable",
+    "git": "2.53.0.windows.1"
+  },
+  "report_inputs": {
+    "manifest_sha256": "899570e965437b3b028c73a5ddf5f30f52850e7556f3d00d27c418ce6dcab12f",
+    "benchmark_script_sha256": "8a1ffe4b7ea68824892330e218154e1601f18619b4cba1af8f3181087254b361",
+    "preflight_stdout_sha256": "ceca58ef0e7be0a3b223e1861c83f2db60814a1d69ef0662de0712ef98ffc014",
+    "preflight_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "direct_runtime_evidence_sha256": "9c0e72d1b821ef01bba66bc14b2bec42c6cfc3c25987b8a01d3ce366bd232a88",
+    "authored_input_aggregate_sha256": "0fc6adfdc16f2e0662948333c4b431c3d9d7a1830d86a08603acd19daa0679c9",
+    "authored_input_file_count": 42,
+    "prior_validation_file_count": 16
+  },
+  "preflight": {
+    "command": "python scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures --json",
+    "exit_code": 0,
+    "schema": "chili.diagnosis-to-fix-fixture-validation.v3",
+    "case_count": 12,
+    "valid": true,
+    "public_passed_count": 12,
+    "feedback_failed_count": 12,
+    "final_failed_count": 12,
+    "sealed_final_adjudication_count": 12,
+    "external_final_oracle_count": 12,
+    "stderr": "",
+    "model_calls": 0
+  },
+  "model_audit": {
+    "evaluation_mode_invocations": 0,
+    "model_calls": 0,
+    "direct_process_names": [
+      "dart",
+      "git",
+      "node",
+      "python"
+    ],
+    "model_processes": [],
+    "network_proxies": "127.0.0.1:9",
+    "validation_return_precedes_model_discovery": true,
+    "evidence": "The --validate-fixtures branch returns before ollama_client.list_models(); direct execution used only disposable repositories and declared language tools."
+  },
+  "direct_method": {
+    "repo_partitions_per_case": [
+      "public",
+      "feedback",
+      "final"
+    ],
+    "syntax_before_behavior": true,
+    "public_materialization": "fresh Git repository from repo_files only",
+    "feedback_materialization": "fresh Git repository from repo_files plus feedback_files only",
+    "final_materialization": "fresh Git repository from repo_files plus final_files only",
+    "public_rechecked_after_feedback": true,
+    "public_rechecked_after_final": true,
+    "sql_parse_execution": "pytest executed every declared SQL query through Python sqlite3"
+  },
+  "v3_redirect_baseline": {
+    "case_id": "th14_dart_redirect_handoffs",
+    "artifact_sha256": {
+      "case": "3774b7d6688bf6d8f2dafa0c67a4500a18f468e4b45e838bfb9eac179da7477a",
+      "oracle": "d350364a517ef17b648c0afd3fac810c33637db032ffb02f5c3e5d76584ced8f",
+      "final_oracle": "36d8f782b7f79b76b86d2b61edf2206ac6ad89914d50f6174e4805407b25f971",
+      "triple_aggregate": "3e57947e1ef6d50514eba858a862d75e4e1ab9e70d5d958b7b783ea918adfaa9"
+    },
+    "syntax_exit_codes": {
+      "public": [0],
+      "feedback": [0],
+      "final": [0]
+    },
+    "public": {
+      "command": "dart run tests/public_test.dart",
+      "exit_code": 0,
+      "combined_output_sha256": "e9430cda088e513a2db8d06718e541a09293e362010cf0a8dfa0590ee1f329b4",
+      "evidence": "public tests passed"
+    },
+    "feedback": {
+      "command": "dart run tests/feedback_test.dart",
+      "exit_code": 255,
+      "combined_output_sha256": "39794123cdfa0da292dc796fe4cabfbc68dd9f1950125561aca10845e5558a5b",
+      "evidence": "see-other changes a write into a read"
+    },
+    "final": {
+      "command": "dart run tests/final_test.dart",
+      "exit_code": 255,
+      "combined_output_sha256": "bd91f42b38cce8ee53e30fe0a1ace2493752404213095b419f0e67121067f945",
+      "evidence": "see-other changes PATCH into GET"
+    },
+    "feedback_public_recheck_exit_code": 0,
+    "final_public_recheck_exit_code": 0,
+    "receipt_baseline_match": true,
+    "hash_encoding": "SHA-256(stdout bytes + NUL + stderr bytes)"
+  },
+  "cases": [
+    {
+      "case_id": "th14_dart_redirect_handoffs",
+      "runner": "dart",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [255, 0],
+      "final_exit_codes": [255, 0],
+      "feedback_evidence": "see-other changes a write into a read",
+      "final_evidence": "see-other changes PATCH into GET",
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_dart_semver_selection",
+      "runner": "dart",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [255, 0],
+      "final_exit_codes": [255, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_dart_websocket_fragments",
+      "runner": "dart",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [255, 0],
+      "final_exit_codes": [255, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_node_esm_plugin_loading",
+      "runner": "node_test",
+      "syntax_command_counts": {"public": 5, "feedback": 7, "final": 10},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_node_http_preconditions",
+      "runner": "node_test",
+      "syntax_command_counts": {"public": 4, "feedback": 5, "final": 5},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_node_partition_commits",
+      "runner": "node_test",
+      "syntax_command_counts": {"public": 4, "feedback": 5, "final": 5},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_py_context_offload",
+      "runner": "pytest",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_py_decorated_handlers",
+      "runner": "pytest",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_py_link_pagination",
+      "runner": "pytest",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_sql_partner_search",
+      "runner": "pytest",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_sql_registry_refresh",
+      "runner": "pytest",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    },
+    {
+      "case_id": "th14_sql_suppression_batches",
+      "runner": "pytest",
+      "syntax_command_counts": {"public": 1, "feedback": 1, "final": 1},
+      "syntax_all_zero": true,
+      "public_exit_codes": [0],
+      "feedback_exit_codes": [1, 0],
+      "final_exit_codes": [1, 0],
+      "fresh_final_repo": true,
+      "verdict": "PASS"
+    }
+  ],
+  "findings": []
+}
