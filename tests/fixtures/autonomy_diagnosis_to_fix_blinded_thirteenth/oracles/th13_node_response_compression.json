@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_node_response_compression",
+  "expected_dimension": "config",
+  "expected_files": [
+    "src/compression-config.mjs",
+    "src/content-type-match.mjs"
+  ],
+  "feedback_files": {
+    "tests/feedback.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { parseCompressibleTypes } from '../src/compression-config.mjs';\nimport { matchesConfiguredType } from '../src/content-type-match.mjs';\n\ntest('comma-separated deployment values ignore surrounding whitespace', () => {\n  assert.deepEqual(\n    parseCompressibleTypes(' application/json, text/csv , text/plain '),\n    ['application/json', 'text/csv', 'text/plain']\n  );\n});\n\ntest('Content-Type parameters do not change the configured media type match', () => {\n  assert.equal(\n    matchesConfiguredType('text/csv; charset=utf-8', ['text/csv']),\n    true\n  );\n  assert.equal(\n    matchesConfiguredType('application/json; profile=compact', ['application/json']),\n    true\n  );\n  assert.equal(\n    matchesConfiguredType('image/png; profile=compact', ['application/json']),\n    false\n  );\n});\n"
+  }
+}

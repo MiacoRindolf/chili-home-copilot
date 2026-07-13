@@ -1,0 +1,90 @@
+{
+  "schema": "chili.diagnosis-to-fix-manifest.v3",
+  "reference_family": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/th13_dart_dependency_report.json",
+      "oracle": "oracles/th13_dart_dependency_report.json",
+      "final_oracle": "final_oracles/th13_dart_dependency_report.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/th13_dart_offset_schedule.json",
+      "oracle": "oracles/th13_dart_offset_schedule.json",
+      "final_oracle": "final_oracles/th13_dart_offset_schedule.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/th13_dart_portable_exports.json",
+      "oracle": "oracles/th13_dart_portable_exports.json",
+      "final_oracle": "final_oracles/th13_dart_portable_exports.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/th13_node_facility_rollup.json",
+      "oracle": "oracles/th13_node_facility_rollup.json",
+      "final_oracle": "final_oracles/th13_node_facility_rollup.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/th13_node_job_recovery.json",
+      "oracle": "oracles/th13_node_job_recovery.json",
+      "final_oracle": "final_oracles/th13_node_job_recovery.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/th13_node_response_compression.json",
+      "oracle": "oracles/th13_node_response_compression.json",
+      "final_oracle": "final_oracles/th13_node_response_compression.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/th13_py_factory_binding.json",
+      "oracle": "oracles/th13_py_factory_binding.json",
+      "final_oracle": "final_oracles/th13_py_factory_binding.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/th13_py_monthly_settlement.json",
+      "oracle": "oracles/th13_py_monthly_settlement.json",
+      "final_oracle": "final_oracles/th13_py_monthly_settlement.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/th13_py_task_teardown.json",
+      "oracle": "oracles/th13_py_task_teardown.json",
+      "final_oracle": "final_oracles/th13_py_task_teardown.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/th13_sql_delimited_profile.json",
+      "oracle": "oracles/th13_sql_delimited_profile.json",
+      "final_oracle": "final_oracles/th13_sql_delimited_profile.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/th13_sql_export_job_state.json",
+      "oracle": "oracles/th13_sql_export_job_state.json",
+      "final_oracle": "final_oracles/th13_sql_export_job_state.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/th13_sql_package_units.json",
+      "oracle": "oracles/th13_sql_package_units.json",
+      "final_oracle": "final_oracles/th13_sql_package_units.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    }
+  ]
+}

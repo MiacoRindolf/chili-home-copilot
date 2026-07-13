@@ -1,0 +1,6 @@
+{
+  "case_id": "th13_py_task_teardown",
+  "final_files": {
+    "tests/test_runtime_final.py": "import pytest\n\nfrom task_runtime import run_task\n\n\ndef test_process_exit_survives_failed_teardown_and_all_hooks_run():\n    events = []\n\n    def task(teardowns):\n        teardowns.callback(lambda: events.append(\"first\"))\n\n        def broken_teardown():\n            events.append(\"broken\")\n            raise RuntimeError(\"teardown failed\")\n\n        teardowns.callback(broken_teardown)\n        teardowns.callback(lambda: events.append(\"last\"))\n        raise SystemExit(\"worker shutdown\")\n\n    with pytest.raises(SystemExit, match=\"worker shutdown\"):\n        run_task(task)\n\n    assert events == [\"last\", \"broken\", \"first\"]\n"
+  }
+}

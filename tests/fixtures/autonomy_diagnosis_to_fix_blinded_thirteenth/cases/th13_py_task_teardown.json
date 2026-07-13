@@ -1,0 +1,16 @@
+{
+  "case_id": "th13_py_task_teardown",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "Worker shutdown incidents leave some task resources open. A process-level stop raised by a task can bypass its registered teardown hooks, and when one hook raises, hooks registered before it do not run. Incident reporting must retain the task's original termination rather than replace it with a teardown failure. Successful tasks and ordinary failures with clean hooks currently behave as expected.",
+  "candidate_paths": [
+    "teardown_stack.py",
+    "task_runtime.py"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "teardown_stack.py": "from collections.abc import Callable\n\n\nclass TeardownStack:\n    def __init__(self) -> None:\n        self._callbacks: list[Callable[[], object]] = []\n\n    def callback(self, function: Callable[[], object]) -> None:\n        self._callbacks.append(function)\n\n    def close(self) -> None:\n        while self._callbacks:\n            function = self._callbacks.pop()\n            function()\n",
+    "task_runtime.py": "from collections.abc import Callable\nfrom typing import TypeVar\n\nfrom teardown_stack import TeardownStack\n\n\nT = TypeVar(\"T\")\n\n\ndef run_task(task: Callable[[TeardownStack], T]) -> T:\n    teardowns = TeardownStack()\n    try:\n        result = task(teardowns)\n    except Exception:\n        teardowns.close()\n        raise\n    teardowns.close()\n    return result\n",
+    "tests/test_public.py": "import pytest\n\nfrom task_runtime import run_task\n\n\ndef test_successful_task_runs_teardowns_in_reverse_order():\n    events = []\n\n    def task(teardowns):\n        teardowns.callback(lambda: events.append(\"first\"))\n        teardowns.callback(lambda: events.append(\"second\"))\n        return \"done\"\n\n    assert run_task(task) == \"done\"\n    assert events == [\"second\", \"first\"]\n\n\ndef test_ordinary_task_error_runs_clean_teardown_and_is_preserved():\n    events = []\n\n    def task(teardowns):\n        teardowns.callback(lambda: events.append(\"closed\"))\n        raise RuntimeError(\"task failed\")\n\n    with pytest.raises(RuntimeError, match=\"task failed\"):\n        run_task(task)\n\n    assert events == [\"closed\"]\n"
+  }
+}

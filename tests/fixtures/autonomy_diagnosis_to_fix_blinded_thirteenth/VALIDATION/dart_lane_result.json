@@ -1,0 +1,280 @@
+{
+  "status": "PASS",
+  "case_count": 3,
+  "all_required_gates_verified": true,
+  "incomplete_or_failed_required_gates": [],
+  "author_root": "D:\\dev\\chili-thirteenth-author-dart",
+  "output_root": "D:\\dev\\chili-thirteenth-validation-lane-dart",
+  "language": "dart",
+  "runtime": "Dart SDK 3.11.1 stable windows_x64",
+  "source_skeleton_normalization": {
+    "version": "dart-lexical-skeleton-v1",
+    "input": "baseline candidate source text embedded in case.json",
+    "steps": [
+      "Remove // and /* */ comments outside literals.",
+      "Replace each complete raw or non-raw single-, double-, or triple-quoted string literal with STR.",
+      "Replace each numeric literal payload with NUM.",
+      "Preserve the fixed Dart control/declaration/context keyword set.",
+      "Map leading-uppercase identifiers to TYPE, underscore-leading identifiers to PRIVATE, and all other non-keyword identifiers to ID.",
+      "Preserve operators and punctuation and join tokens with one ASCII space and no trailing newline."
+    ],
+    "preserved_keywords": [
+      "abstract", "as", "assert", "async", "await", "break", "case", "catch", "class", "const", "continue", "covariant", "default", "deferred", "do", "dynamic", "else", "enum", "export", "extends", "extension", "external", "factory", "false", "final", "finally", "for", "get", "hide", "if", "implements", "import", "in", "interface", "is", "late", "library", "mixin", "new", "null", "of", "on", "operator", "part", "required", "rethrow", "return", "sealed", "set", "show", "static", "super", "switch", "sync", "this", "throw", "true", "try", "typedef", "var", "void", "when", "while", "with", "yield"
+    ],
+    "per_candidate_hash_input": "normalized token stream encoded as UTF-8",
+    "combined_hash_input": "candidate paths sorted ascending; concatenate @@PATH <path><LF><normalized skeleton><LF> for each candidate; encode as UTF-8",
+    "hash": "SHA-256 lowercase hex"
+  },
+  "cases": [
+    {
+      "case_id": "th13_dart_dependency_report",
+      "dimension": "dependency",
+      "mechanism": "dual-schema scan-report adaptation plus precedence-aware Boolean license-expression evaluation",
+      "assertion_family": "decoded record count and fields, expression satisfaction and violation membership, and runtime-scope filtering",
+      "feedback_boundary": "one upgraded document.artifacts record with nested coordinates/license and runtime scope, plus a simple OR satisfied by one allowed license",
+      "final_boundary": "three upgraded records with parenthesized AND nested beneath OR, exactly one unsatisfied runtime expression, and development-scope exclusion",
+      "candidate_paths": [
+        "lib/scan_report_adapter.dart",
+        "lib/license_gate.dart"
+      ],
+      "expected_owners": [
+        "lib/scan_report_adapter.dart",
+        "lib/license_gate.dart"
+      ],
+      "max_files": 2,
+      "gates": {
+        "json_parse_identity_path_test_maps": true,
+        "dart_ascii_relative_contained_no_symlinks": true,
+        "no_public_oracle_or_hidden_test_leak": true,
+        "candidate_and_owner_set_valid": true,
+        "baseline_public_pass": true,
+        "baseline_feedback_fail": true,
+        "baseline_final_fail": true,
+        "repaired_public_feedback_final_pass": true,
+        "each_owner_revert_causes_required_failure": true,
+        "final_materially_new": true
+      },
+      "runs": {
+        "baseline": {
+          "public": {"command": "dart tests/public_test.dart", "exit_code": 0, "output": "public tests passed"},
+          "feedback": {"command": "dart tests/feedback_test.dart", "exit_code": 255, "output": "Bad state: reads artifacts from upgraded reports"},
+          "final": {"command": "dart tests/final_test.dart", "exit_code": 255, "output": "Bad state: keeps all upgraded dependency records"}
+        },
+        "repaired": {
+          "public": {"command": "dart tests/public_test.dart", "exit_code": 0, "output": "public tests passed"},
+          "feedback": {"command": "dart tests/feedback_test.dart", "exit_code": 0, "output": "feedback tests passed"},
+          "final": {"command": "dart tests/final_test.dart", "exit_code": 0, "output": "final tests passed"}
+        },
+        "revert_lib_scan_report_adapter_dart": {
+          "public_exit": 0,
+          "feedback_exit": 255,
+          "feedback_output": "Bad state: reads artifacts from upgraded reports",
+          "final_exit": 255,
+          "final_output": "Bad state: keeps all upgraded dependency records"
+        },
+        "revert_lib_license_gate_dart": {
+          "public_exit": 0,
+          "feedback_exit": 255,
+          "feedback_output": "Bad state: an allowed alternative satisfies a compound expression",
+          "final_exit": 255,
+          "final_output": "Bad state: evaluates alternatives, conjunctions, and scope"
+        }
+      },
+      "final_novelty": "Three upgraded records compose nested AND/OR precedence, parentheses, runtime violation selection, and development-scope filtering; feedback has one upgraded record and simple OR only.",
+      "source_skeletons": {
+        "lib/license_gate.dart": {"source_skeleton_sha256": "14f8975f34f2f46a9f485c0d68ad91adfd3078fdd7267f0a9f3f4a603530c7a5", "token_count": 96},
+        "lib/scan_report_adapter.dart": {"source_skeleton_sha256": "84a9b2d730b39c05ae090b28a869923242499d119775d760a38d5450b57ffe5f", "token_count": 236}
+      },
+      "combined_source_skeleton_sha256": "a247b5e8afcece29db174cfee8ca72bd15b058fb1974c7823990023c9bb0d839"
+    },
+    {
+      "case_id": "th13_dart_offset_schedule",
+      "dimension": "clock",
+      "mechanism": "inclusive offset-transition lookup plus target-time local-wall-clock to UTC resolution",
+      "assertion_family": "exact Duration offset equality and exact DateTime next-run equality around a discontinuity",
+      "feedback_boundary": "the new offset at the exact transition and a later 09:00 wall-clock target resolved with its effective offset",
+      "final_boundary": "the newly created 03:00 wall-clock target resolves to the exact UTC transition instant",
+      "candidate_paths": [
+        "lib/offset_schedule.dart",
+        "lib/daily_window.dart"
+      ],
+      "expected_owners": [
+        "lib/offset_schedule.dart",
+        "lib/daily_window.dart"
+      ],
+      "max_files": 2,
+      "gates": {
+        "json_parse_identity_path_test_maps": true,
+        "dart_ascii_relative_contained_no_symlinks": true,
+        "no_public_oracle_or_hidden_test_leak": true,
+        "candidate_and_owner_set_valid": true,
+        "baseline_public_pass": true,
+        "baseline_feedback_fail": true,
+        "baseline_final_fail": true,
+        "repaired_public_feedback_final_pass": true,
+        "each_owner_revert_causes_required_failure": true,
+        "final_materially_new": true
+      },
+      "runs": {
+        "baseline": {
+          "public": {"command": "dart tests/public_test.dart", "exit_code": 0, "output": "public tests passed"},
+          "feedback": {"command": "dart tests/feedback_test.dart", "exit_code": 255, "output": "Bad state: the new offset starts at the transition instant"},
+          "final": {"command": "dart tests/final_test.dart", "exit_code": 255, "output": "Bad state: a wall-clock target created by the jump resolves to the transition instant"}
+        },
+        "repaired": {
+          "public": {"command": "dart tests/public_test.dart", "exit_code": 0, "output": "public tests passed"},
+          "feedback": {"command": "dart tests/feedback_test.dart", "exit_code": 0, "output": "feedback tests passed"},
+          "final": {"command": "dart tests/final_test.dart", "exit_code": 0, "output": "final tests passed"}
+        },
+        "revert_lib_offset_schedule_dart": {
+          "public_exit": 0,
+          "feedback_exit": 255,
+          "feedback_output": "Bad state: the new offset starts at the transition instant",
+          "final_exit": 255,
+          "final_output": "Bad state: a wall-clock target created by the jump resolves to the transition instant"
+        },
+        "revert_lib_daily_window_dart": {
+          "public_exit": 0,
+          "feedback_exit": 255,
+          "feedback_output": "Bad state: the next wall-clock run uses the offset in effect at that run",
+          "final_exit": 255,
+          "final_output": "Bad state: a wall-clock target created by the jump resolves to the transition instant"
+        }
+      },
+      "final_novelty": "The final target is the newly created 03:00 wall time and must resolve to the exact transition instant, composing the two feedback behaviors at the discontinuity.",
+      "source_skeletons": {
+        "lib/daily_window.dart": {"source_skeleton_sha256": "8f416afa561c084da8838224498d844f53e06cfc2b6c1de9ade65a9164cf4533", "token_count": 210},
+        "lib/offset_schedule.dart": {"source_skeleton_sha256": "a313daedc79fe50f6c46d70b65ce267e3c31b017c0db60c95a880fb8f0246b25", "token_count": 201}
+      },
+      "combined_source_skeleton_sha256": "621e4119b0b4ea4eab1b10657f61c969c8442cc67c2fb73bf3260f95023a2cf4"
+    },
+    {
+      "case_id": "th13_dart_portable_exports",
+      "dimension": "code",
+      "mechanism": "Windows segment normalization plus case-insensitive deterministic entry allocation",
+      "assertion_family": "exact normalized-string equality and sequential allocated-path equality",
+      "feedback_boundary": "a bare reserved device name, terminal dots/spaces, and a case-only duplicate",
+      "final_boundary": "an extension-bearing reserved basename plus a collision created jointly by normalization and case folding",
+      "candidate_paths": [
+        "lib/export_name.dart",
+        "lib/report_bundle.dart"
+      ],
+      "expected_owners": [
+        "lib/export_name.dart",
+        "lib/report_bundle.dart"
+      ],
+      "max_files": 2,
+      "gates": {
+        "json_parse_identity_path_test_maps": true,
+        "dart_ascii_relative_contained_no_symlinks": true,
+        "no_public_oracle_or_hidden_test_leak": true,
+        "candidate_and_owner_set_valid": true,
+        "baseline_public_pass": true,
+        "baseline_feedback_fail": true,
+        "baseline_final_fail": true,
+        "repaired_public_feedback_final_pass": true,
+        "each_owner_revert_causes_required_failure": true,
+        "final_materially_new": true
+      },
+      "runs": {
+        "baseline": {
+          "public": {"command": "dart tests/public_test.dart", "exit_code": 0, "output": "public tests passed"},
+          "feedback": {"command": "dart tests/feedback_test.dart", "exit_code": 255, "output": "Bad state: device names must be made portable"},
+          "final": {"command": "dart tests/final_test.dart", "exit_code": 255, "output": "Bad state: a device basename remains reserved when it has an extension"}
+        },
+        "repaired": {
+          "public": {"command": "dart tests/public_test.dart", "exit_code": 0, "output": "public tests passed"},
+          "feedback": {"command": "dart tests/feedback_test.dart", "exit_code": 0, "output": "feedback tests passed"},
+          "final": {"command": "dart tests/final_test.dart", "exit_code": 0, "output": "final tests passed"}
+        },
+        "revert_lib_export_name_dart": {
+          "public_exit": 0,
+          "feedback_exit": 255,
+          "feedback_output": "Bad state: device names must be made portable",
+          "final_exit": 255,
+          "final_output": "Bad state: a device basename remains reserved when it has an extension"
+        },
+        "revert_lib_report_bundle_dart": {
+          "public_exit": 0,
+          "feedback_exit": 255,
+          "feedback_output": "Bad state: case-only variants share a collision domain",
+          "final_exit": 255,
+          "final_output": "Bad state: collisions introduced by normalization and casing are suffixed"
+        }
+      },
+      "final_novelty": "The final adds an extension-bearing reserved basename and a collision created jointly by segment normalization and case folding.",
+      "source_skeletons": {
+        "lib/export_name.dart": {"source_skeleton_sha256": "fc97b080a3cbe97e7a504ef6756504909572c465f7feddf6f96fbcbfcf5575b4", "token_count": 41},
+        "lib/report_bundle.dart": {"source_skeleton_sha256": "0c38a811cc8e519ab7283061438e3b48d6c6df0f60612a633560b714e1b5ec28", "token_count": 91}
+      },
+      "combined_source_skeleton_sha256": "a9f6207937b8a207b44c9e89b82aa481a63a8d72ca54181fddccf7e8dcfe754d"
+    }
+  ],
+  "cross_case_gates": {
+    "no_duplicate_mechanism": true,
+    "no_duplicate_source_skeleton": true,
+    "no_duplicate_assertion_family": true,
+    "no_duplicate_final_boundary": true,
+    "no_material_prohibited_overlap": true
+  },
+  "mechanism_fingerprints": {
+    "th13_dart_dependency_report": "nested report schema adapter + Boolean license parser",
+    "th13_dart_offset_schedule": "inclusive UTC offset transition + local-wall-time inversion",
+    "th13_dart_portable_exports": "Windows filename normalization + case-insensitive allocation"
+  },
+  "prohibited_mechanisms_checked": [
+    "fixed-point apportionment",
+    "release-reader retirement",
+    "trusted proxy CIDR chains",
+    "canonical base64url",
+    "request policy snapshots",
+    "TLS client authentication",
+    "replacement config reload",
+    "source-aware tail checkpoints",
+    "unordered category hierarchy",
+    "tri-state override SQL",
+    "composite tenant stock ownership",
+    "ticket archive/move accounting"
+  ],
+  "author_integrity": {
+    "file_count_before": 10,
+    "file_count_after": 10,
+    "canonical_inventory_format": "slash-normalized relative path<TAB>bytes<TAB>lowercase sha256<LF>, sorted ascending",
+    "inventory_sha256_before": "e27a71a46e092e1033b295bee05500d9d188c518dfb35866519ff16bb538ce49",
+    "inventory_sha256_after": "e27a71a46e092e1033b295bee05500d9d188c518dfb35866519ff16bb538ce49",
+    "current_file_count": 10,
+    "current_inventory_sha256": "e27a71a46e092e1033b295bee05500d9d188c518dfb35866519ff16bb538ce49",
+    "current_matches_prior_before": true,
+    "current_matches_prior_after": true,
+    "identical": true,
+    "files": [
+      {"path": "AUTHOR_RECEIPT.md", "bytes": 3602, "sha256_before": "cb4df78902ca5cc7613687ec3e486b1ea6589e44c7eedf9b7a53387429924ce9", "sha256_after": "cb4df78902ca5cc7613687ec3e486b1ea6589e44c7eedf9b7a53387429924ce9", "sha256_current": "cb4df78902ca5cc7613687ec3e486b1ea6589e44c7eedf9b7a53387429924ce9"},
+      {"path": "th13_dart_dependency_report/case.json", "bytes": 3621, "sha256_before": "c843b3a4c89fbd76a130941f7497bd577c0d222a3028919849945d4804eb83e1", "sha256_after": "c843b3a4c89fbd76a130941f7497bd577c0d222a3028919849945d4804eb83e1", "sha256_current": "c843b3a4c89fbd76a130941f7497bd577c0d222a3028919849945d4804eb83e1"},
+      {"path": "th13_dart_dependency_report/final_oracle.json", "bytes": 1568, "sha256_before": "50631c7489a3c74621a002d978f1181fe298158e0e54abd20b248c813aa7e142", "sha256_after": "50631c7489a3c74621a002d978f1181fe298158e0e54abd20b248c813aa7e142", "sha256_current": "50631c7489a3c74621a002d978f1181fe298158e0e54abd20b248c813aa7e142"},
+      {"path": "th13_dart_dependency_report/oracle.json", "bytes": 1532, "sha256_before": "ef029d99b0be51028bec790edb6c32c109d5a9a7d24a9b000e2c7ccdf3ed6efd", "sha256_after": "ef029d99b0be51028bec790edb6c32c109d5a9a7d24a9b000e2c7ccdf3ed6efd", "sha256_current": "ef029d99b0be51028bec790edb6c32c109d5a9a7d24a9b000e2c7ccdf3ed6efd"},
+      {"path": "th13_dart_offset_schedule/case.json", "bytes": 4141, "sha256_before": "d499a3740aceafe6fcc571cb6472d396a6312b7ae254a1bb02a4ab3976407500", "sha256_after": "d499a3740aceafe6fcc571cb6472d396a6312b7ae254a1bb02a4ab3976407500", "sha256_current": "d499a3740aceafe6fcc571cb6472d396a6312b7ae254a1bb02a4ab3976407500"},
+      {"path": "th13_dart_offset_schedule/final_oracle.json", "bytes": 770, "sha256_before": "9b772a97de211b81fabe7cc72c704d162260728673b05c6d9a9119646a4ed679", "sha256_after": "9b772a97de211b81fabe7cc72c704d162260728673b05c6d9a9119646a4ed679", "sha256_current": "9b772a97de211b81fabe7cc72c704d162260728673b05c6d9a9119646a4ed679"},
+      {"path": "th13_dart_offset_schedule/oracle.json", "bytes": 1055, "sha256_before": "57724ffe83f033b9bad01c0e4488436e459214893a7fda14c42d4670cd2c6506", "sha256_after": "57724ffe83f033b9bad01c0e4488436e459214893a7fda14c42d4670cd2c6506", "sha256_current": "57724ffe83f033b9bad01c0e4488436e459214893a7fda14c42d4670cd2c6506"},
+      {"path": "th13_dart_portable_exports/case.json", "bytes": 2348, "sha256_before": "1d5101622bf012f0fdd1c60bf834de667a04bee28ed65c5bbc1c5690c7488a9a", "sha256_after": "1d5101622bf012f0fdd1c60bf834de667a04bee28ed65c5bbc1c5690c7488a9a", "sha256_current": "1d5101622bf012f0fdd1c60bf834de667a04bee28ed65c5bbc1c5690c7488a9a"},
+      {"path": "th13_dart_portable_exports/final_oracle.json", "bytes": 802, "sha256_before": "d397532681ee5b69d938da4831e0244d0de162563996197b54b81049d3275c46", "sha256_after": "d397532681ee5b69d938da4831e0244d0de162563996197b54b81049d3275c46", "sha256_current": "d397532681ee5b69d938da4831e0244d0de162563996197b54b81049d3275c46"},
+      {"path": "th13_dart_portable_exports/oracle.json", "bytes": 956, "sha256_before": "aa7d390219813b95306fc61f7df2c5463d5843019f832f74f2ec87a81533d5be", "sha256_after": "aa7d390219813b95306fc61f7df2c5463d5843019f832f74f2ec87a81533d5be", "sha256_current": "aa7d390219813b95306fc61f7df2c5463d5843019f832f74f2ec87a81533d5be"}
+    ]
+  },
+  "command_record": {
+    "dart_version": {"command": "dart --version", "exit_code": 0, "output": "Dart SDK version: 3.11.1 (stable) (Tue Feb 24 00:03:07 2026 -0800) on windows_x64"},
+    "completed_harness": {"working_directory": "D:\\dev\\chili-thirteenth-validation-lane-dart", "command": "dart tmp\\validate_lane.dart", "exit_code": 0, "elapsed_seconds": 14.8, "output": "wrote D:\\dev\\chili-thirteenth-validation-lane-dart\\tmp\\validation_evidence.json"},
+    "per_scenario_commands": [
+      "dart tests/public_test.dart",
+      "dart tests/feedback_test.dart",
+      "dart tests/final_test.dart"
+    ],
+    "per_process_timeout_seconds": 10,
+    "timed_out_processes": 0,
+    "after_hash_snapshot": {"exit_code": 0, "output": "file_count_before=10; file_count_after=10; identical=True"},
+    "discarded_interrupted_rerun": {"command": "dart tmp\\validate_lane.dart", "result": "aborted by user after 5.8 seconds", "used_as_evidence": false}
+  },
+  "non_gate_diagnostics": [
+    "An optional dependency-repair formatter check exited 1 for a ternary line-wrap preference; formatting was not an assigned gate and all required repaired tests passed.",
+    "An initial leakage regex matched the public fixture value Summary; direct inspection of actual hidden check-message arguments confirmed no hidden assertion label leak."
+  ]
+}

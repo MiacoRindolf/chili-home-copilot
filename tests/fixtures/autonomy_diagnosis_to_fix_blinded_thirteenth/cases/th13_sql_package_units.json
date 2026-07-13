@@ -1,0 +1,16 @@
+{
+  "case_id": "th13_sql_package_units",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "Packages entered by suppliers in non-centimeter units show impossible cubic volume and appear in the wrong oversized-handling queue. Packages entered in centimeters still look correct. Every submitted unit is already present in the supported length-unit table.",
+  "candidate_paths": [
+    "sql/package_volume.sql",
+    "sql/oversize_queue.sql"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "sql/package_volume.sql": "SELECT\n    p.package_id,\n    p.length_value * p.width_value * p.height_value AS volume_cm3\nFROM shipping_package AS p\nWHERE p.package_id = :package_id;\n",
+    "sql/oversize_queue.sql": "SELECT\n    p.package_id\nFROM shipping_package AS p\nWHERE max(p.length_value, p.width_value, p.height_value) >= :limit_cm\nORDER BY p.package_id;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef read_sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"ascii\")\n\n\ndef make_db():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(\n        \"\"\"\n        CREATE TABLE length_unit (\n            unit_code TEXT PRIMARY KEY,\n            centimeters_per_unit REAL NOT NULL CHECK (centimeters_per_unit > 0)\n        );\n\n        CREATE TABLE shipping_package (\n            package_id INTEGER PRIMARY KEY,\n            unit_code TEXT NOT NULL REFERENCES length_unit(unit_code),\n            length_value REAL NOT NULL CHECK (length_value >= 0),\n            width_value REAL NOT NULL CHECK (width_value >= 0),\n            height_value REAL NOT NULL CHECK (height_value >= 0)\n        );\n        \"\"\"\n    )\n    db.execute(\"INSERT INTO length_unit VALUES ('CM', 1.0)\")\n    db.executemany(\n        \"INSERT INTO shipping_package VALUES (?, ?, ?, ?, ?)\",\n        [\n            (1, \"CM\", 40.0, 20.0, 10.0),\n            (2, \"CM\", 65.0, 20.0, 10.0),\n        ],\n    )\n    return db\n\n\ndef test_reports_volume_for_a_centimeter_package():\n    db = make_db()\n    row = db.execute(\n        read_sql(\"package_volume.sql\"),\n        {\"package_id\": 1},\n    ).fetchone()\n\n    assert row == (1, 8000.0)\n\n\ndef test_queues_centimeter_packages_over_the_limit():\n    db = make_db()\n    rows = db.execute(\n        read_sql(\"oversize_queue.sql\"),\n        {\"limit_cm\": 60.0},\n    ).fetchall()\n\n    assert rows == [(2,)]\n"
+  }
+}

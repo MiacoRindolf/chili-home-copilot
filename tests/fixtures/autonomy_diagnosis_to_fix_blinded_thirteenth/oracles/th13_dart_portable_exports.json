@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_dart_portable_exports",
+  "expected_dimension": "code",
+  "expected_files": [
+    "lib/export_name.dart",
+    "lib/report_bundle.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/export_name.dart';\nimport '../lib/report_bundle.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  check(portableSegment('CON') == '_CON', 'device names must be made portable');\n  check(\n    portableSegment('daily...  ') == 'daily',\n    'trailing periods and spaces must be removed',\n  );\n\n  final bundle = ReportBundle();\n  check(\n    bundle.allocateEntry('Ops', 'Summary') == 'Ops/Summary.txt',\n    'allocates the first case variant',\n  );\n  check(\n    bundle.allocateEntry('ops', 'summary') == 'ops/summary (2).txt',\n    'case-only variants share a collision domain',\n  );\n\n  print('feedback tests passed');\n}\n"
+  }
+}

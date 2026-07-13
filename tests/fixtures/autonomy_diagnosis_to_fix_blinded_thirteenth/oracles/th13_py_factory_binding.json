@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_py_factory_binding",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "dependency_plan.py",
+    "service_container.py"
+  ],
+  "feedback_files": {
+    "tests/test_dependency_feedback.py": "from dependency_plan import Dependency, dependency_plan\nfrom service_container import Container\n\n\ndef test_plan_describes_required_keyword_only_dependency():\n    def publisher(*, audit_log):\n        return audit_log\n\n    assert dependency_plan(publisher) == (\n        Dependency(\"audit_log\", \"keyword\"),\n    )\n\n\ndef test_container_binds_keyword_only_dependency_by_name():\n    container = Container()\n    container.register(\"audit_log\", lambda: \"audit-ready\")\n\n    def publisher(*, audit_log):\n        return f\"publisher:{audit_log}\"\n\n    container.register(\"publisher\", publisher)\n\n    assert container.resolve(\"publisher\") == \"publisher:audit-ready\"\n"
+  }
+}

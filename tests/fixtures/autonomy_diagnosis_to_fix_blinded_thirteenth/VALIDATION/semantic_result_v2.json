@@ -1,0 +1,313 @@
+{
+  "result": "PASS",
+  "case_count": 12,
+  "verification": {
+    "unique_case_ids": true,
+    "dimension_counts": {
+      "code": 1,
+      "clock": 2,
+      "config": 2,
+      "data": 2,
+      "dependency": 2,
+      "runtime": 1,
+      "state": 2
+    },
+    "exact_dimension_counts_match": true,
+    "all_cases_have_candidate_and_combined_source_skeleton_hashes": true,
+    "all_cases_have_assertion_families": true,
+    "no_duplicate_or_materially_equivalent_mechanism": true,
+    "no_duplicate_or_materially_equivalent_case_source_skeleton": true,
+    "no_duplicate_or_materially_equivalent_assertion_family": true,
+    "no_duplicate_or_materially_equivalent_feedback_boundary": true,
+    "no_duplicate_or_materially_equivalent_final_boundary": true,
+    "every_final_materially_novel": true,
+    "no_material_overlap_with_12_prohibited_families": true,
+    "all_lane_verdicts_pass": true,
+    "no_failed_or_incomplete_required_lane_gates": true
+  },
+  "lane_gates": {
+    "python": { "verdict": "PASS", "failed": [], "incomplete": [] },
+    "node": { "verdict": "PASS", "failed": [], "incomplete": [] },
+    "dart": { "verdict": "PASS", "failed": [], "incomplete": [] },
+    "sql": { "verdict": "PASS", "failed": [], "incomplete": [] }
+  },
+  "material_equivalence_findings": [
+    "The clock cases are distinct: month-end clamping plus instant-preserving conversion versus inclusive offset-transition lookup plus local-wall-time inversion.",
+    "The state cases are distinct: asynchronous attempt-token fencing versus guarded SQL transitions based on current state and worker ownership.",
+    "The config cases are distinct: token-list/media-type matching versus profile-selected separators and delimiter-sensitive quoting.",
+    "The data cases are distinct: null-versus-zero statistical rollup versus lookup-driven unit conversion and threshold filtering.",
+    "The dependency cases are distinct: callable-signature dependency injection versus scan-report adaptation and license-expression evaluation.",
+    "All 12 combined case-level skeleton hashes are unique; equal candidate hashes inside two SQL cases describe symmetric owners within one case and do not duplicate another case skeleton."
+  ],
+  "prohibited_families": [
+    "fixed-point apportionment",
+    "release-reader retirement",
+    "trusted proxy CIDR chains",
+    "canonical base64url",
+    "request policy snapshots",
+    "TLS client authentication",
+    "replacement config reload",
+    "source-aware tail checkpoints",
+    "unordered category hierarchy",
+    "tri-state override SQL",
+    "composite tenant stock ownership",
+    "ticket archive/move accounting"
+  ],
+  "cases": [
+    {
+      "id": "th13_py_factory_binding",
+      "language_lane": "python",
+      "dimension": "dependency",
+      "mechanism": "inspect.Parameter kind discovery plus positional/keyword factory invocation",
+      "assertion_family": "Dependency tuple structure and resolved dependency-graph value equality",
+      "source_skeleton_hashes": {
+        "dependency_plan.py": "1b7590220b652f8fb490de8f62e7f7375e45e03ee32d823f896a0a456c20f8da",
+        "service_container.py": "7d1a0b1e4ab5b0064f15fc871ce3bc38372dd71ed0c92df32209d1b20178853e",
+        "combined": "01a1c8f9f15f4365f0cc1e537bcdd675b8a424d9278c3c665146f84b19c813ea"
+      },
+      "feedback": {
+        "boundary": "keyword-only discovery and invocation",
+        "novelty": "Feedback isolates keyword-only discovery and invocation."
+      },
+      "final": {
+        "boundary": "mixed positional-only and keyword-only bindings across a nested provider graph",
+        "novelty": "The final composes a positional-only provider, a keyword-only provider, and a mixed-signature publisher, including repeated nested resolution."
+      },
+      "prohibited_overlap_finding": "Callable signature introspection and dependency injection have no allocation, proxy, encoding, policy, TLS, reload, checkpoint, hierarchy, SQL, inventory, or ticket mechanism."
+    },
+    {
+      "id": "th13_py_monthly_settlement",
+      "language_lane": "python",
+      "dimension": "clock",
+      "mechanism": "end-of-month day clamping plus instant-preserving timezone conversion",
+      "assertion_family": "timezone-aware datetime and exact ISO wall-clock equality",
+      "source_skeleton_hashes": {
+        "billing_clock.py": "dae2c77a3b58cd0e4c9ee6c9f4ddd6b4216b8dbdf95134a88a8b580371e5d2af",
+        "settlement_runner.py": "b01aa3eb1ec4ab88d58c0f1dffc8d8ae314848c7a98dcb553004ff83aa189605",
+        "combined": "972643e4469bc901f9141f6da11520db9d148da74dc4cf3a1bc44b6ecf0d2b60"
+      },
+      "feedback": {
+        "boundary": "non-leap February clamping and UTC-to-local conversion in January",
+        "novelty": "Feedback separately covers a non-leap February clamp and UTC-to-local conversion in January."
+      },
+      "final": {
+        "boundary": "UTC month rollover maps back to a local leap-day month-end cutoff",
+        "novelty": "The final composes date rollback across a UTC month boundary, leap-day clamping, and a same-local-day future cutoff."
+      },
+      "prohibited_overlap_finding": "Calendar scheduling and timezone conversion perform no apportionment or ownership/accounting operation and match none of the prohibited mechanisms."
+    },
+    {
+      "id": "th13_py_task_teardown",
+      "language_lane": "python",
+      "dimension": "runtime",
+      "mechanism": "BaseException-safe task cleanup plus continuation and exception precedence for callbacks",
+      "assertion_family": "exception type/message preservation and ordered LIFO event-sequence equality",
+      "source_skeleton_hashes": {
+        "task_runtime.py": "a377e2f0e67d6c17fd7655e8a6056c63f4d87555190ee9a56d988f11ad20a6c0",
+        "teardown_stack.py": "34bfb8930805bc70eaa3c720ee17215fce0e43d5710ca5d7788e1bc10157584b",
+        "combined": "48c5d0c1694bae23be5e0f9140837dfd7614766fdc904b53bc1103fc79112f65"
+      },
+      "feedback": {
+        "boundary": "callback continuation after RuntimeError and clean teardown after KeyboardInterrupt",
+        "novelty": "Feedback separately checks callback continuation after RuntimeError and clean teardown after KeyboardInterrupt."
+      },
+      "final": {
+        "boundary": "SystemExit combines with a failed teardown while every registered hook still runs",
+        "novelty": "The final composes process-level SystemExit with a failing middle hook, all-hook execution, LIFO order, and preservation of the original task exception."
+      },
+      "prohibited_overlap_finding": "A generic in-process callback stack and exception-precedence rule is not reader retirement, configuration replacement, checkpointing, ticket movement, or another prohibited mechanism."
+    },
+    {
+      "id": "th13_node_facility_rollup",
+      "language_lane": "node/typescript",
+      "dimension": "data",
+      "mechanism": "null-versus-zero preservation through normalization and aggregation",
+      "assertion_family": "aggregate object and numeric-statistic invariants",
+      "source_skeleton_hashes": {
+        "src/observation.mjs": "d95434cd39d9ff6016b5097df79477b40fac25975d6c048b3b81454f09de25d2",
+        "src/daily-rollup.mjs": "c93f95276e5e97b51c991ad99507b21068fd31c97875a26e62b014e35ffa8900",
+        "src/report-service.mjs": "daa4cc3be43963ffdb5f6ccdbf934a2947865467174a4d15d4072c6974008e5b",
+        "combined": "01945435a9bb47029ff2a21284dd404ad55727fec521eab8c0450743e81d696b"
+      },
+      "feedback": {
+        "boundary": "Null preservation in normalizeObservation and measured-zero inclusion in summarizeMetric are asserted independently.",
+        "novelty": "Feedback isolates normalization and rollup units."
+      },
+      "final": {
+        "boundary": "multi-metric report-service composition across null, zero, and numeric-string values",
+        "novelty": "The final composes both units through buildDailyReport, crosses two metrics, and verifies mixed null, measured zero, and numeric-string handling end to end."
+      },
+      "prohibited_overlap_finding": "Telemetry missing-value preservation and arithmetic rollup do not implement any prohibited mechanism."
+    },
+    {
+      "id": "th13_node_job_recovery",
+      "language_lane": "node/typescript",
+      "dimension": "state",
+      "mechanism": "attempt-token fencing for late asynchronous job settlement",
+      "assertion_family": "state-transition rejection and claim-identity argument invariants",
+      "source_skeleton_hashes": {
+        "src/job-store.mjs": "128697f0a5869cae3bf8ea3c4c95f9233aab6756a4e609400deecda4b3a6efcb",
+        "src/job-runner.mjs": "0c9cdbfc5dbf660f4505742f946401b6081f81b6fd80340cfc2dd9a4130c70c7",
+        "src/job-events.mjs": "168e916664279cdf06b2bcc01c18114c0d53bd06799e18b387826bd71981f99b",
+        "combined": "8e43d8921c0c0f74a0e01605d343ec5cb4dc7097b72cb442b84f5e424a11a719"
+      },
+      "feedback": {
+        "boundary": "Stale completion rejection and successful runner forwarding of the claim attempt are asserted independently.",
+        "novelty": "Feedback covers stale completion and the runner success path."
+      },
+      "final": {
+        "boundary": "stale failure rejection plus runner failure-token forwarding",
+        "novelty": "The final adds the distinct stale-failure transition and verifies Error identity plus attempt forwarding on the runner failure path."
+      },
+      "prohibited_overlap_finding": "Attempt fencing for watchdog-requeued jobs is not release-reader retirement, configuration replacement/reload, or another prohibited mechanism."
+    },
+    {
+      "id": "th13_node_response_compression",
+      "language_lane": "node/typescript",
+      "dimension": "config",
+      "mechanism": "comma-list token normalization combined with media-type parameter matching",
+      "assertion_family": "normalized token-list equality and Boolean decision-matrix invariants",
+      "source_skeleton_hashes": {
+        "src/compression-config.mjs": "1ccf07f070bce89911f739bbfef7d3cf7809a3e5bd4789fb088a95b3b44a3094",
+        "src/content-type-match.mjs": "cf1bd8879325354c06ffb4be0e139716aca5a21fefa60b34a9fa621b7d74567a",
+        "src/compress-response.mjs": "5673cd00dc2063147cb251793d5f46c175c19a1ecbac5d172933f1d862c75179",
+        "combined": "fc645df81cb3ff9cc6903470a8d68c0fe0943e0ca4d498ef2ff22551dd18bd35"
+      },
+      "feedback": {
+        "boundary": "Comma-list whitespace normalization and parameter-insensitive Content-Type matching are asserted independently.",
+        "novelty": "Feedback tests parser and matcher separately."
+      },
+      "final": {
+        "boundary": "factory-decider integration with spaced config, parameterized types, binary exclusion, and undefined input",
+        "novelty": "The final composes the units through createCompressionDecider and adds case normalization, an unlisted binary guard, and the non-string response boundary."
+      },
+      "prohibited_overlap_finding": "Static startup parsing and response matching perform no live replacement configuration reload and no other prohibited mechanism."
+    },
+    {
+      "id": "th13_dart_dependency_report",
+      "language_lane": "dart",
+      "dimension": "dependency",
+      "mechanism": "dual-schema scan-report adaptation plus precedence-aware Boolean license-expression evaluation",
+      "assertion_family": "decoded record count and fields, expression satisfaction and violation membership, and runtime-scope filtering",
+      "source_skeleton_hashes": {
+        "lib/license_gate.dart": "14f8975f34f2f46a9f485c0d68ad91adfd3078fdd7267f0a9f3f4a603530c7a5",
+        "lib/scan_report_adapter.dart": "84a9b2d730b39c05ae090b28a869923242499d119775d760a38d5450b57ffe5f",
+        "combined": "a247b5e8afcece29db174cfee8ca72bd15b058fb1974c7823990023c9bb0d839"
+      },
+      "feedback": {
+        "boundary": "one upgraded document.artifacts record with nested coordinates/license and runtime scope, plus a simple OR satisfied by one allowed license",
+        "novelty": "Feedback has one upgraded record and simple OR only."
+      },
+      "final": {
+        "boundary": "three upgraded records with parenthesized AND nested beneath OR, exactly one unsatisfied runtime expression, and development-scope exclusion",
+        "novelty": "The final composes nested AND/OR precedence, parentheses, runtime violation selection, and development-scope filtering across three upgraded records."
+      },
+      "prohibited_overlap_finding": "Report-schema adaptation and license-expression evaluation contain no request snapshot, category hierarchy, encoding, transport, allocation, reload, checkpoint, or ownership mechanism."
+    },
+    {
+      "id": "th13_dart_offset_schedule",
+      "language_lane": "dart",
+      "dimension": "clock",
+      "mechanism": "inclusive offset-transition lookup plus target-time local-wall-clock to UTC resolution",
+      "assertion_family": "exact Duration offset equality and exact DateTime next-run equality around a discontinuity",
+      "source_skeleton_hashes": {
+        "lib/daily_window.dart": "8f416afa561c084da8838224498d844f53e06cfc2b6c1de9ade65a9164cf4533",
+        "lib/offset_schedule.dart": "a313daedc79fe50f6c46d70b65ce267e3c31b017c0db60c95a880fb8f0246b25",
+        "combined": "621e4119b0b4ea4eab1b10657f61c969c8442cc67c2fb73bf3260f95023a2cf4"
+      },
+      "feedback": {
+        "boundary": "the new offset at the exact transition and a later 09:00 wall-clock target resolved with its effective offset",
+        "novelty": "Feedback checks the offset boundary and later wall-clock resolution separately."
+      },
+      "final": {
+        "boundary": "the newly created 03:00 wall-clock target resolves to the exact UTC transition instant",
+        "novelty": "The final composes the two feedback behaviors at the discontinuity."
+      },
+      "prohibited_overlap_finding": "The offset is a timezone transition, not a stream/source checkpoint; no other prohibited family is present."
+    },
+    {
+      "id": "th13_dart_portable_exports",
+      "language_lane": "dart",
+      "dimension": "code",
+      "mechanism": "Windows segment normalization plus case-insensitive deterministic entry allocation",
+      "assertion_family": "exact normalized-string equality and sequential allocated-path equality",
+      "source_skeleton_hashes": {
+        "lib/export_name.dart": "fc97b080a3cbe97e7a504ef6756504909572c465f7feddf6f96fbcbfcf5575b4",
+        "lib/report_bundle.dart": "0c38a811cc8e519ab7283061438e3b48d6c6df0f60612a633560b714e1b5ec28",
+        "combined": "a9f6207937b8a207b44c9e89b82aa481a63a8d72ca54181fddccf7e8dcfe754d"
+      },
+      "feedback": {
+        "boundary": "a bare reserved device name, terminal dots/spaces, and a case-only duplicate",
+        "novelty": "Feedback checks direct portability and case-only collision behavior."
+      },
+      "final": {
+        "boundary": "an extension-bearing reserved basename plus a collision created jointly by normalization and case folding",
+        "novelty": "The final adds an extension-bearing reserved basename and a jointly normalized/case-folded collision."
+      },
+      "prohibited_overlap_finding": "Filename portability and path allocation are not canonical base64url encoding and do not implement another prohibited family."
+    },
+    {
+      "id": "th13_sql_delimited_profile",
+      "language_lane": "sql",
+      "dimension": "config",
+      "mechanism": "Profile-selected field/record separators with delimiter-sensitive quoting",
+      "assertion_family": "Exact rendered-string equality for customer and order rows",
+      "source_skeleton_hashes": {
+        "sql/render_customer_row.sql": "6965c95b913e0c19b200acee58e0f24bbc165494064adc2b3c6bd412cbc96973",
+        "sql/render_order_row.sql": "6965c95b913e0c19b200acee58e0f24bbc165494064adc2b3c6bd412cbc96973",
+        "combined": "f4fde1ad6acc10e29d0ac33312f6d9618a8c2869306b483ff4a3b31860df774b"
+      },
+      "feedback": {
+        "boundary": "A non-default pipe field separator and CRLF record separator must be honored for plain customer and order values.",
+        "novelty": "Feedback covers profile selection for plain fields."
+      },
+      "final": {
+        "boundary": "Values containing the selected semicolon separator must be quoted, and embedded double quotes must be doubled.",
+        "novelty": "The final composes profile selection with delimiter-sensitive quoting and quote escaping."
+      },
+      "prohibited_overlap_finding": "The profile is read by row-rendering SELECTs; there is no replacement/reload lifecycle, encoding, or canonicalization."
+    },
+    {
+      "id": "th13_sql_export_job_state",
+      "language_lane": "sql",
+      "dimension": "state",
+      "mechanism": "Guarded UPDATE state transitions using current state and worker ownership",
+      "assertion_family": "Affected-row counts plus persisted job state/owner/result equality, including a composed transition sequence",
+      "source_skeleton_hashes": {
+        "sql/claim_export_job.sql": "226e6b5cfac002adf56c71ee63437eb1dd8be07915410bf0718ad8712798c284",
+        "sql/finish_export_job.sql": "226e6b5cfac002adf56c71ee63437eb1dd8be07915410bf0718ad8712798c284",
+        "combined": "278caf0ae1994a97c246c9284e5a5c08984795dcb0518181c23578297d5fc71e"
+      },
+      "feedback": {
+        "boundary": "A second worker cannot steal an active job, and a non-owner cannot finish a running job.",
+        "novelty": "Feedback checks contention and ownership separately."
+      },
+      "final": {
+        "boundary": "Canceled and unclaimed queued jobs reject invalid transitions; rejected interference is followed by one owner completion and a rejected terminal replay.",
+        "novelty": "The final adds invalid source states and a multi-step interference/completion/replay composition proving terminal immutability."
+      },
+      "prohibited_overlap_finding": "Worker ownership is a single job predicate, not composite tenant-stock ownership; the explicit lifecycle is not tri-state inheritance, and no ticket archive/move accounting is present."
+    },
+    {
+      "id": "th13_sql_package_units",
+      "language_lane": "sql",
+      "dimension": "data",
+      "mechanism": "Lookup-table unit normalization for cubic volume and oversize filtering",
+      "assertion_family": "Tolerance-based numeric volume equality plus exact ordered row-set equality",
+      "source_skeleton_hashes": {
+        "sql/oversize_queue.sql": "542d6121f8da7bc5ddbd938f27f0f21d5226e0febb9194919495bb2292ecce4c",
+        "sql/package_volume.sql": "00a9665967b4275d9de5a18cdad142d91f12b1845fb4cb941cb9a28e365ac3aa",
+        "combined": "f4d32d13b5e58c2a37775cc282a247174db180293152b280d49334812d485f70"
+      },
+      "feedback": {
+        "boundary": "The 2.54 inch conversion factor applies to all dimensions, and oversize filtering compares converted lengths around 50 centimeters.",
+        "novelty": "Feedback uses one factor above one and no exact equality."
+      },
+      "final": {
+        "boundary": "Factors below one, all-three-axis conversion, exact threshold equality versus just below, and ordered mixed MM/FT/CM results.",
+        "novelty": "The final adds fractional factors below one, exact inclusive-boundary behavior, multiple units, and composition across all three axes."
+      },
+      "prohibited_overlap_finding": "Package arithmetic is unit scaling with no allocation, quota, remainder, or fixed-point apportionment."
+    }
+  ]
+}

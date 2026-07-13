@@ -1,0 +1,6 @@
+{
+  "case_id": "th13_dart_portable_exports",
+  "final_files": {
+    "tests/final_test.dart": "import '../lib/export_name.dart';\nimport '../lib/report_bundle.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  check(\n    portableSegment('LPT1.audit') == '_LPT1.audit',\n    'a device basename remains reserved when it has an extension',\n  );\n\n  final bundle = ReportBundle();\n  check(\n    bundle.allocateEntry('AUX.', 'daily.') == '_AUX/daily.txt',\n    'normalizes both path segments before allocation',\n  );\n  check(\n    bundle.allocateEntry('_aux', 'DAILY') == '_aux/DAILY (2).txt',\n    'collisions introduced by normalization and casing are suffixed',\n  );\n\n  print('final tests passed');\n}\n"
+  }
+}

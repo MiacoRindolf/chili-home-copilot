@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_dart_dependency_report",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "lib/scan_report_adapter.dart",
+    "lib/license_gate.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/license_gate.dart';\nimport '../lib/scan_report_adapter.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  const upgradedPayload = r'''\n{\n  \"document\": {\n    \"artifacts\": [\n      {\n        \"coordinates\": {\"name\": \"render-core\", \"version\": \"4.2.0\"},\n        \"license\": {\"expression\": \"MIT OR Apache-2.0\"},\n        \"scope\": \"runtime\"\n      }\n    ]\n  }\n}\n''';\n\n  final records = ScanReportAdapter().decode(upgradedPayload);\n  check(records.length == 1, 'reads artifacts from upgraded reports');\n  check(records.single.name == 'render-core', 'reads nested coordinates');\n  check(\n    records.single.licenseExpression == 'MIT OR Apache-2.0',\n    'reads the dependency license expression',\n  );\n  check(records.single.runtime, 'maps the upgraded runtime scope');\n\n  final alternative = DependencyRecord(\n    name: 'render-core',\n    version: '4.2.0',\n    licenseExpression: 'MIT OR Apache-2.0',\n    runtime: true,\n  );\n  check(\n    LicenseGate(<String>{\n      'Apache-2.0',\n    }).violations(<DependencyRecord>[alternative]).isEmpty,\n    'an allowed alternative satisfies a compound expression',\n  );\n\n  print('feedback tests passed');\n}\n"
+  }
+}

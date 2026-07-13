@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_sql_export_job_state",
+  "expected_dimension": "state",
+  "expected_files": [
+    "sql/claim_export_job.sql",
+    "sql/finish_export_job.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef read_sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"ascii\")\n\n\ndef make_db():\n    db = sqlite3.connect(\":memory:\")\n    db.execute(\n        \"\"\"\n        CREATE TABLE export_job (\n            job_id INTEGER PRIMARY KEY,\n            state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'canceled', 'completed')),\n            worker_id TEXT,\n            result_uri TEXT\n        )\n        \"\"\"\n    )\n    return db\n\n\ndef test_a_second_worker_cannot_take_an_active_job():\n    db = make_db()\n    db.execute(\"INSERT INTO export_job VALUES (10, 'queued', NULL, NULL)\")\n\n    first = db.execute(\n        read_sql(\"claim_export_job.sql\"),\n        {\"job_id\": 10, \"worker_id\": \"worker-a\"},\n    )\n    second = db.execute(\n        read_sql(\"claim_export_job.sql\"),\n        {\"job_id\": 10, \"worker_id\": \"worker-b\"},\n    )\n\n    assert first.rowcount == 1\n    assert second.rowcount == 0\n    assert db.execute(\"SELECT state, worker_id FROM export_job\").fetchone() == (\n        \"running\",\n        \"worker-a\",\n    )\n\n\ndef test_a_non_owner_cannot_finish_a_running_job():\n    db = make_db()\n    db.execute(\n        \"INSERT INTO export_job VALUES (11, 'running', 'worker-a', NULL)\"\n    )\n\n    cursor = db.execute(\n        read_sql(\"finish_export_job.sql\"),\n        {\n            \"job_id\": 11,\n            \"worker_id\": \"worker-b\",\n            \"result_uri\": \"exports/wrong.csv\",\n        },\n    )\n\n    assert cursor.rowcount == 0\n    assert db.execute(\"SELECT state, worker_id, result_uri FROM export_job\").fetchone() == (\n        \"running\",\n        \"worker-a\",\n        None,\n    )\n"
+  }
+}

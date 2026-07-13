@@ -1,0 +1,949 @@
+{
+  "author_inventory_after": {
+    "entries": [
+      {
+        "path": "th13_sql_delimited_profile/case.json",
+        "sha256": "a03aec7dff223c5ebb94d419d2166d931ca4f5af1dcf77f3022abec68f9edbb9"
+      },
+      {
+        "path": "th13_sql_delimited_profile/final_oracle.json",
+        "sha256": "edc1589f29144b5171d20fd546297045f8093134b47719275bedbcc3fda1b837"
+      },
+      {
+        "path": "th13_sql_delimited_profile/oracle.json",
+        "sha256": "10c2780ecc6b688657f09d969b2b8465604bdeeb01bc4b69796d2f27ad755eb1"
+      },
+      {
+        "path": "th13_sql_export_job_state/case.json",
+        "sha256": "f356a264a35ee25caea803d96711d039409db705c1a5e4b6a3a34a6da1a85805"
+      },
+      {
+        "path": "th13_sql_export_job_state/final_oracle.json",
+        "sha256": "b3ac56deada2b902d17839f74371e8d4a992d4f42de3ebb086fc5127cbd72e1f"
+      },
+      {
+        "path": "th13_sql_export_job_state/oracle.json",
+        "sha256": "6fad52d6336775844256b1fb7e00819f8d596b3506b8aec266e8a895d8a618d6"
+      },
+      {
+        "path": "th13_sql_package_units/case.json",
+        "sha256": "4f01315e73a75f8a5d3741bdcf62bff72ccb738cb7c832b39646c400fcee2d90"
+      },
+      {
+        "path": "th13_sql_package_units/final_oracle.json",
+        "sha256": "5a90d5d7f8af187b5d4e7f1d6f1d00c3e97fcb5eef817a54a9b5999fc41d859f"
+      },
+      {
+        "path": "th13_sql_package_units/oracle.json",
+        "sha256": "1c670711a24ddeb917c7913efb714666427723e9e67d8a3aae9def6166cd5339"
+      }
+    ],
+    "sorted_inventory_sha256": "5cc457b4f321ee3fd79eef23cb79323522c3b86187efb6650ff0bd2d09f83985"
+  },
+  "author_inventory_before": {
+    "entries": [
+      {
+        "path": "th13_sql_delimited_profile/case.json",
+        "sha256": "a03aec7dff223c5ebb94d419d2166d931ca4f5af1dcf77f3022abec68f9edbb9"
+      },
+      {
+        "path": "th13_sql_delimited_profile/final_oracle.json",
+        "sha256": "edc1589f29144b5171d20fd546297045f8093134b47719275bedbcc3fda1b837"
+      },
+      {
+        "path": "th13_sql_delimited_profile/oracle.json",
+        "sha256": "10c2780ecc6b688657f09d969b2b8465604bdeeb01bc4b69796d2f27ad755eb1"
+      },
+      {
+        "path": "th13_sql_export_job_state/case.json",
+        "sha256": "f356a264a35ee25caea803d96711d039409db705c1a5e4b6a3a34a6da1a85805"
+      },
+      {
+        "path": "th13_sql_export_job_state/final_oracle.json",
+        "sha256": "b3ac56deada2b902d17839f74371e8d4a992d4f42de3ebb086fc5127cbd72e1f"
+      },
+      {
+        "path": "th13_sql_export_job_state/oracle.json",
+        "sha256": "6fad52d6336775844256b1fb7e00819f8d596b3506b8aec266e8a895d8a618d6"
+      },
+      {
+        "path": "th13_sql_package_units/case.json",
+        "sha256": "4f01315e73a75f8a5d3741bdcf62bff72ccb738cb7c832b39646c400fcee2d90"
+      },
+      {
+        "path": "th13_sql_package_units/final_oracle.json",
+        "sha256": "5a90d5d7f8af187b5d4e7f1d6f1d00c3e97fcb5eef817a54a9b5999fc41d859f"
+      },
+      {
+        "path": "th13_sql_package_units/oracle.json",
+        "sha256": "1c670711a24ddeb917c7913efb714666427723e9e67d8a3aae9def6166cd5339"
+      }
+    ],
+    "sorted_inventory_sha256": "5cc457b4f321ee3fd79eef23cb79323522c3b86187efb6650ff0bd2d09f83985"
+  },
+  "author_root": "D:\\dev\\chili-thirteenth-author-sql",
+  "author_unchanged": true,
+  "supplemental_author_inventory": {
+    "after": [
+      {
+        "path": "AUTHOR_RECEIPT.md",
+        "sha256": "d133e5ff6b2bc9c31b221303cbf777dd72cc1ceb20d7333d88de9dd2f4dd8fea"
+      },
+      {
+        "path": "th13_sql_delimited_profile/case.json",
+        "sha256": "a03aec7dff223c5ebb94d419d2166d931ca4f5af1dcf77f3022abec68f9edbb9"
+      },
+      {
+        "path": "th13_sql_delimited_profile/final_oracle.json",
+        "sha256": "edc1589f29144b5171d20fd546297045f8093134b47719275bedbcc3fda1b837"
+      },
+      {
+        "path": "th13_sql_delimited_profile/oracle.json",
+        "sha256": "10c2780ecc6b688657f09d969b2b8465604bdeeb01bc4b69796d2f27ad755eb1"
+      },
+      {
+        "path": "th13_sql_export_job_state/case.json",
+        "sha256": "f356a264a35ee25caea803d96711d039409db705c1a5e4b6a3a34a6da1a85805"
+      },
+      {
+        "path": "th13_sql_export_job_state/final_oracle.json",
+        "sha256": "b3ac56deada2b902d17839f74371e8d4a992d4f42de3ebb086fc5127cbd72e1f"
+      },
+      {
+        "path": "th13_sql_export_job_state/oracle.json",
+        "sha256": "6fad52d6336775844256b1fb7e00819f8d596b3506b8aec266e8a895d8a618d6"
+      },
+      {
+        "path": "th13_sql_package_units/case.json",
+        "sha256": "4f01315e73a75f8a5d3741bdcf62bff72ccb738cb7c832b39646c400fcee2d90"
+      },
+      {
+        "path": "th13_sql_package_units/final_oracle.json",
+        "sha256": "5a90d5d7f8af187b5d4e7f1d6f1d00c3e97fcb5eef817a54a9b5999fc41d859f"
+      },
+      {
+        "path": "th13_sql_package_units/oracle.json",
+        "sha256": "1c670711a24ddeb917c7913efb714666427723e9e67d8a3aae9def6166cd5339"
+      }
+    ],
+    "all_files_equal_before_after": true,
+    "before": [
+      {
+        "path": "AUTHOR_RECEIPT.md",
+        "sha256": "d133e5ff6b2bc9c31b221303cbf777dd72cc1ceb20d7333d88de9dd2f4dd8fea"
+      },
+      {
+        "path": "th13_sql_delimited_profile/case.json",
+        "sha256": "a03aec7dff223c5ebb94d419d2166d931ca4f5af1dcf77f3022abec68f9edbb9"
+      },
+      {
+        "path": "th13_sql_delimited_profile/final_oracle.json",
+        "sha256": "edc1589f29144b5171d20fd546297045f8093134b47719275bedbcc3fda1b837"
+      },
+      {
+        "path": "th13_sql_delimited_profile/oracle.json",
+        "sha256": "10c2780ecc6b688657f09d969b2b8465604bdeeb01bc4b69796d2f27ad755eb1"
+      },
+      {
+        "path": "th13_sql_export_job_state/case.json",
+        "sha256": "f356a264a35ee25caea803d96711d039409db705c1a5e4b6a3a34a6da1a85805"
+      },
+      {
+        "path": "th13_sql_export_job_state/final_oracle.json",
+        "sha256": "b3ac56deada2b902d17839f74371e8d4a992d4f42de3ebb086fc5127cbd72e1f"
+      },
+      {
+        "path": "th13_sql_export_job_state/oracle.json",
+        "sha256": "6fad52d6336775844256b1fb7e00819f8d596b3506b8aec266e8a895d8a618d6"
+      },
+      {
+        "path": "th13_sql_package_units/case.json",
+        "sha256": "4f01315e73a75f8a5d3741bdcf62bff72ccb738cb7c832b39646c400fcee2d90"
+      },
+      {
+        "path": "th13_sql_package_units/final_oracle.json",
+        "sha256": "5a90d5d7f8af187b5d4e7f1d6f1d00c3e97fcb5eef817a54a9b5999fc41d859f"
+      },
+      {
+        "path": "th13_sql_package_units/oracle.json",
+        "sha256": "1c670711a24ddeb917c7913efb714666427723e9e67d8a3aae9def6166cd5339"
+      }
+    ],
+    "file_count": 10,
+    "inventory_canonicalization": "ASCII records '<relative-posix-path>\\t<lowercase-sha256>\\n' sorted lexicographically by relative path",
+    "mismatches": [],
+    "sorted_inventory_sha256_after": "4bc7c9a92802e851f03ab6e984cda577e67848a3ad5f0d575868653c331fde95",
+    "sorted_inventory_sha256_before": "4bc7c9a92802e851f03ab6e984cda577e67848a3ad5f0d575868653c331fde95"
+  },
+  "automated_gates_pass": true,
+  "case_count": 3,
+  "case_ids": [
+    "th13_sql_delimited_profile",
+    "th13_sql_export_job_state",
+    "th13_sql_package_units"
+  ],
+  "cases": [
+    {
+      "candidates": [
+        "sql/render_customer_row.sql",
+        "sql/render_order_row.sql"
+      ],
+      "case_id": "th13_sql_delimited_profile",
+      "assertion_family": "Exact rendered-string equality for customer and order rows.",
+      "combined_source_skeleton_sha256": "f4fde1ad6acc10e29d0ac33312f6d9618a8c2869306b483ff4a3b31860df774b",
+      "feedback_boundary": "A non-default pipe field separator and CRLF record separator must be honored for plain customer and order values.",
+      "final_boundary": "Values containing the selected semicolon separator must be quoted, and embedded double quotes must be doubled.",
+      "final_novelty": "Feedback covers profile selection for plain fields; final composes profile selection with delimiter-sensitive quoting and quote escaping, so it is materially new rather than renamed or equivalent.",
+      "mechanism": "Profile-selected field/record separators with delimiter-sensitive quoting.",
+      "source_skeleton_sha256": {
+        "sql/render_customer_row.sql": "6965c95b913e0c19b200acee58e0f24bbc165494064adc2b3c6bd412cbc96973",
+        "sql/render_order_row.sql": "6965c95b913e0c19b200acee58e0f24bbc165494064adc2b3c6bd412cbc96973"
+      },
+      "checks": [
+        {
+          "detail": "directory=th13_sql_delimited_profile; ids=th13_sql_delimited_profile,th13_sql_delimited_profile,th13_sql_delimited_profile",
+          "gate": "identity",
+          "pass": true
+        },
+        {
+          "detail": "language='sql'",
+          "gate": "language",
+          "pass": true
+        },
+        {
+          "detail": "runner='pytest'",
+          "gate": "runner",
+          "pass": true
+        },
+        {
+          "detail": "repo_files, feedback_files, and final_files are objects",
+          "gate": "file_maps",
+          "pass": true
+        },
+        {
+          "detail": "candidates=['sql/render_customer_row.sql', 'sql/render_order_row.sql']",
+          "gate": "candidate_set",
+          "pass": true
+        },
+        {
+          "detail": "owners=['sql/render_customer_row.sql', 'sql/render_order_row.sql']; max_files=2",
+          "gate": "owner_set",
+          "pass": true
+        },
+        {
+          "detail": "repo_sources=['sql/render_customer_row.sql', 'sql/render_order_row.sql']; public=['tests/test_public.py']; feedback=['tests/test_feedback.py']; final=['tests/test_final.py']",
+          "gate": "test_map_consistency",
+          "pass": true
+        },
+        {
+          "detail": "paths=['sql/render_customer_row.sql', 'sql/render_order_row.sql', 'tests/test_feedback.py', 'tests/test_final.py', 'tests/test_public.py']",
+          "gate": "path_safety",
+          "pass": true
+        },
+        {
+          "detail": "all embedded source and test contents encode as ASCII",
+          "gate": "ascii_contents",
+          "pass": true
+        },
+        {
+          "detail": "case directory and three JSON files are non-symlinks",
+          "gate": "no_symlinks",
+          "pass": true
+        },
+        {
+          "detail": "every candidate is parameterized executable SQL",
+          "gate": "candidate_plausibility",
+          "pass": true
+        },
+        {
+          "detail": "absent labels=['expected_dimension', 'expected_files', 'feedback_files', 'final_files']",
+          "gate": "oracle_label_leak",
+          "pass": true
+        },
+        {
+          "detail": "hidden test names absent; public/hidden test-function hashes disjoint (2 vs 4)",
+          "gate": "hidden_test_leak",
+          "pass": true
+        },
+        {
+          "detail": "repair files=['sql/render_customer_row.sql', 'sql/render_order_row.sql']",
+          "gate": "repair_owner_alignment",
+          "pass": true
+        }
+      ],
+      "dimension": "config",
+      "hidden_test_names": [
+        "test_customer_rows_use_the_selected_profile_separator",
+        "test_customer_values_containing_the_selected_separator_are_quoted",
+        "test_order_quoting_uses_the_selected_separator_and_doubles_quotes",
+        "test_order_rows_use_the_selected_profile_separator"
+      ],
+      "max_files": 2,
+      "owners": [
+        "sql/render_customer_row.sql",
+        "sql/render_order_row.sql"
+      ],
+      "runs_pass_expected_outcomes": true,
+      "semantic_audit": {
+        "assertions": "Exact rendered strings.",
+        "boundary": "Configured separator inside a field and doubled embedded quotes.",
+        "mechanism": "Profile-selected field/record separators with delimiter-sensitive quoting.",
+        "novelty": "Feedback checks non-comma selection on plain fields and CRLF. Final adds composition with a selected separator inside customer/order values plus embedded double-quote escaping; this is a new quoting boundary, not a rename.",
+        "repair": "Both row renderers use p.field_separator for concatenation and quote detection while retaining quote doubling and the selected record terminator.",
+        "skeleton": "SELECT text renderer joined to export_profile."
+      }
+    },
+    {
+      "candidates": [
+        "sql/claim_export_job.sql",
+        "sql/finish_export_job.sql"
+      ],
+      "case_id": "th13_sql_export_job_state",
+      "assertion_family": "Affected-row counts plus persisted job state/owner/result equality, including a composed transition sequence.",
+      "combined_source_skeleton_sha256": "278caf0ae1994a97c246c9284e5a5c08984795dcb0518181c23578297d5fc71e",
+      "feedback_boundary": "A second worker cannot steal an active job, and a non-owner cannot finish a running job.",
+      "final_boundary": "Canceled and unclaimed queued jobs reject invalid transitions; rejected interference is followed by one owner completion and a rejected terminal replay.",
+      "final_novelty": "Feedback checks contention and ownership separately; final adds invalid source states and a multi-step interference/completion/replay composition proving terminal immutability.",
+      "mechanism": "Guarded UPDATE state transitions using current state and worker ownership.",
+      "source_skeleton_sha256": {
+        "sql/claim_export_job.sql": "226e6b5cfac002adf56c71ee63437eb1dd8be07915410bf0718ad8712798c284",
+        "sql/finish_export_job.sql": "226e6b5cfac002adf56c71ee63437eb1dd8be07915410bf0718ad8712798c284"
+      },
+      "checks": [
+        {
+          "detail": "directory=th13_sql_export_job_state; ids=th13_sql_export_job_state,th13_sql_export_job_state,th13_sql_export_job_state",
+          "gate": "identity",
+          "pass": true
+        },
+        {
+          "detail": "language='sql'",
+          "gate": "language",
+          "pass": true
+        },
+        {
+          "detail": "runner='pytest'",
+          "gate": "runner",
+          "pass": true
+        },
+        {
+          "detail": "repo_files, feedback_files, and final_files are objects",
+          "gate": "file_maps",
+          "pass": true
+        },
+        {
+          "detail": "candidates=['sql/claim_export_job.sql', 'sql/finish_export_job.sql']",
+          "gate": "candidate_set",
+          "pass": true
+        },
+        {
+          "detail": "owners=['sql/claim_export_job.sql', 'sql/finish_export_job.sql']; max_files=2",
+          "gate": "owner_set",
+          "pass": true
+        },
+        {
+          "detail": "repo_sources=['sql/claim_export_job.sql', 'sql/finish_export_job.sql']; public=['tests/test_public.py']; feedback=['tests/test_feedback.py']; final=['tests/test_final.py']",
+          "gate": "test_map_consistency",
+          "pass": true
+        },
+        {
+          "detail": "paths=['sql/claim_export_job.sql', 'sql/finish_export_job.sql', 'tests/test_feedback.py', 'tests/test_final.py', 'tests/test_public.py']",
+          "gate": "path_safety",
+          "pass": true
+        },
+        {
+          "detail": "all embedded source and test contents encode as ASCII",
+          "gate": "ascii_contents",
+          "pass": true
+        },
+        {
+          "detail": "case directory and three JSON files are non-symlinks",
+          "gate": "no_symlinks",
+          "pass": true
+        },
+        {
+          "detail": "every candidate is parameterized executable SQL",
+          "gate": "candidate_plausibility",
+          "pass": true
+        },
+        {
+          "detail": "absent labels=['expected_dimension', 'expected_files', 'feedback_files', 'final_files']",
+          "gate": "oracle_label_leak",
+          "pass": true
+        },
+        {
+          "detail": "hidden test names absent; public/hidden test-function hashes disjoint (2 vs 5)",
+          "gate": "hidden_test_leak",
+          "pass": true
+        },
+        {
+          "detail": "repair files=['sql/claim_export_job.sql', 'sql/finish_export_job.sql']",
+          "gate": "repair_owner_alignment",
+          "pass": true
+        }
+      ],
+      "dimension": "state",
+      "hidden_test_names": [
+        "test_a_canceled_job_cannot_be_claimed_again",
+        "test_a_non_owner_cannot_finish_a_running_job",
+        "test_a_queued_job_cannot_be_finished_without_a_claim",
+        "test_a_second_worker_cannot_take_an_active_job",
+        "test_rejected_interference_does_not_block_one_terminal_result"
+      ],
+      "max_files": 2,
+      "owners": [
+        "sql/claim_export_job.sql",
+        "sql/finish_export_job.sql"
+      ],
+      "runs_pass_expected_outcomes": true,
+      "semantic_audit": {
+        "assertions": "Row counts plus persisted state, including a transition sequence.",
+        "boundary": "Invalid source states, rejected interference, terminal replay.",
+        "mechanism": "Guarded UPDATE state transitions using current state and worker ownership.",
+        "novelty": "Feedback checks competing claim and non-owner finish independently. Final adds canceled/queued source-state rejection and a composed foreign rejection -> owner completion -> replay sequence proving one immutable terminal result.",
+        "repair": "Claim is limited to unowned queued jobs; finish is limited to the owning worker's unfinished running job.",
+        "skeleton": "Compare-and-set-like UPDATE statements."
+      }
+    },
+    {
+      "candidates": [
+        "sql/package_volume.sql",
+        "sql/oversize_queue.sql"
+      ],
+      "case_id": "th13_sql_package_units",
+      "assertion_family": "Tolerance-based numeric volume equality plus exact ordered row-set equality.",
+      "combined_source_skeleton_sha256": "f4d32d13b5e58c2a37775cc282a247174db180293152b280d49334812d485f70",
+      "feedback_boundary": "The 2.54 inch conversion factor applies to all dimensions, and oversize filtering compares converted lengths around 50 centimeters.",
+      "final_boundary": "Factors below one, all-three-axis conversion, exact threshold equality versus just below, and ordered mixed MM/FT/CM results.",
+      "final_novelty": "Feedback uses one factor above one and no exact equality; final adds fractional factors below one, exact inclusive-boundary behavior, multiple units, and composition across all three axes.",
+      "mechanism": "Lookup-table unit normalization for cubic volume and oversize filtering.",
+      "source_skeleton_sha256": {
+        "sql/oversize_queue.sql": "542d6121f8da7bc5ddbd938f27f0f21d5226e0febb9194919495bb2292ecce4c",
+        "sql/package_volume.sql": "00a9665967b4275d9de5a18cdad142d91f12b1845fb4cb941cb9a28e365ac3aa"
+      },
+      "checks": [
+        {
+          "detail": "directory=th13_sql_package_units; ids=th13_sql_package_units,th13_sql_package_units,th13_sql_package_units",
+          "gate": "identity",
+          "pass": true
+        },
+        {
+          "detail": "language='sql'",
+          "gate": "language",
+          "pass": true
+        },
+        {
+          "detail": "runner='pytest'",
+          "gate": "runner",
+          "pass": true
+        },
+        {
+          "detail": "repo_files, feedback_files, and final_files are objects",
+          "gate": "file_maps",
+          "pass": true
+        },
+        {
+          "detail": "candidates=['sql/package_volume.sql', 'sql/oversize_queue.sql']",
+          "gate": "candidate_set",
+          "pass": true
+        },
+        {
+          "detail": "owners=['sql/package_volume.sql', 'sql/oversize_queue.sql']; max_files=2",
+          "gate": "owner_set",
+          "pass": true
+        },
+        {
+          "detail": "repo_sources=['sql/oversize_queue.sql', 'sql/package_volume.sql']; public=['tests/test_public.py']; feedback=['tests/test_feedback.py']; final=['tests/test_final.py']",
+          "gate": "test_map_consistency",
+          "pass": true
+        },
+        {
+          "detail": "paths=['sql/oversize_queue.sql', 'sql/package_volume.sql', 'tests/test_feedback.py', 'tests/test_final.py', 'tests/test_public.py']",
+          "gate": "path_safety",
+          "pass": true
+        },
+        {
+          "detail": "all embedded source and test contents encode as ASCII",
+          "gate": "ascii_contents",
+          "pass": true
+        },
+        {
+          "detail": "case directory and three JSON files are non-symlinks",
+          "gate": "no_symlinks",
+          "pass": true
+        },
+        {
+          "detail": "every candidate is parameterized executable SQL",
+          "gate": "candidate_plausibility",
+          "pass": true
+        },
+        {
+          "detail": "absent labels=['expected_dimension', 'expected_files', 'feedback_files', 'final_files']",
+          "gate": "oracle_label_leak",
+          "pass": true
+        },
+        {
+          "detail": "hidden test names absent; public/hidden test-function hashes disjoint (2 vs 4)",
+          "gate": "hidden_test_leak",
+          "pass": true
+        },
+        {
+          "detail": "repair files=['sql/oversize_queue.sql', 'sql/package_volume.sql']",
+          "gate": "repair_owner_alignment",
+          "pass": true
+        }
+      ],
+      "dimension": "data",
+      "hidden_test_names": [
+        "test_converts_every_dimension_before_computing_cubic_volume",
+        "test_fractional_unit_factors_apply_to_all_three_dimensions",
+        "test_mixed_units_respect_the_exact_oversize_boundary",
+        "test_oversize_queue_compares_converted_lengths_to_centimeters"
+      ],
+      "max_files": 2,
+      "owners": [
+        "sql/package_volume.sql",
+        "sql/oversize_queue.sql"
+      ],
+      "runs_pass_expected_outcomes": true,
+      "semantic_audit": {
+        "assertions": "math.isclose for numeric volume and ordered row-set equality.",
+        "boundary": "Fractional factors, exact threshold equality, and mixed units.",
+        "mechanism": "Lookup-table unit normalization for cubic volume and oversize filtering.",
+        "novelty": "Feedback uses inches around a non-equal threshold. Final adds a factor below one, three-axis fractional composition, exact equality versus just-below, feet, centimeters, and ordered mixed-unit results.",
+        "repair": "Both queries join length_unit; volume converts all three axes and queue comparison converts each axis before max().",
+        "skeleton": "SELECT metric queries joined to length_unit."
+      }
+    }
+  ],
+  "commands": [
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\baseline_public",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 0,
+      "output": "2 passed in 0.02s",
+      "scenario": "baseline_public",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_feedback.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\baseline_feedback",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "output": "FAILED tests/test_feedback.py::test_customer_rows_use_the_selected_profile_separator | FAILED tests/test_feedback.py::test_order_rows_use_the_selected_profile_separator",
+      "scenario": "baseline_feedback",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\baseline_final",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "output": "FAILED tests/test_final.py::test_customer_values_containing_the_selected_separator_are_quoted | FAILED tests/test_final.py::test_order_quoting_uses_the_selected_separator_and_doubles_quotes",
+      "scenario": "baseline_final",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\repaired_all",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 0,
+      "output": "6 passed in 0.03s",
+      "scenario": "repaired_all",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\owner_reverted_render_customer_row",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "reverted to baseline",
+      "output": "FAILED tests/test_feedback.py::test_customer_rows_use_the_selected_profile_separator | FAILED tests/test_final.py::test_customer_values_containing_the_selected_separator_are_quoted",
+      "owner": "sql/render_customer_row.sql",
+      "scenario": "owner_reverted_render_customer_row",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\owner_omitted_render_customer_row",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "file omitted",
+      "output": "FAILED tests/test_public.py::test_renders_a_customer_with_the_default_profile | FAILED tests/test_feedback.py::test_customer_rows_use_the_selected_profile_separator | FAILED tests/test_final.py::test_customer_values_containing_the_selected_separator_are_quoted",
+      "owner": "sql/render_customer_row.sql",
+      "scenario": "owner_omitted_render_customer_row",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\owner_reverted_render_order_row",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "reverted to baseline",
+      "output": "FAILED tests/test_feedback.py::test_order_rows_use_the_selected_profile_separator | FAILED tests/test_final.py::test_order_quoting_uses_the_selected_separator_and_doubles_quotes",
+      "owner": "sql/render_order_row.sql",
+      "scenario": "owner_reverted_render_order_row",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_delimited_profile",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_delimited_profile\\owner_omitted_render_order_row",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "file omitted",
+      "output": "FAILED tests/test_public.py::test_renders_an_order_with_the_default_profile | FAILED tests/test_feedback.py::test_order_rows_use_the_selected_profile_separator | FAILED tests/test_final.py::test_order_quoting_uses_the_selected_separator_and_doubles_quotes",
+      "owner": "sql/render_order_row.sql",
+      "scenario": "owner_omitted_render_order_row",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\baseline_public",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 0,
+      "output": "2 passed in 0.02s",
+      "scenario": "baseline_public",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_feedback.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\baseline_feedback",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "output": "FAILED tests/test_feedback.py::test_a_second_worker_cannot_take_an_active_job | FAILED tests/test_feedback.py::test_a_non_owner_cannot_finish_a_running_job",
+      "scenario": "baseline_feedback",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\baseline_final",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "output": "FAILED tests/test_final.py::test_a_canceled_job_cannot_be_claimed_again - ass... | FAILED tests/test_final.py::test_a_queued_job_cannot_be_finished_without_a_claim | FAILED tests/test_final.py::test_rejected_interference_does_not_block_one_terminal_result",
+      "scenario": "baseline_final",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\repaired_all",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 0,
+      "output": "7 passed in 0.04s",
+      "scenario": "repaired_all",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\owner_reverted_claim_export_job",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "reverted to baseline",
+      "output": "FAILED tests/test_feedback.py::test_a_second_worker_cannot_take_an_active_job | FAILED tests/test_final.py::test_a_canceled_job_cannot_be_claimed_again - ass...",
+      "owner": "sql/claim_export_job.sql",
+      "scenario": "owner_reverted_claim_export_job",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\owner_omitted_claim_export_job",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "file omitted",
+      "output": "FAILED tests/test_public.py::test_a_worker_claims_a_queued_job - FileNotFound... | FAILED tests/test_feedback.py::test_a_second_worker_cannot_take_an_active_job | FAILED tests/test_final.py::test_a_canceled_job_cannot_be_claimed_again - Fil...",
+      "owner": "sql/claim_export_job.sql",
+      "scenario": "owner_omitted_claim_export_job",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\owner_reverted_finish_export_job",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "reverted to baseline",
+      "output": "FAILED tests/test_feedback.py::test_a_non_owner_cannot_finish_a_running_job | FAILED tests/test_final.py::test_a_queued_job_cannot_be_finished_without_a_claim | FAILED tests/test_final.py::test_rejected_interference_does_not_block_one_terminal_result",
+      "owner": "sql/finish_export_job.sql",
+      "scenario": "owner_reverted_finish_export_job",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_export_job_state",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_export_job_state\\owner_omitted_finish_export_job",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "file omitted",
+      "output": "FAILED tests/test_public.py::test_the_owning_worker_finishes_a_running_job - ... | FAILED tests/test_feedback.py::test_a_non_owner_cannot_finish_a_running_job | FAILED tests/test_final.py::test_a_queued_job_cannot_be_finished_without_a_claim | FAILED tests/test_final.py::test_rejected_interference_does_not_block_one_terminal_result",
+      "owner": "sql/finish_export_job.sql",
+      "scenario": "owner_omitted_finish_export_job",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\baseline_public",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 0,
+      "output": "2 passed in 0.02s",
+      "scenario": "baseline_public",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_feedback.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\baseline_feedback",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "output": "FAILED tests/test_feedback.py::test_converts_every_dimension_before_computing_cubic_volume | FAILED tests/test_feedback.py::test_oversize_queue_compares_converted_lengths_to_centimeters",
+      "scenario": "baseline_feedback",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\baseline_final",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "output": "FAILED tests/test_final.py::test_fractional_unit_factors_apply_to_all_three_dimensions | FAILED tests/test_final.py::test_mixed_units_respect_the_exact_oversize_boundary",
+      "scenario": "baseline_final",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\repaired_all",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 0,
+      "output": "6 passed in 0.03s",
+      "scenario": "repaired_all",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\owner_reverted_package_volume",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "reverted to baseline",
+      "output": "FAILED tests/test_feedback.py::test_converts_every_dimension_before_computing_cubic_volume | FAILED tests/test_final.py::test_fractional_unit_factors_apply_to_all_three_dimensions",
+      "owner": "sql/package_volume.sql",
+      "scenario": "owner_reverted_package_volume",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\owner_omitted_package_volume",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "file omitted",
+      "output": "FAILED tests/test_public.py::test_reports_volume_for_a_centimeter_package - F... | FAILED tests/test_feedback.py::test_converts_every_dimension_before_computing_cubic_volume | FAILED tests/test_final.py::test_fractional_unit_factors_apply_to_all_three_dimensions",
+      "owner": "sql/package_volume.sql",
+      "scenario": "owner_omitted_package_volume",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\owner_reverted_oversize_queue",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "reverted to baseline",
+      "output": "FAILED tests/test_feedback.py::test_oversize_queue_compares_converted_lengths_to_centimeters | FAILED tests/test_final.py::test_mixed_units_respect_the_exact_oversize_boundary",
+      "owner": "sql/oversize_queue.sql",
+      "scenario": "owner_reverted_oversize_queue",
+      "timed_out": false
+    },
+    {
+      "case_id": "th13_sql_package_units",
+      "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=line --disable-warnings tests/test_public.py tests/test_feedback.py tests/test_final.py",
+      "cwd": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work\\th13_sql_package_units\\owner_omitted_oversize_queue",
+      "environment": {
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "exit_code": 1,
+      "mutation": "file omitted",
+      "output": "FAILED tests/test_public.py::test_queues_centimeter_packages_over_the_limit | FAILED tests/test_feedback.py::test_oversize_queue_compares_converted_lengths_to_centimeters | FAILED tests/test_final.py::test_mixed_units_respect_the_exact_oversize_boundary",
+      "owner": "sql/oversize_queue.sql",
+      "scenario": "owner_omitted_oversize_queue",
+      "timed_out": false
+    }
+  ],
+  "cross_case_audit": {
+    "duplicate_assertion_family": false,
+    "duplicate_final_boundary": false,
+    "duplicate_mechanism": false,
+    "duplicate_source_skeleton": false,
+    "finding": "The cases are respectively configuration-driven text rendering, guarded state mutation, and lookup-driven numeric normalization; their SQL shapes, assertion families, and final boundaries are distinct."
+  },
+  "dimensions": {
+    "th13_sql_delimited_profile": "config",
+    "th13_sql_export_job_state": "state",
+    "th13_sql_package_units": "data"
+  },
+  "failed_gates": [],
+  "incomplete_gates": [],
+  "inventory_method": "SHA-256 of raw bytes for the nine required case JSON files; inventory digest is SHA-256 of ASCII '<relative-path>\\t<sha256>\\n' records sorted by relative path.",
+  "source_skeleton_normalization": {
+    "combined_hash_input": "For candidate paths sorted lexicographically: '<relative-path>\\n<normalized-skeleton>\\n', concatenated and UTF-8 encoded",
+    "hash": "SHA-256 of normalized UTF-8 bytes, lowercase hexadecimal",
+    "identifier_rule": "ASCII word tokens are uppercased; listed SQL keywords are preserved, COALESCE/INSTR/REPLACE/CHAR/MAX become FUNC_<NAME>, and all other ordinary identifiers become ID",
+    "keyword_set": "SELECT FROM WHERE JOIN INNER LEFT RIGHT FULL CROSS ON AS UPDATE SET INSERT INTO VALUES DELETE CASE WHEN THEN ELSE END AND OR NOT IS NULL IN EXISTS BETWEEN LIKE ESCAPE ORDER BY GROUP HAVING LIMIT OFFSET DISTINCT ALL UNION INTERSECT EXCEPT ASC DESC CAST TEXT REAL INTEGER PRIMARY KEY CREATE TABLE CHECK REFERENCES WITH RECURSIVE OVER PARTITION ROWS RANGE CURRENT ROW",
+    "literal_rule": "Single-quoted string literals become STR; numeric literals become NUM; quoted identifiers become QID; named parameters become PARAM",
+    "operator_rule": "Preserve ||, comparison/arithmetic operators, parentheses, commas, periods, and semicolons as individual tokens",
+    "source": "Baseline SQL strings in case.json repo_files for each candidate_path",
+    "version": "sql_baseline_skeleton_v1",
+    "whitespace_and_comments": "Discard -- line comments and /* block comments */; discard source whitespace; join output tokens with one ASCII space and no leading/trailing space"
+  },
+  "lane": "sql",
+  "output_root": "D:\\dev\\chili-thirteenth-validation-lane-sql",
+  "prohibited_mechanism_overlap": {
+    "TLS client authentication": {
+      "finding": "No TLS, certificates, clients, or authentication protocol.",
+      "material_overlap": false
+    },
+    "canonical base64url": {
+      "finding": "No encoding or canonicalization.",
+      "material_overlap": false
+    },
+    "composite tenant stock ownership": {
+      "finding": "Worker ownership is a single job predicate; there is no tenant, stock, or composite ownership key.",
+      "material_overlap": false
+    },
+    "fixed-point apportionment": {
+      "finding": "No allocation, quota, remainder, or fixed-point rounding; package arithmetic is unit scaling.",
+      "material_overlap": false
+    },
+    "release-reader retirement": {
+      "finding": "No releases, readers, epochs, or retirement lifecycle.",
+      "material_overlap": false
+    },
+    "replacement config reload": {
+      "finding": "The profile is read by a row-rendering SELECT; there is no replacement/reload lifecycle.",
+      "material_overlap": false
+    },
+    "request policy snapshots": {
+      "finding": "No request policy or snapshot semantics.",
+      "material_overlap": false
+    },
+    "source-aware tail checkpoints": {
+      "finding": "No streams, tails, sources, offsets, or checkpoints.",
+      "material_overlap": false
+    },
+    "ticket archive/move accounting": {
+      "finding": "Export claim/finish has no tickets, archive/move operation, or accounting invariant.",
+      "material_overlap": false
+    },
+    "tri-state override SQL": {
+      "finding": "No nullable inheritance/override resolution; job state is an explicit lifecycle enum.",
+      "material_overlap": false
+    },
+    "trusted proxy CIDR chains": {
+      "finding": "No networking, proxy trust, addresses, or CIDR parsing.",
+      "material_overlap": false
+    },
+    "unordered category hierarchy": {
+      "finding": "No categories, trees, parentage, or unordered hierarchy.",
+      "material_overlap": false
+    }
+  },
+  "result": "PASS",
+  "runtime": {
+    "pytest": "9.0.2",
+    "python": "3.13.11",
+    "sqlite": "3.51.0"
+  },
+  "scope": {
+    "author_modified": false,
+    "author_receipt_opened_or_hashed": false,
+    "author_receipt_opened_or_hashed_scope": "Original validation phase only; the requested supplemental audit subsequently hashed all ten authored files including AUTHOR_RECEIPT.md.",
+    "supplemental_author_receipt_hashed": true,
+    "external_services_or_models_used": false,
+    "git_containers_services_brokers_touched": false,
+    "temporary_work_root": "D:\\dev\\chili-thirteenth-validation-lane-sql\\temp\\work"
+  }
+}

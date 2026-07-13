@@ -1,0 +1,6 @@
+{
+  "case_id": "th13_node_response_compression",
+  "final_files": {
+    "tests/final.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { createCompressionDecider } from '../src/compress-response.mjs';\n\ntest('spaced deployment configuration matches parameterized handler responses end to end', () => {\n  const shouldCompress = createCompressionDecider({\n    COMPRESS_TYPES: ' Application/JSON , text/csv '\n  });\n\n  assert.equal(shouldCompress('application/json; charset=utf-8'), true);\n  assert.equal(shouldCompress('TEXT/CSV; header=present'), true);\n  assert.equal(shouldCompress('image/png; profile=compact'), false);\n  assert.equal(shouldCompress(undefined), false);\n});\n"
+  }
+}

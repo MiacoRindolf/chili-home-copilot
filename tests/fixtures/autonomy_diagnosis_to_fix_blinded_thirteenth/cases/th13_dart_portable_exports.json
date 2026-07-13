@@ -1,0 +1,16 @@
+{
+  "case_id": "th13_dart_portable_exports",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "Windows desktop operators report that some generated support-report directories cannot be copied into a shared folder because a few customer or report labels are rejected as filenames. They also report that reports for teams whose labels differ only by letter case can replace one another instead of receiving the normal numeric suffix. Preserve readable entry names and deterministic allocation behavior. Diagnose and fix the source owners without changing tests.",
+  "candidate_paths": [
+    "lib/export_name.dart",
+    "lib/report_bundle.dart"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "lib/export_name.dart": "String portableSegment(String input) {\n  final replaced = input.replaceAll(RegExp(r'[<>:\"/\\\\|?*\\x00-\\x1f]'), '_');\n  final cleaned = replaced.trim();\n  return cleaned.isEmpty ? 'untitled' : cleaned;\n}\n",
+    "lib/report_bundle.dart": "import 'export_name.dart';\n\nclass ReportBundle {\n  final Set<String> _usedEntries = <String>{};\n\n  String allocateEntry(String folder, String title) {\n    final safeFolder = portableSegment(folder);\n    final safeTitle = portableSegment(title);\n    final stem = '$safeFolder/$safeTitle';\n\n    var candidate = '$stem.txt';\n    var suffix = 2;\n    while (_usedEntries.contains(candidate)) {\n      candidate = '$stem ($suffix).txt';\n      suffix += 1;\n    }\n    _usedEntries.add(candidate);\n    return candidate;\n  }\n}\n",
+    "tests/public_test.dart": "import '../lib/export_name.dart';\nimport '../lib/report_bundle.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  check(portableSegment('Quarter 1') == 'Quarter 1', 'keeps readable names');\n  check(portableSegment('ops/east') == 'ops_east', 'replaces separators');\n  check(\n    portableSegment('   ') == 'untitled',\n    'supplies an empty-name fallback',\n  );\n\n  final bundle = ReportBundle();\n  check(\n    bundle.allocateEntry('Support', 'Summary') == 'Support/Summary.txt',\n    'allocates the first entry',\n  );\n  check(\n    bundle.allocateEntry('Support', 'Summary') == 'Support/Summary (2).txt',\n    'adds a deterministic suffix for an exact duplicate',\n  );\n\n  print('public tests passed');\n}\n"
+  }
+}

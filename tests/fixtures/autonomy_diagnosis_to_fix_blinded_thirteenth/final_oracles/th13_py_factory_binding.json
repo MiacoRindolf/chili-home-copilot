@@ -1,0 +1,6 @@
+{
+  "case_id": "th13_py_factory_binding",
+  "final_files": {
+    "tests/test_dependency_final.py": "from dependency_plan import Dependency, dependency_plan\nfrom service_container import Container\n\n\ndef test_mixed_bindings_resolve_through_keyword_only_provider():\n    container = Container()\n    container.register(\"prefix\", lambda: \"ops\")\n\n    def formatter(prefix, /):\n        return f\"{prefix}-format\"\n\n    def audit_sink(*, formatter):\n        return f\"audit:{formatter}\"\n\n    def publisher(formatter, /, *, audit_sink):\n        return f\"publish:{formatter}:{audit_sink}\"\n\n    container.register(\"formatter\", formatter)\n    container.register(\"audit_sink\", audit_sink)\n    container.register(\"publisher\", publisher)\n\n    assert dependency_plan(publisher) == (\n        Dependency(\"formatter\", \"positional\"),\n        Dependency(\"audit_sink\", \"keyword\"),\n    )\n    assert container.resolve(\"publisher\") == (\n        \"publish:ops-format:audit:ops-format\"\n    )\n"
+  }
+}

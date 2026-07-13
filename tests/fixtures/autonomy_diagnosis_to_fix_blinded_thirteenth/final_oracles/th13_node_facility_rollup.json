@@ -1,0 +1,6 @@
+{
+  "case_id": "th13_node_facility_rollup",
+  "final_files": {
+    "tests/final.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { buildDailyReport } from '../src/report-service.mjs';\n\ntest('a multi-metric report distinguishes missing data from measured zero end to end', () => {\n  const report = buildDailyReport(\n    [\n      { sensorId: 'flow-a', metric: 'flow', value: null, unit: 'L/s' },\n      { sensorId: 'flow-b', metric: 'flow', value: 0, unit: 'L/s' },\n      { sensorId: 'flow-c', metric: 'flow', value: '6', unit: 'L/s' },\n      { sensorId: 'line-a', metric: 'pressure', value: '2', unit: 'bar' },\n      { sensorId: 'line-b', metric: 'pressure', value: null, unit: 'bar' }\n    ],\n    ['flow', 'pressure']\n  );\n\n  assert.deepEqual(report, {\n    flow: {\n      metric: 'flow',\n      count: 2,\n      minimum: 0,\n      maximum: 6,\n      average: 3\n    },\n    pressure: {\n      metric: 'pressure',\n      count: 1,\n      minimum: 2,\n      maximum: 2,\n      average: 2\n    }\n  });\n});\n"
+  }
+}

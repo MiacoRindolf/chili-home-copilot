@@ -1,0 +1,16 @@
+{
+  "case_id": "th13_py_factory_binding",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "Extension activation fails when a factory declares a required collaborator after a keyword-only separator. The dependency diagnostic reports no required collaborators for that factory, and resolution then raises a missing-argument error. Factories with ordinary required parameters and optional defaults continue to work. Preserve the Container registration and resolution API.",
+  "candidate_paths": [
+    "dependency_plan.py",
+    "service_container.py"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "dependency_plan.py": "from dataclasses import dataclass\nfrom inspect import Parameter, signature\nfrom typing import Callable\n\n\n@dataclass(frozen=True)\nclass Dependency:\n    name: str\n    binding: str\n\n\ndef dependency_plan(factory: Callable[..., object]) -> tuple[Dependency, ...]:\n    dependencies = []\n    for parameter in signature(factory).parameters.values():\n        if parameter.default is not Parameter.empty:\n            continue\n        if parameter.kind in (\n            Parameter.POSITIONAL_ONLY,\n            Parameter.POSITIONAL_OR_KEYWORD,\n        ):\n            dependencies.append(Dependency(parameter.name, \"positional\"))\n    return tuple(dependencies)\n",
+    "service_container.py": "from collections.abc import Callable\n\nfrom dependency_plan import dependency_plan\n\n\nclass Container:\n    def __init__(self) -> None:\n        self._providers: dict[str, Callable[..., object]] = {}\n\n    def register(self, name: str, factory: Callable[..., object]) -> None:\n        self._providers[name] = factory\n\n    def resolve(self, name: str) -> object:\n        try:\n            factory = self._providers[name]\n        except KeyError:\n            raise KeyError(f\"no provider registered for {name!r}\") from None\n\n        dependencies = [\n            self.resolve(item.name) for item in dependency_plan(factory)\n        ]\n        return factory(*dependencies)\n",
+    "tests/test_public.py": "from dependency_plan import Dependency, dependency_plan\nfrom service_container import Container\n\n\ndef test_plan_includes_required_positional_and_skips_default():\n    def make_report(database, formatter=\"plain\"):\n        return database, formatter\n\n    assert dependency_plan(make_report) == (\n        Dependency(\"database\", \"positional\"),\n    )\n\n\ndef test_container_resolves_positional_dependency_chain():\n    container = Container()\n    container.register(\"settings\", lambda: {\"dsn\": \"memory\"})\n\n    def database(settings):\n        return f\"db:{settings['dsn']}\"\n\n    def application(database):\n        return f\"app:{database}\"\n\n    container.register(\"database\", database)\n    container.register(\"application\", application)\n\n    assert container.resolve(\"application\") == \"app:db:memory\"\n"
+  }
+}

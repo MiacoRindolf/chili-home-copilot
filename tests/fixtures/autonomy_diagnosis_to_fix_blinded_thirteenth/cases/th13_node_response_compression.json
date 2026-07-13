@@ -1,0 +1,18 @@
+{
+  "case_id": "th13_node_response_compression",
+  "language": "typescript",
+  "test_runner": "node_test",
+  "prompt": "Platform operators report that response compression works with a single bare media type but is skipped in production when the configured comma-separated list contains normal spacing and a handler adds a charset parameter to Content-Type. Unlisted binary responses must remain uncompressed. Repair the configuration-to-decision path.",
+  "candidate_paths": [
+    "src/compression-config.mjs",
+    "src/content-type-match.mjs",
+    "src/compress-response.mjs"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "src/compression-config.mjs": "const DEFAULT_TYPES = ['application/json', 'text/plain'];\n\nexport function parseCompressibleTypes(rawValue) {\n  if (rawValue === undefined) {\n    return [...DEFAULT_TYPES];\n  }\n  if (typeof rawValue !== 'string') {\n    throw new TypeError('COMPRESS_TYPES must be a string');\n  }\n\n  return rawValue.split(',').map((value) => value.toLowerCase());\n}\n",
+    "src/content-type-match.mjs": "export function matchesConfiguredType(contentType, configuredTypes) {\n  if (typeof contentType !== 'string') {\n    return false;\n  }\n\n  return configuredTypes.includes(contentType.toLowerCase());\n}\n",
+    "src/compress-response.mjs": "import { parseCompressibleTypes } from './compression-config.mjs';\nimport { matchesConfiguredType } from './content-type-match.mjs';\n\nexport function createCompressionDecider(environment = {}) {\n  const configuredTypes = parseCompressibleTypes(environment.COMPRESS_TYPES);\n  return (contentType) => matchesConfiguredType(contentType, configuredTypes);\n}\n",
+    "tests/public.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { parseCompressibleTypes } from '../src/compression-config.mjs';\nimport { matchesConfiguredType } from '../src/content-type-match.mjs';\nimport { createCompressionDecider } from '../src/compress-response.mjs';\n\ntest('default compressible types are available when configuration is absent', () => {\n  assert.deepEqual(parseCompressibleTypes(undefined), [\n    'application/json',\n    'text/plain'\n  ]);\n});\n\ntest('an exact configured media type matches case-insensitively', () => {\n  assert.equal(\n    matchesConfiguredType('Application/JSON', ['application/json']),\n    true\n  );\n  assert.equal(matchesConfiguredType('image/png', ['application/json']), false);\n});\n\ntest('the compression decider uses the deployment configuration', () => {\n  const shouldCompress = createCompressionDecider({\n    COMPRESS_TYPES: 'application/json,text/csv'\n  });\n\n  assert.equal(shouldCompress('application/json'), true);\n  assert.equal(shouldCompress('text/csv'), true);\n  assert.equal(shouldCompress('application/zip'), false);\n});\n"
+  }
+}

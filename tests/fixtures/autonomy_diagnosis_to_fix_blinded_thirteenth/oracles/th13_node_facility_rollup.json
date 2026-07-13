@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_node_facility_rollup",
+  "expected_dimension": "data",
+  "expected_files": [
+    "src/observation.mjs",
+    "src/daily-rollup.mjs"
+  ],
+  "feedback_files": {
+    "tests/feedback.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { normalizeObservation } from '../src/observation.mjs';\nimport { summarizeMetric } from '../src/daily-rollup.mjs';\n\ntest('an unavailable sensor value remains missing during normalization', () => {\n  assert.deepEqual(\n    normalizeObservation({\n      sensorId: 'flow-1',\n      metric: 'flow',\n      value: null,\n      unit: 'L/s'\n    }),\n    {\n      sensorId: 'flow-1',\n      metric: 'flow',\n      value: null,\n      unit: 'L/s'\n    }\n  );\n});\n\ntest('a measured zero participates in metric statistics', () => {\n  assert.deepEqual(\n    summarizeMetric(\n      [\n        { sensorId: 'flow-1', metric: 'flow', value: 0 },\n        { sensorId: 'flow-2', metric: 'flow', value: 4 },\n        { sensorId: 'flow-3', metric: 'flow', value: null }\n      ],\n      'flow'\n    ),\n    {\n      metric: 'flow',\n      count: 2,\n      minimum: 0,\n      maximum: 4,\n      average: 2\n    }\n  );\n});\n"
+  }
+}

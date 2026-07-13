@@ -1,0 +1,1127 @@
+{
+  "lane": "node",
+  "status": "PASS",
+  "validated_case_count": 3,
+  "case_ids": [
+    "th13_node_facility_rollup",
+    "th13_node_job_recovery",
+    "th13_node_response_compression"
+  ],
+  "author_root": "D:\\dev\\chili-thirteenth-author-node",
+  "output_root": "D:\\dev\\chili-thirteenth-validation-lane-node",
+  "runtime": "Node.js v24.15.0",
+  "constraints": {
+    "author_access": "read_only",
+    "writes_confined_to_output_root": true,
+    "temporary_root": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp",
+    "external_services_invoked": false,
+    "model_invoked": false,
+    "git_invoked": false,
+    "containers_invoked": false,
+    "services_or_brokers_invoked": false,
+    "unrelated_processes_touched": false,
+    "test_timeout_ms": 10000
+  },
+  "root_checks": [
+    {
+      "name": "exactly_three_cases",
+      "pass": true,
+      "detail": "th13_node_facility_rollup, th13_node_job_recovery, th13_node_response_compression"
+    },
+    {
+      "name": "top_level_shape",
+      "pass": true,
+      "detail": "AUTHOR_RECEIPT.md"
+    },
+    {
+      "name": "author_tree_has_no_symlinks_before",
+      "pass": true,
+      "detail": "none"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "th13_node_facility_rollup",
+      "dimension": "data",
+      "status": "PASS",
+      "candidate_paths": [
+        "src/observation.mjs",
+        "src/daily-rollup.mjs",
+        "src/report-service.mjs"
+      ],
+      "expected_files": [
+        "src/observation.mjs",
+        "src/daily-rollup.mjs"
+      ],
+      "max_files": 2,
+      "structural_checks": [
+        {
+          "name": "json_parse",
+          "pass": true,
+          "detail": "case.json, oracle.json, and final_oracle.json parsed"
+        },
+        {
+          "name": "schema_keys",
+          "pass": true,
+          "detail": "top-level bundle maps have the expected roles"
+        },
+        {
+          "name": "identity",
+          "pass": true,
+          "detail": "directory/case/oracle/final identities=th13_node_facility_rollup/th13_node_facility_rollup/th13_node_facility_rollup"
+        },
+        {
+          "name": "language",
+          "pass": true,
+          "detail": "language=typescript"
+        },
+        {
+          "name": "runner",
+          "pass": true,
+          "detail": "test_runner=node_test"
+        },
+        {
+          "name": "file_maps",
+          "pass": true,
+          "detail": "repo, feedback, and final maps contain source strings"
+        },
+        {
+          "name": "paths_relative_contained_ascii",
+          "pass": true,
+          "detail": "6 unique declared paths checked"
+        },
+        {
+          "name": "bundle_ascii",
+          "pass": true,
+          "detail": "all bundle bytes and embedded file contents are ASCII"
+        },
+        {
+          "name": "candidate_shape_and_plausibility",
+          "pass": true,
+          "detail": "3 source candidates are exported and exercised by public tests"
+        },
+        {
+          "name": "owner_set_within_max_files",
+          "pass": true,
+          "detail": "2 expected owners; max_files=2"
+        },
+        {
+          "name": "test_map_consistency",
+          "pass": true,
+          "detail": "one public, one feedback, and one final test path with no collisions"
+        },
+        {
+          "name": "public_surface_no_oracle_leak",
+          "pass": true,
+          "detail": "8 labels, 2 hidden bodies, and 3 hidden titles checked"
+        },
+        {
+          "name": "repair_scope_matches_owners",
+          "pass": true,
+          "detail": "repair owners=src/daily-rollup.mjs, src/observation.mjs"
+        },
+        {
+          "name": "final_not_renamed_or_identical",
+          "pass": true,
+          "detail": "feedback titles=2; final titles=1; semantic review recorded separately"
+        }
+      ],
+      "execution_checks": [
+        {
+          "name": "baseline_public_passes",
+          "pass": true,
+          "detail": "tests=3, pass=3, fail=0"
+        },
+        {
+          "name": "baseline_feedback_fails",
+          "pass": true,
+          "detail": "tests=5, pass=3, fail=2; failing=an unavailable sensor value remains missing during normalization | a measured zero participates in metric statistics"
+        },
+        {
+          "name": "baseline_final_fails",
+          "pass": true,
+          "detail": "tests=1, pass=0, fail=1; failing=a multi-metric report distinguishes missing data from measured zero end to end"
+        },
+        {
+          "name": "repaired_public_feedback_final_pass",
+          "pass": true,
+          "detail": "tests=6, pass=6, fail=0"
+        },
+        {
+          "name": "each_owner_is_required",
+          "pass": true,
+          "detail": "src/observation.mjs: tests=6, pass=4, fail=2; failing=an unavailable sensor value remains missing during normalization | a multi-metric report distinguishes missing data from measured zero end to end; src/daily-rollup.mjs: tests=6, pass=4, fail=2; failing=a measured zero participates in metric statistics | a multi-metric report distinguishes missing data from measured zero end to end"
+        },
+        {
+          "name": "all_runs_bounded_and_no_materialized_symlinks",
+          "pass": true,
+          "detail": "6 fresh scenarios, timeout=10000ms each"
+        },
+        {
+          "name": "every_expected_owner_changed",
+          "pass": true,
+          "detail": "2/2 owners changed"
+        }
+      ],
+      "structural_pass": true,
+      "execution_pass": true,
+      "commands": [
+        {
+          "scenario": "01-baseline-public",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\01-baseline-public",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 209,
+          "output": "tests=3, pass=3, fail=0",
+          "counts": {
+            "tests": 3,
+            "passed": 3,
+            "failed": 0
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "02-baseline-feedback",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\02-baseline-feedback",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 172,
+          "output": "tests=5, pass=3, fail=2; failing=an unavailable sensor value remains missing during normalization | a measured zero participates in metric statistics",
+          "counts": {
+            "tests": 5,
+            "passed": 3,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "03-baseline-final",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\03-baseline-final",
+          "command": "node --test --test-reporter=tap tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 169,
+          "output": "tests=1, pass=0, fail=1; failing=a multi-metric report distinguishes missing data from measured zero end to end",
+          "counts": {
+            "tests": 1,
+            "passed": 0,
+            "failed": 1
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "04-repaired-all",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\04-repaired-all",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 255,
+          "output": "tests=6, pass=6, fail=0",
+          "counts": {
+            "tests": 6,
+            "passed": 6,
+            "failed": 0
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "05-omit-observation",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\05-omit-observation",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 252,
+          "output": "tests=6, pass=4, fail=2; failing=an unavailable sensor value remains missing during normalization | a multi-metric report distinguishes missing data from measured zero end to end",
+          "counts": {
+            "tests": 6,
+            "passed": 4,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "06-omit-daily-rollup",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\06-omit-daily-rollup",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 176,
+          "output": "tests=6, pass=4, fail=2; failing=a measured zero participates in metric statistics | a multi-metric report distinguishes missing data from measured zero end to end",
+          "counts": {
+            "tests": 6,
+            "passed": 4,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        }
+      ],
+      "omissions": [
+        {
+          "omitted_owner": "src/observation.mjs",
+          "required_validation_failed": true,
+          "scenario": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\05-omit-observation",
+          "exit_code": 1,
+          "output": "tests=6, pass=4, fail=2; failing=an unavailable sensor value remains missing during normalization | a multi-metric report distinguishes missing data from measured zero end to end"
+        },
+        {
+          "omitted_owner": "src/daily-rollup.mjs",
+          "required_validation_failed": true,
+          "scenario": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_facility_rollup\\06-omit-daily-rollup",
+          "exit_code": 1,
+          "output": "tests=6, pass=4, fail=2; failing=a measured zero participates in metric statistics | a multi-metric report distinguishes missing data from measured zero end to end"
+        }
+      ],
+      "repair_hashes": [
+        {
+          "path": "src/observation.mjs",
+          "baseline_sha256": "2a6302f5c7c9186d18616224605ffa7a93482c2534318840281e5f477a6260a2",
+          "repaired_sha256": "164acd0f45aeeeb3fbf40af1c9587494c50acfaecbbc2de780a5e0aa024c2563",
+          "changed": true
+        },
+        {
+          "path": "src/daily-rollup.mjs",
+          "baseline_sha256": "69e039391a365eec1a5503b5c06a26d66f619511146e4d9501c7a4dc696153a2",
+          "repaired_sha256": "e22fc8e5cb8775d95c5bb7975b603541773b92592f1972f526fc1e7e15417715",
+          "changed": true
+        }
+      ],
+      "semantic_review": {
+        "mechanism": "null-versus-zero preservation through normalization and aggregation",
+        "source_skeleton": "pure normalization and statistical rollup functions composed by a report service",
+        "assertion_family": "aggregate object and numeric-statistic invariants",
+        "final_boundary": "multi-metric report-service composition across null, zero, and numeric-string values",
+        "final_novelty": "Feedback isolates normalization and rollup units; final composes both through buildDailyReport, crosses two metrics, and verifies mixed null, measured zero, and numeric-string handling end to end.",
+        "prohibited_overlap": "Telemetry missing-value preservation and arithmetic rollup do not implement any prohibited mechanism.",
+        "feedback_boundary": "Unit boundary: null preservation in normalizeObservation and measured-zero inclusion in summarizeMetric are asserted independently."
+      },
+      "final_novelty": {
+        "pass": true,
+        "detail": "Feedback isolates normalization and rollup units; final composes both through buildDailyReport, crosses two metrics, and verifies mixed null, measured zero, and numeric-string handling end to end.",
+        "materially_new": true,
+        "summary": "Feedback isolates normalization and rollup units; final composes both through buildDailyReport, crosses two metrics, and verifies mixed null, measured zero, and numeric-string handling end to end."
+      },
+      "mechanism": "null-versus-zero preservation through normalization and aggregation",
+      "assertion_family": "aggregate object and numeric-statistic invariants",
+      "feedback_boundary": "Unit boundary: null preservation in normalizeObservation and measured-zero inclusion in summarizeMetric are asserted independently.",
+      "final_boundary": "multi-metric report-service composition across null, zero, and numeric-string values",
+      "candidate_source_skeletons": [
+        {
+          "path": "src/observation.mjs",
+          "source_skeleton_sha256": "d95434cd39d9ff6016b5097df79477b40fac25975d6c048b3b81454f09de25d2",
+          "normalized_token_count": 134
+        },
+        {
+          "path": "src/daily-rollup.mjs",
+          "source_skeleton_sha256": "c93f95276e5e97b51c991ad99507b21068fd31c97875a26e62b014e35ffa8900",
+          "normalized_token_count": 133
+        },
+        {
+          "path": "src/report-service.mjs",
+          "source_skeleton_sha256": "daa4cc3be43963ffdb5f6ccdbf934a2947865467174a4d15d4072c6974008e5b",
+          "normalized_token_count": 67
+        }
+      ],
+      "combined_source_skeleton_sha256": "01945435a9bb47029ff2a21284dd404ad55727fec521eab8c0450743e81d696b"
+    },
+    {
+      "case_id": "th13_node_job_recovery",
+      "dimension": "state",
+      "status": "PASS",
+      "candidate_paths": [
+        "src/job-store.mjs",
+        "src/job-runner.mjs",
+        "src/job-events.mjs"
+      ],
+      "expected_files": [
+        "src/job-store.mjs",
+        "src/job-runner.mjs"
+      ],
+      "max_files": 2,
+      "structural_checks": [
+        {
+          "name": "json_parse",
+          "pass": true,
+          "detail": "case.json, oracle.json, and final_oracle.json parsed"
+        },
+        {
+          "name": "schema_keys",
+          "pass": true,
+          "detail": "top-level bundle maps have the expected roles"
+        },
+        {
+          "name": "identity",
+          "pass": true,
+          "detail": "directory/case/oracle/final identities=th13_node_job_recovery/th13_node_job_recovery/th13_node_job_recovery"
+        },
+        {
+          "name": "language",
+          "pass": true,
+          "detail": "language=typescript"
+        },
+        {
+          "name": "runner",
+          "pass": true,
+          "detail": "test_runner=node_test"
+        },
+        {
+          "name": "file_maps",
+          "pass": true,
+          "detail": "repo, feedback, and final maps contain source strings"
+        },
+        {
+          "name": "paths_relative_contained_ascii",
+          "pass": true,
+          "detail": "6 unique declared paths checked"
+        },
+        {
+          "name": "bundle_ascii",
+          "pass": true,
+          "detail": "all bundle bytes and embedded file contents are ASCII"
+        },
+        {
+          "name": "candidate_shape_and_plausibility",
+          "pass": true,
+          "detail": "3 source candidates are exported and exercised by public tests"
+        },
+        {
+          "name": "owner_set_within_max_files",
+          "pass": true,
+          "detail": "2 expected owners; max_files=2"
+        },
+        {
+          "name": "test_map_consistency",
+          "pass": true,
+          "detail": "one public, one feedback, and one final test path with no collisions"
+        },
+        {
+          "name": "public_surface_no_oracle_leak",
+          "pass": true,
+          "detail": "8 labels, 2 hidden bodies, and 4 hidden titles checked"
+        },
+        {
+          "name": "repair_scope_matches_owners",
+          "pass": true,
+          "detail": "repair owners=src/job-runner.mjs, src/job-store.mjs"
+        },
+        {
+          "name": "final_not_renamed_or_identical",
+          "pass": true,
+          "detail": "feedback titles=2; final titles=2; semantic review recorded separately"
+        }
+      ],
+      "execution_checks": [
+        {
+          "name": "baseline_public_passes",
+          "pass": true,
+          "detail": "tests=3, pass=3, fail=0"
+        },
+        {
+          "name": "baseline_feedback_fails",
+          "pass": true,
+          "detail": "tests=5, pass=3, fail=2; failing=the store rejects completion from an attempt the watchdog replaced | the runner identifies the claim when reporting successful work"
+        },
+        {
+          "name": "baseline_final_fails",
+          "pass": true,
+          "detail": "tests=2, pass=0, fail=2; failing=a late failure cannot send a replacement attempt back to the queue | the runner identifies the claim when reporting failed work"
+        },
+        {
+          "name": "repaired_public_feedback_final_pass",
+          "pass": true,
+          "detail": "tests=7, pass=7, fail=0"
+        },
+        {
+          "name": "each_owner_is_required",
+          "pass": true,
+          "detail": "src/job-store.mjs: tests=7, pass=4, fail=3; failing=the store rejects completion from an attempt the watchdog replaced | a late failure cannot send a replacement attempt back to the queue | a failed export returns to the queue and can be retried; src/job-runner.mjs: tests=7, pass=3, fail=4; failing=the runner identifies the claim when reporting successful work | the runner identifies the claim when reporting failed work | a claimed export completes normally"
+        },
+        {
+          "name": "all_runs_bounded_and_no_materialized_symlinks",
+          "pass": true,
+          "detail": "6 fresh scenarios, timeout=10000ms each"
+        },
+        {
+          "name": "every_expected_owner_changed",
+          "pass": true,
+          "detail": "2/2 owners changed"
+        }
+      ],
+      "structural_pass": true,
+      "execution_pass": true,
+      "commands": [
+        {
+          "scenario": "01-baseline-public",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\01-baseline-public",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 178,
+          "output": "tests=3, pass=3, fail=0",
+          "counts": {
+            "tests": 3,
+            "passed": 3,
+            "failed": 0
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "02-baseline-feedback",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\02-baseline-feedback",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 187,
+          "output": "tests=5, pass=3, fail=2; failing=the store rejects completion from an attempt the watchdog replaced | the runner identifies the claim when reporting successful work",
+          "counts": {
+            "tests": 5,
+            "passed": 3,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "03-baseline-final",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\03-baseline-final",
+          "command": "node --test --test-reporter=tap tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 219,
+          "output": "tests=2, pass=0, fail=2; failing=a late failure cannot send a replacement attempt back to the queue | the runner identifies the claim when reporting failed work",
+          "counts": {
+            "tests": 2,
+            "passed": 0,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "04-repaired-all",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\04-repaired-all",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 246,
+          "output": "tests=7, pass=7, fail=0",
+          "counts": {
+            "tests": 7,
+            "passed": 7,
+            "failed": 0
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "05-omit-job-store",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\05-omit-job-store",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 247,
+          "output": "tests=7, pass=4, fail=3; failing=the store rejects completion from an attempt the watchdog replaced | a late failure cannot send a replacement attempt back to the queue | a failed export returns to the queue and can be retried",
+          "counts": {
+            "tests": 7,
+            "passed": 4,
+            "failed": 3
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "06-omit-job-runner",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\06-omit-job-runner",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 301,
+          "output": "tests=7, pass=3, fail=4; failing=the runner identifies the claim when reporting successful work | the runner identifies the claim when reporting failed work | a claimed export completes normally",
+          "counts": {
+            "tests": 7,
+            "passed": 3,
+            "failed": 4
+          },
+          "materialized_symlinks": []
+        }
+      ],
+      "omissions": [
+        {
+          "omitted_owner": "src/job-store.mjs",
+          "required_validation_failed": true,
+          "scenario": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\05-omit-job-store",
+          "exit_code": 1,
+          "output": "tests=7, pass=4, fail=3; failing=the store rejects completion from an attempt the watchdog replaced | a late failure cannot send a replacement attempt back to the queue | a failed export returns to the queue and can be retried"
+        },
+        {
+          "omitted_owner": "src/job-runner.mjs",
+          "required_validation_failed": true,
+          "scenario": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_job_recovery\\06-omit-job-runner",
+          "exit_code": 1,
+          "output": "tests=7, pass=3, fail=4; failing=the runner identifies the claim when reporting successful work | the runner identifies the claim when reporting failed work | a claimed export completes normally"
+        }
+      ],
+      "repair_hashes": [
+        {
+          "path": "src/job-store.mjs",
+          "baseline_sha256": "5848323b96477bd4a4eb0551d00e070a894c0d2b4205830520b835da9ad4596f",
+          "repaired_sha256": "397c550fb3fce516f395a9881ec73f4cae43a1d465276a61ecbbc87f3b35cf7f",
+          "changed": true
+        },
+        {
+          "path": "src/job-runner.mjs",
+          "baseline_sha256": "1b91feac757f1f7b01144f02f9a4a31079545610626493bbf0e0de659bb7d42f",
+          "repaired_sha256": "95b8f46b3b9e7c4aecdafcb6b0dcc979ce6d1e97198f8ee21fa8434f7bd8a813",
+          "changed": true
+        }
+      ],
+      "semantic_review": {
+        "mechanism": "attempt-token fencing for late asynchronous job settlement",
+        "source_skeleton": "mutable class-backed job store coordinated by an asynchronous runner",
+        "assertion_family": "state-transition rejection and claim-identity argument invariants",
+        "final_boundary": "stale failure rejection plus runner failure-token forwarding",
+        "final_novelty": "Feedback covers stale completion and the runner success path; final adds the distinct stale-failure transition and verifies Error identity plus attempt forwarding on the runner failure path.",
+        "prohibited_overlap": "Attempt fencing for watchdog-requeued jobs is not release-reader retirement, configuration replacement/reload, or another prohibited mechanism.",
+        "feedback_boundary": "Store/runner API boundary: stale completion rejection and successful runner forwarding of the claim attempt are asserted independently."
+      },
+      "final_novelty": {
+        "pass": true,
+        "detail": "Feedback covers stale completion and the runner success path; final adds the distinct stale-failure transition and verifies Error identity plus attempt forwarding on the runner failure path.",
+        "materially_new": true,
+        "summary": "Feedback covers stale completion and the runner success path; final adds the distinct stale-failure transition and verifies Error identity plus attempt forwarding on the runner failure path."
+      },
+      "mechanism": "attempt-token fencing for late asynchronous job settlement",
+      "assertion_family": "state-transition rejection and claim-identity argument invariants",
+      "feedback_boundary": "Store/runner API boundary: stale completion rejection and successful runner forwarding of the claim attempt are asserted independently.",
+      "final_boundary": "stale failure rejection plus runner failure-token forwarding",
+      "candidate_source_skeletons": [
+        {
+          "path": "src/job-store.mjs",
+          "source_skeleton_sha256": "128697f0a5869cae3bf8ea3c4c95f9233aab6756a4e609400deecda4b3a6efcb",
+          "normalized_token_count": 360
+        },
+        {
+          "path": "src/job-runner.mjs",
+          "source_skeleton_sha256": "0c9cdbfc5dbf660f4505742f946401b6081f81b6fd80340cfc2dd9a4130c70c7",
+          "normalized_token_count": 161
+        },
+        {
+          "path": "src/job-events.mjs",
+          "source_skeleton_sha256": "168e916664279cdf06b2bcc01c18114c0d53bd06799e18b387826bd71981f99b",
+          "normalized_token_count": 21
+        }
+      ],
+      "combined_source_skeleton_sha256": "8e43d8921c0c0f74a0e01605d343ec5cb4dc7097b72cb442b84f5e424a11a719"
+    },
+    {
+      "case_id": "th13_node_response_compression",
+      "dimension": "config",
+      "status": "PASS",
+      "candidate_paths": [
+        "src/compression-config.mjs",
+        "src/content-type-match.mjs",
+        "src/compress-response.mjs"
+      ],
+      "expected_files": [
+        "src/compression-config.mjs",
+        "src/content-type-match.mjs"
+      ],
+      "max_files": 2,
+      "structural_checks": [
+        {
+          "name": "json_parse",
+          "pass": true,
+          "detail": "case.json, oracle.json, and final_oracle.json parsed"
+        },
+        {
+          "name": "schema_keys",
+          "pass": true,
+          "detail": "top-level bundle maps have the expected roles"
+        },
+        {
+          "name": "identity",
+          "pass": true,
+          "detail": "directory/case/oracle/final identities=th13_node_response_compression/th13_node_response_compression/th13_node_response_compression"
+        },
+        {
+          "name": "language",
+          "pass": true,
+          "detail": "language=typescript"
+        },
+        {
+          "name": "runner",
+          "pass": true,
+          "detail": "test_runner=node_test"
+        },
+        {
+          "name": "file_maps",
+          "pass": true,
+          "detail": "repo, feedback, and final maps contain source strings"
+        },
+        {
+          "name": "paths_relative_contained_ascii",
+          "pass": true,
+          "detail": "6 unique declared paths checked"
+        },
+        {
+          "name": "bundle_ascii",
+          "pass": true,
+          "detail": "all bundle bytes and embedded file contents are ASCII"
+        },
+        {
+          "name": "candidate_shape_and_plausibility",
+          "pass": true,
+          "detail": "3 source candidates are exported and exercised by public tests"
+        },
+        {
+          "name": "owner_set_within_max_files",
+          "pass": true,
+          "detail": "2 expected owners; max_files=2"
+        },
+        {
+          "name": "test_map_consistency",
+          "pass": true,
+          "detail": "one public, one feedback, and one final test path with no collisions"
+        },
+        {
+          "name": "public_surface_no_oracle_leak",
+          "pass": true,
+          "detail": "8 labels, 2 hidden bodies, and 3 hidden titles checked"
+        },
+        {
+          "name": "repair_scope_matches_owners",
+          "pass": true,
+          "detail": "repair owners=src/compression-config.mjs, src/content-type-match.mjs"
+        },
+        {
+          "name": "final_not_renamed_or_identical",
+          "pass": true,
+          "detail": "feedback titles=2; final titles=1; semantic review recorded separately"
+        }
+      ],
+      "execution_checks": [
+        {
+          "name": "baseline_public_passes",
+          "pass": true,
+          "detail": "tests=3, pass=3, fail=0"
+        },
+        {
+          "name": "baseline_feedback_fails",
+          "pass": true,
+          "detail": "tests=5, pass=3, fail=2; failing=comma-separated deployment values ignore surrounding whitespace | Content-Type parameters do not change the configured media type match"
+        },
+        {
+          "name": "baseline_final_fails",
+          "pass": true,
+          "detail": "tests=1, pass=0, fail=1; failing=spaced deployment configuration matches parameterized handler responses end to end"
+        },
+        {
+          "name": "repaired_public_feedback_final_pass",
+          "pass": true,
+          "detail": "tests=6, pass=6, fail=0"
+        },
+        {
+          "name": "each_owner_is_required",
+          "pass": true,
+          "detail": "src/compression-config.mjs: tests=6, pass=4, fail=2; failing=comma-separated deployment values ignore surrounding whitespace | spaced deployment configuration matches parameterized handler responses end to end; src/content-type-match.mjs: tests=6, pass=4, fail=2; failing=Content-Type parameters do not change the configured media type match | spaced deployment configuration matches parameterized handler responses end to end"
+        },
+        {
+          "name": "all_runs_bounded_and_no_materialized_symlinks",
+          "pass": true,
+          "detail": "6 fresh scenarios, timeout=10000ms each"
+        },
+        {
+          "name": "every_expected_owner_changed",
+          "pass": true,
+          "detail": "2/2 owners changed"
+        }
+      ],
+      "structural_pass": true,
+      "execution_pass": true,
+      "commands": [
+        {
+          "scenario": "01-baseline-public",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\01-baseline-public",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 169,
+          "output": "tests=3, pass=3, fail=0",
+          "counts": {
+            "tests": 3,
+            "passed": 3,
+            "failed": 0
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "02-baseline-feedback",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\02-baseline-feedback",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 171,
+          "output": "tests=5, pass=3, fail=2; failing=comma-separated deployment values ignore surrounding whitespace | Content-Type parameters do not change the configured media type match",
+          "counts": {
+            "tests": 5,
+            "passed": 3,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "03-baseline-final",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\03-baseline-final",
+          "command": "node --test --test-reporter=tap tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 173,
+          "output": "tests=1, pass=0, fail=1; failing=spaced deployment configuration matches parameterized handler responses end to end",
+          "counts": {
+            "tests": 1,
+            "passed": 0,
+            "failed": 1
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "04-repaired-all",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\04-repaired-all",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 0,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 189,
+          "output": "tests=6, pass=6, fail=0",
+          "counts": {
+            "tests": 6,
+            "passed": 6,
+            "failed": 0
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "05-omit-compression-config",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\05-omit-compression-config",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 172,
+          "output": "tests=6, pass=4, fail=2; failing=comma-separated deployment values ignore surrounding whitespace | spaced deployment configuration matches parameterized handler responses end to end",
+          "counts": {
+            "tests": 6,
+            "passed": 4,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        },
+        {
+          "scenario": "06-omit-content-type-match",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\06-omit-content-type-match",
+          "command": "node --test --test-reporter=tap tests/public.test.mjs tests/feedback.test.mjs tests/final.test.mjs",
+          "exit_code": 1,
+          "signal": null,
+          "timed_out": false,
+          "duration_ms": 185,
+          "output": "tests=6, pass=4, fail=2; failing=Content-Type parameters do not change the configured media type match | spaced deployment configuration matches parameterized handler responses end to end",
+          "counts": {
+            "tests": 6,
+            "passed": 4,
+            "failed": 2
+          },
+          "materialized_symlinks": []
+        }
+      ],
+      "omissions": [
+        {
+          "omitted_owner": "src/compression-config.mjs",
+          "required_validation_failed": true,
+          "scenario": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\05-omit-compression-config",
+          "exit_code": 1,
+          "output": "tests=6, pass=4, fail=2; failing=comma-separated deployment values ignore surrounding whitespace | spaced deployment configuration matches parameterized handler responses end to end"
+        },
+        {
+          "omitted_owner": "src/content-type-match.mjs",
+          "required_validation_failed": true,
+          "scenario": "D:\\dev\\chili-thirteenth-validation-lane-node\\_tmp\\th13_node_response_compression\\06-omit-content-type-match",
+          "exit_code": 1,
+          "output": "tests=6, pass=4, fail=2; failing=Content-Type parameters do not change the configured media type match | spaced deployment configuration matches parameterized handler responses end to end"
+        }
+      ],
+      "repair_hashes": [
+        {
+          "path": "src/compression-config.mjs",
+          "baseline_sha256": "84e2dd45575d3d8e1048dddc9a375c1fcfdf42e3036e435adc5ea9c8fa789f46",
+          "repaired_sha256": "b2cc4222a9dce6b41b641a83ce963d064d523ca718c505ef43d828407d2c714d",
+          "changed": true
+        },
+        {
+          "path": "src/content-type-match.mjs",
+          "baseline_sha256": "eddf382ba9274103f6be253210824b7b5b52085a653adf31d714d0446a99c887",
+          "repaired_sha256": "5bab579168a5949312d1ff80eca60710b0d4f6b58ce8408ef3efdee3d891497e",
+          "changed": true
+        }
+      ],
+      "semantic_review": {
+        "mechanism": "comma-list token normalization combined with media-type parameter matching",
+        "source_skeleton": "configuration parser and pure predicate composed by a decision factory",
+        "assertion_family": "normalized token-list equality and Boolean decision-matrix invariants",
+        "final_boundary": "factory-decider integration with spaced config, parameterized types, binary exclusion, and undefined input",
+        "final_novelty": "Feedback tests parser and matcher separately; final composes them through createCompressionDecider and adds case normalization, an unlisted binary guard, and the non-string response boundary.",
+        "prohibited_overlap": "Static startup parsing and response matching perform no live replacement configuration reload and no other prohibited mechanism.",
+        "feedback_boundary": "Unit boundary: comma-list whitespace normalization and parameter-insensitive Content-Type matching are asserted independently."
+      },
+      "final_novelty": {
+        "pass": true,
+        "detail": "Feedback tests parser and matcher separately; final composes them through createCompressionDecider and adds case normalization, an unlisted binary guard, and the non-string response boundary.",
+        "materially_new": true,
+        "summary": "Feedback tests parser and matcher separately; final composes them through createCompressionDecider and adds case normalization, an unlisted binary guard, and the non-string response boundary."
+      },
+      "mechanism": "comma-list token normalization combined with media-type parameter matching",
+      "assertion_family": "normalized token-list equality and Boolean decision-matrix invariants",
+      "feedback_boundary": "Unit boundary: comma-list whitespace normalization and parameter-insensitive Content-Type matching are asserted independently.",
+      "final_boundary": "factory-decider integration with spaced config, parameterized types, binary exclusion, and undefined input",
+      "candidate_source_skeletons": [
+        {
+          "path": "src/compression-config.mjs",
+          "source_skeleton_sha256": "1ccf07f070bce89911f739bbfef7d3cf7809a3e5bd4789fb088a95b3b44a3094",
+          "normalized_token_count": 68
+        },
+        {
+          "path": "src/content-type-match.mjs",
+          "source_skeleton_sha256": "cf1bd8879325354c06ffb4be0e139716aca5a21fefa60b34a9fa621b7d74567a",
+          "normalized_token_count": 34
+        },
+        {
+          "path": "src/compress-response.mjs",
+          "source_skeleton_sha256": "5673cd00dc2063147cb251793d5f46c175c19a1ecbac5d172933f1d862c75179",
+          "normalized_token_count": 47
+        }
+      ],
+      "combined_source_skeleton_sha256": "fc645df81cb3ff9cc6903470a8d68c0fe0943e0ca4d498ef2ff22551dd18bd35"
+    }
+  ],
+  "cross_case": {
+    "dimensions": [
+      "config",
+      "data",
+      "state"
+    ],
+    "mechanisms": [
+      "null-versus-zero preservation through normalization and aggregation",
+      "attempt-token fencing for late asynchronous job settlement",
+      "comma-list token normalization combined with media-type parameter matching"
+    ],
+    "source_skeletons": [
+      "pure normalization and statistical rollup functions composed by a report service",
+      "mutable class-backed job store coordinated by an asynchronous runner",
+      "configuration parser and pure predicate composed by a decision factory"
+    ],
+    "assertion_families": [
+      "aggregate object and numeric-statistic invariants",
+      "state-transition rejection and claim-identity argument invariants",
+      "normalized token-list equality and Boolean decision-matrix invariants"
+    ],
+    "final_boundaries": [
+      "multi-metric report-service composition across null, zero, and numeric-string values",
+      "stale failure rejection plus runner failure-token forwarding",
+      "factory-decider integration with spaced config, parameterized types, binary exclusion, and undefined input"
+    ],
+    "dimensions_unique": true,
+    "mechanisms_unique": true,
+    "source_skeletons_unique": true,
+    "assertion_families_unique": true,
+    "final_boundaries_unique": true,
+    "exact_prohibited_phrase_hits": [],
+    "material_prohibited_overlap": false,
+    "duplicate_finding": "No mechanism, source skeleton, semantic assertion family, or final boundary is duplicated across the three cases.",
+    "prohibited_finding": "No exact prohibited phrase occurs, and manual semantic review found no material overlap. The compression case uses static parsing only, not replacement/reload behavior.",
+    "pass": true,
+    "feedback_boundaries": [
+      "Unit boundary: null preservation in normalizeObservation and measured-zero inclusion in summarizeMetric are asserted independently.",
+      "Store/runner API boundary: stale completion rejection and successful runner forwarding of the claim attempt are asserted independently.",
+      "Unit boundary: comma-list whitespace normalization and parameter-insensitive Content-Type matching are asserted independently."
+    ]
+  },
+  "author_inventory": {
+    "algorithm": "SHA-256",
+    "canonical_format": "UTF-8 lines sorted by relative path: <lowercase-file-sha256><two spaces><forward-slash-path><LF>",
+    "before_sorted_inventory_sha256": "789542593f8fafa5fbd323aaabf56ad99cb3ea733344ebb84a2f2049e59953c7",
+    "after_sorted_inventory_sha256": "789542593f8fafa5fbd323aaabf56ad99cb3ea733344ebb84a2f2049e59953c7",
+    "before_symlinks": [],
+    "after_symlinks": [],
+    "unchanged": true,
+    "files": [
+      {
+        "path": "AUTHOR_RECEIPT.md",
+        "before_sha256": "701dd6714520577479134476b555d68029a1ddebfa7df2a041e75ccd95b460b0",
+        "after_sha256": "701dd6714520577479134476b555d68029a1ddebfa7df2a041e75ccd95b460b0",
+        "unchanged": true,
+        "current_sha256": "701dd6714520577479134476b555d68029a1ddebfa7df2a041e75ccd95b460b0",
+        "current_bytes": 2619,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_facility_rollup/case.json",
+        "before_sha256": "0ed58bccf859151c4fbc461c8afe793f70fc05050172de4175011457ecad951f",
+        "after_sha256": "0ed58bccf859151c4fbc461c8afe793f70fc05050172de4175011457ecad951f",
+        "unchanged": true,
+        "current_sha256": "0ed58bccf859151c4fbc461c8afe793f70fc05050172de4175011457ecad951f",
+        "current_bytes": 3982,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_facility_rollup/final_oracle.json",
+        "before_sha256": "0d368ec47b9165462815dde4b2fcea52a011387e93b23956c05b89388b650ff7",
+        "after_sha256": "0d368ec47b9165462815dde4b2fcea52a011387e93b23956c05b89388b650ff7",
+        "unchanged": true,
+        "current_sha256": "0d368ec47b9165462815dde4b2fcea52a011387e93b23956c05b89388b650ff7",
+        "current_bytes": 1071,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_facility_rollup/oracle.json",
+        "before_sha256": "2f67641daf429c8a969ec5ab4efe5439a4b173ec445c2c493d3e0e1acf8c9bdc",
+        "after_sha256": "2f67641daf429c8a969ec5ab4efe5439a4b173ec445c2c493d3e0e1acf8c9bdc",
+        "unchanged": true,
+        "current_sha256": "2f67641daf429c8a969ec5ab4efe5439a4b173ec445c2c493d3e0e1acf8c9bdc",
+        "current_bytes": 1216,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_job_recovery/case.json",
+        "before_sha256": "bb32a60140b3b3863fcd3b9f8467b22f2f033594d51c12177baf297d76fac8d1",
+        "after_sha256": "bb32a60140b3b3863fcd3b9f8467b22f2f033594d51c12177baf297d76fac8d1",
+        "unchanged": true,
+        "current_sha256": "bb32a60140b3b3863fcd3b9f8467b22f2f033594d51c12177baf297d76fac8d1",
+        "current_bytes": 4721,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_job_recovery/final_oracle.json",
+        "before_sha256": "ba14e700a88f25ce0655010d84719cab6a96d4a09030fd01c223f9828eeb5910",
+        "after_sha256": "ba14e700a88f25ce0655010d84719cab6a96d4a09030fd01c223f9828eeb5910",
+        "unchanged": true,
+        "current_sha256": "ba14e700a88f25ce0655010d84719cab6a96d4a09030fd01c223f9828eeb5910",
+        "current_bytes": 1776,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_job_recovery/oracle.json",
+        "before_sha256": "012d157421fa001f74465a0f887ae1ed156bf05b4111623b7a826bfb4a096eba",
+        "after_sha256": "012d157421fa001f74465a0f887ae1ed156bf05b4111623b7a826bfb4a096eba",
+        "unchanged": true,
+        "current_sha256": "012d157421fa001f74465a0f887ae1ed156bf05b4111623b7a826bfb4a096eba",
+        "current_bytes": 1736,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_response_compression/case.json",
+        "before_sha256": "7eb9ff54c94516b078dc221c623b39d34c6ee132aa7384e11e377cd49295a2ac",
+        "after_sha256": "7eb9ff54c94516b078dc221c623b39d34c6ee132aa7384e11e377cd49295a2ac",
+        "unchanged": true,
+        "current_sha256": "7eb9ff54c94516b078dc221c623b39d34c6ee132aa7384e11e377cd49295a2ac",
+        "current_bytes": 2820,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_response_compression/final_oracle.json",
+        "before_sha256": "2162a2880c77ec92f44238360eba2f7fec6933201e66b6dfc8c3fff6f9db0bc1",
+        "after_sha256": "2162a2880c77ec92f44238360eba2f7fec6933201e66b6dfc8c3fff6f9db0bc1",
+        "unchanged": true,
+        "current_sha256": "2162a2880c77ec92f44238360eba2f7fec6933201e66b6dfc8c3fff6f9db0bc1",
+        "current_bytes": 738,
+        "current_matches_prior": true
+      },
+      {
+        "path": "th13_node_response_compression/oracle.json",
+        "before_sha256": "b4a511a77692333bb0f3882f7189aff5af282fbac97f6bdd005303c42ce10cbf",
+        "after_sha256": "b4a511a77692333bb0f3882f7189aff5af282fbac97f6bdd005303c42ce10cbf",
+        "unchanged": true,
+        "current_sha256": "b4a511a77692333bb0f3882f7189aff5af282fbac97f6bdd005303c42ce10cbf",
+        "current_bytes": 1130,
+        "current_matches_prior": true
+      }
+    ],
+    "current_file_count": 10,
+    "current_sorted_inventory_sha256": "789542593f8fafa5fbd323aaabf56ad99cb3ea733344ebb84a2f2049e59953c7",
+    "current_symlinks": [],
+    "current_matches_prior_before": true,
+    "current_matches_prior_after": true,
+    "current_complete_inventory_matches_prior": true
+  },
+  "failures": [],
+  "source_skeleton_normalization": {
+    "id": "js-ts-source-skeleton-v1",
+    "input": "Baseline candidate source text from case.json repo_files, in UTF-8.",
+    "lexical_rules": [
+      "Remove line and block comments.",
+      "Replace each single-quoted, double-quoted, or template string literal, including its payload, with STR.",
+      "Replace each decimal, binary, octal, hexadecimal, exponent, or bigint numeric literal payload with NUM.",
+      "Preserve the documented ECMAScript control/declaration/literal keywords exactly; replace other ASCII identifiers with ID.",
+      "Preserve operators and punctuation; discard original whitespace; join tokens with one ASCII space and no trailing newline."
+    ],
+    "preserved_keywords": [
+      "as",
+      "async",
+      "await",
+      "break",
+      "case",
+      "catch",
+      "class",
+      "const",
+      "continue",
+      "debugger",
+      "default",
+      "delete",
+      "do",
+      "else",
+      "export",
+      "extends",
+      "finally",
+      "for",
+      "from",
+      "function",
+      "get",
+      "if",
+      "import",
+      "in",
+      "instanceof",
+      "let",
+      "new",
+      "of",
+      "return",
+      "set",
+      "static",
+      "super",
+      "switch",
+      "this",
+      "throw",
+      "try",
+      "typeof",
+      "var",
+      "void",
+      "while",
+      "with",
+      "yield",
+      "null",
+      "true",
+      "false"
+    ],
+    "per_candidate_hash": "SHA-256 of normalized UTF-8 bytes, lowercase hexadecimal.",
+    "combined_hash": "Sort candidates by ASCII path; concatenate <path><LF><normalized-text><LF> for each; SHA-256 the combined UTF-8 bytes."
+  }
+}

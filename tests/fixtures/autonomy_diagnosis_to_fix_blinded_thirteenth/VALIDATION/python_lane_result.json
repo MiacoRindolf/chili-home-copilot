@@ -1,0 +1,813 @@
+{
+  "author_inventory_after": {
+    "files": {
+      "AUTHOR_RECEIPT.md": "cc580e69e5a43cd09a16d3189d2f11186d2fd6de65d1bb1dbcaebc95a42fbb1c",
+      "th13_py_factory_binding/case.json": "30906cb6b6364bcfe6a166d8bb8b6e8b1d338d28d644c1fa28939687f981f3f6",
+      "th13_py_factory_binding/final_oracle.json": "35dbeb6fee30c8868ad06fe84a2a8a55438a5ea51c72d4458e25fc0dc95648f1",
+      "th13_py_factory_binding/oracle.json": "421cf8c120c5d1e4e35d84c78892c5dd0d4e853b734fc5e0f0f150394e812672",
+      "th13_py_monthly_settlement/case.json": "08e975278eba8f2b739ba48b0a85d91e4f484b4049b1e841a9b2b28e730692e2",
+      "th13_py_monthly_settlement/final_oracle.json": "87a4db172687698d435a144fd3756a98b9c304aa2800cf2817865b2aa14c0d54",
+      "th13_py_monthly_settlement/oracle.json": "2c87cfe4075b2892a90aad230210405a14212074b1d98d864990ea0c70dbc4cd",
+      "th13_py_task_teardown/case.json": "9bc9aa757d6059aa24531860982b57f8e83b294c6deafd54ea43f7bb7e525fc6",
+      "th13_py_task_teardown/final_oracle.json": "cf7a7133c70679e074c6990cfbb3b71be75fa7f18cdf46b982f7de70c209c3d4",
+      "th13_py_task_teardown/oracle.json": "46e85aa47c1fd2fac3f4bac592574163cb52e575708074ef74273067e81c5845"
+    },
+    "sizes": {
+      "AUTHOR_RECEIPT.md": 2170,
+      "th13_py_factory_binding/case.json": 2901,
+      "th13_py_factory_binding/final_oracle.json": 1024,
+      "th13_py_factory_binding/oracle.json": 922,
+      "th13_py_monthly_settlement/case.json": 2962,
+      "th13_py_monthly_settlement/final_oracle.json": 475,
+      "th13_py_monthly_settlement/oracle.json": 910,
+      "th13_py_task_teardown/case.json": 2237,
+      "th13_py_task_teardown/final_oracle.json": 764,
+      "th13_py_task_teardown/oracle.json": 1191
+    },
+    "sorted_inventory_lines": [
+      "AUTHOR_RECEIPT.md\tcc580e69e5a43cd09a16d3189d2f11186d2fd6de65d1bb1dbcaebc95a42fbb1c\t2170",
+      "th13_py_factory_binding/case.json\t30906cb6b6364bcfe6a166d8bb8b6e8b1d338d28d644c1fa28939687f981f3f6\t2901",
+      "th13_py_factory_binding/final_oracle.json\t35dbeb6fee30c8868ad06fe84a2a8a55438a5ea51c72d4458e25fc0dc95648f1\t1024",
+      "th13_py_factory_binding/oracle.json\t421cf8c120c5d1e4e35d84c78892c5dd0d4e853b734fc5e0f0f150394e812672\t922",
+      "th13_py_monthly_settlement/case.json\t08e975278eba8f2b739ba48b0a85d91e4f484b4049b1e841a9b2b28e730692e2\t2962",
+      "th13_py_monthly_settlement/final_oracle.json\t87a4db172687698d435a144fd3756a98b9c304aa2800cf2817865b2aa14c0d54\t475",
+      "th13_py_monthly_settlement/oracle.json\t2c87cfe4075b2892a90aad230210405a14212074b1d98d864990ea0c70dbc4cd\t910",
+      "th13_py_task_teardown/case.json\t9bc9aa757d6059aa24531860982b57f8e83b294c6deafd54ea43f7bb7e525fc6\t2237",
+      "th13_py_task_teardown/final_oracle.json\tcf7a7133c70679e074c6990cfbb3b71be75fa7f18cdf46b982f7de70c209c3d4\t764",
+      "th13_py_task_teardown/oracle.json\t46e85aa47c1fd2fac3f4bac592574163cb52e575708074ef74273067e81c5845\t1191"
+    ],
+    "sorted_inventory_sha256": "56a265fe9935c5e71fadace1e3307fa439920c0e70cb40346f4a62bf724a8f45",
+    "symlinks": []
+  },
+  "author_inventory_before": {
+    "files": {
+      "AUTHOR_RECEIPT.md": "cc580e69e5a43cd09a16d3189d2f11186d2fd6de65d1bb1dbcaebc95a42fbb1c",
+      "th13_py_factory_binding/case.json": "30906cb6b6364bcfe6a166d8bb8b6e8b1d338d28d644c1fa28939687f981f3f6",
+      "th13_py_factory_binding/final_oracle.json": "35dbeb6fee30c8868ad06fe84a2a8a55438a5ea51c72d4458e25fc0dc95648f1",
+      "th13_py_factory_binding/oracle.json": "421cf8c120c5d1e4e35d84c78892c5dd0d4e853b734fc5e0f0f150394e812672",
+      "th13_py_monthly_settlement/case.json": "08e975278eba8f2b739ba48b0a85d91e4f484b4049b1e841a9b2b28e730692e2",
+      "th13_py_monthly_settlement/final_oracle.json": "87a4db172687698d435a144fd3756a98b9c304aa2800cf2817865b2aa14c0d54",
+      "th13_py_monthly_settlement/oracle.json": "2c87cfe4075b2892a90aad230210405a14212074b1d98d864990ea0c70dbc4cd",
+      "th13_py_task_teardown/case.json": "9bc9aa757d6059aa24531860982b57f8e83b294c6deafd54ea43f7bb7e525fc6",
+      "th13_py_task_teardown/final_oracle.json": "cf7a7133c70679e074c6990cfbb3b71be75fa7f18cdf46b982f7de70c209c3d4",
+      "th13_py_task_teardown/oracle.json": "46e85aa47c1fd2fac3f4bac592574163cb52e575708074ef74273067e81c5845"
+    },
+    "sizes": {
+      "AUTHOR_RECEIPT.md": 2170,
+      "th13_py_factory_binding/case.json": 2901,
+      "th13_py_factory_binding/final_oracle.json": 1024,
+      "th13_py_factory_binding/oracle.json": 922,
+      "th13_py_monthly_settlement/case.json": 2962,
+      "th13_py_monthly_settlement/final_oracle.json": 475,
+      "th13_py_monthly_settlement/oracle.json": 910,
+      "th13_py_task_teardown/case.json": 2237,
+      "th13_py_task_teardown/final_oracle.json": 764,
+      "th13_py_task_teardown/oracle.json": 1191
+    },
+    "sorted_inventory_lines": [
+      "AUTHOR_RECEIPT.md\tcc580e69e5a43cd09a16d3189d2f11186d2fd6de65d1bb1dbcaebc95a42fbb1c\t2170",
+      "th13_py_factory_binding/case.json\t30906cb6b6364bcfe6a166d8bb8b6e8b1d338d28d644c1fa28939687f981f3f6\t2901",
+      "th13_py_factory_binding/final_oracle.json\t35dbeb6fee30c8868ad06fe84a2a8a55438a5ea51c72d4458e25fc0dc95648f1\t1024",
+      "th13_py_factory_binding/oracle.json\t421cf8c120c5d1e4e35d84c78892c5dd0d4e853b734fc5e0f0f150394e812672\t922",
+      "th13_py_monthly_settlement/case.json\t08e975278eba8f2b739ba48b0a85d91e4f484b4049b1e841a9b2b28e730692e2\t2962",
+      "th13_py_monthly_settlement/final_oracle.json\t87a4db172687698d435a144fd3756a98b9c304aa2800cf2817865b2aa14c0d54\t475",
+      "th13_py_monthly_settlement/oracle.json\t2c87cfe4075b2892a90aad230210405a14212074b1d98d864990ea0c70dbc4cd\t910",
+      "th13_py_task_teardown/case.json\t9bc9aa757d6059aa24531860982b57f8e83b294c6deafd54ea43f7bb7e525fc6\t2237",
+      "th13_py_task_teardown/final_oracle.json\tcf7a7133c70679e074c6990cfbb3b71be75fa7f18cdf46b982f7de70c209c3d4\t764",
+      "th13_py_task_teardown/oracle.json\t46e85aa47c1fd2fac3f4bac592574163cb52e575708074ef74273067e81c5845\t1191"
+    ],
+    "sorted_inventory_sha256": "56a265fe9935c5e71fadace1e3307fa439920c0e70cb40346f4a62bf724a8f45",
+    "symlinks": []
+  },
+  "author_root": "D:\\dev\\chili-thirteenth-author-python",
+  "author_unchanged": true,
+  "case_count": 3,
+  "case_ids": [
+    "th13_py_factory_binding",
+    "th13_py_monthly_settlement",
+    "th13_py_task_teardown"
+  ],
+  "cases": {
+    "th13_py_factory_binding": {
+      "assertion_family": "Dependency tuple structure and resolved dependency-graph value equality",
+      "candidate_paths": [
+        "dependency_plan.py",
+        "service_container.py"
+      ],
+      "combined_source_skeleton_sha256": "01a1c8f9f15f4365f0cc1e537bcdd675b8a424d9278c3c665146f84b19c813ea",
+      "dimension": "dependency",
+      "expected_files": [
+        "dependency_plan.py",
+        "service_container.py"
+      ],
+      "final_boundary": "mixed positional-only and keyword-only bindings across a nested provider graph",
+      "final_novelty": "Feedback isolates keyword-only discovery and invocation. The final test composes a positional-only provider, a keyword-only provider, and a mixed-signature publisher, including repeated nested resolution.",
+      "max_files": 2,
+      "mechanism": "inspect.Parameter kind discovery plus positional/keyword factory invocation",
+      "prohibited_rationale": "This is callable signature introspection and dependency injection; it has no allocation, proxy, encoding, policy, TLS, reload, checkpoint, hierarchy, SQL, inventory, or ticket mechanism.",
+      "runs": [
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\public_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\public_baseline\\pytest.ini",
+          "concise_output": "2 passed in 0.01s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\public_baseline",
+          "exit_code": 0,
+          "full_output_sha256": "fcd476841e8af121ff907e81a92a59579b64c007b70cb79f9d096806f703fc7e",
+          "name": "public_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\feedback_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\feedback_baseline\\pytest.ini",
+          "concise_output": "FAILED tests/test_dependency_feedback.py::test_plan_describes_required_keyword_only_dependency | FAILED tests/test_dependency_feedback.py::test_container_binds_keyword_only_dependency_by_name | 2 failed, 2 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\feedback_baseline",
+          "exit_code": 1,
+          "full_output_sha256": "505469040f88f95cd14d5dff9f8678dd9ca42d5499409a5cc99407b91f6642f1",
+          "name": "feedback_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\final_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\final_baseline\\pytest.ini",
+          "concise_output": "FAILED tests/test_dependency_final.py::test_mixed_bindings_resolve_through_keyword_only_provider | 1 failed, 2 passed in 0.01s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\final_baseline",
+          "exit_code": 1,
+          "full_output_sha256": "85e2e9ee447d585f13933a6b566c83926954cf1f1f4fb709dd6a0ed619351529",
+          "name": "final_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\repaired_all -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\repaired_all\\pytest.ini",
+          "concise_output": "5 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\repaired_all",
+          "exit_code": 0,
+          "full_output_sha256": "ef0e7ef49e71fa999842be0cb8d22ec1058d3a384ed5c0a2ec6efb8f434975ac",
+          "name": "repaired_all",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\ablation_revert_dependency_plan_py -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\ablation_revert_dependency_plan_py\\pytest.ini",
+          "concise_output": "FAILED tests/test_dependency_feedback.py::test_plan_describes_required_keyword_only_dependency | FAILED tests/test_dependency_feedback.py::test_container_binds_keyword_only_dependency_by_name | FAILED tests/test_dependency_final.py::test_mixed_bindings_resolve_through_keyword_only_provider | 3 failed, 2 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\ablation_revert_dependency_plan_py",
+          "exit_code": 1,
+          "full_output_sha256": "edac7ae0a3ab0b66dae2f54afe90d20b63ee83be5ea9fc05055d9724c20a7d49",
+          "name": "ablation_revert_dependency_plan_py",
+          "omitted_owner": "dependency_plan.py",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\ablation_revert_service_container_py -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\ablation_revert_service_container_py\\pytest.ini",
+          "concise_output": "FAILED tests/test_dependency_feedback.py::test_container_binds_keyword_only_dependency_by_name | FAILED tests/test_dependency_final.py::test_mixed_bindings_resolve_through_keyword_only_provider | 2 failed, 3 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_factory_binding\\ablation_revert_service_container_py",
+          "exit_code": 1,
+          "full_output_sha256": "86f9435724abac369daa0c3a1d5fe4b342378b8aa447ee1dadcdff032f3f45b5",
+          "name": "ablation_revert_service_container_py",
+          "omitted_owner": "service_container.py",
+          "timed_out": false,
+          "timeout_seconds": 20
+        }
+      ],
+      "source_hashes": {
+        "dependency_plan.py": {
+          "baseline_sha256": "c318b9c74a0ed11c4482929031675d7abbe60ff2057341c85030018604b2756d",
+          "changed": true,
+          "repaired_sha256": "1c050b5f8147a0a7bf211215c7efa4aa9de1b8572eb8cc17258c32ddad971d17"
+        },
+        "service_container.py": {
+          "baseline_sha256": "75d81aad6ca081b492541484a9b0d56a9c4c3db75f6de021e4662ca577a72f90",
+          "changed": true,
+          "repaired_sha256": "b73aeb9bc93f26cb0d6295dd0f7a8599d23c014faed22790b3693f0845cb51ad"
+        }
+      },
+      "source_skeleton_sha256": {
+        "dependency_plan.py": "1b7590220b652f8fb490de8f62e7f7375e45e03ee32d823f896a0a456c20f8da",
+        "service_container.py": "7d1a0b1e4ab5b0064f15fc871ce3bc38372dd71ed0c92df32209d1b20178853e"
+      }
+    },
+    "th13_py_monthly_settlement": {
+      "assertion_family": "timezone-aware datetime and exact ISO wall-clock equality",
+      "candidate_paths": [
+        "billing_clock.py",
+        "settlement_runner.py"
+      ],
+      "combined_source_skeleton_sha256": "972643e4469bc901f9141f6da11520db9d148da74dc4cf3a1bc44b6ecf0d2b60",
+      "dimension": "clock",
+      "expected_files": [
+        "billing_clock.py",
+        "settlement_runner.py"
+      ],
+      "final_boundary": "UTC month rollover maps back to a local leap-day month-end cutoff",
+      "final_novelty": "Feedback separately covers a non-leap February clamp and UTC-to-local conversion in January. The final test composes date rollback across a UTC month boundary, leap-day clamping, and a same-local-day future cutoff.",
+      "max_files": 2,
+      "mechanism": "end-of-month day clamping plus instant-preserving timezone conversion",
+      "prohibited_rationale": "This is calendar scheduling and timezone conversion; despite finance wording, it performs no apportionment or ownership/accounting operation and matches none of the prohibited mechanisms.",
+      "runs": [
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\public_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\public_baseline\\pytest.ini",
+          "concise_output": "3 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\public_baseline",
+          "exit_code": 0,
+          "full_output_sha256": "bf22e88f0e3a0e89eddb09d252b1661a48c9dfc4bd5aa177b5efca41f2700a18",
+          "name": "public_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\feedback_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\feedback_baseline\\pytest.ini",
+          "concise_output": "FAILED tests/test_clock_feedback.py::test_month_end_uses_last_real_day_of_short_month | FAILED tests/test_clock_feedback.py::test_runner_converts_completion_instant_before_scheduling | 2 failed, 3 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\feedback_baseline",
+          "exit_code": 1,
+          "full_output_sha256": "fb961b98d90e11d0c8d74720b98fc7a87a31c20c47d3ffeeb83eee68c9b9455d",
+          "name": "feedback_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\final_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\final_baseline\\pytest.ini",
+          "concise_output": "FAILED tests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff | 1 failed, 3 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\final_baseline",
+          "exit_code": 1,
+          "full_output_sha256": "ad5f0c97b6f6fbbc339fced99d49ad6a491b04b3eaee62d196356a431f2a74fd",
+          "name": "final_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\repaired_all -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\repaired_all\\pytest.ini",
+          "concise_output": "6 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\repaired_all",
+          "exit_code": 0,
+          "full_output_sha256": "d5be81bbe49b412357ba177be7fae47b32ba70b563d2a01ec6ee15df362cc215",
+          "name": "repaired_all",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\ablation_revert_billing_clock_py -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\ablation_revert_billing_clock_py\\pytest.ini",
+          "concise_output": "FAILED tests/test_clock_feedback.py::test_month_end_uses_last_real_day_of_short_month | FAILED tests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff | 2 failed, 4 passed in 0.03s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\ablation_revert_billing_clock_py",
+          "exit_code": 1,
+          "full_output_sha256": "c9916a0a5b561486fef14416c65e881f094aca49bd6925cac5320c11c145cbd0",
+          "name": "ablation_revert_billing_clock_py",
+          "omitted_owner": "billing_clock.py",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\ablation_revert_settlement_runner_py -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\ablation_revert_settlement_runner_py\\pytest.ini",
+          "concise_output": "FAILED tests/test_clock_feedback.py::test_runner_converts_completion_instant_before_scheduling | FAILED tests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff | 2 failed, 4 passed in 0.03s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_monthly_settlement\\ablation_revert_settlement_runner_py",
+          "exit_code": 1,
+          "full_output_sha256": "711bdf099344f6ce487ff59c4b20b837559fda705ddc32d6e90f0afc46d2d047",
+          "name": "ablation_revert_settlement_runner_py",
+          "omitted_owner": "settlement_runner.py",
+          "timed_out": false,
+          "timeout_seconds": 20
+        }
+      ],
+      "source_hashes": {
+        "billing_clock.py": {
+          "baseline_sha256": "5a1e5d88f13fdae79115deb0a930d882d23897f67dc3ba0f80a70e9f87e888b0",
+          "changed": true,
+          "repaired_sha256": "c0b0abe35ed7985992e7aa53d276327f23337e2eb91f05eeb26905db052cd68b"
+        },
+        "settlement_runner.py": {
+          "baseline_sha256": "7d929ee8cf9756d5f6cecb36a6eb7be470cc9a8e59a3b9e04908415d2ce0e2ba",
+          "changed": true,
+          "repaired_sha256": "89e35af8f329abc7fc644b7bdc3041fe418da2a87116fa711f0f4a593254df7a"
+        }
+      },
+      "source_skeleton_sha256": {
+        "billing_clock.py": "dae2c77a3b58cd0e4c9ee6c9f4ddd6b4216b8dbdf95134a88a8b580371e5d2af",
+        "settlement_runner.py": "b01aa3eb1ec4ab88d58c0f1dffc8d8ae314848c7a98dcb553004ff83aa189605"
+      }
+    },
+    "th13_py_task_teardown": {
+      "assertion_family": "exception type/message preservation and ordered LIFO event-sequence equality",
+      "candidate_paths": [
+        "teardown_stack.py",
+        "task_runtime.py"
+      ],
+      "combined_source_skeleton_sha256": "48c5d0c1694bae23be5e0f9140837dfd7614766fdc904b53bc1103fc79112f65",
+      "dimension": "runtime",
+      "expected_files": [
+        "teardown_stack.py",
+        "task_runtime.py"
+      ],
+      "final_boundary": "SystemExit combines with a failed teardown while every registered hook still runs",
+      "final_novelty": "Feedback separately checks callback continuation after RuntimeError and clean teardown after KeyboardInterrupt. The final test composes a process-level SystemExit with a failing middle hook, all-hook execution, LIFO order, and preservation of the original task exception.",
+      "max_files": 2,
+      "mechanism": "BaseException-safe task cleanup plus continuation and exception precedence for callbacks",
+      "prohibited_rationale": "This is a generic in-process callback stack and exception-precedence rule, not reader retirement, configuration replacement, checkpointing, ticket movement, or any other prohibited mechanism.",
+      "runs": [
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\public_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\public_baseline\\pytest.ini",
+          "concise_output": "2 passed in 0.01s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\public_baseline",
+          "exit_code": 0,
+          "full_output_sha256": "fcd476841e8af121ff907e81a92a59579b64c007b70cb79f9d096806f703fc7e",
+          "name": "public_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\feedback_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\feedback_baseline\\pytest.ini",
+          "concise_output": "FAILED tests/test_runtime_feedback.py::test_stack_continues_after_teardown_failure | FAILED tests/test_runtime_feedback.py::test_process_stop_still_runs_clean_teardown | 2 failed, 2 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\feedback_baseline",
+          "exit_code": 1,
+          "full_output_sha256": "da363240010651e21102495e0b0629cef7997de6d64fe94d2de527c27de4c6d4",
+          "name": "feedback_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\final_baseline -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\final_baseline\\pytest.ini",
+          "concise_output": "FAILED tests/test_runtime_final.py::test_process_exit_survives_failed_teardown_and_all_hooks_run | 1 failed, 2 passed in 0.01s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\final_baseline",
+          "exit_code": 1,
+          "full_output_sha256": "2033e458fc22cff5c2bef7efce8b303613d85fa23a58393279dc5c0a9a1161a9",
+          "name": "final_baseline",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\repaired_all -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\repaired_all\\pytest.ini",
+          "concise_output": "5 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\repaired_all",
+          "exit_code": 0,
+          "full_output_sha256": "ef0e7ef49e71fa999842be0cb8d22ec1058d3a384ed5c0a2ec6efb8f434975ac",
+          "name": "repaired_all",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\ablation_revert_teardown_stack_py -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\ablation_revert_teardown_stack_py\\pytest.ini",
+          "concise_output": "FAILED tests/test_runtime_feedback.py::test_stack_continues_after_teardown_failure | FAILED tests/test_runtime_final.py::test_process_exit_survives_failed_teardown_and_all_hooks_run | 2 failed, 3 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\ablation_revert_teardown_stack_py",
+          "exit_code": 1,
+          "full_output_sha256": "683bdf06ff7b4328540b3564bddb99e0e82d1250d72b1c60284a6b0a694dc718",
+          "name": "ablation_revert_teardown_stack_py",
+          "omitted_owner": "teardown_stack.py",
+          "timed_out": false,
+          "timeout_seconds": 20
+        },
+        {
+          "command": "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q --tb=no -p no:cacheprovider --rootdir D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\ablation_revert_task_runtime_py -c D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\ablation_revert_task_runtime_py\\pytest.ini",
+          "concise_output": "FAILED tests/test_runtime_feedback.py::test_process_stop_still_runs_clean_teardown | FAILED tests/test_runtime_final.py::test_process_exit_survives_failed_teardown_and_all_hooks_run | 2 failed, 3 passed in 0.02s",
+          "cwd": "D:\\dev\\chili-thirteenth-validation-lane-python\\tmp\\runs\\th13_py_task_teardown\\ablation_revert_task_runtime_py",
+          "exit_code": 1,
+          "full_output_sha256": "a09010f635a2581f8e1348ce444af2ff7102b5445474f316279ae4aae67e6334",
+          "name": "ablation_revert_task_runtime_py",
+          "omitted_owner": "task_runtime.py",
+          "timed_out": false,
+          "timeout_seconds": 20
+        }
+      ],
+      "source_hashes": {
+        "task_runtime.py": {
+          "baseline_sha256": "0f8a04f6c12f6588223a9d81bd933fdf8f0ee7122fdd931caf433e4049fc7e23",
+          "changed": true,
+          "repaired_sha256": "d1065d8a33139aba8d39ec7458797eed248a7222fae596572c6bee1a95f97ec6"
+        },
+        "teardown_stack.py": {
+          "baseline_sha256": "5826c34d0bc7c3e61dff941f6586fadbc0aeb447cd31961f56d77f6e6c5bf940",
+          "changed": true,
+          "repaired_sha256": "cfe0a319cf9887cd865e39e59164b201a1eba16b001052bebfbe3191d072b8e1"
+        }
+      },
+      "source_skeleton_sha256": {
+        "task_runtime.py": "a377e2f0e67d6c17fd7655e8a6056c63f4d87555190ee9a56d988f11ad20a6c0",
+        "teardown_stack.py": "34bfb8930805bc70eaa3c720ee17215fce0e43d5710ca5d7788e1bc10157584b"
+      }
+    }
+  },
+  "checks": [
+    {
+      "detail": "symlinks=[]",
+      "gate": "author physical symlinks",
+      "passed": true,
+      "scope": "lane"
+    },
+    {
+      "detail": "case_directories=['th13_py_factory_binding', 'th13_py_monthly_settlement', 'th13_py_task_teardown']",
+      "gate": "exactly three case directories",
+      "passed": true,
+      "scope": "lane"
+    },
+    {
+      "detail": "files=['case.json', 'final_oracle.json', 'oracle.json']",
+      "gate": "bundle file inventory",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "all three strict JSON objects match directory case_id",
+      "gate": "JSON parse and identity",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "language='python', test_runner='pytest'",
+      "gate": "language and runner",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "candidates=['dependency_plan.py', 'service_container.py'], expected_owners=['dependency_plan.py', 'service_container.py'], max_files=2",
+      "gate": "candidate and owner cardinality",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "mapped_paths=['dependency_plan.py', 'service_container.py', 'tests/test_public.py', 'tests/test_dependency_feedback.py', 'tests/test_dependency_final.py']",
+      "gate": "source/test map consistency",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "checked=['dependency_plan.py', 'service_container.py', 'tests/test_dependency_feedback.py', 'tests/test_dependency_final.py', 'tests/test_public.py']",
+      "gate": "relative contained ASCII paths",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "dependency_plan.py: definitions=['Dependency', 'dependency_plan']; service_container.py: definitions=['Container']",
+      "gate": "plausible candidate sources",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "compiled=['dependency_plan.py', 'service_container.py', 'tests/test_dependency_feedback.py', 'tests/test_dependency_final.py', 'tests/test_public.py']",
+      "gate": "all mapped Python compiles",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "forbidden_public_keys=[], hidden_test_names_checked=['test_plan_describes_required_keyword_only_dependency', 'test_container_binds_keyword_only_dependency_by_name', 'test_mixed_bindings_resolve_through_keyword_only_provider'], duplicate_test_bodies=0, shared_generic_assertions=0 (not a hidden input, boundary, or test body)",
+      "gate": "no public oracle-label or hidden-test leak",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "expected_dimension='dependency'",
+      "gate": "dimension identity",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "repair_paths=['dependency_plan.py', 'service_container.py']",
+      "gate": "representative repair ownership and syntax",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "2 passed in 0.01s",
+      "gate": "public baseline passes",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "FAILED tests/test_dependency_feedback.py::test_plan_describes_required_keyword_only_dependency | FAILED tests/test_dependency_feedback.py::test_container_binds_keyword_only_dependency_by_name | 2 failed, 2 passed in 0.02s",
+      "gate": "feedback baseline fails",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "FAILED tests/test_dependency_final.py::test_mixed_bindings_resolve_through_keyword_only_provider | 1 failed, 2 passed in 0.01s",
+      "gate": "fresh final baseline fails",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "5 passed in 0.02s",
+      "gate": "repaired public+feedback+final pass",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "FAILED tests/test_dependency_feedback.py::test_plan_describes_required_keyword_only_dependency | FAILED tests/test_dependency_feedback.py::test_container_binds_keyword_only_dependency_by_name | FAILED tests/test_dependency_final.py::test_mixed_bindings_resolve_through_keyword_only_provider | 3 failed, 2 passed in 0.02s",
+      "gate": "owner ablation required: dependency_plan.py",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "FAILED tests/test_dependency_feedback.py::test_container_binds_keyword_only_dependency_by_name | FAILED tests/test_dependency_final.py::test_mixed_bindings_resolve_through_keyword_only_provider | 2 failed, 3 passed in 0.02s",
+      "gate": "owner ablation required: service_container.py",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "Feedback isolates keyword-only discovery and invocation. The final test composes a positional-only provider, a keyword-only provider, and a mixed-signature publisher, including repeated nested resolution.",
+      "gate": "final adds material boundary/composition",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "This is callable signature introspection and dependency injection; it has no allocation, proxy, encoding, policy, TLS, reload, checkpoint, hierarchy, SQL, inventory, or ticket mechanism.",
+      "gate": "no prohibited mechanism overlap",
+      "passed": true,
+      "scope": "th13_py_factory_binding"
+    },
+    {
+      "detail": "files=['case.json', 'final_oracle.json', 'oracle.json']",
+      "gate": "bundle file inventory",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "all three strict JSON objects match directory case_id",
+      "gate": "JSON parse and identity",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "language='python', test_runner='pytest'",
+      "gate": "language and runner",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "candidates=['billing_clock.py', 'settlement_runner.py'], expected_owners=['billing_clock.py', 'settlement_runner.py'], max_files=2",
+      "gate": "candidate and owner cardinality",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "mapped_paths=['billing_clock.py', 'settlement_runner.py', 'tests/test_public.py', 'tests/test_clock_feedback.py', 'tests/test_clock_final.py']",
+      "gate": "source/test map consistency",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "checked=['billing_clock.py', 'settlement_runner.py', 'tests/test_clock_feedback.py', 'tests/test_clock_final.py', 'tests/test_public.py']",
+      "gate": "relative contained ASCII paths",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "billing_clock.py: definitions=['next_monthly_run']; settlement_runner.py: definitions=['next_scheduled_run']",
+      "gate": "plausible candidate sources",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "compiled=['billing_clock.py', 'settlement_runner.py', 'tests/test_clock_feedback.py', 'tests/test_clock_final.py', 'tests/test_public.py']",
+      "gate": "all mapped Python compiles",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "forbidden_public_keys=[], hidden_test_names_checked=['test_month_end_uses_last_real_day_of_short_month', 'test_runner_converts_completion_instant_before_scheduling', 'test_utc_month_boundary_can_still_reach_local_leap_day_cutoff'], duplicate_test_bodies=0, shared_generic_assertions=0 (not a hidden input, boundary, or test body)",
+      "gate": "no public oracle-label or hidden-test leak",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "expected_dimension='clock'",
+      "gate": "dimension identity",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "repair_paths=['billing_clock.py', 'settlement_runner.py']",
+      "gate": "representative repair ownership and syntax",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "3 passed in 0.02s",
+      "gate": "public baseline passes",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "FAILED tests/test_clock_feedback.py::test_month_end_uses_last_real_day_of_short_month | FAILED tests/test_clock_feedback.py::test_runner_converts_completion_instant_before_scheduling | 2 failed, 3 passed in 0.02s",
+      "gate": "feedback baseline fails",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "FAILED tests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff | 1 failed, 3 passed in 0.02s",
+      "gate": "fresh final baseline fails",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "6 passed in 0.02s",
+      "gate": "repaired public+feedback+final pass",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "FAILED tests/test_clock_feedback.py::test_month_end_uses_last_real_day_of_short_month | FAILED tests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff | 2 failed, 4 passed in 0.03s",
+      "gate": "owner ablation required: billing_clock.py",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "FAILED tests/test_clock_feedback.py::test_runner_converts_completion_instant_before_scheduling | FAILED tests/test_clock_final.py::test_utc_month_boundary_can_still_reach_local_leap_day_cutoff | 2 failed, 4 passed in 0.03s",
+      "gate": "owner ablation required: settlement_runner.py",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "Feedback separately covers a non-leap February clamp and UTC-to-local conversion in January. The final test composes date rollback across a UTC month boundary, leap-day clamping, and a same-local-day future cutoff.",
+      "gate": "final adds material boundary/composition",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "This is calendar scheduling and timezone conversion; despite finance wording, it performs no apportionment or ownership/accounting operation and matches none of the prohibited mechanisms.",
+      "gate": "no prohibited mechanism overlap",
+      "passed": true,
+      "scope": "th13_py_monthly_settlement"
+    },
+    {
+      "detail": "files=['case.json', 'final_oracle.json', 'oracle.json']",
+      "gate": "bundle file inventory",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "all three strict JSON objects match directory case_id",
+      "gate": "JSON parse and identity",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "language='python', test_runner='pytest'",
+      "gate": "language and runner",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "candidates=['teardown_stack.py', 'task_runtime.py'], expected_owners=['teardown_stack.py', 'task_runtime.py'], max_files=2",
+      "gate": "candidate and owner cardinality",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "mapped_paths=['teardown_stack.py', 'task_runtime.py', 'tests/test_public.py', 'tests/test_runtime_feedback.py', 'tests/test_runtime_final.py']",
+      "gate": "source/test map consistency",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "checked=['task_runtime.py', 'teardown_stack.py', 'tests/test_public.py', 'tests/test_runtime_feedback.py', 'tests/test_runtime_final.py']",
+      "gate": "relative contained ASCII paths",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "teardown_stack.py: definitions=['TeardownStack']; task_runtime.py: definitions=['run_task']",
+      "gate": "plausible candidate sources",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "compiled=['task_runtime.py', 'teardown_stack.py', 'tests/test_public.py', 'tests/test_runtime_feedback.py', 'tests/test_runtime_final.py']",
+      "gate": "all mapped Python compiles",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "forbidden_public_keys=[], hidden_test_names_checked=['test_stack_continues_after_teardown_failure', 'test_process_stop_still_runs_clean_teardown', 'test_process_exit_survives_failed_teardown_and_all_hooks_run'], duplicate_test_bodies=0, shared_generic_assertions=1 (not a hidden input, boundary, or test body)",
+      "gate": "no public oracle-label or hidden-test leak",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "expected_dimension='runtime'",
+      "gate": "dimension identity",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "repair_paths=['task_runtime.py', 'teardown_stack.py']",
+      "gate": "representative repair ownership and syntax",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "2 passed in 0.01s",
+      "gate": "public baseline passes",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "FAILED tests/test_runtime_feedback.py::test_stack_continues_after_teardown_failure | FAILED tests/test_runtime_feedback.py::test_process_stop_still_runs_clean_teardown | 2 failed, 2 passed in 0.02s",
+      "gate": "feedback baseline fails",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "FAILED tests/test_runtime_final.py::test_process_exit_survives_failed_teardown_and_all_hooks_run | 1 failed, 2 passed in 0.01s",
+      "gate": "fresh final baseline fails",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "5 passed in 0.02s",
+      "gate": "repaired public+feedback+final pass",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "FAILED tests/test_runtime_feedback.py::test_stack_continues_after_teardown_failure | FAILED tests/test_runtime_final.py::test_process_exit_survives_failed_teardown_and_all_hooks_run | 2 failed, 3 passed in 0.02s",
+      "gate": "owner ablation required: teardown_stack.py",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "FAILED tests/test_runtime_feedback.py::test_process_stop_still_runs_clean_teardown | FAILED tests/test_runtime_final.py::test_process_exit_survives_failed_teardown_and_all_hooks_run | 2 failed, 3 passed in 0.02s",
+      "gate": "owner ablation required: task_runtime.py",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "Feedback separately checks callback continuation after RuntimeError and clean teardown after KeyboardInterrupt. The final test composes a process-level SystemExit with a failing middle hook, all-hook execution, LIFO order, and preservation of the original task exception.",
+      "gate": "final adds material boundary/composition",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "This is a generic in-process callback stack and exception-precedence rule, not reader retirement, configuration replacement, checkpointing, ticket movement, or any other prohibited mechanism.",
+      "gate": "no prohibited mechanism overlap",
+      "passed": true,
+      "scope": "th13_py_task_teardown"
+    },
+    {
+      "detail": "dimensions_unique=True, mechanisms_unique=True, assertion_families_unique=True, final_boundaries_unique=True, combined_skeletons_unique=True, all_six_source_skeletons_unique=True, exact_hidden_assertion_overlap={}",
+      "gate": "cross-case uniqueness",
+      "passed": true,
+      "scope": "lane"
+    },
+    {
+      "detail": "fixed-point apportionment; release-reader retirement; trusted proxy CIDR chains; canonical base64url; request policy snapshots; TLS client authentication; replacement config reload; source-aware tail checkpoints; unordered category hierarchy; tri-state override SQL; composite tenant stock ownership; ticket archive/move accounting",
+      "gate": "prohibited mechanism set reviewed",
+      "passed": true,
+      "scope": "lane"
+    },
+    {
+      "detail": "before_inventory_sha256=56a265fe9935c5e71fadace1e3307fa439920c0e70cb40346f4a62bf724a8f45, after_inventory_sha256=56a265fe9935c5e71fadace1e3307fa439920c0e70cb40346f4a62bf724a8f45",
+      "gate": "author hashes unchanged",
+      "passed": true,
+      "scope": "lane"
+    }
+  ],
+  "cross_case": {
+    "assertion_families": {
+      "th13_py_factory_binding": "Dependency tuple structure and resolved dependency-graph value equality",
+      "th13_py_monthly_settlement": "timezone-aware datetime and exact ISO wall-clock equality",
+      "th13_py_task_teardown": "exception type/message preservation and ordered LIFO event-sequence equality"
+    },
+    "combined_source_skeleton_sha256": {
+      "th13_py_factory_binding": "01a1c8f9f15f4365f0cc1e537bcdd675b8a424d9278c3c665146f84b19c813ea",
+      "th13_py_monthly_settlement": "972643e4469bc901f9141f6da11520db9d148da74dc4cf3a1bc44b6ecf0d2b60",
+      "th13_py_task_teardown": "48c5d0c1694bae23be5e0f9140837dfd7614766fdc904b53bc1103fc79112f65"
+    },
+    "dimensions": {
+      "th13_py_factory_binding": "dependency",
+      "th13_py_monthly_settlement": "clock",
+      "th13_py_task_teardown": "runtime"
+    },
+    "exact_hidden_assertion_overlap": {},
+    "final_boundaries": {
+      "th13_py_factory_binding": "mixed positional-only and keyword-only bindings across a nested provider graph",
+      "th13_py_monthly_settlement": "UTC month rollover maps back to a local leap-day month-end cutoff",
+      "th13_py_task_teardown": "SystemExit combines with a failed teardown while every registered hook still runs"
+    },
+    "mechanisms": {
+      "th13_py_factory_binding": "inspect.Parameter kind discovery plus positional/keyword factory invocation",
+      "th13_py_monthly_settlement": "end-of-month day clamping plus instant-preserving timezone conversion",
+      "th13_py_task_teardown": "BaseException-safe task cleanup plus continuation and exception precedence for callbacks"
+    },
+    "prohibited_mechanisms": [
+      "fixed-point apportionment",
+      "release-reader retirement",
+      "trusted proxy CIDR chains",
+      "canonical base64url",
+      "request policy snapshots",
+      "TLS client authentication",
+      "replacement config reload",
+      "source-aware tail checkpoints",
+      "unordered category hierarchy",
+      "tri-state override SQL",
+      "composite tenant stock ownership",
+      "ticket archive/move accounting"
+    ]
+  },
+  "failed_checks": [],
+  "output_root": "D:\\dev\\chili-thirteenth-validation-lane-python",
+  "pytest_command_policy": {
+    "bytecode_disabled": true,
+    "cacheprovider_disabled": true,
+    "per_command_timeout_seconds": 20,
+    "plugin_autoload_disabled": true
+  },
+  "python": "3.13.11",
+  "result": "PASS",
+  "validator": "isolated_python_lane_validator"
+}

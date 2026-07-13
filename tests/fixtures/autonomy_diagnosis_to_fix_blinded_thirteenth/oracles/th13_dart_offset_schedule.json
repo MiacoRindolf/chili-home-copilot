@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_dart_offset_schedule",
+  "expected_dimension": "clock",
+  "expected_files": [
+    "lib/offset_schedule.dart",
+    "lib/daily_window.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/daily_window.dart';\nimport '../lib/offset_schedule.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  final transition = DateTime.utc(2026, 3, 8, 10);\n  final offsets = OffsetSchedule(const Duration(hours: -8), <OffsetChange>[\n    OffsetChange(transition, const Duration(hours: -7)),\n  ]);\n\n  check(\n    offsets.offsetAt(transition) == const Duration(hours: -7),\n    'the new offset starts at the transition instant',\n  );\n\n  final scheduler = DailyWindowScheduler(offsets);\n  check(\n    scheduler.nextRun(DateTime.utc(2026, 3, 7, 20), hour: 9, minute: 0) ==\n        DateTime.utc(2026, 3, 8, 16),\n    'the next wall-clock run uses the offset in effect at that run',\n  );\n\n  print('feedback tests passed');\n}\n"
+  }
+}

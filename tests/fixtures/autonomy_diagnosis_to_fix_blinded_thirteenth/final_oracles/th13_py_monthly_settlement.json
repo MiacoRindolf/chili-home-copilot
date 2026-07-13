@@ -1,0 +1,6 @@
+{
+  "case_id": "th13_py_monthly_settlement",
+  "final_files": {
+    "tests/test_clock_final.py": "from settlement_runner import next_scheduled_run\n\n\ndef test_utc_month_boundary_can_still_reach_local_leap_day_cutoff():\n    result = next_scheduled_run(\n        \"2024-03-01T00:30:00+00:00\",\n        billing_day=31,\n        hour=17,\n        minute=0,\n        timezone_name=\"America/Los_Angeles\",\n    )\n\n    assert result == \"2024-02-29T17:00:00-08:00\"\n"
+  }
+}

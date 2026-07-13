@@ -1,0 +1,16 @@
+{
+  "case_id": "th13_sql_export_job_state",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "Export workers occasionally take over jobs that another worker already started. Operators have also seen canceled jobs reappear as running and completed result locations change after a late retry. Normal queued-to-running-to-completed jobs succeed.",
+  "candidate_paths": [
+    "sql/claim_export_job.sql",
+    "sql/finish_export_job.sql"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "sql/claim_export_job.sql": "UPDATE export_job\nSET\n    state = 'running',\n    worker_id = :worker_id\nWHERE job_id = :job_id;\n",
+    "sql/finish_export_job.sql": "UPDATE export_job\nSET\n    state = 'completed',\n    result_uri = :result_uri\nWHERE job_id = :job_id;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef read_sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"ascii\")\n\n\ndef make_db():\n    db = sqlite3.connect(\":memory:\")\n    db.execute(\n        \"\"\"\n        CREATE TABLE export_job (\n            job_id INTEGER PRIMARY KEY,\n            state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'canceled', 'completed')),\n            worker_id TEXT,\n            result_uri TEXT\n        )\n        \"\"\"\n    )\n    return db\n\n\ndef test_a_worker_claims_a_queued_job():\n    db = make_db()\n    db.execute(\"INSERT INTO export_job VALUES (1, 'queued', NULL, NULL)\")\n\n    cursor = db.execute(\n        read_sql(\"claim_export_job.sql\"),\n        {\"job_id\": 1, \"worker_id\": \"worker-a\"},\n    )\n\n    assert cursor.rowcount == 1\n    assert db.execute(\"SELECT * FROM export_job WHERE job_id = 1\").fetchone() == (\n        1,\n        \"running\",\n        \"worker-a\",\n        None,\n    )\n\n\ndef test_the_owning_worker_finishes_a_running_job():\n    db = make_db()\n    db.execute(\n        \"INSERT INTO export_job VALUES (2, 'running', 'worker-a', NULL)\"\n    )\n\n    cursor = db.execute(\n        read_sql(\"finish_export_job.sql\"),\n        {\n            \"job_id\": 2,\n            \"worker_id\": \"worker-a\",\n            \"result_uri\": \"exports/2.csv\",\n        },\n    )\n\n    assert cursor.rowcount == 1\n    assert db.execute(\"SELECT * FROM export_job WHERE job_id = 2\").fetchone() == (\n        2,\n        \"completed\",\n        \"worker-a\",\n        \"exports/2.csv\",\n    )\n"
+  }
+}

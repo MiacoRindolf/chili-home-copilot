@@ -1,0 +1,6 @@
+{
+  "case_id": "th13_dart_offset_schedule",
+  "final_files": {
+    "tests/final_test.dart": "import '../lib/daily_window.dart';\nimport '../lib/offset_schedule.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) {\n    throw StateError(message);\n  }\n}\n\nvoid main() {\n  final transition = DateTime.utc(2026, 3, 8, 10);\n  final scheduler = DailyWindowScheduler(\n    OffsetSchedule(const Duration(hours: -8), <OffsetChange>[\n      OffsetChange(transition, const Duration(hours: -7)),\n    ]),\n  );\n\n  check(\n    scheduler.nextRun(DateTime.utc(2026, 3, 7, 20), hour: 3, minute: 0) ==\n        transition,\n    'a wall-clock target created by the jump resolves to the transition instant',\n  );\n\n  print('final tests passed');\n}\n"
+  }
+}

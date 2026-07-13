@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_py_task_teardown",
+  "expected_dimension": "runtime",
+  "expected_files": [
+    "teardown_stack.py",
+    "task_runtime.py"
+  ],
+  "feedback_files": {
+    "tests/test_runtime_feedback.py": "import pytest\n\nfrom task_runtime import run_task\nfrom teardown_stack import TeardownStack\n\n\ndef test_stack_continues_after_teardown_failure():\n    events = []\n    teardowns = TeardownStack()\n    teardowns.callback(lambda: events.append(\"first\"))\n\n    def broken_teardown():\n        events.append(\"broken\")\n        raise RuntimeError(\"teardown failed\")\n\n    teardowns.callback(broken_teardown)\n    teardowns.callback(lambda: events.append(\"last\"))\n\n    with pytest.raises(RuntimeError, match=\"teardown failed\"):\n        teardowns.close()\n\n    assert events == [\"last\", \"broken\", \"first\"]\n\n\ndef test_process_stop_still_runs_clean_teardown():\n    events = []\n\n    def task(teardowns):\n        teardowns.callback(lambda: events.append(\"closed\"))\n        raise KeyboardInterrupt(\"operator stop\")\n\n    with pytest.raises(KeyboardInterrupt, match=\"operator stop\"):\n        run_task(task)\n\n    assert events == [\"closed\"]\n"
+  }
+}

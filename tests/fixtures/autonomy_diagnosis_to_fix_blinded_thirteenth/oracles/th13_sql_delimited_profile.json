@@ -1,0 +1,11 @@
+{
+  "case_id": "th13_sql_delimited_profile",
+  "expected_dimension": "config",
+  "expected_files": [
+    "sql/render_customer_row.sql",
+    "sql/render_order_row.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef read_sql(name):\n    return (ROOT / \"sql\" / name).read_text(encoding=\"ascii\")\n\n\ndef make_db():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(\n        \"\"\"\n        CREATE TABLE export_profile (\n            profile_name TEXT PRIMARY KEY,\n            field_separator TEXT NOT NULL CHECK (length(field_separator) = 1),\n            record_separator TEXT NOT NULL CHECK (record_separator IN ('LF', 'CRLF'))\n        );\n\n        CREATE TABLE customer (\n            customer_id INTEGER PRIMARY KEY,\n            display_name TEXT\n        );\n\n        CREATE TABLE fulfillment_order (\n            order_id INTEGER PRIMARY KEY,\n            delivery_note TEXT\n        );\n        \"\"\"\n    )\n    db.execute(\"INSERT INTO export_profile VALUES ('pipe_windows', '|', 'CRLF')\")\n    db.execute(\"INSERT INTO customer VALUES (7, 'North Annex')\")\n    db.execute(\"INSERT INTO fulfillment_order VALUES (41, 'Leave at desk')\")\n    return db\n\n\ndef test_customer_rows_use_the_selected_profile_separator():\n    db = make_db()\n    rendered = db.execute(\n        read_sql(\"render_customer_row.sql\"),\n        {\"profile_name\": \"pipe_windows\", \"customer_id\": 7},\n    ).fetchone()[0]\n\n    assert rendered == \"7|North Annex\\r\\n\"\n\n\ndef test_order_rows_use_the_selected_profile_separator():\n    db = make_db()\n    rendered = db.execute(\n        read_sql(\"render_order_row.sql\"),\n        {\"profile_name\": \"pipe_windows\", \"order_id\": 41},\n    ).fetchone()[0]\n\n    assert rendered == \"41|Leave at desk\\r\\n\"\n"
+  }
+}
