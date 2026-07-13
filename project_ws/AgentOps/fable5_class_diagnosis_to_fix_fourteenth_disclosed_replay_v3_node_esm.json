@@ -1,0 +1,1050 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 326658.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "dependency",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 420,
+        "exit_code": 1,
+        "output": "[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.6207ms)\n\u2716 scoped vendor directories remain loadable (7.4252ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 121.6007\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.6207ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-frjvvckp/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (7.4252ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-frjvvckp\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-frjvvckp\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-frjvvckp/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (1.2119ms)\n\u2714 an ordinary vendor package activates through the registry (9.6061ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 138.1116",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/feedback.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "baseline_final_tests": {
+        "duration_ms": 357,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.mjs]\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (6.8776ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 1\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 104.7704\n\n\u2716 failing tests:\n\ntest at tests\\final.test.mjs:7:1\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (6.8776ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-_8i53v4o\\repo\\tests\\final_data\\vendor' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-_8i53v4o\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-_8i53v4o/repo/tests/final_data/vendor#suite/browser.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.9277ms)\n\u2714 an ordinary vendor package activates through the registry (7.4449ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 101.9615",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/final.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 195,
+        "exit_code": 0,
+        "output": "[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.9028ms)\n\u2714 an ordinary vendor package activates through the registry (8.3442ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 114.5999",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.mjs"
+        ]
+      },
+      "case_id": "th14_node_esm_plugin_loading",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "dependency",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "dependency",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "source-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Dependency drift is the most likely cause.",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Outcome remains unchanged.",
+            "expected_if_true": "Outcome changes with dependency.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "dependency",
+              "filters": {},
+              "group_by": "",
+              "kind": "git_diff",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "package.json"
+              ],
+              "probe_id": "p1",
+              "query": "exports",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Dependency drift causes plugin loading failure.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Change dependency and observe no outcome change.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ]
+          },
+          {
+            "claim": "Data drift causes vendor cache failure.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Change data and observe no outcome change.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Unknown drift causes unresolved behavior.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Change unknown and observe no outcome change.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-4"
+            ]
+          },
+          {
+            "claim": "Test harness drift affects baseline comparability.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Change test harness and observe no outcome change.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 0,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "failed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_git_diff",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Outcome remains unchanged.",
+            "expected_if_true": "Outcome changes with dependency.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-13T16:37:39.031131+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.65,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed git_diff probe status=failed exit=2: No valid probe paths exist."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "dimension": "dependency",
+            "duration_ms": 0,
+            "exit_code": 2,
+            "expected_if_false": "Outcome remains unchanged.",
+            "expected_if_true": "Outcome changes with dependency.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "git_diff",
+            "observed_at": "2026-07-13T16:37:39.031131+00:00",
+            "output": "No valid probe paths exist.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "failed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th14_node_esm_plugin_loading",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Dependency drift causes plugin loading failure.",
+          "confidence": 0.0,
+          "dimension": "dependency",
+          "evidence_ids": [
+            "operator-1",
+            "source-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Dependency drift is the most likely cause.",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Dependency drift causes plugin loading failure.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.31,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "dimension_alignment_weight": 1.55,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Change dependency and observe no outcome change.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Data drift causes vendor cache failure.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Change data and observe no outcome change.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Unknown drift causes unresolved behavior.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Change unknown and observe no outcome change.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-4"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Test harness drift affects baseline comparability.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Change test harness and observe no outcome change.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Change dependency and observe no outcome change.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Change data and observe no outcome change.",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Change unknown and observe no outcome change.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Change test harness and observe no outcome change.",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.0,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h-dependency",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.0,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h-dependency",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": false,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": false,
+          "json_parsed": false,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": false,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h-dependency",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 0,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Dependency drift causes plugin loading failure.",
+            "confidence": 0.0,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Dependency drift is the most likely cause.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Dependency drift causes plugin loading failure.",
+            "confidence": 0.0,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Dependency drift is the most likely cause.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Dependency drift is the most likely cause.",
+            "status": "provisional"
+          },
+          "response_chars": 1614,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 326658,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 331,
+        "exit_code": 1,
+        "output": "[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.935ms)\n\u2716 scoped vendor directories remain loadable (5.8303ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 96.9345\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.935ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (5.8303ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.7962ms)\n\u2714 an ordinary vendor package activates through the registry (7.4402ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 101.1968",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/feedback.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "final_tests": {
+        "duration_ms": 360,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.mjs]\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (6.213ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 1\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 103.1845\n\n\u2716 failing tests:\n\ntest at tests\\final.test.mjs:7:1\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (6.213ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-jc9zoa6i\\repo\\tests\\final_data\\vendor' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-jc9zoa6i\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-jc9zoa6i/repo/tests/final_data/vendor#suite/browser.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.7927ms)\n\u2714 an ordinary vendor package activates through the registry (7.5093ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 110.486",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/final.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "dependency",
+      "language": "typescript",
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 89944725000,
+          "json_object_valid": false,
+          "latency_ms": 105995,
+          "load_duration_ns": 9491695200,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 9374,
+          "prompt_eval_count": 2122,
+          "prompt_eval_duration_ns": 6467596000,
+          "requested_timeout_sec": 150.0,
+          "response": "",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": true,
+          "thinking_chars": 4991,
+          "thinking_enabled": true,
+          "tokens_out": 1000,
+          "wall_ms": 105995
+        },
+        {
+          "case_budget_remaining_before_sec": 374.00437180005247,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 33317379000,
+          "json_object_valid": true,
+          "latency_ms": 45173,
+          "load_duration_ns": 184057800,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 14094,
+          "prompt_eval_count": 3165,
+          "prompt_eval_duration_ns": 11374446000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Dependency drift causes plugin loading failure.\",\"dimension\":\"dependency\",\"support_evidence_ids\":[\"operator-1\",\"source-1\",\"source-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Change dependency and observe no outcome change.\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Data drift causes vendor cache failure.\",\"dimension\":\"data\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Change data and observe no outcome change.\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Unknown drift causes unresolved behavior.\",\"dimension\":\"unknown\",\"support_evidence_ids\":[\"operator-3\",\"operator-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Change unknown and observe no outcome change.\"},{\"hypothesis_id\":\"h4\",\"claim\":\"Test harness drift affects baseline comparability.\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"baseline-public-contracts\"],\"contradict_evidence_ids\":[],\"falsification\":\"Change test harness and observe no outcome change.\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"dependency\"],\"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"runtime\",\"test_harness\"],\"expected_if_true\":\"Outcome changes with dependency.\",\"expected_if_false\":\"Outcome remains unchanged.\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"git_diff\",\"paths\":[\"package.json\"],\"query\":\"exports\",\"dimension\":\"dependency\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"operator-1\",\"source-1\",\"source-2\"],\"reason\":\"Dependency drift is the most likely cause.\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 368,
+          "wall_ms": 45173
+        },
+        {
+          "case_budget_remaining_before_sec": 328.8306514000287,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 24491419000,
+          "latency_ms": 31148,
+          "load_duration_ns": 199863700,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 7753,
+          "prompt_eval_count": 1793,
+          "prompt_eval_duration_ns": 6118667000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"dependency\",\n  \"analysis\": \"The bug is caused by dependency drift, where the plugin host incorrectly selects a browser implementation despite the package being intended for Node. This is due to the resolver logic not correctly handling the conditions and exports field in the package.json.\",\n  \"files\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Fix the resolver logic to correctly handle the conditions and exports field in package.json.\"\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure the loader correctly resolves the target based on the conditions and exports field.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"resolveExportTarget\",\n      \"owner_paths\": [\"src/package-exports.mjs\"],\n      \"postcondition\": \"The function returns the correct target based on the conditions and exports field.\"\n    },\n    {\n      \"contract\": \"loadPlugin\",\n      \"owner_paths\": [\"src/plugin-loader.mjs\"],\n      \"postcondition\": \"The function loads the correct plugin based on the package.json exports and conditions.\"\n    }\n  ],\n  \"notes\": \"Ensure the resolver and loader correctly handle the conditions and exports field to prevent incorrect plugin selection.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 275,
+          "wall_ms": 31148
+        },
+        {
+          "case_budget_remaining_before_sec": 297.6818244000315,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 13749771000,
+          "latency_ms": 26346,
+          "load_duration_ns": 8638711800,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 6873,
+          "prompt_eval_count": 1530,
+          "prompt_eval_duration_ns": 3925847000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const firstTarget = Object.values(entry)[0];\",\n          \"replace\": \"const firstTarget = Object.entries(entry).find(([key, value]) => key === conditions[0] && typeof value === 'string' && value.startsWith('./'))?.[1];\"\n        }\n      ]\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const target = resolveExportTarget(manifest.exports, {\",\n          \"replace\": \"const target = resolveExportTarget(manifest.exports, { subpath: options.subpath ?? '.', conditions: options.conditions ?? ['node', 'import'] });\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "edit_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 177,
+          "wall_ms": 26346
+        },
+        {
+          "case_budget_remaining_before_sec": 271.33576480002375,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 9718831000,
+          "latency_ms": 12674,
+          "load_duration_ns": 205189700,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 3694,
+          "prompt_eval_count": 847,
+          "prompt_eval_duration_ns": 2676390000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n  const firstTarget = Object.entries(entry).find(([key, value]) => key === conditions[0] && typeof value === 'string' && value.startsWith('./'))?.[1];\n  return typeof firstTarget === 'string' && firstTarget.startsWith('./')\n    ? firstTarget\n    : null;\n=======\n  const firstTarget = Object.entries(entry).find(([key, value]) => key === conditions[0] && typeof value === 'string' && value.startsWith('./'));\n  if (firstTarget) {\n    return firstTarget;\n  }\n  return null;\n>>>>>>> REPLACE\n```",
+          "stage": "edit_compiler_correction_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 125,
+          "wall_ms": 12674
+        },
+        {
+          "case_budget_remaining_before_sec": 258.66158140002517,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 7706492000,
+          "latency_ms": 9700,
+          "load_duration_ns": 212263100,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 3579,
+          "prompt_eval_count": 792,
+          "prompt_eval_duration_ns": 1707102000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n  const target = resolveExportTarget(manifest.exports, { subpath: options.subpath ?? '.', conditions: options.conditions ?? ['node', 'import'] });\n    subpath: options.subpath ?? '.',\n    conditions: options.conditions ?? ['node', 'import']\n  });\n=======\n  const target = resolveExportTarget(manifest.exports, { subpath: options.subpath ?? '.', conditions: options.conditions ?? ['node', 'import'] });\n>>>>>>> REPLACE\n```",
+          "stage": "edit_compiler_correction_2",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 99,
+          "wall_ms": 9700
+        },
+        {
+          "case_budget_remaining_before_sec": 248.96101420006016,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 28368404000,
+          "latency_ms": 46359,
+          "load_duration_ns": 6848521200,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 13161,
+          "prompt_eval_count": 3279,
+          "prompt_eval_duration_ns": 11091582000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"dependency\",\n  \"analysis\": \"The resolver logic in package-exports.mjs is incorrectly selecting the browser export over the node export when both are present, violating the expected behavior. Additionally, the scoped vendor directory loading fails due to incorrect resolution of the module path.\",\n  \"files\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Update the resolver to prioritize the node export over the browser export when both are present.\"\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Fix the module resolution logic to correctly handle scoped vendor directories.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"tests/feedback.test.mjs::deployment conditions select the server plugin\",\n      \"owner_paths\": [\"src/package-exports.mjs\"],\n      \"postcondition\": \"The resolver should select the node export when both browser and node exports are present.\"\n    },\n    {\n      \"contract\": \"tests/feedback.test.mjs::scoped vendor directories remain loadable\",\n      \"owner_paths\": [\"src/plugin-loader.mjs\"],\n      \"postcondition\": \"The loader should correctly resolve and load modules from scoped vendor directories.\"\n    }\n  ],\n  \"notes\": \"Ensure that the resolver logic in package-exports.mjs prioritizes the node export when both browser and node exports are present. Also, ensure that the plugin loader correctly resolves module paths for scoped vendor directories.\"\n}",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 318,
+          "wall_ms": 46359
+        },
+        {
+          "case_budget_remaining_before_sec": 202.60180720005883,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 25190296000,
+          "latency_ms": 42303,
+          "load_duration_ns": 8216970400,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 12210,
+          "prompt_eval_count": 3010,
+          "prompt_eval_duration_ns": 8825808000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const firstTarget = Object.values(entry)[0];\\nreturn typeof firstTarget === 'string' && firstTarget.startsWith('./')\\n  ? firstTarget\\n  : null;\",\n          \"replace\": \"if (conditions.includes('node')) {\\n  const nodeTargets = Object.keys(entry).filter(key => key.startsWith('./node.'));\\n  if (nodeTargets.length > 0) {\\n    return nodeTargets[0];\\n  }\\n}\\nconst firstTarget = Object.values(entry)[0];\\nreturn typeof firstTarget === 'string' && firstTarget.startsWith('./')\\n  ? firstTarget\\n  : null;\"\n        }\n      ]\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const manifestPath = resolve(packageRoot, 'package.json');\\nconst manifest = JSON.parse(await readFile(manifestPath, 'utf8'));\",\n          \"replace\": \"const manifestPath = resolve(packageRoot, 'package.json');\\nconst manifest = JSON.parse(await readFile(manifestPath, 'utf8'));\\nif (manifest.name.includes('#')) {\\n  const vendorDir = resolve(packageRoot, '..');\\n  if (existsSync(vendorDir)) {\\n    packageRoot = vendorDir;\\n  }\\n}\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "repair_edit_1_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 319,
+          "wall_ms": 42303
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 8,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": false,
+      "patch_warnings": [
+        "Recovered the edit group with one bounded compiler-guided correction.",
+        "Rolled back initial patch because it regressed or made no validated progress.",
+        "Rolled back repair because validation regressed or made no measurable progress."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 159,
+        "exit_code": 0,
+        "output": "[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.8955ms)\n\u2714 an ordinary vendor package activates through the registry (7.3309ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 96.6853",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.mjs"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "8badab044cf28124eeef11920e168fe74d1b08c3311c032b64562b95736ca8b0",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable",
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ],
+            "passed_ids": [
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ]
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"expected: './node.mjs'; actual: './browser.mjs'\",\n      \"AssertionError: Expected values to be strictly equal:\"\n    ],\n    \"failed_ids\": [\n      \"tests/feedback.test.mjs::deployment conditions select the server plugin\",\n      \"tests/feedback.test.mjs::scoped vendor directories remain loadable\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- Do not invent or install dependencies; use platform primitives and existing repository imports.\n- observed: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n- observed: code: 'ERR_ASSERTION',\n- observed: Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\src\\plugin-loader.mjs\n- observed: code: 'ERR_MODULE_NOT_FOUND',\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.6616ms)\n\u2716 scoped vendor directories remain loadable (6.7358ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 105.907\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.6616ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (6.7358ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.9866ms)\n\u2714 an ordinary vendor package activates through the registry (7.8004ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 100.9079",
+          "applied_files": [
+            "src/package-exports.mjs",
+            "src/plugin-loader.mjs"
+          ],
+          "attempt_fingerprint": "ba37f7ce0e74827758590573559effe51f43cf0b976f9c0ded8daf2007c3b76e",
+          "attempted_diff": "--- a/src/package-exports.mjs\n+++ b/src/package-exports.mjs\n@@ -29,6 +29,12 @@\n     return null;\n   }\n \n+  if (conditions.includes('node')) {\n+    const nodeTargets = Object.keys(entry).filter(key => key.startsWith('./node.'));\n+    if (nodeTargets.length > 0) {\n+      return nodeTargets[0];\n+    }\n+  }\n   const firstTarget = Object.values(entry)[0];\n   return typeof firstTarget === 'string' && firstTarget.startsWith('./')\n     ? firstTarget\n\n--- a/src/plugin-loader.mjs\n+++ b/src/plugin-loader.mjs\n@@ -12,6 +12,12 @@\n export async function loadPlugin(packageRoot, options = {}) {\n   const manifestPath = resolve(packageRoot, 'package.json');\n   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));\n+  if (manifest.name.includes('#')) {\n+    const vendorDir = resolve(packageRoot, '..');\n+    if (existsSync(vendorDir)) {\n+      packageRoot = vendorDir;\n+    }\n+  }\n   const target = resolveExportTarget(manifest.exports, {\n     subpath: options.subpath ?? '.',\n     conditions: options.conditions ?? ['node', 'import']\n",
+          "before_failure_signature": "e852bf6c18d56e9e9b2b91e7a3538886ec5aeebb43a40f22342497f229dc018c",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable",
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ],
+            "passed_ids": [
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"expected: './node.mjs'; actual: './browser.mjs'\",\n      \"AssertionError: Expected values to be strictly equal:\"\n    ],\n    \"failed_ids\": [\n      \"tests/feedback.test.mjs::deployment conditions select the server plugin\",\n      \"tests/feedback.test.mjs::scoped vendor directories remain loadable\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- Do not invent or install dependencies; use platform primitives and existing repository imports.\n- observed: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n- observed: code: 'ERR_ASSERTION',\n- observed: Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\src\\plugin-loader.mjs\n- observed: code: 'ERR_MODULE_NOT_FOUND',\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.5696ms)\n\u2716 scoped vendor directories remain loadable (6.8633ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 118.1361\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.5696ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (6.8633ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.9043ms)\n\u2714 an ordinary vendor package activates through the registry (9.0589ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 113.6983",
+          "escalated": false,
+          "feedback_context_files": [
+            "src/package-exports.mjs",
+            "src/plugin-loader.mjs"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The resolver logic in package-exports.mjs is incorrectly selecting the browser export over the node export when both are present, violating the expected behavior. Additionally, the scoped vendor directory loading fails due to incorrect resolution of the module path.",
+            "contract_coverage": [
+              {
+                "contract": "tests/feedback.test.mjs::deployment conditions select the server plugin",
+                "owner_paths": [
+                  "src/package-exports.mjs"
+                ],
+                "postcondition": "The resolver should select the node export when both browser and node exports are present."
+              },
+              {
+                "contract": "tests/feedback.test.mjs::scoped vendor directories remain loadable",
+                "owner_paths": [
+                  "src/plugin-loader.mjs"
+                ],
+                "postcondition": "The loader should correctly resolve and load modules from scoped vendor directories."
+              }
+            ],
+            "dimension": "dependency",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Update the resolver to prioritize the node export over the browser export when both are present.",
+                "path": "src/package-exports.mjs"
+              },
+              {
+                "action": "modify",
+                "description": "Fix the module resolution logic to correctly handle scoped vendor directories.",
+                "path": "src/plugin-loader.mjs"
+              }
+            ],
+            "notes": "Ensure that the resolver logic in package-exports.mjs prioritizes the node export when both browser and node exports are present. Also, ensure that the plugin loader correctly resolves module paths for scoped vendor directories.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "1df2fdd9c3801730e392e41c079ba79b3b2f7dbee56dda3c79c1a9aa0ce8f944",
+          "proposed_diagnosis_dimension": "dependency",
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "src/package-exports.mjs",
+          "selected_files": [
+            "src/package-exports.mjs",
+            "src/plugin-loader.mjs"
+          ],
+          "skipped_optional_files": [],
+          "validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"expected: './node.mjs'; actual: './browser.mjs'\",\n      \"AssertionError: Expected values to be strictly equal:\"\n    ],\n    \"failed_ids\": [\n      \"tests/feedback.test.mjs::deployment conditions select the server plugin\",\n      \"tests/feedback.test.mjs::scoped vendor directories remain loadable\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- Do not invent or install dependencies; use platform primitives and existing repository imports.\n- observed: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n- observed: code: 'ERR_ASSERTION',\n- observed: Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\src\\plugin-loader.mjs\n- observed: code: 'ERR_MODULE_NOT_FOUND',\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.6616ms)\n\u2716 scoped vendor directories remain loadable (6.7358ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 105.907\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.6616ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (6.7358ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-t0ai24u9\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-t0ai24u9/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.9866ms)\n\u2714 an ordinary vendor package activates through the registry (7.8004ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 100.9079",
+          "validation_regression": {
+            "after_failure_signature": "8badab044cf28124eeef11920e168fe74d1b08c3311c032b64562b95736ca8b0",
+            "after_quality": 2,
+            "before_failure_signature": "e852bf6c18d56e9e9b2b91e7a3538886ec5aeebb43a40f22342497f229dc018c",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "dependency",
+      "score": 40,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "src/package-exports.mjs",
+        "src/plugin-loader.mjs"
+      ],
+      "split": "disclosed_replay",
+      "test_runner": "node_test"
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-13T16:40:33.867964+00:00",
+  "development_regression_case_count": 1,
+  "development_regression_score": 40.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 50.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 50.0,
+  "diagnostic_stage_schema_acceptance_rate": 50.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "max_base_repair_rounds": 1,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 1,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 40.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v5",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "total_model_calls": 8,
+  "verdict": "needs_improvement"
+}
