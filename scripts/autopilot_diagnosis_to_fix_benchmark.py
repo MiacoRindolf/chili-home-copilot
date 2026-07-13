@@ -1,12 +1,15 @@
 """Local-only diagnosis-to-fix benchmark with sealed final adjudication.
 
 The model sees the case prompt and candidate repository only. Oracle labels and
-repair-feedback tests are loaded after the initial patch. For blinded holdouts,
-final tests live in a separate oracle that is first read after every model call.
+repair-feedback tests are loaded after the initial patch. Protocol fixture bytes,
+including the external final oracle, are hash-bound and safety-scanned at preflight;
+the final adjudication payload is reverified and opened only after the model ledger
+is frozen.
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import difflib
 import hashlib
 import itertools
@@ -45,6 +48,21 @@ DEFAULT_RESULTS = ROOT / "project_ws" / "AgentOps" / "autonomous_diagnosis_to_fi
 MAX_REPAIR_ROUNDS = 5
 TEST_RUNNERS = frozenset({"pytest", "node_test", "dart"})
 MAX_TEST_FILES = 40
+VALID_EVALUATION_ROLES = frozenset({"development_regression", "blinded_holdout"})
+TEST_SOURCE_SUFFIXES = frozenset(
+    {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".dart"}
+)
+CAUSAL_REASONING_STAGES = frozenset({"investigator", "skeptic", "judge"})
+TEST_SUBPROCESS_ASSURANCE = {
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": False,
+    "hostile_process_proof": False,
+    "residual_risk": (
+        "Test subprocesses are screened statically and seeded repository files are "
+        "hash-checked around each process, but this is not an OS sandbox and does not "
+        "prove containment against hostile native or dynamically constructed behavior."
+    ),
+}
 SCORE_WEIGHTS = {
     "baseline_final_failure": 5,
     "diagnosis": 15,
@@ -54,6 +72,12 @@ SCORE_WEIGHTS = {
     "final_tests": 45,
     "premium_independence": 10,
 }
+
+
+class FixtureIntegrityError(RuntimeError):
+    """Raised when a sealed fixture or test process violates run integrity."""
+
+
 REPAIR_DIMENSION_RUBRIC = dict(diagnostic_reasoning.CAUSAL_DIMENSION_RUBRIC)
 REPAIR_PLAN_SCHEMA = {
     "type": "object",
@@ -126,6 +150,191 @@ def _fixture_path(root: Path, value: object, label: str) -> Path:
     if not path.is_file():
         raise ValueError(f"{label} fixture file does not exist: {relative}")
     return path
+
+
+def _record_audit_event(
+    events: list[dict[str, Any]],
+    event: str,
+    **details: Any,
+) -> dict[str, Any]:
+    item = {
+        "sequence": len(events) + 1,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        **details,
+    }
+    events.append(item)
+    return item
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _json_from_bytes(payload: bytes, path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid UTF-8 JSON fixture in {path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected an object in {path}")
+    return value
+
+
+def _bind_fixture_artifact(
+    root: Path,
+    path: Path,
+    *,
+    artifact: str,
+    events: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bytes]:
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    try:
+        relative = resolved_path.relative_to(resolved_root).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"Fixture artifact escapes fixture root: {path}") from exc
+    payload = resolved_path.read_bytes()
+    binding = {
+        "artifact": artifact,
+        "path": relative,
+        "sha256": _sha256_bytes(payload),
+        "size_bytes": len(payload),
+        "_absolute_path": str(resolved_path),
+    }
+    _record_audit_event(
+        events,
+        "fixture_digest_verified",
+        phase="preflight_binding",
+        artifact=artifact,
+        path=relative,
+        sha256=binding["sha256"],
+        size_bytes=len(payload),
+    )
+    return binding, payload
+
+
+def _verify_fixture_artifact(
+    binding: Mapping[str, Any],
+    *,
+    events: list[dict[str, Any]],
+    phase: str,
+    case_id: str = "",
+) -> bytes:
+    path = Path(str(binding.get("_absolute_path") or ""))
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        details = {
+            "phase": phase,
+            "artifact": str(binding.get("artifact") or "fixture"),
+            "path": str(binding.get("path") or ""),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if case_id:
+            details["case_id"] = case_id
+        _record_audit_event(events, "fixture_access_failed", **details)
+        raise FixtureIntegrityError(
+            f"Fixture artifact became unreadable during {phase}: {binding.get('path')}"
+        ) from exc
+    actual = _sha256_bytes(payload)
+    expected = str(binding.get("sha256") or "")
+    common = {
+        "phase": phase,
+        "artifact": str(binding.get("artifact") or "fixture"),
+        "path": str(binding.get("path") or ""),
+        "expected_sha256": expected,
+        "actual_sha256": actual,
+    }
+    if case_id:
+        common["case_id"] = case_id
+    if actual != expected:
+        _record_audit_event(events, "fixture_digest_mismatch", **common)
+        raise FixtureIntegrityError(
+            f"Fixture digest changed for {binding.get('path')} during {phase}."
+        )
+    _record_audit_event(
+        events,
+        "fixture_digest_verified",
+        **common,
+    )
+    return payload
+
+
+def _read_bound_json(
+    binding: Mapping[str, Any],
+    *,
+    events: list[dict[str, Any]],
+    phase: str,
+    case_id: str = "",
+) -> dict[str, Any]:
+    payload = _verify_fixture_artifact(
+        binding,
+        events=events,
+        phase=phase,
+        case_id=case_id,
+    )
+    return _json_from_bytes(payload, Path(str(binding.get("_absolute_path") or "")))
+
+
+def _public_digest_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: binding[key]
+        for key in ("artifact", "path", "sha256", "size_bytes")
+        if key in binding
+    }
+
+
+def _is_holdout_split(split: str) -> bool:
+    return bool(re.fullmatch(r"holdout(?:[-_][a-z0-9]+)+", split))
+
+
+def _is_holdout_sealed_split(split: str) -> bool:
+    if not _is_holdout_split(split):
+        return False
+    return "sealed" in re.split(r"[-_]", split)
+
+
+def _validate_evaluation_entry(
+    entry: Mapping[str, Any],
+    *,
+    evaluation_context: str,
+) -> None:
+    role = entry.get("evaluation_role")
+    split = entry.get("split")
+    if role not in VALID_EVALUATION_ROLES:
+        raise ValueError(
+            "Manifest evaluation_role must be exactly development_regression or "
+            f"blinded_holdout; received {role!r}."
+        )
+    if not isinstance(split, str) or not split.strip() or split != split.strip():
+        raise ValueError("Manifest split must be a non-empty canonical string.")
+    holdout_split = _is_holdout_split(split)
+    if role == "blinded_holdout":
+        if not holdout_split:
+            raise ValueError(
+                "blinded_holdout entries require a canonical holdout split."
+            )
+        if not entry.get("final_oracle"):
+            raise ValueError(
+                "Every blinded_holdout entry requires a separate final_oracle path."
+            )
+    elif holdout_split:
+        raise ValueError(
+            "development_regression entries cannot use a holdout split."
+        )
+
+    if evaluation_context == "protocol":
+        if role != "blinded_holdout":
+            raise ValueError(
+                "Protocol evaluation accepts only exact blinded_holdout entries."
+            )
+        if not _is_holdout_sealed_split(split):
+            raise ValueError(
+                "Protocol evaluation requires a holdout-sealed split."
+            )
+    elif evaluation_context != "disclosed_replay":
+        raise ValueError(f"Unknown evaluation context: {evaluation_context!r}.")
 
 
 def _write_files(root: Path, files: Mapping[str, Any]) -> None:
@@ -297,6 +506,365 @@ def _validate_oracle_test_paths(
             )
 
 
+def _ast_dotted_name(node: ast.AST, aliases: Mapping[str, str]) -> str:
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+    else:
+        return ""
+    parts.reverse()
+    if parts and parts[0] in aliases:
+        replacement = aliases[parts[0]].split(".")
+        parts = [*replacement, *parts[1:]]
+    return ".".join(parts)
+
+
+def _path_expression_hint(node: ast.AST | None) -> str:
+    if node is None:
+        return ""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.replace("\\", "/")
+    if isinstance(node, ast.Name):
+        return "<temp>" if "tmp" in node.id.lower() or "temp" in node.id.lower() else ""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _path_expression_hint(node.left).rstrip("/")
+        right = _path_expression_hint(node.right).lstrip("/")
+        if left and right:
+            return f"{left}/{right}"
+        return right or left
+    if isinstance(node, ast.Call):
+        name = _ast_dotted_name(node.func, {})
+        if name in {"Path", "pathlib.Path"} and node.args:
+            return _path_expression_hint(node.args[0])
+        if isinstance(node.func, ast.Attribute):
+            return _path_expression_hint(node.func.value)
+    if isinstance(node, ast.Attribute):
+        return _path_expression_hint(node.value)
+    if isinstance(node, ast.Subscript):
+        return _path_expression_hint(node.value)
+    return ""
+
+
+def _path_parent_ascent_depth(node: ast.AST | None) -> int:
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        return 1 + _path_parent_ascent_depth(node.value)
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "parents"
+    ):
+        index = node.slice.value if isinstance(node.slice, ast.Constant) else None
+        if isinstance(index, int) and index >= 0:
+            return index + 1 + _path_parent_ascent_depth(node.value.value)
+    return 0
+
+
+def _canonical_path_hint(value: str) -> str:
+    normalized = value.replace("\\", "/").strip().strip("/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.casefold()
+
+
+def _targets_seeded_file(value: str, seeded_paths: set[str]) -> bool:
+    canonical = _canonical_path_hint(value)
+    if not canonical or canonical.startswith("<temp>"):
+        return False
+    return canonical in seeded_paths
+
+
+def _sensitive_path_literal(value: str) -> str:
+    normalized = value.replace("\\", "/").strip()
+    lowered = normalized.casefold()
+    if (
+        re.match(r"^[a-z]:/", lowered)
+        or lowered.startswith("//")
+        or lowered == "/"
+        or re.match(
+            r"^/(?:home|users|workspace|workspaces|mnt|tmp|var/tmp|opt|private/tmp)(?:/|$)",
+            lowered,
+        )
+    ):
+        return "absolute host path"
+    parts = [part for part in lowered.split("/") if part and part != "."]
+    if ".git" in parts:
+        return ".git access"
+    if any(
+        marker in lowered
+        for marker in (
+            "final_oracle",
+            "final-oracle",
+            "final_oracles/",
+            "final-oracles/",
+            "autonomy_diagnosis_to_fix",
+        )
+    ):
+        return "host oracle or fixture discovery"
+    return ""
+
+
+def _python_test_safety_violations(
+    relative: str,
+    source: str,
+    seeded_paths: set[str],
+) -> list[str]:
+    try:
+        tree = ast.parse(source, filename=relative)
+    except SyntaxError as exc:
+        return [f"cannot statically parse Python test source: {exc.msg}"]
+
+    aliases: dict[str, str] = {}
+    violations: list[str] = []
+    banned_import_roots = {
+        "aiohttp",
+        "ftplib",
+        "httpx",
+        "multiprocessing",
+        "paramiko",
+        "requests",
+        "smtplib",
+        "socket",
+        "subprocess",
+        "telnetlib",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases[alias.asname or alias.name.split(".")[0]] = alias.name
+                if alias.name.split(".")[0] in banned_import_roots:
+                    violations.append(f"line {node.lineno}: banned import {alias.name}")
+                if alias.name == "urllib.request":
+                    violations.append(f"line {node.lineno}: banned network import urllib.request")
+        elif isinstance(node, ast.ImportFrom):
+            module = str(node.module or "")
+            for alias in node.names:
+                local = alias.asname or alias.name
+                aliases[local] = f"{module}.{alias.name}".strip(".")
+            if module.split(".")[0] in banned_import_roots:
+                violations.append(f"line {node.lineno}: banned import {module}")
+            if module == "urllib.request":
+                violations.append(f"line {node.lineno}: banned network import {module}")
+
+    process_prefixes = (
+        "subprocess.",
+        "multiprocessing.",
+        "os.system",
+        "os.popen",
+        "os.spawn",
+        "os.exec",
+        "os.startfile",
+        "pty.spawn",
+    )
+    network_prefixes = (
+        "socket.",
+        "requests.",
+        "httpx.",
+        "aiohttp.",
+        "urllib.request.",
+        "ftplib.",
+        "smtplib.",
+        "telnetlib.",
+        "paramiko.",
+    )
+    path_calls = {
+        "Path",
+        "pathlib.Path",
+        "open",
+        "glob.glob",
+        "glob.iglob",
+        "os.walk",
+        "os.listdir",
+        "os.scandir",
+    }
+    write_methods = {
+        "append_text",
+        "rename",
+        "replace",
+        "touch",
+        "unlink",
+        "write_bytes",
+        "write_text",
+    }
+    destructive_calls = {
+        "os.remove",
+        "os.rename",
+        "os.replace",
+        "os.unlink",
+        "shutil.copy",
+        "shutil.copy2",
+        "shutil.copyfile",
+        "shutil.move",
+    }
+    for node in ast.walk(tree):
+        if _path_parent_ascent_depth(node) > 2:
+            violations.append(
+                f"line {getattr(node, 'lineno', 0)}: test path ascends beyond the repo-local parents[1] boundary"
+            )
+        if not isinstance(node, ast.Call):
+            continue
+        name = _ast_dotted_name(node.func, aliases)
+        if name in {"eval", "exec", "compile", "builtins.eval", "builtins.exec"}:
+            violations.append(f"line {node.lineno}: dynamic code execution is not allowed")
+        if name.startswith(process_prefixes):
+            violations.append(f"line {node.lineno}: process spawning call {name}")
+        if name.startswith(network_prefixes):
+            violations.append(f"line {node.lineno}: network call {name}")
+        if name in {"Path.home", "pathlib.Path.home"} or name.endswith(".expanduser"):
+            violations.append(f"line {node.lineno}: host-home discovery call {name}")
+
+        path_arguments: list[ast.AST] = []
+        if name in path_calls:
+            path_arguments.extend(node.args[:1])
+        if name.endswith((".glob", ".rglob")):
+            path_arguments.extend(node.args[:1])
+        for argument in path_arguments:
+            hint = _path_expression_hint(argument)
+            reason = _sensitive_path_literal(hint) if hint else ""
+            if reason:
+                violations.append(f"line {node.lineno}: {reason} is not allowed")
+
+        if isinstance(node.func, ast.Attribute) and node.func.attr in write_methods:
+            target = _path_expression_hint(node.func.value)
+            if _targets_seeded_file(target, seeded_paths):
+                violations.append(
+                    f"line {node.lineno}: writes seeded repository file {target!r}"
+                )
+        if name in {"open", "builtins.open"} and node.args:
+            mode = "r"
+            if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                mode = str(node.args[1].value)
+            for keyword in node.keywords:
+                if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+                    mode = str(keyword.value.value)
+            target = _path_expression_hint(node.args[0])
+            if any(flag in mode for flag in "wax+") and _targets_seeded_file(
+                target, seeded_paths
+            ):
+                violations.append(
+                    f"line {node.lineno}: opens seeded repository file {target!r} for writing"
+                )
+        if name in destructive_calls and node.args:
+            target_nodes = node.args[-1:] if name.startswith("shutil.") else node.args
+            for target_node in target_nodes:
+                target = _path_expression_hint(target_node)
+                if _targets_seeded_file(target, seeded_paths):
+                    violations.append(
+                        f"line {node.lineno}: mutates seeded repository file {target!r}"
+                    )
+    return list(dict.fromkeys(violations))
+
+
+def _quoted_literals(source: str) -> list[str]:
+    return [
+        match.group(2)
+        for match in re.finditer(r"(['\"`])((?:\\.|(?!\1).)*)\1", source, re.DOTALL)
+    ]
+
+
+def _non_python_test_safety_violations(
+    relative: str,
+    source: str,
+    seeded_paths: set[str],
+) -> list[str]:
+    del relative
+    violations: list[str] = []
+    if re.search(
+        r"(?:from\s+|require\s*\(|import\s*\()\s*['\"](?:node:)?"
+        r"(?:child_process|worker_threads|net|http|https|http2|dgram|dns|tls)['\"]",
+        source,
+    ):
+        violations.append("banned Node process or network module import")
+    if re.search(
+        r"\b(?:fetch|Bun\.spawn|Deno\.connect|Deno\.Command|Process\.(?:run|start)|"
+        r"Socket\.connect|WebSocket\.connect|InternetAddress\.lookup)\s*\(",
+        source,
+    ):
+        violations.append("process spawning or network call")
+    if re.search(
+        r"\b(?:childProcess|child_process|cp)\.\s*"
+        r"(?:execFile|exec|spawn|fork)\s*\(",
+        source,
+    ) or re.search(
+        r"\b(?:http|https|net|tls|dns|dgram)\.\s*"
+        r"(?:connect|createConnection|request|get|lookup|createSocket)\s*\(",
+        source,
+    ):
+        violations.append("process spawning or network call")
+    if re.search(r"\bnew\s+HttpClient\s*\(", source):
+        violations.append("network client construction")
+
+    for literal in _quoted_literals(source):
+        reason = _sensitive_path_literal(literal)
+        if reason and re.search(
+            re.escape(literal),
+            source,
+        ):
+            violations.append(f"{reason} is not allowed")
+
+    write_patterns = (
+        r"(?:writeFile|writeFileSync|appendFile|appendFileSync|Deno\.writeTextFile|"
+        r"Deno\.writeFile)\s*\(\s*(['\"`])([^'\"`]+)\1",
+        r"File\s*\(\s*(['\"])([^'\"]+)\1\s*\)\s*\.\s*"
+        r"(?:writeAsString|writeAsBytes|openWrite)\s*\(",
+    )
+    for pattern in write_patterns:
+        for match in re.finditer(pattern, source):
+            target = match.group(2)
+            if _targets_seeded_file(target, seeded_paths):
+                violations.append(f"writes seeded repository file {target!r}")
+    return list(dict.fromkeys(violations))
+
+
+def _validate_test_source_safety(
+    case: Mapping[str, Any],
+    partitions: Mapping[str, Any],
+) -> dict[str, Any]:
+    repo_files = case.get("repo_files") or {}
+    if not isinstance(repo_files, Mapping):
+        raise ValueError("Case repo_files must be an object.")
+    seeded_paths = {
+        _canonical_path_hint(relative)
+        for raw_path in repo_files
+        if (relative := _safe_rel(raw_path))
+    }
+    sources: dict[str, str] = {}
+    for files in (
+        repo_files,
+        partitions.get("feedback_files") or {},
+        partitions.get("final_files") or {},
+    ):
+        if not isinstance(files, Mapping):
+            continue
+        for raw_path, content in files.items():
+            relative = _safe_rel(raw_path)
+            if (
+                relative
+                and relative.startswith("tests/")
+                and Path(relative).suffix.casefold() in TEST_SOURCE_SUFFIXES
+            ):
+                sources[relative] = str(content)
+    violations: list[str] = []
+    for relative, source in sorted(sources.items()):
+        if Path(relative).suffix.casefold() == ".py":
+            found = _python_test_safety_violations(relative, source, seeded_paths)
+        else:
+            found = _non_python_test_safety_violations(relative, source, seeded_paths)
+        violations.extend(f"{relative}: {item}" for item in found)
+    if violations:
+        raise FixtureIntegrityError(
+            "Unsafe sealed test source rejected before model access: "
+            + "; ".join(violations[:8])
+        )
+    return {
+        "scanned_test_source_count": len(sources),
+        "static_safety_scan_passed": True,
+    }
+
+
 def _expected_owner_paths(oracle: Mapping[str, Any]) -> set[str]:
     raw = oracle.get("expected_files") or [oracle.get("expected_file")]
     return {
@@ -370,6 +938,62 @@ def _run(
         return 127, f"executable error: {exc}", int((time.monotonic() - started) * 1000)
 
 
+def _seeded_repo_file_snapshot(
+    root: Path,
+    case: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    repo_files = case.get("repo_files") or {}
+    if not isinstance(repo_files, Mapping):
+        raise ValueError("Case repo_files must be an object.")
+    resolved_root = root.resolve()
+    snapshot: dict[str, dict[str, Any]] = {}
+    for raw_path in repo_files:
+        relative = _safe_rel(raw_path)
+        if not relative:
+            raise ValueError(f"Unsafe seeded repository path: {raw_path!r}")
+        path = (resolved_root / relative).resolve()
+        try:
+            path.relative_to(resolved_root)
+        except ValueError as exc:
+            raise FixtureIntegrityError(
+                f"Seeded repository path escaped the test repository: {relative}"
+            ) from exc
+        if not path.is_file():
+            snapshot[relative] = {"state": "missing"}
+            continue
+        payload = path.read_bytes()
+        snapshot[relative] = {
+            "state": "file",
+            "sha256": _sha256_bytes(payload),
+            "size_bytes": len(payload),
+        }
+    return snapshot
+
+
+def _run_guarded_test_process(
+    args: list[str],
+    root: Path,
+    case: Mapping[str, Any],
+    *,
+    timeout: float,
+    process_label: str,
+) -> tuple[int, str, int]:
+    before = _seeded_repo_file_snapshot(root, case)
+    result = _run(args, root, timeout=timeout)
+    after = _seeded_repo_file_snapshot(root, case)
+    changed = sorted(
+        relative
+        for relative in set(before) | set(after)
+        if before.get(relative) != after.get(relative)
+    )
+    if changed:
+        raise FixtureIntegrityError(
+            f"{process_label} mutated seeded repository files: "
+            + ", ".join(changed)
+        )
+    return result
+
+
 def _init_repo(root: Path, files: Mapping[str, Any]) -> None:
     root.mkdir(parents=True, exist_ok=True)
     _write_files(root, files)
@@ -392,6 +1016,7 @@ def _init_repo(root: Path, files: Mapping[str, Any]) -> None:
 
 def _run_pytest(
     root: Path,
+    case: Mapping[str, Any],
     selector: str = "tests",
     *,
     stop_after_first: bool = True,
@@ -407,12 +1032,21 @@ def _run_pytest(
     ]
     if stop_after_first:
         args.append("--maxfail=1")
-    code, output, duration = _run(
+    code, output, duration = _run_guarded_test_process(
         args,
         root,
+        case,
         timeout=90,
+        process_label=f"pytest {selector}",
     )
-    return {"passed": code == 0, "exit_code": code, "output": output, "duration_ms": duration}
+    return {
+        "passed": code == 0,
+        "exit_code": code,
+        "output": output,
+        "duration_ms": duration,
+        "seeded_file_integrity_verified": True,
+        "test_process_count": 1,
+    }
 
 
 def _case_test_runner(case: Mapping[str, Any]) -> str:
@@ -486,6 +1120,7 @@ def _run_case_tests(
     if runner == "pytest":
         result = _run_pytest(
             root,
+            case,
             "tests/test_public.py" if public_only else "tests",
             stop_after_first=public_only,
         )
@@ -512,10 +1147,12 @@ def _run_case_tests(
         duration = 0
         code = 0
         for test_file in files:
-            file_code, output, file_duration = _run(
+            file_code, output, file_duration = _run_guarded_test_process(
                 [executable, "--test", "--test-reporter=spec", test_file],
                 root,
+                case,
                 timeout=90,
+                process_label=f"node test {test_file}",
             )
             outputs.append(f"[{test_file}]\n{output}".rstrip())
             duration += file_duration
@@ -528,6 +1165,8 @@ def _run_case_tests(
             "duration_ms": duration,
             "runner": runner,
             "test_files": files,
+            "seeded_file_integrity_verified": True,
+            "test_process_count": len(files),
         }
 
     executable = _dart_executable()
@@ -552,10 +1191,12 @@ def _run_case_tests(
     contract_status: dict[str, str] = {}
     contracts_complete = True
     for test_file in files:
-        code, output, duration = _run(
+        code, output, duration = _run_guarded_test_process(
             [executable, "run", test_file],
             root,
+            case,
             timeout=90,
+            process_label=f"dart test {test_file}",
         )
         total_duration += duration
         outputs.append(f"[{test_file}]\n{output}".rstrip())
@@ -588,6 +1229,8 @@ def _run_case_tests(
         "test_files": files,
         "test_contract_status": contract_status,
         "test_contracts_complete": contracts_complete,
+        "seeded_file_integrity_verified": True,
+        "test_process_count": len(files),
     }
 
 
@@ -1628,6 +2271,8 @@ def _markdown(results: Mapping[str, Any]) -> str:
         f"- Exact changed-file-set accuracy: **{results['exact_file_set_accuracy']:.1f}%**",
         f"- JSON-valid diagnostic stages: **{results['diagnostic_stage_acceptance_rate']:.1f}%**",
         f"- Causally accepted diagnoses: **{results['causal_diagnosis_acceptance_rate']:.1f}%**",
+        f"- Live-reasoning-qualified cases: **{results.get('live_reasoning_qualified_case_rate', 0.0):.1f}%**",
+        f"- Deterministic-only cases: **{results.get('deterministic_only_case_rate', 0.0):.1f}%**",
         f"- Autonomy verdict: **{results['verdict']}**",
         f"- Comparison verdict: **{results['evaluation_verdict']}**",
         "- Premium calls: **0**",
@@ -1635,6 +2280,7 @@ def _markdown(results: Mapping[str, Any]) -> str:
         f"- Maximum bounded repair rounds: **{results['max_repair_rounds']}**",
         f"- Escalation repair rounds: **{results.get('max_escalation_repair_rounds', 0)}**",
         "- Fable 5 parity claim: **No**. No authenticated same-task Fable 5 head-to-head is included.",
+        "- Test subprocess containment: **static scan + seeded-file SHA-256 guard; not hostile-process proof**.",
         "",
         "| Case | Language | Runner | Evaluation | Split | Score | Diagnosis | Changed files | Patch | Public | Feedback | Final |",
         "|---|---|---|---|---|---:|---|---|---:|---:|---:|---:|",
@@ -1663,7 +2309,10 @@ def _markdown(results: Mapping[str, Any]) -> str:
             "Changed-file scoring is derived from the git worktree, and multi-file edit groups roll back when any "
             "member edit is rejected. "
             "A high score proves this bounded repair contract only; broader Fable 5 parity still requires "
-            "blinded multi-repository adjudication.",
+            "blinded multi-repository adjudication. A deterministic-only functional solve keeps its score but "
+            "cannot receive shadow_ready or support a Fable 5-class reasoning claim. Test subprocesses are not "
+            "OS-isolated in this runner; static screening and seeded-file mutation hashes reduce but do not "
+            "eliminate hostile-process risk.",
             "",
         ]
     )
@@ -1680,6 +2329,10 @@ def _local_call(
     num_predict: int,
     json_mode: bool,
 ) -> str:
+    if bool(getattr(calls, "frozen", False)):
+        raise FixtureIntegrityError(
+            "Model-call ledger is frozen; model access is forbidden after final-oracle sealing."
+        )
     requested_timeout = float(timeout)
     deadline = getattr(calls, "deadline", None)
     remaining_before: float | None = None
@@ -1823,6 +2476,20 @@ class _ModelCallLedger(list[dict[str, Any]]):
         self.deadline = deadline
         self.model_time_budget = model_time_budget
         self.model_time_used = 0.0
+        self.frozen = False
+        self.frozen_length: int | None = None
+
+    def append(self, item: dict[str, Any]) -> None:
+        if self.frozen:
+            raise FixtureIntegrityError(
+                "Model-call ledger is frozen; no call may begin after final-oracle access."
+            )
+        super().append(item)
+
+    def freeze(self) -> int:
+        self.frozen = True
+        self.frozen_length = len(self)
+        return self.frozen_length
 
     @property
     def budget_exhausted(self) -> bool:
@@ -3520,34 +4187,245 @@ def _score_case(
     return sum(SCORE_WEIGHTS[name] for name, passed in checks.items() if passed), checks
 
 
+def _live_reasoning_metrics(
+    calls: Sequence[Mapping[str, Any]],
+    diagnosis: Mapping[str, Any],
+) -> dict[str, Any]:
+    successful_calls = [item for item in calls if bool(item.get("ok"))]
+    successful_causal_calls = [
+        item
+        for item in successful_calls
+        if any(
+            str(item.get("stage") or "").startswith(f"diagnosis_{stage}")
+            for stage in CAUSAL_REASONING_STAGES
+        )
+    ]
+    accepted_stages = [
+        item
+        for item in diagnosis.get("stages") or []
+        if isinstance(item, Mapping)
+        and bool(item.get("accepted"))
+        and str(item.get("stage") or "") in CAUSAL_REASONING_STAGES
+    ]
+    successful_stage_names = {
+        stage
+        for stage in CAUSAL_REASONING_STAGES
+        if any(
+            str(item.get("stage") or "").startswith(f"diagnosis_{stage}")
+            for item in successful_causal_calls
+        )
+    }
+    qualified_stages = [
+        item
+        for item in accepted_stages
+        if str(item.get("stage") or "") in successful_stage_names
+    ]
+    return {
+        "successful_live_model_call_count": len(successful_calls),
+        "successful_causal_reasoning_call_count": len(successful_causal_calls),
+        "accepted_causal_reasoning_stage_count": len(accepted_stages),
+        "successful_accepted_causal_reasoning_stage_count": len(qualified_stages),
+        "live_reasoning_qualified": bool(qualified_stages),
+        "deterministic_only": not successful_calls,
+    }
+
+
 def _verdict(case_results: Sequence[Mapping[str, Any]]) -> str:
     return (
         "shadow_ready"
         if case_results
-        and all(all(bool(value) for value in (item.get("checks") or {}).values()) for item in case_results)
+        and all(
+            all(bool(value) for value in (item.get("checks") or {}).values())
+            and bool(item.get("live_reasoning_qualified"))
+            for item in case_results
+        )
         else "needs_improvement"
     )
 
 
-def _fixture_entries(root: Path, selected: set[str]) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
-    manifest = _read_json(root / "manifest.json")
-    entries = [
+def _selected_fixture_entries(
+    manifest: Mapping[str, Any],
+    selected: set[str],
+) -> list[Mapping[str, Any]]:
+    return [
         item
         for item in manifest.get("cases") or []
         if isinstance(item, Mapping)
         and (not selected or Path(str(item.get("case") or "")).stem in selected)
     ]
-    return manifest, entries
 
 
-def validate_fixture(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
-    case = _read_json(_fixture_path(root, entry.get("case"), "case"))
-    oracle = _read_json(_fixture_path(root, entry.get("oracle"), "oracle"))
-    final_oracle = (
-        _read_json(_fixture_path(root, entry.get("final_oracle"), "final oracle"))
-        if entry.get("final_oracle")
-        else None
+def _fixture_entries(root: Path, selected: set[str]) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
+    manifest = _read_json(root / "manifest.json")
+    return manifest, _selected_fixture_entries(manifest, selected)
+
+
+def _preflight_fixture_integrity(
+    root: Path,
+    selected: set[str],
+    *,
+    evaluation_context: str,
+    events: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    manifest_path = _fixture_path(root, "manifest.json", "manifest")
+    manifest_binding, manifest_payload = _bind_fixture_artifact(
+        root,
+        manifest_path,
+        artifact="manifest",
+        events=events,
     )
+    manifest = _json_from_bytes(manifest_payload, manifest_path)
+    entries = [
+        item
+        for item in _selected_fixture_entries(manifest, selected)
+    ]
+    if not entries:
+        raise SystemExit("No diagnosis-to-fix cases selected.")
+
+    prepared: list[dict[str, Any]] = []
+    digest_cases: list[dict[str, Any]] = []
+    for index, raw_entry in enumerate(entries):
+        entry = dict(raw_entry)
+        _validate_evaluation_entry(
+            entry,
+            evaluation_context=evaluation_context,
+        )
+        case_path = _fixture_path(root, entry.get("case"), "case")
+        oracle_path = _fixture_path(root, entry.get("oracle"), "feedback oracle")
+        final_path = (
+            _fixture_path(root, entry.get("final_oracle"), "final oracle")
+            if entry.get("final_oracle")
+            else None
+        )
+        if final_path is not None and final_path.resolve() in {
+            case_path.resolve(),
+            oracle_path.resolve(),
+        }:
+            raise ValueError(
+                "External final oracle must be a separate fixture artifact."
+            )
+        case_key = Path(str(entry.get("case") or f"case-{index}")).stem
+        case_binding, case_payload = _bind_fixture_artifact(
+            root,
+            case_path,
+            artifact=f"case:{case_key}",
+            events=events,
+        )
+        oracle_binding, oracle_payload = _bind_fixture_artifact(
+            root,
+            oracle_path,
+            artifact=f"feedback_oracle:{case_key}",
+            events=events,
+        )
+        final_binding: dict[str, Any] | None = None
+        final_payload: bytes | None = None
+        if final_path is not None:
+            final_binding, final_payload = _bind_fixture_artifact(
+                root,
+                final_path,
+                artifact=f"final_oracle:{case_key}",
+                events=events,
+            )
+
+        case = _json_from_bytes(case_payload, case_path)
+        oracle = _json_from_bytes(oracle_payload, oracle_path)
+        final_oracle = (
+            _json_from_bytes(final_payload, final_path)
+            if final_payload is not None and final_path is not None
+            else None
+        )
+        case_id = str(case.get("case_id") or case_key)
+        if oracle.get("case_id") is not None and oracle.get("case_id") != case.get("case_id"):
+            raise ValueError("Feedback oracle case_id does not match the public case.")
+        if final_oracle is not None and final_oracle.get("case_id") != case.get("case_id"):
+            raise ValueError("Final oracle case_id does not match the public case.")
+        role = str(entry.get("evaluation_role") or "")
+        partitions = _oracle_test_partitions(
+            oracle,
+            final_oracle=final_oracle,
+            require_sealed=role == "blinded_holdout",
+            require_external_final=role == "blinded_holdout",
+        )
+        _validate_oracle_test_paths(case, partitions)
+        _validate_expected_ownership(case, oracle)
+        safety = _validate_test_source_safety(case, partitions)
+        bindings = {
+            "case": case_binding,
+            "feedback_oracle": oracle_binding,
+            "final_oracle": final_binding,
+        }
+        prepared.append(
+            {
+                "entry": entry,
+                "bindings": bindings,
+                "case_id": case_id,
+                "test_source_safety": safety,
+            }
+        )
+        digest_cases.append(
+            {
+                "case_id": case_id,
+                "case": _public_digest_binding(case_binding),
+                "feedback_oracle": _public_digest_binding(oracle_binding),
+                "final_oracle": (
+                    _public_digest_binding(final_binding)
+                    if final_binding is not None
+                    else None
+                ),
+            }
+        )
+
+    _verify_fixture_artifact(
+        manifest_binding,
+        events=events,
+        phase="pre_model_manifest_recheck",
+    )
+    inventory = {
+        "manifest": _public_digest_binding(manifest_binding),
+        "cases": digest_cases,
+    }
+    return manifest, prepared, inventory
+
+
+def validate_fixture(
+    root: Path,
+    entry: Mapping[str, Any],
+    *,
+    bindings: Mapping[str, Any] | None = None,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    audit_events = events if events is not None else []
+    if bindings is not None:
+        case = _read_bound_json(
+            bindings["case"],
+            events=audit_events,
+            phase="fixture_validation_case_load",
+        )
+        oracle = _read_bound_json(
+            bindings["feedback_oracle"],
+            events=audit_events,
+            phase="fixture_validation_feedback_load",
+            case_id=str(case.get("case_id") or ""),
+        )
+        final_binding = bindings.get("final_oracle")
+        final_oracle = (
+            _read_bound_json(
+                final_binding,
+                events=audit_events,
+                phase="fixture_validation_final_load",
+                case_id=str(case.get("case_id") or ""),
+            )
+            if isinstance(final_binding, Mapping)
+            else None
+        )
+    else:
+        case = _read_json(_fixture_path(root, entry.get("case"), "case"))
+        oracle = _read_json(_fixture_path(root, entry.get("oracle"), "oracle"))
+        final_oracle = (
+            _read_json(_fixture_path(root, entry.get("final_oracle"), "final oracle"))
+            if entry.get("final_oracle")
+            else None
+        )
     if final_oracle is not None and final_oracle.get("case_id") != case.get("case_id"):
         raise ValueError("Final oracle case_id does not match the public case.")
     partitions = _oracle_test_partitions(
@@ -3558,6 +4436,7 @@ def validate_fixture(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
     )
     _validate_oracle_test_paths(case, partitions)
     _validate_expected_ownership(case, oracle)
+    safety = _validate_test_source_safety(case, partitions)
     with tempfile.TemporaryDirectory(prefix="chili-fixture-validation-") as temp:
         repo = Path(temp) / "repo"
         _init_repo(repo, case.get("repo_files") or {})
@@ -3573,6 +4452,7 @@ def validate_fixture(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
         "final_failed": not final["passed"],
         "sealed_final_adjudication": bool(partitions["sealed"]),
         "external_final_oracle": bool(partitions["external_final"]),
+        **safety,
         "valid": public["passed"] and not feedback["passed"] and not final["passed"],
         "public_failure": "" if public["passed"] else str(public.get("output") or "")[-4_000:],
         "feedback_unexpected_pass": (
@@ -3590,32 +4470,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         getattr(args, "evaluation_context", "protocol") or "protocol"
     )
     disclosed_replay = evaluation_context == "disclosed_replay"
-    manifest, entries = _fixture_entries(fixture_root, set(args.case or []))
-    if not entries:
-        raise SystemExit("No diagnosis-to-fix cases selected.")
-    if any(
-        entry.get("evaluation_role") == "blinded_holdout"
-        and not entry.get("final_oracle")
-        for entry in entries
-    ):
-        raise SystemExit(
-            "Every blinded_holdout entry requires a separate final_oracle path."
-        )
-    for entry in entries:
-        _fixture_path(fixture_root, entry.get("case"), "case")
-        _fixture_path(fixture_root, entry.get("oracle"), "oracle")
-        if entry.get("final_oracle"):
-            _fixture_path(
-                fixture_root,
-                entry.get("final_oracle"),
-                "final oracle",
-            )
+    integrity_events: list[dict[str, Any]] = []
+    manifest, prepared_entries, digest_inventory = _preflight_fixture_integrity(
+        fixture_root,
+        set(getattr(args, "case", None) or []),
+        evaluation_context=evaluation_context,
+        events=integrity_events,
+    )
     if args.validate_fixtures:
-        validations = [validate_fixture(fixture_root, entry) for entry in entries]
+        validations = [
+            validate_fixture(
+                fixture_root,
+                prepared["entry"],
+                bindings=prepared["bindings"],
+                events=integrity_events,
+            )
+            for prepared in prepared_entries
+        ]
         return {
             "schema": "chili.diagnosis-to-fix-fixture-validation.v3",
             "valid": all(item["valid"] for item in validations),
             "cases": validations,
+            "fixture_digest_inventory": digest_inventory,
+            "integrity_audit_events": integrity_events,
+            "test_subprocess_assurance": dict(TEST_SUBPROCESS_ASSURANCE),
         }
     installed = ollama_client.list_models()
     repair_schedule = _repair_model_schedule(args)
@@ -3629,8 +4507,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     case_results: list[dict[str, Any]] = []
-    for entry in entries:
-        case = _read_json(_fixture_path(fixture_root, entry.get("case"), "case"))
+    for prepared in prepared_entries:
+        case_event_start = len(integrity_events)
+        entry = prepared["entry"]
+        bindings = prepared["bindings"]
+        case_id = str(prepared.get("case_id") or "")
+        case = _read_bound_json(
+            bindings["case"],
+            events=integrity_events,
+            phase="case_load",
+            case_id=case_id,
+        )
         started = time.monotonic()
         case_model_budget = max(
             1.0,
@@ -3689,8 +4576,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             public_tests = _run_case_tests(repo, case, public_only=True)
 
             # Oracle access begins only after the patch and public validation exist.
-            oracle = _read_json(
-                _fixture_path(fixture_root, entry.get("oracle"), "oracle")
+            oracle = _read_bound_json(
+                bindings["feedback_oracle"],
+                events=integrity_events,
+                phase="feedback_oracle_load",
+                case_id=case_id,
             )
             _validate_expected_ownership(case, oracle)
             if entry.get("final_oracle"):
@@ -4091,14 +4981,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             patch["selected_file"] = (
                 patch["changed_files"][0] if len(patch["changed_files"]) == 1 else ""
             )
-            model_calls_before_final = len(calls)
+            model_calls_before_final = calls.freeze()
+            _record_audit_event(
+                integrity_events,
+                "model_call_ledger_frozen",
+                case_id=case_id,
+                model_call_count=model_calls_before_final,
+            )
             if entry.get("final_oracle"):
-                final_oracle = _read_json(
-                    _fixture_path(
-                        fixture_root,
-                        entry.get("final_oracle"),
-                        "final oracle",
+                final_binding = bindings.get("final_oracle")
+                if not isinstance(final_binding, Mapping):
+                    raise FixtureIntegrityError(
+                        "External final oracle binding is missing at sealed read."
                     )
+                final_oracle = _read_bound_json(
+                    final_binding,
+                    events=integrity_events,
+                    phase="sealed_final_oracle_read",
+                    case_id=case_id,
+                )
+                _record_audit_event(
+                    integrity_events,
+                    "final_oracle_opened",
+                    case_id=case_id,
+                    path=str(final_binding.get("path") or ""),
+                    sha256=str(final_binding.get("sha256") or ""),
+                    external=True,
                 )
                 if final_oracle.get("case_id") != case.get("case_id"):
                     raise ValueError(
@@ -4115,7 +5023,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "Repair feedback changed before final adjudication."
                     )
                 _validate_oracle_test_paths(case, complete_partitions)
+                _validate_test_source_safety(case, complete_partitions)
                 partitions = complete_partitions
+            else:
+                _record_audit_event(
+                    integrity_events,
+                    "final_oracle_opened",
+                    case_id=case_id,
+                    path=str(bindings["feedback_oracle"].get("path") or ""),
+                    sha256=str(bindings["feedback_oracle"].get("sha256") or ""),
+                    external=False,
+                    disclosed_embedded_partition=True,
+                )
+            _record_audit_event(
+                integrity_events,
+                "final_adjudication_started",
+                case_id=case_id,
+            )
             baseline_final = _run_final_adjudication(
                 case,
                 partitions["final_files"],
@@ -4126,10 +5050,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 candidate_repo=repo,
             )
             _retract_unclosed_validated_diagnosis(diagnosis, final_tests)
+            _record_audit_event(
+                integrity_events,
+                "final_adjudication_completed",
+                case_id=case_id,
+                baseline_passed=bool(baseline_final.get("passed")),
+                candidate_passed=bool(final_tests.get("passed")),
+            )
             if len(calls) != model_calls_before_final:
-                raise RuntimeError(
+                raise FixtureIntegrityError(
                     "A model call occurred after final adjudication began."
                 )
+            _record_audit_event(
+                integrity_events,
+                "post_final_model_call_count_verified",
+                case_id=case_id,
+                expected_count=model_calls_before_final,
+                actual_count=len(calls),
+                ledger_frozen=bool(calls.frozen),
+            )
             score, checks = _score_case(
                 oracle,
                 diagnosis,
@@ -4153,6 +5092,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 else {}
             )
             effective_dimension = _effective_diagnosis_dimension(diagnosis)
+            reasoning_metrics = _live_reasoning_metrics(calls, diagnosis)
             case_results.append(
                 {
                     "case_id": case["case_id"],
@@ -4216,6 +5156,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "external_final_oracle": bool(partitions["external_final"]),
                     "model_calls_before_final": model_calls_before_final,
                     "model_calls_after_final": 0,
+                    **reasoning_metrics,
+                    "fable5_class_reasoning_claim_eligible": bool(
+                        reasoning_metrics["live_reasoning_qualified"]
+                        and all(bool(value) for value in checks.values())
+                    ),
+                    "fixture_digest_inventory": {
+                        key: _public_digest_binding(value)
+                        for key, value in bindings.items()
+                        if isinstance(value, Mapping)
+                    },
+                    "integrity_audit_events": integrity_events[case_event_start:],
+                    "test_source_safety": dict(prepared["test_source_safety"]),
+                    "test_subprocess_assurance": dict(TEST_SUBPROCESS_ASSURANCE),
                     "repair_attempts": repair_attempts,
                     "deterministic_contract_repair": deterministic_contract_repair,
                     "model_calls": calls,
@@ -4330,8 +5283,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for call in item.get("model_calls") or []
         if isinstance(call, Mapping)
     ]
+    deterministic_only_case_count = sum(
+        1 for item in case_results if item.get("deterministic_only")
+    )
+    live_reasoning_qualified_case_count = sum(
+        1 for item in case_results if item.get("live_reasoning_qualified")
+    )
+    successful_causal_reasoning_call_count = sum(
+        int(item.get("successful_causal_reasoning_call_count") or 0)
+        for item in case_results
+    )
+    successful_accepted_causal_reasoning_stage_count = sum(
+        int(item.get("successful_accepted_causal_reasoning_stage_count") or 0)
+        for item in case_results
+    )
     results = {
-        "schema": "chili.diagnosis-to-fix-results.v5",
+        "schema": "chili.diagnosis-to-fix-results.v6",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "evaluation_context": evaluation_context,
         "model": args.model,
@@ -4392,6 +5359,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "average_case_duration_ms": round(average_duration, 2),
         "verdict": _verdict(case_results),
         "evaluation_verdict": evaluation_verdict,
+        "deterministic_only_case_count": deterministic_only_case_count,
+        "deterministic_only_case_rate": round(
+            100 * deterministic_only_case_count / total_cases,
+            2,
+        ),
+        "live_reasoning_qualified_case_count": live_reasoning_qualified_case_count,
+        "live_reasoning_qualified_case_rate": round(
+            100 * live_reasoning_qualified_case_count / total_cases,
+            2,
+        ),
+        "successful_causal_reasoning_call_count": (
+            successful_causal_reasoning_call_count
+        ),
+        "successful_accepted_causal_reasoning_stage_count": (
+            successful_accepted_causal_reasoning_stage_count
+        ),
         "premium_calls": 0,
         "total_model_calls": len(all_model_calls),
         "model_call_error_count": sum(
@@ -4413,6 +5396,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "fable5_head_to_head_run": False,
         "fable5_parity_claim": False,
+        "fable5_class_reasoning_claim_supported": False,
+        "fable5_class_reasoning_claim_blockers": [
+            "No authenticated same-task Fable 5 head-to-head was run.",
+            *(
+                [
+                    "At least one functionally scored case had no successful accepted "
+                    "live causal-reasoning stage."
+                ]
+                if live_reasoning_qualified_case_count < total_cases
+                else []
+            ),
+        ],
+        "fixture_digest_inventory": digest_inventory,
+        "integrity_audit_events": integrity_events,
+        "test_subprocess_assurance": dict(TEST_SUBPROCESS_ASSURANCE),
         "score_weights": SCORE_WEIGHTS,
         "maximum_score_without_final_pass": sum(
             weight for key, weight in SCORE_WEIGHTS.items() if key != "final_tests"

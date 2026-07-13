@@ -28,6 +28,82 @@ FOURTEENTH_FIXTURE_ROOT = (
 )
 
 
+def _write_protocol_fixture(
+    root: Path,
+    *,
+    role: str = "blinded_holdout",
+    split: str = "holdout-sealed-python-singlefile",
+    feedback_source: str | None = None,
+    final_source: str | None = None,
+) -> dict[str, Path]:
+    (root / "cases").mkdir(parents=True)
+    (root / "oracles").mkdir()
+    (root / "final_oracles").mkdir()
+    case = {
+        "case_id": "integrity-case",
+        "language": "python",
+        "test_runner": "pytest",
+        "prompt": "Repair the explicit value contract without changing the public API.",
+        "candidate_paths": ["owner.py"],
+        "max_files": 1,
+        "repo_files": {
+            "owner.py": "VALUE = 1\n",
+            "tests/test_public.py": (
+                "from owner import VALUE\n\n"
+                "def test_public():\n"
+                "    assert VALUE in {1, 2}\n"
+            ),
+        },
+    }
+    oracle = {
+        "case_id": "integrity-case",
+        "expected_dimension": "code",
+        "expected_file": "owner.py",
+        "feedback_files": {
+            "tests/test_feedback.py": feedback_source
+            or (
+                "from owner import VALUE\n\n"
+                "def test_feedback():\n"
+                "    assert VALUE == 2\n"
+            )
+        },
+    }
+    final_oracle = {
+        "case_id": "integrity-case",
+        "final_files": {
+            "tests/test_final.py": final_source
+            or (
+                "from owner import VALUE\n\n"
+                "def test_final():\n"
+                "    assert VALUE == 2\n"
+            )
+        },
+    }
+    manifest = {
+        "reference_family": "claude-fable-5",
+        "cases": [
+            {
+                "case": "cases/integrity-case.json",
+                "oracle": "oracles/integrity-case.json",
+                "final_oracle": "final_oracles/integrity-case.json",
+                "evaluation_role": role,
+                "split": split,
+            }
+        ],
+    }
+    paths = {
+        "manifest": root / "manifest.json",
+        "case": root / "cases/integrity-case.json",
+        "oracle": root / "oracles/integrity-case.json",
+        "final": root / "final_oracles/integrity-case.json",
+    }
+    paths["manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+    paths["case"].write_text(json.dumps(case), encoding="utf-8")
+    paths["oracle"].write_text(json.dumps(oracle), encoding="utf-8")
+    paths["final"].write_text(json.dumps(final_oracle), encoding="utf-8")
+    return paths
+
+
 def test_fixture_manifest_keeps_hidden_oracles_out_of_cases_and_labels_evaluation_role():
     manifest = json.loads((FIXTURE_ROOT / "manifest.json").read_text(encoding="utf-8"))
 
@@ -63,6 +139,7 @@ def test_all_legacy_repair_fixtures_pass_public_and_fail_feedback_and_final(tmp_
         timeout=1.0,
         max_repairs=0,
         validate_fixtures=True,
+        evaluation_context="disclosed_replay",
         report=str(tmp_path / "unused.md"),
         results_json=str(tmp_path / "unused.json"),
         json=False,
@@ -632,11 +709,22 @@ def test_prompt_contract_closure_surfaces_hidden_boundary_without_final_oracle(
 
 
 def test_shadow_verdict_requires_every_case_check_not_only_high_average():
-    passing = {"checks": {"diagnosis": True, "final_tests": True}}
-    one_miss = {"checks": {"diagnosis": False, "final_tests": True}}
+    passing = {
+        "checks": {"diagnosis": True, "final_tests": True},
+        "live_reasoning_qualified": True,
+    }
+    one_miss = {
+        "checks": {"diagnosis": False, "final_tests": True},
+        "live_reasoning_qualified": True,
+    }
+    deterministic_only = {
+        "checks": {"diagnosis": True, "final_tests": True},
+        "live_reasoning_qualified": False,
+    }
 
     assert benchmark._verdict([passing, passing]) == "shadow_ready"
     assert benchmark._verdict([passing, one_miss]) == "needs_improvement"
+    assert benchmark._verdict([deterministic_only]) == "needs_improvement"
     assert benchmark._verdict([]) == "needs_improvement"
 
 
@@ -2453,11 +2541,12 @@ def test_final_adjudication_occurs_after_repair_loop_and_before_no_more_model_ca
     source = inspect.getsource(benchmark.run)
 
     repair_loop = source.index("for repair_round, repair_model in enumerate")
-    final_oracle_read = source.index("final_oracle = _read_json")
+    ledger_freeze = source.index("model_calls_before_final = calls.freeze()")
+    final_oracle_read = source.index("final_oracle = _read_bound_json")
     final_start = source.index("final_tests = _run_final_adjudication")
     model_call_guard = source.index("A model call occurred after final adjudication began")
 
-    assert repair_loop < final_oracle_read < final_start < model_call_guard
+    assert repair_loop < ledger_freeze < final_oracle_read < final_start < model_call_guard
 
 
 def test_blinded_run_rejects_missing_external_final_oracle_before_model_access(
@@ -2474,6 +2563,7 @@ def test_blinded_run_rejects_missing_external_final_oracle_before_model_access(
                         "case": "cases/one.json",
                         "oracle": "oracles/one.json",
                         "evaluation_role": "blinded_holdout",
+                        "split": "holdout-sealed-python-singlefile",
                     }
                 ]
             }
@@ -2492,7 +2582,7 @@ def test_blinded_run_rejects_missing_external_final_oracle_before_model_access(
         model="local-model",
     )
 
-    with pytest.raises(SystemExit, match="separate final_oracle"):
+    with pytest.raises(ValueError, match="separate final_oracle"):
         benchmark.run(args)
 
 
@@ -2511,6 +2601,7 @@ def test_fixture_paths_are_contained_and_exist_before_model_access(tmp_path, mon
                         "oracle": "oracles/one.json",
                         "final_oracle": "final/missing.json",
                         "evaluation_role": "blinded_holdout",
+                        "split": "holdout-sealed-python-singlefile",
                     }
                 ]
             }
@@ -2533,6 +2624,404 @@ def test_fixture_paths_are_contained_and_exist_before_model_access(tmp_path, mon
         benchmark.run(args)
     with pytest.raises(ValueError, match="Unsafe or missing"):
         benchmark._fixture_path(fixture, "../outside.json", "case")
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        (
+            {
+                "evaluation_role": None,
+                "split": "holdout-sealed-python-singlefile",
+            },
+            "evaluation_role",
+        ),
+        (
+            {
+                "evaluation_role": "future_role",
+                "split": "holdout-sealed-python-singlefile",
+            },
+            "evaluation_role",
+        ),
+        (
+            {
+                "evaluation_role": "development_regression",
+                "split": "holdout-sealed-python-singlefile",
+            },
+            "cannot use a holdout split",
+        ),
+        (
+            {
+                "evaluation_role": "blinded_holdout",
+                "split": "development-regression",
+                "final_oracle": "final.json",
+            },
+            "canonical holdout split",
+        ),
+        (
+            {
+                "evaluation_role": "blinded_holdout",
+                "split": "holdout-python-singlefile",
+                "final_oracle": "final.json",
+            },
+            "holdout-sealed split",
+        ),
+        (
+            {
+                "evaluation_role": "development_regression",
+                "split": "development-regression",
+            },
+            "only exact blinded_holdout",
+        ),
+    ],
+)
+def test_protocol_manifest_metadata_fails_closed(entry, message):
+    with pytest.raises(ValueError, match=message):
+        benchmark._validate_evaluation_entry(entry, evaluation_context="protocol")
+
+
+def test_malformed_protocol_role_is_rejected_before_model_registry_access(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "manifest.json").write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "case": "cases/one.json",
+                        "oracle": "oracles/one.json",
+                        "evaluation_role": "blinded-holdout",
+                        "split": "holdout-sealed-python-singlefile",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: (_ for _ in ()).throw(AssertionError("model registry was accessed")),
+    )
+
+    with pytest.raises(ValueError, match="evaluation_role"):
+        benchmark.run(
+            argparse.Namespace(
+                fixture_root=str(fixture),
+                case=[],
+                validate_fixtures=False,
+                evaluation_context="protocol",
+                model="local-model",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "feedback_source",
+    [
+        "import subprocess\n\ndef test_feedback():\n    subprocess.run(['echo'])\n",
+        "import socket\n\ndef test_feedback():\n    socket.socket()\n",
+        (
+            "from pathlib import Path\n\n"
+            "def test_feedback():\n"
+            "    Path('D:/dev/fixture/final.json').read_text()\n"
+        ),
+        (
+            "from pathlib import Path\n\n"
+            "def test_feedback():\n"
+            "    Path('.git/config').read_text()\n"
+        ),
+        (
+            "from pathlib import Path\n\n"
+            "def test_feedback():\n"
+            "    list(Path(__file__).resolve().parents[3].rglob('final_oracles/*'))\n"
+        ),
+        (
+            "from pathlib import Path\n\n"
+            "def test_feedback():\n"
+            "    Path('owner.py').write_text('VALUE = 9\\n')\n"
+        ),
+    ],
+)
+def test_static_test_safety_scan_rejects_dangerous_feedback_sources(
+    feedback_source,
+):
+    case = {
+        "repo_files": {
+            "owner.py": "VALUE = 1\n",
+            "tests/test_public.py": "def test_public():\n    assert True\n",
+        }
+    }
+    partitions = {
+        "feedback_files": {"tests/test_feedback.py": feedback_source},
+        "final_files": {
+            "tests/test_final.py": "def test_final():\n    assert True\n"
+        },
+    }
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="Unsafe sealed test"):
+        benchmark._validate_test_source_safety(case, partitions)
+
+
+def test_static_scan_allows_domain_tokens_temp_writes_and_repo_local_sql_reads():
+    safe_source = (
+        "from pathlib import Path\n\n"
+        "requests = {'socket': 'websocket lifecycle'}\n\n"
+        "def test_safe(tmp_path):\n"
+        "    (tmp_path / 'checkpoint.json').write_text('ok')\n"
+        "    query = (Path(__file__).resolve().parents[1] / 'report.sql').read_text()\n"
+        "    assert requests and query\n"
+    )
+    case = {
+        "repo_files": {
+            "report.sql": "select 1;\n",
+            "tests/test_public.py": safe_source,
+        }
+    }
+    partitions = {
+        "feedback_files": {"tests/test_feedback.py": safe_source},
+        "final_files": {"tests/test_final.py": safe_source},
+    }
+
+    result = benchmark._validate_test_source_safety(case, partitions)
+
+    assert result["static_safety_scan_passed"] is True
+    assert result["scanned_test_source_count"] == 3
+
+
+def test_unsafe_feedback_is_rejected_before_model_registry_access(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    _write_protocol_fixture(
+        fixture,
+        feedback_source=(
+            "import subprocess\n\n"
+            "def test_feedback():\n"
+            "    subprocess.run(['echo', 'sealed'])\n"
+        ),
+    )
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: (_ for _ in ()).throw(AssertionError("model registry was accessed")),
+    )
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="Unsafe sealed test"):
+        benchmark.run(
+            argparse.Namespace(
+                fixture_root=str(fixture),
+                case=[],
+                validate_fixtures=False,
+                evaluation_context="protocol",
+                model="local-model",
+            )
+        )
+
+
+def test_public_test_process_cannot_mutate_seeded_repository_files(tmp_path):
+    case = {
+        "test_runner": "pytest",
+        "repo_files": {
+            "owner.py": "VALUE = 1\n",
+            "tests/test_public.py": (
+                "from pathlib import Path\n\n"
+                "def test_public():\n"
+                "    Path('owner.py').write_text('VALUE = 9\\n')\n"
+            ),
+        },
+    }
+    repo = tmp_path / "repo"
+    benchmark._init_repo(repo, case["repo_files"])
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="mutated seeded"):
+        benchmark._run_case_tests(repo, case, public_only=True)
+
+
+def test_final_test_process_cannot_mutate_seeded_repository_files(tmp_path):
+    case = {
+        "test_runner": "pytest",
+        "repo_files": {
+            "owner.py": "VALUE = 1\n",
+            "tests/test_public.py": "def test_public():\n    assert True\n",
+        },
+    }
+    final_files = {
+        "tests/test_final.py": (
+            "from pathlib import Path\n\n"
+            "def test_final():\n"
+            "    Path('owner.py').write_text('VALUE = 9\\n')\n"
+        )
+    }
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="mutated seeded"):
+        benchmark._run_final_adjudication(case, final_files)
+
+
+def test_bound_final_oracle_digest_change_fails_closed_and_is_audited(tmp_path):
+    fixture = tmp_path / "fixture"
+    paths = _write_protocol_fixture(fixture)
+    events = []
+    binding, _payload = benchmark._bind_fixture_artifact(
+        fixture,
+        paths["final"],
+        artifact="final_oracle:integrity-case",
+        events=events,
+    )
+    paths["final"].write_text(
+        json.dumps({"case_id": "integrity-case", "final_files": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="digest changed"):
+        benchmark._read_bound_json(
+            binding,
+            events=events,
+            phase="sealed_final_oracle_read",
+            case_id="integrity-case",
+        )
+
+    assert events[-1]["event"] == "fixture_digest_mismatch"
+    assert events[-1]["phase"] == "sealed_final_oracle_read"
+
+
+def test_model_call_ledger_rejects_appends_after_freeze():
+    calls = benchmark._ModelCallLedger()
+    calls.append({"stage": "diagnosis_investigator", "ok": True})
+
+    assert calls.freeze() == 1
+    with pytest.raises(benchmark.FixtureIntegrityError, match="ledger is frozen"):
+        calls.append({"stage": "repair_after_final", "ok": True})
+
+
+def test_frozen_ledger_blocks_model_transport_before_invocation(monkeypatch):
+    calls = benchmark._ModelCallLedger()
+    calls.freeze()
+    invoked = False
+
+    def forbidden_chat(*_args, **_kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("model transport was invoked")
+
+    monkeypatch.setattr(benchmark.ollama_client, "chat", forbidden_chat)
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="model access is forbidden"):
+        benchmark._local_call(
+            "local-model",
+            [{"role": "user", "content": "must not run"}],
+            stage="repair_after_final",
+            calls=calls,
+            timeout=1.0,
+            num_predict=32,
+            json_mode=True,
+        )
+
+    assert invoked is False
+
+
+def test_protocol_run_records_ordered_integrity_audit_and_live_reasoning_metrics(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = tmp_path / "fixture"
+    _write_protocol_fixture(fixture)
+    monkeypatch.setattr(benchmark.ollama_client, "list_models", lambda: ["local-model"])
+
+    def fake_diagnose(_repo, case, _model, calls, _timeout, **_kwargs):
+        calls.append(
+            {
+                "stage": "diagnosis_investigator",
+                "model": "local-model",
+                "ok": True,
+                "response": "{}",
+            }
+        )
+        conclusion = {
+            "dimension": "code",
+            "status": "confirmed",
+            "causal_sufficiency": "isolated",
+        }
+        return {
+            "report": {"conclusion": conclusion},
+            "packet": {},
+            "stages": [
+                {
+                    "stage": "investigator",
+                    "accepted": True,
+                    "conclusion": conclusion,
+                }
+            ],
+            "case": {"problem_statement": case["prompt"]},
+        }
+
+    def fake_contract_repair(repo, _case):
+        (repo / "owner.py").write_text("VALUE = 2\n", encoding="utf-8")
+        return {
+            "attempted": True,
+            "patch_applied": True,
+            "selected_files": ["owner.py"],
+            "warnings": [],
+            "proposed_dimension": "code",
+        }
+
+    monkeypatch.setattr(benchmark, "_diagnose", fake_diagnose)
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_deterministic_contract_repair",
+        fake_contract_repair,
+    )
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        model="local-model",
+        reasoning_model="local-model",
+        escalation_model="",
+        case=[],
+        timeout=1.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        validate_fixtures=False,
+        evaluation_context="protocol",
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "result.json"),
+        json=False,
+    )
+
+    result = benchmark.run(args)
+    case_result = result["cases"][0]
+    events = case_result["integrity_audit_events"]
+
+    def event_sequence(name, *, phase=None):
+        return next(
+            item["sequence"]
+            for item in events
+            if item["event"] == name
+            and (phase is None or item.get("phase") == phase)
+        )
+
+    assert (
+        event_sequence("model_call_ledger_frozen")
+        < event_sequence("fixture_digest_verified", phase="sealed_final_oracle_read")
+        < event_sequence("final_oracle_opened")
+        < event_sequence("final_adjudication_started")
+        < event_sequence("final_adjudication_completed")
+        < event_sequence("post_final_model_call_count_verified")
+    )
+    assert all(item["timestamp_utc"] for item in events)
+    assert case_result["score"] == 100
+    assert case_result["live_reasoning_qualified"] is True
+    assert case_result["deterministic_only"] is False
+    assert case_result["fable5_class_reasoning_claim_eligible"] is True
+    assert result["verdict"] == "shadow_ready"
+    assert result["live_reasoning_qualified_case_count"] == 1
+    assert result["deterministic_only_case_count"] == 0
+    assert result["fable5_class_reasoning_claim_supported"] is False
+    assert len(result["fixture_digest_inventory"]["manifest"]["sha256"]) == 64
+    assert len(
+        result["fixture_digest_inventory"]["cases"][0]["final_oracle"]["sha256"]
+    ) == 64
+    assert result["test_subprocess_assurance"]["hostile_process_proof"] is False
 
 
 def test_candidate_snapshot_restores_only_manifest_approved_sources(tmp_path):
@@ -2896,6 +3385,7 @@ def test_recognized_contract_uses_initial_non_generative_edit_lane(
         max_repairs=0,
         max_escalation_repairs=0,
         validate_fixtures=False,
+        evaluation_context="disclosed_replay",
         report=str(tmp_path / "report.md"),
         results_json=str(tmp_path / "result.json"),
         json=False,
@@ -2908,6 +3398,10 @@ def test_recognized_contract_uses_initial_non_generative_edit_lane(
     assert case_result["functional_repair_passed"] is True
     assert case_result["model_calls"] == []
     assert case_result["deterministic_contract_repair"]["patch_applied"] is True
+    assert case_result["deterministic_only"] is True
+    assert case_result["live_reasoning_qualified"] is False
+    assert result["verdict"] == "needs_improvement"
+    assert result["evaluation_verdict"] == "disclosed_replay_failed"
 
 
 def test_validated_structural_intervention_revises_family_and_labels_disclosed_replay(
@@ -2961,7 +3455,7 @@ def test_validated_structural_intervention_revises_family_and_labels_disclosed_r
     case_result = result["cases"][0]
 
     assert result["evaluation_context"] == "disclosed_replay"
-    assert result["evaluation_verdict"] == "disclosed_replay_passed"
+    assert result["evaluation_verdict"] == "disclosed_replay_failed"
     assert result["blinded_holdout_case_count"] == 0
     assert case_result["original_evaluation_role"] == "blinded_holdout"
     assert case_result["evaluation_role"] == "development_regression"
@@ -2970,6 +3464,8 @@ def test_validated_structural_intervention_revises_family_and_labels_disclosed_r
     assert case_result["accepted_diagnosis_conclusion"]["accepted"] is True
     assert case_result["functional_repair_passed"] is True
     assert case_result["score"] == 100
+    assert case_result["deterministic_only"] is True
+    assert case_result["live_reasoning_qualified"] is False
 
 
 def test_initial_patch_generation_does_not_run_repair_reviewer(tmp_path, monkeypatch):
