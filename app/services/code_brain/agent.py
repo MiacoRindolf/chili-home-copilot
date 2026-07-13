@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_FILE_LINES = 600
 _MAX_FILES_PER_EDIT = 8
+_MAX_EDITOR_HANDOFF_CHARS = 12_000
 _MUTATING_PLAN_ACTIONS = frozenset({"modify", "create"})
 
 
@@ -199,6 +201,254 @@ def _build_plan_prompt(context: Dict[str, Any]) -> str:
     ])
 
     return "\n".join(parts)
+
+
+def _build_editor_handoff(
+    plan: object,
+    target_path: object = None,
+    max_chars: object = _MAX_EDITOR_HANDOFF_CHARS,
+) -> str:
+    """Render a structured plan as deterministic, bounded editor context.
+
+    Valid plan data is lossless when it fits. Under pressure, explanatory
+    text and non-target records are reduced before contracts owned by the
+    emphasized target. The input is never mutated.
+    """
+
+    def normalized_path(value: object) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        result = value.strip().replace("\\", "/")
+        if not result or any(ord(char) < 32 for char in result):
+            return None
+        return result
+
+    if max_chars is None:
+        budget = _MAX_EDITOR_HANDOFF_CHARS
+    elif isinstance(max_chars, bool):
+        budget = int(max_chars)
+    else:
+        try:
+            budget = int(max_chars)
+        except (TypeError, ValueError, OverflowError):
+            budget = _MAX_EDITOR_HANDOFF_CHARS
+    budget = max(0, budget)
+    if budget < 2:
+        return "{}"[:budget]
+
+    source = plan if isinstance(plan, Mapping) else {}
+    target = normalized_path(target_path)
+
+    files_with_priority: List[tuple[Dict[str, Any], bool]] = []
+    raw_files = source.get("files")
+    if isinstance(raw_files, (list, tuple)):
+        for raw_file in raw_files:
+            if not isinstance(raw_file, Mapping):
+                continue
+            path = normalized_path(raw_file.get("path"))
+            responsibility = raw_file.get("description")
+            if not isinstance(responsibility, str):
+                responsibility = raw_file.get("responsibility")
+            if path is None or not isinstance(responsibility, str):
+                continue
+            item: Dict[str, Any] = {
+                "path": path,
+                "responsibility": responsibility,
+            }
+            action = raw_file.get("action")
+            if isinstance(action, str) and action:
+                item["action"] = action
+            optional = raw_file.get("optional")
+            if isinstance(optional, bool):
+                item["optional"] = optional
+            files_with_priority.append((item, bool(target and path == target)))
+
+    contracts_with_priority: List[tuple[Dict[str, Any], bool]] = []
+    raw_contracts = source.get("contract_coverage")
+    if isinstance(raw_contracts, (list, tuple)):
+        for raw_contract in raw_contracts:
+            if not isinstance(raw_contract, Mapping):
+                continue
+            contract = raw_contract.get("contract")
+            postcondition = raw_contract.get("postcondition")
+            raw_owners = raw_contract.get("owner_paths")
+            if (
+                not isinstance(contract, str)
+                or not contract.strip()
+                or not isinstance(postcondition, str)
+                or not postcondition.strip()
+                or not isinstance(raw_owners, (list, tuple))
+            ):
+                continue
+            owners = [
+                owner
+                for value in raw_owners
+                if (owner := normalized_path(value)) is not None
+            ]
+            if not owners:
+                continue
+            item = {
+                "contract": contract,
+                "owner_paths": owners,
+                "postcondition": postcondition,
+            }
+            contracts_with_priority.append(
+                (item, bool(target and target in owners))
+            )
+
+    # Stable partitioning emphasizes the target without disturbing the plan's
+    # causal order within target-owned and cross-file groups.
+    files_with_priority.sort(key=lambda value: not value[1])
+    contracts_with_priority.sort(key=lambda value: not value[1])
+
+    payload: Dict[str, Any] = {}
+    if target is not None:
+        payload["target_path"] = target
+    dimension = source.get("dimension")
+    if isinstance(dimension, str):
+        payload["dimension"] = dimension
+    analysis = source.get("analysis")
+    if isinstance(analysis, str):
+        payload["analysis"] = analysis
+    notes = source.get("notes")
+    if isinstance(notes, str):
+        payload["notes"] = notes
+    payload["files"] = [item for item, _is_target in files_with_priority]
+    payload["contract_coverage"] = [
+        item for item, _is_target in contracts_with_priority
+    ]
+
+    pretty = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    if len(pretty) <= budget:
+        return pretty
+
+    def render() -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    compact = render()
+    if len(compact) <= budget:
+        return compact
+
+    def shrink_text(container: Dict[str, Any], key: str) -> bool:
+        """Shrink one field as little as possible; report when it now fits."""
+        original = container.get(key)
+        if not isinstance(original, str) or not original:
+            return False
+        container[key] = ""
+        if len(render()) > budget:
+            return False
+
+        best = ""
+        low = 0
+        high = len(original) - 1
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = original[:middle] + "..."
+            container[key] = candidate
+            if len(render()) <= budget:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        container[key] = best
+        return True
+
+    if "notes" in payload and shrink_text(payload, "notes"):
+        return render()
+
+    files = payload["files"]
+    contracts = payload["contract_coverage"]
+    file_target_flags = [is_target for _item, is_target in files_with_priority]
+    contract_target_flags = [
+        is_target for _item, is_target in contracts_with_priority
+    ]
+
+    # Keep every path/record for as long as possible. Target descriptions and
+    # target-owned contract text are deliberately reduced last.
+    for index in reversed(range(len(files))):
+        if not file_target_flags[index] and shrink_text(
+            files[index], "responsibility"
+        ):
+            return render()
+    for index in reversed(range(len(contracts))):
+        if not contract_target_flags[index] and shrink_text(
+            contracts[index], "postcondition"
+        ):
+            return render()
+    if "analysis" in payload and shrink_text(payload, "analysis"):
+        return render()
+    for index in reversed(range(len(files))):
+        if file_target_flags[index] and shrink_text(
+            files[index], "responsibility"
+        ):
+            return render()
+    for index in reversed(range(len(contracts))):
+        if contract_target_flags[index] and shrink_text(
+            contracts[index], "postcondition"
+        ):
+            return render()
+    for index in reversed(range(len(contracts))):
+        if not contract_target_flags[index] and shrink_text(
+            contracts[index], "contract"
+        ):
+            return render()
+    for index in reversed(range(len(contracts))):
+        if contract_target_flags[index] and shrink_text(
+            contracts[index], "contract"
+        ):
+            return render()
+
+    # Structural overhead can itself exceed very small bounds. Remove optional
+    # metadata, then non-target records, before touching target-owned contracts.
+    for item in files:
+        item.pop("optional", None)
+        item.pop("action", None)
+        if len(render()) <= budget:
+            return render()
+    payload.pop("dimension", None)
+    if len(render()) <= budget:
+        return render()
+
+    for index in reversed(range(len(contracts))):
+        if contract_target_flags[index]:
+            continue
+        contracts.pop(index)
+        contract_target_flags.pop(index)
+        if len(render()) <= budget:
+            return render()
+    for index in reversed(range(len(files))):
+        if file_target_flags[index]:
+            continue
+        files.pop(index)
+        file_target_flags.pop(index)
+        if len(render()) <= budget:
+            return render()
+
+    payload.pop("notes", None)
+    if len(render()) <= budget:
+        return render()
+    payload.pop("analysis", None)
+    if len(render()) <= budget:
+        return render()
+
+    while contracts:
+        contracts.pop()
+        if len(render()) <= budget:
+            return render()
+    while files:
+        files.pop()
+        if len(render()) <= budget:
+            return render()
+    payload.pop("target_path", None)
+    rendered = render()
+    if len(rendered) <= budget:
+        return rendered
+    return "{}" if budget >= 2 else "{}"[:budget]
 
 
 def _build_edit_prompt(file_path: str, file_content: str, change_description: str, conventions: List[str]) -> str:
@@ -926,6 +1176,8 @@ async def run_code_agent(
     for r in context["repos"]:
         repo_path_map[r["name"]] = r["path"]
     default_repo_path = context["repos"][0]["path"] if context["repos"] else ""
+    editor_plan = dict(plan_json)
+    editor_plan["files"] = plan_files
 
     # ── Step 2: Edit each file ───────────────────────────────────
     all_diffs: List[str] = []
@@ -937,13 +1189,18 @@ async def run_code_agent(
         fpath = pf.get("path", "")
         action = pf.get("action", "modify")
         description = pf.get("description", "")
+        editor_handoff = _build_editor_handoff(
+            editor_plan,
+            target_path=fpath,
+        )
 
         if action == "create":
             edit_sections.append(f"### New file: {fpath}\n{description}")
             # For new files, ask LLM to generate the full file content
             create_prompt = (
                 f"You are creating a new file: {fpath}\n\n"
-                f"Requirements: {description}\n\n"
+                "Implement the emphasized target in this coordinated plan:\n"
+                f"{editor_handoff}\n\n"
                 "Follow the project conventions:\n" +
                 "\n".join(f"- {c}" for c in conventions[:3]) +
                 "\n\nReturn ONLY the file content wrapped in a code block."
@@ -1021,7 +1278,13 @@ async def run_code_agent(
             edit_sections.append(f"### {fpath}\nFile not found -- skipped.")
             continue
 
-        edit_system = _build_edit_prompt(fpath, _elide_for_prompt(file_content), description, conventions)
+        edit_system = _build_edit_prompt(
+            fpath,
+            _elide_for_prompt(file_content),
+            "Implement the emphasized target in this coordinated plan:\n"
+            + editor_handoff,
+            conventions,
+        )
         edit_result = llm_chat(
             messages=[{"role": "user", "content": f"Apply the change to {fpath} as described."}],
             system_prompt=edit_system,

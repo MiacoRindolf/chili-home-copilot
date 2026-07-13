@@ -6,6 +6,20 @@ import sqlite3
 from app.services.project_autonomy import diagnostic_reasoning as reasoning
 
 
+def _contrastive_contract(changed_dimension: str) -> dict[str, object]:
+    held = [
+        dimension
+        for dimension in ("code", "data", "clock", "state", "config", "dependency", "runtime", "test_harness")
+        if dimension != changed_dimension
+    ]
+    return {
+        "changed_dimensions": [changed_dimension],
+        "held_constant_dimensions": held,
+        "expected_if_true": "The intervention changes or restores the outcome.",
+        "expected_if_false": "The outcome remains unchanged.",
+    }
+
+
 def _sim_clock_case():
     return {
         "case_id": "fable5-sim-clock",
@@ -20,6 +34,7 @@ def _sim_clock_case():
                 "independence_key": "replay-run-1",
                 "reliability": 1.0,
                 "discriminating": True,
+                **_contrastive_contract("clock"),
             },
             {
                 "evidence_id": "caller-source",
@@ -535,6 +550,7 @@ def test_strong_independent_support_outweighs_weaker_same_family_counterevidence
                 "independence_key": "barrier-a",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("state"),
             },
             {
                 "evidence_id": "state-b",
@@ -545,6 +561,7 @@ def test_strong_independent_support_outweighs_weaker_same_family_counterevidence
                 "independence_key": "barrier-b",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("state"),
             },
             {
                 "evidence_id": "state-control",
@@ -660,9 +677,137 @@ def test_dense_council_prompts_enforce_compact_closed_json_contract():
 
     assert "Hard output budget: at most 700 tokens" in investigator
     assert "Close every JSON array and object" in judge
+    assert '"experiments":[{"experiment_id":"x1"' in investigator
+    assert '"auto_execute":true,"probe":{' in investigator
+    assert '"experiment_id":"x-log"' in investigator
     assert len(investigator) < 8_000
     assert len(judge) < 13_000
     assert '\"environment_fingerprint\":\"\"' not in judge
+
+
+def test_parseable_standalone_probe_gets_one_schema_retry_and_can_recover():
+    case = {
+        "case_id": "standalone-probe-retry",
+        "problem_statement": "Find whether the worker reads wall time.",
+        "observations": [
+            {
+                "evidence_id": "source-clock",
+                "statement": "The worker source contains a clock read.",
+                "dimension": "clock",
+                "kind": "artifact",
+                "provenance": "source:worker.py",
+            }
+        ],
+        "constraints": {"minimum_hypothesis_dimensions": 1},
+    }
+    standalone_probe = {
+        "probe_id": "find-clock",
+        "kind": "search",
+        "paths": ["app"],
+        "query": "datetime.now",
+        "dimension": "clock",
+    }
+    corrected_packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "The worker reads wall time.",
+                "dimension": "clock",
+                "support_evidence_ids": ["source-clock"],
+                "contradict_evidence_ids": [],
+                "falsification": "Compare against an injected clock.",
+            }
+        ],
+        "experiments": [
+            {
+                "experiment_id": "x-clock-search",
+                "hypothesis_ids": ["h-clock"],
+                "changed_dimensions": ["clock"],
+                "held_constant_dimensions": ["code", "data"],
+                "expected_if_true": "The source contains a wall-time read.",
+                "expected_if_false": "The source omits wall-time reads.",
+                "safety": "read_only",
+                "status": "planned",
+                "auto_execute": True,
+                "probe": standalone_probe,
+            }
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "evidence_ids": ["source-clock"],
+        },
+    }
+    calls: list[tuple[str, str]] = []
+
+    def fake_model(stage, prompt):
+        calls.append((stage, prompt))
+        return json.dumps(standalone_probe if len(calls) == 1 else corrected_packet)
+
+    result = reasoning.run_local_diagnostic_debate(
+        case,
+        fake_model,
+        stages_to_run=("judge",),
+    )
+    stage = result["stages"][0]
+
+    assert [name for name, _prompt in calls] == [
+        "judge",
+        "judge_schema_correction",
+    ]
+    assert "only schema-correction attempt" in calls[1][1]
+    assert stage["accepted"] is True
+    assert stage["json_parsed"] is True
+    assert stage["raw_schema_valid"] is True
+    assert stage["initial_json_parsed"] is True
+    assert stage["initial_raw_schema_valid"] is False
+    assert stage["schema_correction_attempted"] is True
+    assert stage["schema_correction_json_parsed"] is True
+    assert stage["schema_correction_raw_schema_valid"] is True
+    assert result["packet"]["experiments"][0]["probe"]["kind"] == "search"
+
+
+def test_repeated_standalone_probe_is_rejected_after_one_schema_retry():
+    case = {
+        "case_id": "standalone-probe-rejected",
+        "problem_statement": "Diagnose a possible clock dependency.",
+        "observations": [],
+        "constraints": {"minimum_hypothesis_dimensions": 1},
+    }
+    standalone_probe = {
+        "probe_id": "find-clock",
+        "kind": "search",
+        "query": "datetime.now",
+        "dimension": "clock",
+    }
+    calls: list[str] = []
+
+    def fake_model(stage, _prompt):
+        calls.append(stage)
+        return json.dumps(standalone_probe)
+
+    result = reasoning.run_local_diagnostic_debate(
+        case,
+        fake_model,
+        stages_to_run=("judge",),
+    )
+    stage = result["stages"][0]
+
+    assert calls == ["judge", "judge_schema_correction"]
+    assert stage["accepted"] is False
+    assert stage["json_parsed"] is True
+    assert stage["raw_schema_valid"] is False
+    assert stage["initial_json_parsed"] is True
+    assert stage["initial_raw_schema_valid"] is False
+    assert stage["schema_correction_attempted"] is True
+    assert stage["schema_correction_json_parsed"] is True
+    assert stage["schema_correction_raw_schema_valid"] is False
+    assert any("Standalone diagnostic probes" in error for error in stage["errors"])
+    assert result["packet"]["hypotheses"]
+    assert all(
+        not experiment["auto_execute"] and experiment["probe"] == {}
+        for experiment in result["packet"]["experiments"]
+    )
 
 
 def test_local_packet_contract_repair_is_grounded_audited_and_fail_closed():
@@ -738,7 +883,7 @@ def test_local_packet_contract_repair_is_grounded_audited_and_fail_closed():
     assert result["report"]["valid"] is True
 
 
-def test_local_packet_cannot_replace_qualified_causal_support_with_correlation():
+def test_local_packet_does_not_restore_broad_control_as_qualified_support():
     case = {
         "case_id": "causal-support-retention",
         "problem_statement": "Large jobs stall on a shared worker pool.",
@@ -809,14 +954,13 @@ def test_local_packet_cannot_replace_qualified_causal_support_with_correlation()
     assert stage["accepted"] is True
     assert (
         "h-runtime:restored_qualified_causal_support"
-        in stage["contract_repairs"]
+        not in stage["contract_repairs"]
     )
-    assert support == ["host-correlation", "broad-control"]
-    assert result["report"]["conclusion"]["status"] == "provisional"
-    assert result["report"]["decision"] == "instrument_first"
+    assert support == ["host-correlation"]
+    assert result["report"]["conclusion"]["status"] != "confirmed"
 
 
-def test_local_packet_preserves_grounded_family_when_model_ids_and_breadth_change():
+def test_local_packet_does_not_preserve_family_grounded_only_by_broad_control():
     case = {
         "case_id": "grounded-family-retention",
         "problem_statement": (
@@ -888,10 +1032,9 @@ def test_local_packet_preserves_grounded_family_when_model_ids_and_breadth_chang
     stage = result["stages"][0]
 
     assert stage["accepted"] is True
-    assert "runtime" in stage["preserved_hypothesis_dimensions"]
-    assert result["report"]["conclusion"]["dimension"] == "runtime"
-    assert result["report"]["conclusion"]["status"] == "provisional"
-    assert result["report"]["decision"] == "instrument_first"
+    assert "runtime" not in stage["preserved_hypothesis_dimensions"]
+    assert result["report"]["conclusion"]["dimension"] == "data"
+    assert result["report"]["conclusion"]["status"] == "inconclusive"
 
 
 def test_local_dimension_aliases_preserve_system_layer_meaning():
@@ -1121,7 +1264,7 @@ def test_evidence_gate_confirms_strong_root_cause_even_when_model_is_conservativ
     assert report["decision"] == "patch_root_cause"
 
 
-def test_typed_probe_evidence_recovers_causal_family_omitted_by_local_model():
+def test_contextual_typed_probe_does_not_create_omitted_causal_family():
     case = {
         "case_id": "typed-probe-omission",
         "problem_statement": "A provider-backed worker failed while its source revision stayed fixed.",
@@ -1180,15 +1323,20 @@ def test_typed_probe_evidence_recovers_causal_family_omitted_by_local_model():
     report = reasoning.evaluate_packet(case, packet)
 
     assert report["valid"] is True
-    assert report["conclusion"]["hypothesis_id"] == "evidence-dependency"
-    assert report["conclusion"]["dimension"] == "dependency"
-    assert report["conclusion"]["status"] == "confirmed"
-    assert report["conclusion"]["evidence_ids"] == ["probe-log-search"]
-    assert any(
+    assert report["conclusion"]["hypothesis_id"] == "h-clock"
+    assert report["conclusion"]["status"] == "inconclusive"
+    assert not any(
         item["hypothesis_id"] == "evidence-dependency"
-        and item["origin"] == "deterministic_evidence_gate"
         for item in report["hypothesis_results"]
     )
+    normalized_probe = next(
+        item
+        for item in reasoning.normalize_case(case)["observations"]
+        if item["evidence_id"] == "probe-log-search"
+    )
+    assert normalized_probe["causal_role"] == "context"
+    assert normalized_probe["dimension_origin"] == "inferred"
+    assert normalized_probe["discriminating"] is False
 
 
 def test_same_code_and_input_with_different_outcome_blocks_code_attribution():
@@ -1272,6 +1420,7 @@ def test_new_counter_evidence_retracts_a_previous_confirmed_conclusion():
                 "independence_key": "feature-ab-run",
                 "reliability": 0.9,
                 "discriminating": True,
+                **_contrastive_contract("code"),
             },
         ],
     }
@@ -3929,6 +4078,7 @@ def test_causal_owner_follows_the_manipulated_factor_not_the_probe_apparatus():
                 "kind": "experiment",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract(expected),
             }
         )
 
@@ -3973,6 +4123,41 @@ def test_planned_measurements_and_broad_relocations_are_not_completed_proof():
     assert broad["evidence_lifecycle"] == "observed_result"
     assert broad["intervention_scope"] == "broad"
     assert reasoning._is_contrastive_experiment(broad) is False
+
+
+def test_only_predeclared_changed_and_held_dimensions_make_outcome_contrastive():
+    declared = reasoning.normalize_evidence(
+        {
+            "evidence_id": "clock-intervention",
+            "statement": (
+                "Changing only the injected clock restores the expected result while "
+                "code and data remain fixed."
+            ),
+            "dimension": "clock",
+            "kind": "experiment",
+            "reliability": 0.99,
+            "discriminating": True,
+            "changed_dimensions": ["clock"],
+            "held_constant_dimensions": ["code", "data"],
+            "expected_if_true": "The expected result returns.",
+            "expected_if_false": "The mismatch remains.",
+        }
+    )
+    undeclared = reasoning.normalize_evidence(
+        {
+            "evidence_id": "post-hoc-clock-run",
+            "statement": "Changing only the clock restored the result.",
+            "dimension": "clock",
+            "kind": "experiment",
+            "reliability": 0.99,
+            "discriminating": True,
+        }
+    )
+
+    assert declared["discriminating"] is True
+    assert reasoning._is_contrastive_experiment(declared) is True
+    assert undeclared["discriminating"] is False
+    assert reasoning._is_contrastive_experiment(undeclared) is False
 
 
 def test_retained_comparison_distinguishes_changed_stable_and_incomparable_outcomes():
@@ -4034,6 +4219,7 @@ def test_effective_status_depends_on_qualified_proof_not_model_posture():
                 "kind": "experiment",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("config"),
             }
         ],
     }
@@ -4255,6 +4441,7 @@ def test_omitted_inferred_contrastive_proof_cannot_promote_clock_family():
                 "kind": "experiment",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("clock"),
             },
         ],
     }
@@ -4548,6 +4735,7 @@ def test_isolated_intervention_outranks_multiple_downstream_symptoms():
                 "independence_key": "policy-replay",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("config"),
             },
         ],
     }
@@ -4704,6 +4892,7 @@ def test_isolated_proof_is_not_overwritten_by_weaker_earliest_or_provenance_brea
                 "independence_key": "package-ab",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("dependency"),
             },
         ],
     }
@@ -5024,6 +5213,7 @@ def test_provisional_promotion_requires_isolated_or_graph_linked_proof():
                 "independence_key": "isolated-revert",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("code"),
             },
         ],
     }
@@ -5098,6 +5288,7 @@ def test_causal_fallback_restores_omitted_isolation_evidence_and_syncs_final_pac
                 "independence_key": "isolated-revert",
                 "reliability": 0.99,
                 "discriminating": True,
+                **_contrastive_contract("code"),
             },
         ],
         "constraints": {"minimum_hypothesis_dimensions": 1},

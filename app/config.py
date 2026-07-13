@@ -407,6 +407,15 @@ class Settings(BaseSettings):
         default="qwen2.5-coder:7b",
         validation_alias=AliasChoices("CHILI_CODE_LOCAL_MODEL"),
     )
+    chili_code_local_reasoning_model: str = Field(
+        default="qwen3:8b",
+        validation_alias=AliasChoices("CHILI_CODE_LOCAL_REASONING_MODEL"),
+        description=(
+            "Optional local reasoning model for diagnosis, architecture, and repair planning. "
+            "The configured coder remains responsible for source edits, and an unavailable "
+            "reasoning model falls back to the local coder without using a premium model."
+        ),
+    )
     chili_code_local_escalation_model: str = Field(
         default="qwen2.5-coder:14b",
         validation_alias=AliasChoices("CHILI_CODE_LOCAL_ESCALATION_MODEL"),

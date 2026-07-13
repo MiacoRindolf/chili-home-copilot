@@ -55,6 +55,42 @@ def test_synthetic_fixture_history_is_not_causal_code_evidence():
     assert authored["kind"] == "artifact"
 
 
+def test_successful_static_probe_results_are_not_discriminating_experiments():
+    results = [
+        {
+            "kind": "search",
+            "status": "completed",
+            "dimension": "clock",
+            "output": "app/gate.py:4: datetime.now()",
+        },
+        {
+            "kind": "file_excerpt",
+            "status": "completed",
+            "dimension": "code",
+            "output": "def gate(): return True",
+        },
+        {
+            "kind": "compile",
+            "status": "completed",
+            "dimension": "code",
+            "output": "ok app/gate.py",
+        },
+        {
+            "kind": "targeted_test",
+            "status": "completed",
+            "dimension": "test_harness",
+            "output": "1 passed",
+        },
+    ]
+
+    semantics = [
+        diagnostic_probes._probe_evidence_semantics(result) for result in results
+    ]
+
+    assert all(item["kind"] == "artifact" for item in semantics)
+    assert all(item["discriminating"] is False for item in semantics)
+
+
 def test_probe_catalog_has_no_raw_command_and_rejects_unsafe_paths():
     assert "command" not in diagnostic_probes.PROBE_KINDS
     unknown = diagnostic_probes.normalize_probe_spec(
@@ -97,6 +133,9 @@ def test_fixed_string_search_returns_provenanced_evidence(tmp_path):
     assert run["evidence"][0]["sequence"] == 0
     assert run["evidence"][0]["entity_id"] == "probe:find-wall-clock"
     assert run["evidence"][0]["event_type"] == "typed_probe_search"
+    assert run["evidence"][0]["dimension_origin"] == "inferred"
+    assert run["evidence"][0]["causal_role"] == "context"
+    assert run["evidence"][0]["discriminating"] is False
     timeline = diagnostic_reasoning.reconstruct_causal_timeline(
         diagnostic_reasoning.normalize_case(
             {
@@ -107,6 +146,58 @@ def test_fixed_string_search_returns_provenanced_evidence(tmp_path):
         )
     )
     assert timeline["ordered_evidence_ids"] == ["probe-find-wall-clock"]
+
+
+def test_contextual_search_probe_does_not_confirm_requested_causal_family(tmp_path):
+    repo = _committed_repo(tmp_path)
+    target = repo / "app/gate.py"
+    target.parent.mkdir()
+    target.write_text(
+        "from datetime import datetime\n\ndef allowed():\n    return datetime.now().hour > 9\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "app/gate.py")
+    _git(repo, "commit", "-m", "add gate")
+    run = diagnostic_probes.execute_safe_probes(
+        repo,
+        [
+            {
+                "probe_id": "find-wall-clock",
+                "kind": "search",
+                "query": "datetime.now",
+                "paths": ["app/gate.py"],
+                "dimension": "clock",
+                "safety": "read_only",
+            }
+        ],
+    )
+    case = {
+        "case_id": "contextual-probe",
+        "problem_statement": "Determine whether wall time caused the failure.",
+        "observations": run["evidence"],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "Wall time caused the failure.",
+                "dimension": "clock",
+                "support_evidence_ids": ["probe-find-wall-clock"],
+                "falsification": "Intervene on clock while holding code constant.",
+            }
+        ],
+        "experiments": [],
+        "conclusion": {"hypothesis_id": "h-clock", "status": "confirmed"},
+    }
+
+    report = diagnostic_reasoning.evaluate_packet(case, packet)
+    hypothesis = report["hypothesis_results"][0]
+
+    assert hypothesis["status"] == "untested"
+    assert hypothesis["causal_sufficiency"] == "observational"
+    assert hypothesis["typed_probe_evidence"] is False
+    assert hypothesis["causal_support_evidence_ids"] == []
+    assert report["conclusion"]["status"] == "inconclusive"
 
 
 def test_log_probe_hashes_correlation_identity_for_provenance_graph(tmp_path):
@@ -277,7 +368,56 @@ def test_packet_validation_rejects_automatic_probe_with_wrong_safety():
     assert any("requires safety=read_only" in error for error in report["errors"])
 
 
-def test_probe_evidence_retracts_an_initially_confirmed_code_diagnosis(tmp_path):
+def test_valid_nested_experiment_survives_normalization_into_packet_probes():
+    packet = diagnostic_reasoning.normalize_packet(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h-clock",
+                    "claim": "The replay reads wall time.",
+                    "dimension": "clock",
+                    "falsification": "Inspect the clock read.",
+                }
+            ],
+            "experiments": [
+                {
+                    "experiment_id": "x-clock-search",
+                    "hypothesis_ids": ["h-clock"],
+                    "changed_dimensions": ["clock"],
+                    "held_constant_dimensions": ["code", "data"],
+                    "expected_if_true": "The source contains datetime.now.",
+                    "expected_if_false": "The source omits datetime.now.",
+                    "safety": "read_only",
+                    "status": "planned",
+                    "auto_execute": True,
+                    "probe": {
+                        "probe_id": "p-clock-search",
+                        "kind": "search",
+                        "paths": ["app"],
+                        "query": "datetime.now",
+                        "dimension": "clock",
+                    },
+                }
+            ],
+            "conclusion": {
+                "hypothesis_id": "h-clock",
+                "status": "provisional",
+            },
+        }
+    )
+
+    probes = diagnostic_probes.probes_from_packet(packet)
+
+    assert len(probes) == 1
+    assert probes[0]["probe_id"] == "p-clock-search"
+    assert probes[0]["kind"] == "search"
+    assert probes[0]["safety"] == "read_only"
+    assert probes[0]["experiment_id"] == "x-clock-search"
+    assert probes[0]["changed_dimensions"] == ["clock"]
+    assert probes[0]["held_constant_dimensions"] == ["code", "data"]
+
+
+def test_contextual_probe_does_not_retract_confirmed_code_diagnosis(tmp_path):
     repo = _committed_repo(tmp_path)
     target = repo / "app/gate.py"
     target.parent.mkdir()
@@ -310,6 +450,10 @@ def test_probe_evidence_retracts_an_initially_confirmed_code_diagnosis(tmp_path)
                 "independence_key": "test-ab",
                 "reliability": 0.9,
                 "discriminating": True,
+                "changed_dimensions": ["code"],
+                "held_constant_dimensions": ["data", "clock", "state", "config"],
+                "expected_if_true": "The source edit changes the replay outcome.",
+                "expected_if_false": "The replay outcome remains unchanged.",
             },
             {
                 "evidence_id": "clock-source",
@@ -384,6 +528,8 @@ def test_probe_evidence_retracts_an_initially_confirmed_code_diagnosis(tmp_path)
         previous_report=initial,
     )
 
-    assert result["report"]["conclusion"]["dimension"] == "clock"
+    assert probe_run["evidence"][0]["causal_role"] == "context"
+    assert probe_run["evidence"][0]["discriminating"] is False
+    assert result["report"]["conclusion"]["dimension"] == "code"
     assert result["report"]["conclusion"]["status"] == "confirmed"
-    assert result["report"]["retractions"][0]["hypothesis_id"] == "h-code"
+    assert result["report"]["retractions"] == []

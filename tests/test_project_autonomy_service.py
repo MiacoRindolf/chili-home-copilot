@@ -85,6 +85,55 @@ def test_select_local_model_prefers_resident_7b_over_cpu_offloaded_14b(monkeypat
     assert selected["model"] == "qwen2.5-coder:7b"
 
 
+def test_select_local_reasoning_model_prefers_explicit_installed_reasoner(monkeypatch):
+    monkeypatch.setattr(settings, "chili_code_local_reasoning_model", "qwen3:8b")
+    selected = orchestrator.select_local_reasoning_model(
+        {
+            "model": "qwen2.5-coder:7b",
+            "available": True,
+            "installed_models": ["qwen2.5-coder:7b", "qwen3:8b"],
+            "skipped_models": {},
+        }
+    )
+
+    assert selected["model"] == "qwen3:8b"
+    assert selected["fallback_to_coder"] is False
+    assert orchestrator._reasoning_model_supports_thinking(selected["model"]) is True
+
+
+def test_select_local_reasoning_model_falls_back_without_premium(monkeypatch):
+    monkeypatch.setattr(settings, "chili_code_local_reasoning_model", "qwen3:8b")
+    selected = orchestrator.select_local_reasoning_model(
+        {
+            "model": "qwen2.5-coder:7b",
+            "available": True,
+            "installed_models": ["qwen2.5-coder:7b"],
+            "skipped_models": {},
+        }
+    )
+
+    assert selected["model"] == "qwen2.5-coder:7b"
+    assert selected["fallback_to_coder"] is True
+
+
+def test_plan_source_context_contains_bounded_current_code(tmp_path):
+    first = tmp_path / "src/producer.py"
+    second = tmp_path / "src/consumer.py"
+    first.parent.mkdir(parents=True)
+    first.write_text("def produce():\n    return 'current-value'\n", encoding="utf-8")
+    second.write_text("def consume(value):\n    return value\n", encoding="utf-8")
+
+    context = orchestrator._bounded_plan_source_context(
+        tmp_path,
+        ["src/producer.py", "src/consumer.py"],
+        max_chars=140,
+    )
+
+    assert "### src/producer.py" in context
+    assert "current-value" in context
+    assert len(context) <= 140
+
+
 def test_select_local_model_recommends_coder_model_when_empty(monkeypatch):
     monkeypatch.setattr(orchestrator.ollama_client, "list_models", lambda: [])
 
@@ -211,7 +260,25 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             calls.append({"messages": messages, "model": model, **kwargs})
             is_diagnostic = "diagnostic council" in messages[0]["content"]
             text_value = (
-                "{}"
+                (
+                    '{"hypotheses":[{"hypothesis_id":"h1",'
+                    '"claim":"runtime baseline drift",'
+                    '"dimension":"runtime","support_evidence_ids":[],'
+                    '"contradict_evidence_ids":[],'
+                    '"falsification":"compare frozen runtime revisions"}],'
+                    '"experiments":[{"experiment_id":"x1",'
+                    '"hypothesis_ids":["h1"],"changed_dimensions":["runtime"],'
+                    '"held_constant_dimensions":["code"],'
+                    '"expected_if_true":"runtime evidence exists",'
+                    '"expected_if_false":"runtime evidence absent",'
+                    '"safety":"read_only","auto_execute":true,'
+                    '"probe":{"probe_id":"p1","kind":"search",'
+                    '"paths":["app"],"query":"replay",'
+                    '"dimension":"runtime"}}],'
+                    '"conclusion":{"hypothesis_id":"h1",'
+                    '"status":"provisional","evidence_ids":[],'
+                    '"reason":"runtime revision remains unverified"}}'
+                )
                 if is_diagnostic
                 else (
                     '{"analysis":"instrument drift","files":[{"path":"app/service.py",'
@@ -237,7 +304,7 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             for call in calls
             if "diagnostic council" in call["messages"][0]["content"]
         ]
-        assert 3 <= len(diagnostic_calls) <= 2 + orchestrator._DIAGNOSTIC_MAX_PROBES
+        assert 2 <= len(diagnostic_calls) <= 2 + orchestrator._DIAGNOSTIC_MAX_PROBES
         assert calls[0]["options"]["format"] == "json"
         assert "local-only diagnostic team" in calls[0]["messages"][1]["content"]
         assert "investigator" in diagnostic_calls[0]["messages"][1]["content"]
@@ -3460,6 +3527,87 @@ def test_validation_repair_decision_keeps_progress_and_rejects_regression():
     assert regressed["reason"] == "previously_passing_validation_regressed"
     assert unchanged["accepted"] is False
     assert unchanged["reason"] == "no_measurable_validation_progress"
+
+
+def test_repair_salvage_retains_one_file_only_after_isolated_progress(
+    tmp_path,
+    monkeypatch,
+):
+    first = tmp_path / "app/first.py"
+    second = tmp_path / "app/second.py"
+    first.parent.mkdir(parents=True)
+    first.write_text("VALUE = 1\n", encoding="utf-8")
+    second.write_text("VALUE = 2\n", encoding="utf-8")
+    assert orchestrator._git(tmp_path, ["init"]).returncode == 0
+    assert orchestrator._git(tmp_path, ["add", "."]).returncode == 0
+    assert (
+        orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "baseline",
+            ],
+        ).returncode
+        == 0
+    )
+    files = [{"path": "app/first.py"}, {"path": "app/second.py"}]
+    before_snapshot = orchestrator._repair_file_snapshot(tmp_path, files)
+    first.write_text("VALUE = 10\n", encoding="utf-8")
+    second.write_text("BROKEN =\n", encoding="utf-8")
+    attempted_snapshot = orchestrator._repair_file_snapshot(tmp_path, files)
+    before_validation = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 1,
+            "test_files": ["tests/test_contract.py"],
+            "stdout": (
+                "tests/test_contract.py::test_first FAILED [ 50%]\n"
+                "tests/test_contract.py::test_second FAILED [100%]\n"
+            ),
+        }
+    ]
+
+    def fake_validation(worktree, changed_files, *, pinned_test_files):
+        assert pinned_test_files == ["tests/test_contract.py"]
+        first_fixed = first.read_text(encoding="utf-8") == "VALUE = 10\n"
+        second_unchanged = second.read_text(encoding="utf-8") == "VALUE = 2\n"
+        return [
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 1,
+                "test_files": ["tests/test_contract.py"],
+                "stdout": (
+                    "tests/test_contract.py::test_first PASSED [ 50%]\n"
+                    "tests/test_contract.py::test_second FAILED [100%]\n"
+                    if first_fixed and second_unchanged
+                    else "tests/test_contract.py::test_first FAILED [ 50%]\n"
+                    "tests/test_contract.py::test_second FAILED [100%]\n"
+                ),
+            }
+        ]
+
+    monkeypatch.setattr(orchestrator, "run_validation", fake_validation)
+
+    salvaged = orchestrator._salvage_progressing_repair_file(
+        tmp_path,
+        files,
+        before_snapshot,
+        attempted_snapshot,
+        before_validation,
+        pinned_test_files=["tests/test_contract.py"],
+        contract_entries=[],
+        before_contract_snapshot={},
+    )
+
+    assert salvaged["path"] == "app/first.py"
+    assert salvaged["decision"]["reason"].startswith("isolated_file_progress:")
+    assert first.read_text(encoding="utf-8") == "VALUE = 10\n"
+    assert second.read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
 def test_validation_repair_decision_rejects_equal_count_contract_swap():

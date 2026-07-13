@@ -1414,18 +1414,15 @@ def infer_causal_role(
     if (
         str(kind or "") == "metric"
         and not structured_break
-        and not str(provenance or "").startswith("diagnostic_probe:")
     ):
         return "context"
     if any(marker in lower for marker in _CAUSAL_SUPPORT_MARKERS):
         return "support"
     if downstream_surface:
         return "context"
-    if discriminating and (
-        str(kind or "") == "experiment"
-        or str(provenance or "").startswith("diagnostic_probe:")
-        or structured_break
-    ):
+    if structured_break:
+        return "support"
+    if discriminating and str(kind or "") == "experiment":
         return "support"
     return "context"
 
@@ -5730,6 +5727,22 @@ def derive_diagnostic_lenses(statement: str) -> list[str]:
     return list(dict.fromkeys(lenses))[:12]
 
 
+def _normalized_dimensions(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    dimensions: list[str] = []
+    for item in value:
+        dimension = str(item or "").strip().lower()
+        dimension = DIMENSION_ALIASES.get(dimension, dimension)
+        if (
+            dimension in DIMENSIONS
+            and dimension != "unknown"
+            and dimension not in dimensions
+        ):
+            dimensions.append(dimension)
+    return dimensions[:12]
+
+
 def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]:
     statement = _clip(raw.get("statement"), 900)
     structured_context = _bounded_metadata_summary(raw)
@@ -5842,6 +5855,24 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         and not raw.get("edge_to")
     )
     attribution_gap = has_attribution_gap(statement)
+    changed_dimensions = _normalized_dimensions(
+        evidence_value("changed_dimensions")
+    )
+    held_constant_dimensions = _normalized_dimensions(
+        evidence_value("held_constant_dimensions")
+    )
+    expected_if_true = _clip(evidence_value("expected_if_true"), 500)
+    expected_if_false = _clip(evidence_value("expected_if_false"), 500)
+    declared_contrastive_shape = bool(
+        kind == "experiment"
+        and changed_dimensions
+        and held_constant_dimensions
+        and set(changed_dimensions).isdisjoint(held_constant_dimensions)
+        and expected_if_true
+        and expected_if_false
+    )
+    if not declared_contrastive_shape:
+        discriminating = False
     causal_role = str(raw.get("causal_role") or "").strip().lower()
     if causal_role not in {"support", "contradiction", "context"}:
         causal_role = infer_causal_role(
@@ -5854,6 +5885,19 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         )
     if lifecycle == "planned_measurement":
         causal_role = "context"
+    if provenance.startswith("diagnostic_probe:"):
+        causal_role = "context"
+        discriminating = False
+        intervention_scope = "none"
+        if dimension != "unknown":
+            dimension_origin = "inferred"
+    if (
+        kind in {"observation", "artifact", "metric"}
+        and dimension_origin == "inferred"
+        and causal_role == "support"
+    ):
+        causal_role = "context"
+        discriminating = False
     retained_comparison = str(raw.get("retained_comparison") or "").strip().lower()
     if retained_comparison not in {"none", "stable", "changed", "incomparable"}:
         retained_comparison = _retained_comparison_relation(
@@ -5910,6 +5954,10 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         "discriminating": discriminating,
         "causal_role": causal_role,
         "attribution_gap": attribution_gap,
+        "changed_dimensions": changed_dimensions,
+        "held_constant_dimensions": held_constant_dimensions,
+        "expected_if_true": expected_if_true,
+        "expected_if_false": expected_if_false,
         "comparison_key": _clip(evidence_value("comparison_key"), 160),
         "code_revision": _clip(evidence_value("code_revision"), 100),
         "input_fingerprint": _clip(evidence_value("input_fingerprint"), 160),
@@ -6628,6 +6676,117 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
     return dict(parsed) if isinstance(parsed, Mapping) else None
 
 
+_RAW_PROBE_FIELDS = frozenset(
+    {
+        "probe_id",
+        "kind",
+        "paths",
+        "path",
+        "query",
+        "selector",
+        "table",
+        "timestamp_column",
+        "group_by",
+        "aggregate",
+        "aggregate_column",
+        "filters",
+    }
+)
+
+
+def validate_raw_packet_schema(raw: Mapping[str, Any]) -> list[str]:
+    """Validate the parsed model envelope before normalization drops fields."""
+    errors: list[str] = []
+    if not isinstance(raw, Mapping):
+        return ["Diagnostic packet must be a JSON object."]
+
+    misplaced_probe_fields = sorted(_RAW_PROBE_FIELDS.intersection(raw))
+    if misplaced_probe_fields:
+        errors.append(
+            "Standalone diagnostic probes are not packets; put the probe inside "
+            "experiments[].probe."
+        )
+
+    hypotheses = raw.get("hypotheses")
+    if not isinstance(hypotheses, list):
+        errors.append("hypotheses must be a JSON array.")
+    elif not hypotheses:
+        errors.append("hypotheses must contain at least one hypothesis object.")
+    else:
+        for index, item in enumerate(hypotheses):
+            label = f"hypotheses[{index}]"
+            if not isinstance(item, Mapping):
+                errors.append(f"{label} must be a JSON object.")
+                continue
+            for field in (
+                "support_evidence_ids",
+                "contradict_evidence_ids",
+            ):
+                if field in item and not isinstance(item.get(field), list):
+                    errors.append(f"{label}.{field} must be a JSON array.")
+            for field in ("hypothesis_id", "claim", "dimension", "falsification"):
+                if field in item and not isinstance(item.get(field), str):
+                    errors.append(f"{label}.{field} must be a string.")
+
+    experiments = raw.get("experiments", [])
+    if not isinstance(experiments, list):
+        errors.append("experiments must be a JSON array.")
+    else:
+        for index, item in enumerate(experiments):
+            label = f"experiments[{index}]"
+            if not isinstance(item, Mapping):
+                errors.append(f"{label} must be a JSON object.")
+                continue
+            misplaced = sorted(_RAW_PROBE_FIELDS.intersection(item))
+            if misplaced:
+                errors.append(
+                    f"{label} is a standalone probe; move probe fields under "
+                    f"{label}.probe."
+                )
+            for field in (
+                "hypothesis_ids",
+                "changed_dimensions",
+                "held_constant_dimensions",
+                "evidence_required",
+                "result_evidence_ids",
+            ):
+                if field in item and not isinstance(item.get(field), list):
+                    errors.append(f"{label}.{field} must be a JSON array.")
+            for field in (
+                "experiment_id",
+                "expected_if_true",
+                "expected_if_false",
+                "safety",
+                "status",
+            ):
+                if field in item and not isinstance(item.get(field), str):
+                    errors.append(f"{label}.{field} must be a string.")
+            if "auto_execute" in item and not isinstance(
+                item.get("auto_execute"), bool
+            ):
+                errors.append(f"{label}.auto_execute must be a boolean.")
+            if "probe" in item and not isinstance(item.get("probe"), Mapping):
+                errors.append(f"{label}.probe must be a JSON object.")
+            probe = item.get("probe")
+            if isinstance(probe, Mapping):
+                for field in ("probe_id", "kind"):
+                    if field in probe and not isinstance(probe.get(field), str):
+                        errors.append(f"{label}.probe.{field} must be a string.")
+
+    conclusion = raw.get("conclusion")
+    if not isinstance(conclusion, Mapping):
+        errors.append("conclusion must be a JSON object.")
+    else:
+        for field in ("hypothesis_id", "status", "reason"):
+            if field in conclusion and not isinstance(conclusion.get(field), str):
+                errors.append(f"conclusion.{field} must be a string.")
+        if "evidence_ids" in conclusion and not isinstance(
+            conclusion.get("evidence_ids"), list
+        ):
+            errors.append("conclusion.evidence_ids must be a JSON array.")
+    return sorted(dict.fromkeys(errors))
+
+
 def _normalize_hypothesis(raw: Mapping[str, Any], index: int) -> dict[str, Any]:
     dimension = str(raw.get("dimension") or "unknown").strip().lower()
     dimension = DIMENSION_ALIASES.get(dimension, dimension)
@@ -6836,13 +6995,25 @@ def _record_has_structured_break(record: Mapping[str, Any]) -> bool:
 
 
 def _is_contrastive_experiment(record: Mapping[str, Any]) -> bool:
+    changed_dimensions = set(
+        _normalized_dimensions(record.get("changed_dimensions"))
+    )
+    held_constant_dimensions = set(
+        _normalized_dimensions(record.get("held_constant_dimensions"))
+    )
+    owner_dimension = _evidence_owner_dimension(record)
     return bool(
         str(record.get("kind") or "") == "experiment"
         and str(record.get("evidence_lifecycle") or "observed_result")
         == "observed_result"
         and str(record.get("intervention_scope") or "none")
         in {"component", "boundary"}
-        and _evidence_owner_dimension(record) != "unknown"
+        and changed_dimensions
+        and held_constant_dimensions
+        and changed_dimensions.isdisjoint(held_constant_dimensions)
+        and owner_dimension in changed_dimensions
+        and str(record.get("expected_if_true") or "").strip()
+        and str(record.get("expected_if_false") or "").strip()
         and bool(record.get("discriminating"))
         and str(record.get("causal_role") or "context") == "support"
         and not bool(record.get("attribution_gap"))
@@ -6863,8 +7034,6 @@ def _is_attribution_resolving_evidence(record: Mapping[str, Any]) -> bool:
         return False
     if str(record.get("evidence_lifecycle") or "observed_result") != "observed_result":
         return False
-    if str(record.get("provenance") or "").startswith("diagnostic_probe:"):
-        return True
     if str(record.get("kind") or "") != "experiment":
         return False
     if _is_coarse_reset_experiment(record) or str(
@@ -6897,14 +7066,13 @@ def _is_attribution_resolving_evidence(record: Mapping[str, Any]) -> bool:
         )
     )
     return bool(
-        "changed_factor=" in context
-        or explicit_single_change
-        or (
-            held_constants
-            and any(marker in lower for marker in _CAUSAL_INTERVENTION_MARKERS)
+        _is_contrastive_experiment(record)
+        and (
+            "changed_factor=" in context
+            or explicit_single_change
+            or held_constants
+            or _record_has_structured_break(record)
         )
-        or _record_has_structured_break(record)
-        and bool(record.get("correlation_fingerprints"))
     )
 
 
@@ -6959,10 +7127,7 @@ def _is_qualified_causal_record(record: Mapping[str, Any]) -> bool:
         == "observed_result"
         and not bool(record.get("attribution_gap"))
         and (
-            bool(record.get("discriminating"))
-            or str(record.get("provenance") or "").startswith(
-                "diagnostic_probe:"
-            )
+            _is_contrastive_experiment(record)
             or _record_has_structured_break(record)
             or _has_direct_causal_artifact(record)
         )
@@ -6972,16 +7137,11 @@ def _is_qualified_causal_record(record: Mapping[str, Any]) -> bool:
 def _causal_sufficiency(
     records: Sequence[Mapping[str, Any]],
     *,
-    typed_probe: bool,
     earliest_break_support: bool,
     provenance_break_support: bool,
-    completed_result_ids: set[str] | None = None,
 ) -> str:
-    completed = completed_result_ids or set()
     if (
-        typed_probe
-        or any(_is_contrastive_experiment(record) for record in records)
-        or any(str(record.get("evidence_id") or "") in completed for record in records)
+        any(_is_contrastive_experiment(record) for record in records)
     ):
         return "isolated"
     if earliest_break_support or provenance_break_support:
@@ -7075,23 +7235,14 @@ def evidence_gated_report_revision(
     }
 
 
-def _experiment_result_ids(packet: Mapping[str, Any]) -> set[str]:
-    return {
-        str(evidence_id)
-        for experiment in packet.get("experiments") or []
-        if isinstance(experiment, Mapping) and experiment.get("status") == "completed"
-        for evidence_id in experiment.get("result_evidence_ids") or []
-    }
-
-
 def _typed_probe_fallback_hypotheses(
     case: Mapping[str, Any],
     hypotheses: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Recover strongly grounded causal families omitted by a small local model.
 
-    Typed probes, contrastive experiments, and explicit structured breaks may
-    create a bounded fallback. Ordinary observations and symptom volume cannot.
+    Contrastive experiments and explicit structured breaks may create a
+    bounded fallback. Ordinary probes, observations, and symptom volume cannot.
     """
     existing_support_by_dimension: dict[str, set[str]] = defaultdict(set)
     for item in hypotheses:
@@ -7111,12 +7262,10 @@ def _typed_probe_fallback_hypotheses(
         if not isinstance(record, Mapping):
             continue
         dimension = _evidence_owner_dimension(record)
-        provenance = str(record.get("provenance") or "")
         expected_edge_state = str(record.get("expected_edge_state") or "")
         actual_edge_state = str(record.get("actual_edge_state") or "")
         strong_causal_record = bool(
-            provenance.startswith("diagnostic_probe:")
-            or _is_contrastive_experiment(record)
+            _is_contrastive_experiment(record)
             or (
                 expected_edge_state
                 and actual_edge_state
@@ -7128,7 +7277,7 @@ def _typed_probe_fallback_hypotheses(
             dimension not in DIMENSIONS
             or dimension == "unknown"
             or not strong_causal_record
-            or not bool(record.get("discriminating"))
+            or not _is_qualified_causal_record(record)
             or _clamp_reliability(record.get("reliability")) < 0.9
             or str(record.get("causal_role") or "context") != "support"
             or bool(record.get("attribution_gap"))
@@ -7150,10 +7299,7 @@ def _typed_probe_fallback_hypotheses(
         isolation_grade_ids = {
             evidence_id
             for evidence_id in evidence_ids
-            if str(
-                (strong_records_by_id.get(evidence_id) or {}).get("provenance") or ""
-            ).startswith("diagnostic_probe:")
-            or _is_contrastive_experiment(
+            if _is_contrastive_experiment(
                 strong_records_by_id.get(evidence_id) or {}
             )
             or (
@@ -7371,7 +7517,6 @@ def evaluate_packet(
     packet = normalize_packet(raw_packet)
     errors = _validate_packet(case, packet)
     evidence = {str(item.get("evidence_id")): item for item in case["observations"]}
-    completed_result_ids = _experiment_result_ids(packet)
     drift = detect_baseline_drift(case["observations"])
     problem_statement = str(case.get("problem_statement") or "")
     problem_dimension = infer_dimension(problem_statement)
@@ -7529,8 +7674,7 @@ def evaluate_packet(
         confirmatory_weight = _confirmatory_weight(causal_support_records)
         contradict_weight = _independent_weight(contradict_records)
         discriminating = any(
-            bool(record.get("discriminating"))
-            or str(record.get("evidence_id")) in completed_result_ids
+            _is_contrastive_experiment(record)
             for record in causal_support_records
         )
         direct_artifact_records = [
@@ -7566,18 +7710,15 @@ def evaluate_packet(
         )
         causal_sufficiency = _causal_sufficiency(
             causal_support_records,
-            typed_probe=typed_probe_evidence,
             earliest_break_support=earliest_break_graph_qualified,
             provenance_break_support=provenance_break_support,
-            completed_result_ids=completed_result_ids,
         )
         coarse_reset_support = any(
             _is_coarse_reset_experiment(record)
             for record in causal_support_records
         )
         attribution_resolving_support = bool(
-            typed_probe_evidence
-            or earliest_break_graph_qualified
+            earliest_break_graph_qualified
             or provenance_break_support
             or any(
                 _is_attribution_resolving_evidence(record)
@@ -8248,6 +8389,10 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "discriminating",
         "causal_role",
         "attribution_gap",
+        "changed_dimensions",
+        "held_constant_dimensions",
+        "expected_if_true",
+        "expected_if_false",
         "comparison_key",
         "code_revision",
         "input_fingerprint",
@@ -8304,7 +8449,11 @@ def _packet_shape() -> str:
     return (
         '{"hypotheses":[{"hypothesis_id":"h1","claim":"<=12 words","dimension":"code|data|clock|state|config|dependency|runtime|test_harness|unknown",'
         '"support_evidence_ids":["e1"],"contradict_evidence_ids":[],"falsification":"<=12 words"}],'
-        '"experiments":[],'
+        '"experiments":[{"experiment_id":"x1","hypothesis_ids":["h1"],'
+        '"changed_dimensions":["clock"],"held_constant_dimensions":["code","data"],'
+        '"expected_if_true":"<=12 words","expected_if_false":"<=12 words",'
+        '"safety":"read_only","auto_execute":true,"probe":{"probe_id":"p1","kind":"search",'
+        '"paths":["app"],"query":"fixed string","dimension":"clock"}}],'
         '"conclusion":{"hypothesis_id":"h1","status":"confirmed|provisional|inconclusive|rejected",'
         '"evidence_ids":["e1"],"reason":"<=12 words"}}'
     )
@@ -8375,13 +8524,28 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
 
 def _typed_probe_examples() -> str:
     return (
-        'Examples (choose one exact kind, never copy alternatives): '
-        '{"probe_id":"p-log","kind":"log_search","paths":["logs"],"query":"connection refused",'
-        '"tail_lines":5000,"dimension":"runtime"}; '
-        '{"probe_id":"p-schema","kind":"db_schema","table":"trading_events","dimension":"data"}; '
-        '{"probe_id":"p-count","kind":"db_profile","table":"trading_events",'
-        '"timestamp_column":"created_at","lookback_minutes":60,"group_by":"reason",'
-        '"max_groups":15,"filters":{"status":"pending"},"dimension":"data"}.'
+        'Typed experiment examples (probe stays nested): '
+        '{"experiment_id":"x-log","hypothesis_ids":["h1"],'
+        '"changed_dimensions":["runtime"],"held_constant_dimensions":["code"],'
+        '"expected_if_true":"match","expected_if_false":"no match","safety":"read_only",'
+        '"auto_execute":true,"probe":{"probe_id":"p-log","kind":"log_search",'
+        '"paths":["logs"],"query":"connection refused","dimension":"runtime"}}.'
+    )
+
+
+def _schema_correction_prompt(
+    stage: str,
+    raw_packet: Mapping[str, Any],
+    errors: Sequence[str],
+) -> str:
+    return (
+        f"Your {stage} response parsed as JSON but did not match the diagnostic packet schema. "
+        "Return one corrected full packet as JSON only. Preserve the same claims and evidence ids. "
+        "Do not return a standalone probe; every probe must be nested under an experiment wrapper. "
+        "This is the only schema-correction attempt.\n\n"
+        f"Schema errors:\n{_prompt_json(list(errors)[:8])}\n\n"
+        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\n"
+        f"Malformed packet:\n{_clip(_prompt_json(raw_packet), 3200)}"
     )
 
 
@@ -8389,14 +8553,12 @@ def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
     case = normalize_case(raw_case)
     return (
         "You are the investigator in a local-only diagnostic team. Return JSON only. "
-        "Generate competing hypotheses across different dimensions. Link every claim to supplied evidence ids. "
-        "Reconstruct expected behavior, observed behavior, and the causal timeline before selecting a root cause. "
-        "Separate the earliest causal break from downstream symptoms. Treat every diagnostic lens in the case "
-        "as a question to test, not as an assumed answer. For trading or operational incidents, distinguish the "
-        "strategy/requirements contract, external conditions, broker or persisted state, evidence-pipeline "
-        "coverage, and source-versus-running-revision parity. "
-        "Every hypothesis needs a short falsification string; do not create an experiment object unless a typed "
-        "probe is essential. Same code and input with different outcomes "
+        "Generate competing hypotheses across dimensions. Cite evidence ids. "
+        "Reconstruct expected and observed behavior; separate the earliest causal break from downstream symptoms. "
+        "Treat each diagnostic lens as a question. For incidents, separate requirements, external conditions, "
+        "state, evidence coverage, and source-versus-running-revision parity. "
+        "Every hypothesis needs a short falsification; create an experiment only when a typed probe is essential. "
+        "Same code and input with different outcomes "
         "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation. "
         "When evidence is insufficient, you may set auto_execute=true only for a typed probe from the supplied "
         "catalog. Raw shell commands do not exist. search is fixed-string; targeted_test must name one selector "
@@ -8811,16 +8973,59 @@ def run_local_diagnostic_debate(
         else:
             prompt = judge_prompt(case, packet, report)
         response = model_call(stage, prompt) if model_call is not None else ""
-        parsed = parse_json_object(response)
-        accepted = parsed is not None
+        initial_parsed = parse_json_object(response)
+        initial_json_parsed = initial_parsed is not None
+        initial_raw_schema_errors = (
+            validate_raw_packet_schema(initial_parsed)
+            if initial_parsed is not None
+            else []
+        )
+        initial_raw_schema_valid = bool(
+            initial_json_parsed and not initial_raw_schema_errors
+        )
+        parsed = initial_parsed
+        raw_schema_errors = list(initial_raw_schema_errors)
+        correction_response = ""
+        correction_json_parsed: bool | None = None
+        correction_raw_schema_valid: bool | None = None
+        schema_correction_attempted = bool(
+            initial_parsed is not None
+            and initial_raw_schema_errors
+            and model_call is not None
+        )
+        if schema_correction_attempted:
+            correction_response = model_call(
+                f"{stage}_schema_correction",
+                _schema_correction_prompt(
+                    stage,
+                    initial_parsed,
+                    initial_raw_schema_errors,
+                ),
+            )
+            corrected = parse_json_object(correction_response)
+            correction_json_parsed = corrected is not None
+            correction_errors = (
+                validate_raw_packet_schema(corrected)
+                if corrected is not None
+                else []
+            )
+            correction_raw_schema_valid = bool(
+                correction_json_parsed and not correction_errors
+            )
+            if corrected is not None:
+                parsed = corrected
+                raw_schema_errors = correction_errors
+        json_parsed = parsed is not None
+        raw_schema_valid = bool(json_parsed and not raw_schema_errors)
+        accepted = raw_schema_valid
         requested_conclusion = dict(
             (normalize_packet(parsed).get("conclusion") or {})
-            if parsed is not None
+            if raw_schema_valid and parsed is not None
             else (packet.get("conclusion") or {})
         )
         preserved_dimensions: list[str] = []
         contract_repairs: list[str] = []
-        if parsed is not None:
+        if raw_schema_valid and parsed is not None:
             repaired, contract_repairs = _repair_candidate_contract(
                 case,
                 parsed,
@@ -8835,8 +9040,10 @@ def run_local_diagnostic_debate(
             candidate = packet
         next_report = evaluate_packet(case, candidate, previous_report=report)
         candidate_errors = list(next_report.get("errors") or [])
-        if parsed is None and response:
+        if not initial_json_parsed and response:
             candidate_errors.insert(0, "Model response was not a usable diagnostic JSON object.")
+        elif raw_schema_errors:
+            candidate_errors = [*raw_schema_errors, *candidate_errors]
         if not next_report["valid"] and accepted:
             accepted = False
             candidate = packet
@@ -8845,6 +9052,16 @@ def run_local_diagnostic_debate(
             {
                 "stage": stage,
                 "accepted": accepted,
+                "json_parsed": json_parsed,
+                "raw_schema_valid": raw_schema_valid,
+                "raw_schema_errors": raw_schema_errors,
+                "initial_json_parsed": initial_json_parsed,
+                "initial_raw_schema_valid": initial_raw_schema_valid,
+                "initial_raw_schema_errors": initial_raw_schema_errors,
+                "schema_correction_attempted": schema_correction_attempted,
+                "schema_correction_json_parsed": correction_json_parsed,
+                "schema_correction_raw_schema_valid": correction_raw_schema_valid,
+                "schema_correction_response_chars": len(correction_response),
                 "response_chars": len(response),
                 "errors": candidate_errors,
                 "contract_repairs": contract_repairs,

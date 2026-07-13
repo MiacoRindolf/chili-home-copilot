@@ -56,7 +56,9 @@ def test_log_inventory_and_search_are_suffix_tail_and_root_bounded(tmp_path):
     assert run["evidence"][0]["discriminating"] is False
     assert run["evidence"][1]["dimension"] == "dependency"
     assert run["evidence"][1]["kind"] == "artifact"
-    assert run["evidence"][1]["discriminating"] is True
+    assert run["evidence"][1]["discriminating"] is False
+    assert run["evidence"][1]["causal_role"] == "context"
+    assert run["evidence"][1]["intervention_scope"] == "none"
 
 
 def test_database_url_resolution_never_falls_back_to_primary(monkeypatch):
@@ -480,7 +482,7 @@ def test_probe_selector_uses_structured_earliest_break_dimension():
     assert "tests_earliest_break" in selected["selection_reasons"]
 
 
-def test_runtime_probe_evidence_can_retract_a_supported_runtime_conclusion(monkeypatch, tmp_path):
+def test_runtime_probe_evidence_cannot_retract_without_contrastive_intervention(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runtime_evidence,
         "execute_db_profile",
@@ -606,4 +608,11 @@ def test_runtime_probe_evidence_can_retract_a_supported_runtime_conclusion(monke
     )
 
     assert result["report"]["conclusion"]["dimension"] == "state"
-    assert result["report"]["retractions"][0]["hypothesis_id"] == "h-runtime"
+    assert result["report"]["conclusion"]["status"] != "confirmed"
+    assert result["report"]["retractions"] == []
+    assert all(
+        evidence["discriminating"] is False
+        and evidence["causal_role"] == "context"
+        and evidence["intervention_scope"] == "none"
+        for evidence in probe_run["evidence"]
+    )

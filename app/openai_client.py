@@ -734,6 +734,7 @@ def _configured_local_code_models() -> set[str]:
         value.strip()
         for value in (
             settings.chili_code_local_model,
+            settings.chili_code_local_reasoning_model,
             settings.chili_code_local_escalation_model,
         )
         if value and value.strip()

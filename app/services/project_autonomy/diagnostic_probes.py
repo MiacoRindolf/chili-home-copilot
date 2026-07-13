@@ -167,6 +167,31 @@ def normalize_probe_spec(raw: Mapping[str, Any] | None, index: int = 0) -> dict[
     }
 
 
+def _experiment_context(raw: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "experiment_id": _clean_probe_id(raw.get("experiment_id"), "")
+        if raw.get("experiment_id")
+        else "",
+        "hypothesis_ids": [
+            _clean_probe_id(value, "")
+            for value in raw.get("hypothesis_ids") or []
+            if str(value).strip()
+        ][:12],
+        "changed_dimensions": [
+            str(value).strip().lower()
+            for value in raw.get("changed_dimensions") or []
+            if str(value).strip()
+        ][:12],
+        "held_constant_dimensions": [
+            str(value).strip().lower()
+            for value in raw.get("held_constant_dimensions") or []
+            if str(value).strip()
+        ][:12],
+        "expected_if_true": _clip(raw.get("expected_if_true"), 500),
+        "expected_if_false": _clip(raw.get("expected_if_false"), 500),
+    }
+
+
 def validate_probe_spec(probe: Mapping[str, Any], safety: str) -> list[str]:
     errors: list[str] = []
     kind = str(probe.get("kind") or "")
@@ -219,7 +244,13 @@ def probes_from_packet(packet: Mapping[str, Any], max_probes: int = MAX_PROBES) 
         if validate_probe_spec(probe, str(experiment.get("safety") or "")):
             continue
         seen.add(probe_id)
-        probes.append({**probe, "safety": str(experiment.get("safety") or "")})
+        probes.append(
+            {
+                **probe,
+                **_experiment_context(experiment),
+                "safety": str(experiment.get("safety") or ""),
+            }
+        )
         if len(probes) >= max(0, min(MAX_PROBES, int(max_probes))):
             break
     return probes
@@ -263,7 +294,13 @@ def merge_probe_sets(
         if fingerprint in fingerprints:
             continue
         fingerprints.add(fingerprint)
-        merged.append({**probe, "safety": safety})
+        merged.append(
+            {
+                **probe,
+                **_experiment_context(raw),
+                "safety": safety,
+            }
+        )
         if len(merged) >= maximum:
             break
     return merged
@@ -975,7 +1012,7 @@ def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
             "dimension": dimension,
             "kind": "artifact",
             "reliability": 0.95,
-            "discriminating": True,
+            "discriminating": False,
         }
     if probe_kind == "db_schema":
         return {
@@ -1008,7 +1045,7 @@ def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
             "dimension": dimension,
             "kind": "artifact",
             "reliability": 0.95,
-            "discriminating": True,
+            "discriminating": False,
         }
     if probe_kind == "repo_state":
         dirty_lines = [
@@ -1020,7 +1057,7 @@ def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
             "dimension": "code" if dirty_lines else "unknown",
             "kind": "artifact" if dirty_lines else "metric",
             "reliability": 0.9 if dirty_lines else 0.6,
-            "discriminating": bool(dirty_lines),
+            "discriminating": False,
         }
     if probe_kind == "git_history":
         authored_lines = [
@@ -1047,7 +1084,7 @@ def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
             "dimension": "code" if has_diff else "unknown",
             "kind": "artifact" if has_diff else "metric",
             "reliability": 0.95 if has_diff else 0.6,
-            "discriminating": has_diff,
+            "discriminating": False,
         }
     if probe_kind == "search":
         has_matches = bool(output.strip()) and "no output" not in lowered
@@ -1055,20 +1092,20 @@ def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
             "dimension": requested_dimension if has_matches else "unknown",
             "kind": "artifact" if has_matches else "metric",
             "reliability": 0.9 if has_matches else 0.6,
-            "discriminating": has_matches,
+            "discriminating": False,
         }
     if probe_kind == "file_excerpt":
         return {
             "dimension": requested_dimension,
             "kind": "artifact",
             "reliability": 0.9,
-            "discriminating": True,
+            "discriminating": False,
         }
     return {
         "dimension": requested_dimension,
-        "kind": "experiment",
+        "kind": "artifact",
         "reliability": 0.95,
-        "discriminating": True,
+        "discriminating": False,
     }
 
 
@@ -1125,7 +1162,13 @@ def execute_safe_probes(
     normalized: list[dict[str, Any]] = []
     for index, raw in enumerate(probes[: max(0, min(MAX_PROBES, int(max_probes)))]):
         probe = normalize_probe_spec(raw, index)
-        normalized.append({**probe, "safety": str(raw.get("safety") or "")})
+        normalized.append(
+            {
+                **probe,
+                **_experiment_context(raw),
+                "safety": str(raw.get("safety") or ""),
+            }
+        )
     for probe in normalized:
         if time.monotonic() - started >= max(1.0, float(time_budget_sec)):
             results.append(
@@ -1150,6 +1193,7 @@ def execute_safe_probes(
         results.append(
             {
                 **result,
+                **_experiment_context(probe),
                 "observed_at": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -1169,14 +1213,25 @@ def execute_safe_probes(
                 ),
                 "dimension": semantics["dimension"],
                 "dimension_origin": (
-                    "explicit" if semantics["dimension"] != "unknown" else "unknown"
+                    "inferred" if semantics["dimension"] != "unknown" else "unknown"
                 ),
                 "kind": semantics["kind"],
+                "causal_role": "context",
+                "intervention_scope": "none",
                 "provenance": f"diagnostic_probe:{result.get('probe_id')}",
                 "independence_key": f"diagnostic_probe:{result.get('probe_id')}",
                 "reliability": semantics["reliability"],
                 "discriminating": semantics["discriminating"],
-                "experiment_id": str(result.get("probe_id") or ""),
+                "experiment_id": str(
+                    result.get("experiment_id") or result.get("probe_id") or ""
+                ),
+                "hypothesis_ids": list(result.get("hypothesis_ids") or []),
+                "changed_dimensions": list(result.get("changed_dimensions") or []),
+                "held_constant_dimensions": list(
+                    result.get("held_constant_dimensions") or []
+                ),
+                "expected_if_true": str(result.get("expected_if_true") or ""),
+                "expected_if_false": str(result.get("expected_if_false") or ""),
                 "observed_at": str(result.get("observed_at") or ""),
                 "sequence": index,
                 "entity_id": str(provenance_metadata.get("service_id") or "")

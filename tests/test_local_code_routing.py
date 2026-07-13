@@ -22,6 +22,7 @@ from app.services.context_brain import llm_gateway
 
 
 LOCAL_MODEL = "qwen2.5-coder:7b"
+LOCAL_REASONING_MODEL = "qwen3:8b"
 LOCAL_ESCALATION_MODEL = "qwen2.5-coder:14b"
 FRONTIER_MODEL = "claude-fable-5"
 
@@ -30,6 +31,11 @@ FRONTIER_MODEL = "claude-fable-5"
 def local_configured(monkeypatch):
     monkeypatch.setattr(settings, "ollama_host", "http://127.0.0.1:11434")
     monkeypatch.setattr(settings, "chili_code_local_model", LOCAL_MODEL)
+    monkeypatch.setattr(
+        settings,
+        "chili_code_local_reasoning_model",
+        LOCAL_REASONING_MODEL,
+    )
     monkeypatch.setattr(
         settings,
         "chili_code_local_escalation_model",
@@ -158,6 +164,30 @@ def test_chat_local_only_allows_configured_local_escalation_model(local_configur
     assert result["model"] == LOCAL_ESCALATION_MODEL
     assert result["premium_calls"] == 0
     assert seen == [LOCAL_ESCALATION_MODEL]
+
+
+def test_chat_local_only_allows_configured_reasoning_model(local_configured):
+    monkeypatch = local_configured
+    seen: list[str] = []
+
+    def fake_call_provider(api_key, base_url, model, messages, prompt, trace_id, **kwargs):
+        seen.append(model)
+        return _reply("bounded local reasoning result", model=model)
+
+    monkeypatch.setattr(openai_client, "_call_provider", fake_call_provider)
+    monkeypatch.setattr(openai_client, "_chat_groq", lambda *a, **k: pytest.fail("groq reached"))
+    monkeypatch.setattr(openai_client, "_chat_openai", lambda *a, **k: pytest.fail("openai reached"))
+    monkeypatch.setattr(openai_client, "_chat_gemini", lambda *a, **k: pytest.fail("gemini reached"))
+
+    result = openai_client.chat(
+        [{"role": "user", "content": "derive the causal repair mechanism"}],
+        model_override=LOCAL_REASONING_MODEL,
+        local_only=True,
+    )
+
+    assert result["model"] == LOCAL_REASONING_MODEL
+    assert result["premium_calls"] == 0
+    assert seen == [LOCAL_REASONING_MODEL]
 
 
 def test_chat_local_only_rejects_unconfigured_model_override(local_configured):

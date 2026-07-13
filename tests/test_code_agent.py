@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.code_brain.agent import (
+    _build_editor_handoff,
     _gather_context,
     _parse_plan_json,
     _snapshots_by_repo,
@@ -80,6 +81,178 @@ class TestParsePlanJson:
     )
     def test_plan_action_classifier_blocks_non_mutating_and_unknown_entries(self, action):
         assert _is_mutating_plan_action(action) is False
+
+
+class TestBuildEditorHandoff:
+    def test_preserves_multi_file_causal_context_and_contracts(self):
+        plan = {
+            "analysis": "The writer commits state before the reader observes it.",
+            "notes": "Keep the public return shape unchanged.",
+            "files": [
+                {
+                    "path": "src/writer.py",
+                    "action": "modify",
+                    "description": "Publish the state only after validation.",
+                },
+                {
+                    "path": "src/reader.py",
+                    "action": "modify",
+                    "description": "Interpret the published state consistently.",
+                },
+            ],
+            "contract_coverage": [
+                {
+                    "contract": "validated state is the only visible state",
+                    "owner_paths": ["src/writer.py"],
+                    "postcondition": "Invalid state is never published.",
+                },
+                {
+                    "contract": "readers preserve the published meaning",
+                    "owner_paths": ["src/reader.py", "src/writer.py"],
+                    "postcondition": "Readers observe the validated representation.",
+                },
+            ],
+        }
+        original_plan = json.loads(json.dumps(plan))
+
+        rendered = _build_editor_handoff(plan)
+        handoff = json.loads(rendered)
+
+        assert rendered == _build_editor_handoff(plan)
+        assert plan == original_plan
+        assert handoff["analysis"] == plan["analysis"]
+        assert handoff["notes"] == plan["notes"]
+        assert [item["responsibility"] for item in handoff["files"]] == [
+            item["description"] for item in plan["files"]
+        ]
+        assert handoff["contract_coverage"] == plan["contract_coverage"]
+
+    def test_emphasizes_target_and_keeps_cross_file_responsibilities(self):
+        plan = {
+            "analysis": "Two owners coordinate one boundary.",
+            "files": [
+                {
+                    "path": "src/caller.py",
+                    "action": "modify",
+                    "description": "Send the canonical value.",
+                },
+                {
+                    "path": "src\\boundary.py",
+                    "action": "modify",
+                    "description": "Validate before accepting the value.",
+                },
+            ],
+            "contract_coverage": [
+                {
+                    "contract": "caller contract",
+                    "owner_paths": ["src/caller.py"],
+                    "postcondition": "The caller emits one canonical form.",
+                },
+                {
+                    "contract": "boundary contract",
+                    "owner_paths": ["src\\boundary.py"],
+                    "postcondition": "The boundary rejects noncanonical input.",
+                },
+            ],
+        }
+
+        handoff = json.loads(
+            _build_editor_handoff(plan, target_path="src/boundary.py")
+        )
+
+        assert handoff["target_path"] == "src/boundary.py"
+        assert [item["path"] for item in handoff["files"]] == [
+            "src/boundary.py",
+            "src/caller.py",
+        ]
+        assert handoff["contract_coverage"][0]["contract"] == "boundary contract"
+        assert {item["path"] for item in handoff["files"]} == {
+            "src/boundary.py",
+            "src/caller.py",
+        }
+
+    def test_ignores_malformed_plan_values(self):
+        plan = {
+            "analysis": {"not": "text"},
+            "notes": 17,
+            "files": [
+                None,
+                {"path": 3, "description": "wrong path type"},
+                {"path": "src/missing.py", "description": None},
+                {"path": "src/valid.py", "responsibility": "Keep valid input."},
+            ],
+            "contract_coverage": [
+                "not a contract",
+                {
+                    "contract": "missing owners",
+                    "owner_paths": None,
+                    "postcondition": "Ignored.",
+                },
+                {
+                    "contract": "valid contract",
+                    "owner_paths": [None, "src\\valid.py", 9],
+                    "postcondition": "Valid input remains visible.",
+                },
+            ],
+        }
+
+        handoff = json.loads(_build_editor_handoff(plan))
+
+        assert "analysis" not in handoff
+        assert "notes" not in handoff
+        assert handoff["files"] == [
+            {"path": "src/valid.py", "responsibility": "Keep valid input."}
+        ]
+        assert handoff["contract_coverage"] == [
+            {
+                "contract": "valid contract",
+                "owner_paths": ["src/valid.py"],
+                "postcondition": "Valid input remains visible.",
+            }
+        ]
+
+    def test_output_is_bounded_without_dropping_target_contract_first(self):
+        plan = {
+            "analysis": "causal detail " * 100,
+            "notes": "secondary note " * 100,
+            "files": [
+                {
+                    "path": "src/other.py",
+                    "action": "modify",
+                    "description": "other responsibility " * 80,
+                },
+                {
+                    "path": "src/target.py",
+                    "action": "modify",
+                    "description": "target responsibility",
+                },
+            ],
+            "contract_coverage": [
+                {
+                    "contract": "non-target contract",
+                    "owner_paths": ["src/other.py"],
+                    "postcondition": "other postcondition " * 80,
+                },
+                {
+                    "contract": "target contract",
+                    "owner_paths": ["src/target.py"],
+                    "postcondition": "target postcondition",
+                },
+            ],
+        }
+
+        rendered = _build_editor_handoff(
+            plan,
+            target_path="src/target.py",
+            max_chars=420,
+        )
+        handoff = json.loads(rendered)
+
+        assert len(rendered) <= 420
+        assert handoff["contract_coverage"][0]["contract"] == "target contract"
+        assert handoff["contract_coverage"][0]["owner_paths"] == [
+            "src/target.py"
+        ]
 
 
 class TestValidateDiff:

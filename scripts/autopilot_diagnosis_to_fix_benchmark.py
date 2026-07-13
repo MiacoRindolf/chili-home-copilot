@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -606,6 +607,8 @@ def _validation_failure_context(
     public_tests: Mapping[str, Any],
     feedback_tests: Mapping[str, Any],
 ) -> str:
+    public_deltas = validation_contracts.failure_delta_evidence(public_tests)
+    feedback_deltas = validation_contracts.failure_delta_evidence(feedback_tests)
     raw_outputs = [
         str(public_tests.get("output") or ""),
         str(feedback_tests.get("output") or ""),
@@ -666,6 +669,18 @@ def _validation_failure_context(
             "Preserve public function signatures used by existing callers unless every approved caller is updated."
         )
     sections: list[str] = []
+    delta_payload = {
+        "public": public_deltas,
+        "repair_feedback": feedback_deltas,
+    }
+    if any(
+        payload.get("failed_ids") or payload.get("facts")
+        for payload in delta_payload.values()
+    ):
+        sections.append(
+            "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n"
+            + json.dumps(delta_payload, indent=2, sort_keys=True)
+        )
     if contracts or exception_facts:
         summary = [
             "NON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):",
@@ -1515,6 +1530,7 @@ def _plan_prompt(
     context: str,
     report: Mapping[str, Any],
     max_files: int,
+    public_context: str = "",
 ) -> str:
     invariants = diagnostic_reasoning.derive_contract_invariants(prompt)
     return (
@@ -1529,6 +1545,7 @@ def _plan_prompt(
         f"Dimension rubric:\n{json.dumps(REPAIR_DIMENSION_RUBRIC, indent=2)}\n\n"
         f"Deterministic mechanism invariants:\n{json.dumps(invariants, indent=2)}\n\n"
         f"Evidence decision:\n{diagnostic_reasoning.report_context(report)}\n\n"
+        f"Read-only public contracts that must remain green:\n{public_context or '(unavailable)'}\n\n"
         f"Allowed candidate paths: {json.dumps(candidates)}\n\n"
         f"Candidate contents:\n{context}"
     )
@@ -1568,6 +1585,7 @@ def _markdown(results: Mapping[str, Any]) -> str:
         "",
         f"- Run: {results['created_at']}",
         f"- Local model: `{results['model']}`",
+        f"- Local reasoning model: `{results.get('reasoning_model') or results['model']}`",
         f"- Local escalation model: `{results.get('escalation_model') or 'disabled'}`",
         f"- Reference family: `{results['reference_family']}`",
         f"- Overall score: **{results['overall_score']:.1f}/100**",
@@ -1630,9 +1648,43 @@ def _local_call(
     num_predict: int,
     json_mode: bool,
 ) -> str:
+    requested_timeout = float(timeout)
     deadline = getattr(calls, "deadline", None)
+    remaining_before: float | None = None
+    deadline_clamped = False
+    model_budget = getattr(calls, "model_time_budget", None)
+    model_time_used = float(getattr(calls, "model_time_used", 0.0) or 0.0)
+    if isinstance(model_budget, (int, float)):
+        model_remaining = float(model_budget) - model_time_used
+        remaining_before = model_remaining
+        if model_remaining <= 0:
+            calls.append(
+                {
+                    "stage": stage,
+                    "model": model,
+                    "ok": False,
+                    "latency_ms": 0,
+                    "wall_ms": 0,
+                    "tokens_out": 0,
+                    "error": "case_model_time_budget_exhausted",
+                    "response": "",
+                    "budget_exhausted": True,
+                    "error_kind": "case_budget_exhausted",
+                    "prompt_chars": sum(
+                        len(str(message.get("content") or "")) for message in messages
+                    ),
+                }
+            )
+            return ""
+        timeout = min(timeout, model_remaining)
+        deadline_clamped = timeout < requested_timeout
     if isinstance(deadline, (int, float)):
         remaining = float(deadline) - time.monotonic()
+        remaining_before = (
+            remaining
+            if remaining_before is None
+            else min(remaining_before, remaining)
+        )
         if remaining <= 0:
             calls.append(
                 {
@@ -1645,10 +1697,15 @@ def _local_call(
                     "error": "case_model_time_budget_exhausted",
                     "response": "",
                     "budget_exhausted": True,
+                    "error_kind": "case_budget_exhausted",
+                    "prompt_chars": sum(
+                        len(str(message.get("content") or "")) for message in messages
+                    ),
                 }
             )
             return ""
         timeout = min(timeout, remaining)
+        deadline_clamped = deadline_clamped or timeout < requested_timeout
     started = time.monotonic()
     options: dict[str, Any] = {
         "num_predict": num_predict,
@@ -1663,30 +1720,73 @@ def _local_call(
         temperature=0.1,
         timeout_sec=timeout,
         options=options,
+        think=bool(json_mode and str(model).lower().startswith("qwen3")),
     )
+    raw_value = getattr(result, "raw", None)
+    raw = raw_value if isinstance(raw_value, Mapping) else {}
+    error_text = str(result.error or "")
+    timed_out = "timed out" in error_text.lower() or "timeouterror" in error_text.lower()
+    error_kind = (
+        ""
+        if result.ok
+        else "case_budget_timeout"
+        if timed_out and deadline_clamped
+        else "call_timeout"
+        if timed_out
+        else "transport_error"
+    )
+    call_wall_seconds = time.monotonic() - started
+    if hasattr(calls, "model_time_used"):
+        calls.model_time_used = model_time_used + call_wall_seconds
     calls.append(
         {
             "stage": stage,
             "model": model,
             "ok": result.ok,
             "latency_ms": result.latency_ms,
-            "wall_ms": int((time.monotonic() - started) * 1000),
+            "wall_ms": int(call_wall_seconds * 1000),
             "tokens_out": result.tokens_out,
             "error": result.error,
+            "error_kind": error_kind,
             "response": (result.text or "")[:6000],
+            "prompt_chars": sum(
+                len(str(message.get("content") or "")) for message in messages
+            ),
+            "prompt_eval_count": int(raw.get("prompt_eval_count") or 0),
+            "load_duration_ns": int(raw.get("load_duration") or 0),
+            "prompt_eval_duration_ns": int(raw.get("prompt_eval_duration") or 0),
+            "eval_duration_ns": int(raw.get("eval_duration") or 0),
+            "requested_timeout_sec": requested_timeout,
+            "effective_timeout_sec": float(timeout),
+            "case_budget_remaining_before_sec": remaining_before,
+            "case_deadline_clamped": deadline_clamped,
         }
     )
     return result.text if result.ok else ""
 
 
 class _ModelCallLedger(list[dict[str, Any]]):
-    def __init__(self, *, deadline: float | None = None):
+    def __init__(
+        self,
+        *,
+        deadline: float | None = None,
+        model_time_budget: float | None = None,
+    ):
         super().__init__()
         self.deadline = deadline
+        self.model_time_budget = model_time_budget
+        self.model_time_used = 0.0
 
     @property
     def budget_exhausted(self) -> bool:
-        return bool(self.deadline is not None and time.monotonic() >= self.deadline)
+        deadline_exhausted = bool(
+            self.deadline is not None and time.monotonic() >= self.deadline
+        )
+        model_budget_exhausted = bool(
+            self.model_time_budget is not None
+            and self.model_time_used >= self.model_time_budget
+        )
+        return deadline_exhausted or model_budget_exhausted
 
 
 def _diagnostic_json_call(
@@ -1755,6 +1855,9 @@ def _diagnose(
     model: str,
     calls: list[dict[str, Any]],
     timeout: float,
+    *,
+    public_context: str = "",
+    public_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     prompt = str(case.get("prompt") or "")
     candidates = [str(value) for value in case.get("candidate_paths") or []]
@@ -1764,6 +1867,36 @@ def _diagnose(
         repo_path=repo,
         candidate_paths=candidates,
     )
+    if public_context or public_result:
+        observations = list(diagnostic_case.get("observations") or [])
+        if public_result:
+            observations.append(
+                {
+                    "evidence_id": "baseline-public-contracts",
+                    "statement": (
+                        "The declared public contract baseline passed before any source edit."
+                        if public_result.get("passed")
+                        else "The declared public contract baseline failed before any source edit."
+                    ),
+                    "dimension": "test_harness",
+                    "dimension_origin": "measured",
+                    "kind": "test_result",
+                    "provenance": "isolated_public_baseline",
+                    "reliability": 0.98,
+                    "discriminating": False,
+                    "causal_role": "context",
+                }
+            )
+        diagnostic_case = diagnostic_reasoning.normalize_case(
+            {
+                **diagnostic_case,
+                "observations": observations,
+                "constraints": {
+                    **(diagnostic_case.get("constraints") or {}),
+                    "public_test_contracts": public_context[:12_000],
+                },
+            }
+        )
 
     def judge(stage: str, stage_prompt: str) -> str:
         return _diagnostic_json_call(
@@ -1788,6 +1921,19 @@ def _diagnose(
     probe_run = diagnostic_probes.execute_safe_probes(repo, probes, max_probes=3, time_budget_sec=60)
     if not probe_run["evidence"]:
         return {**initial, "probe_run": probe_run, "case": diagnostic_case}
+    if not any(
+        bool(item.get("discriminating"))
+        for item in probe_run.get("evidence") or []
+        if isinstance(item, Mapping)
+    ):
+        return {
+            **initial,
+            "probe_run": {
+                **probe_run,
+                "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+            },
+            "case": diagnostic_case,
+        }
     enriched = diagnostic_reasoning.normalize_case(
         {
             **diagnostic_case,
@@ -2119,6 +2265,59 @@ def _compiler_diagnostic_guidance(relative: str, diagnostics: str) -> str:
     return "\n".join(guidance)
 
 
+def _salvage_progressing_edit_subset(
+    repo: Path,
+    case: Mapping[str, Any],
+    originals: Mapping[str, str],
+    attempted: Mapping[str, str],
+    baseline_public: Mapping[str, Any] | None,
+    baseline_feedback: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep only a syntax-clean subset that proves contract progress."""
+    if baseline_public is None or baseline_feedback is None:
+        return {}
+    changed = [
+        relative
+        for relative in originals
+        if str(attempted.get(relative) or "").rstrip()
+        != str(originals.get(relative) or "").rstrip()
+    ]
+    if len(changed) < 2:
+        return {}
+
+    def restore() -> None:
+        for relative, content in originals.items():
+            (repo / relative).write_text(content, encoding="utf-8")
+
+    for subset_size in range(len(changed) - 1, 0, -1):
+        for subset_values in itertools.combinations(changed, subset_size):
+            subset = list(subset_values)
+            restore()
+            for relative in subset:
+                (repo / relative).write_text(
+                    str(attempted[relative]),
+                    encoding="utf-8",
+                )
+            syntax = validator_runner.run_ast_syntax(repo, changed_files=subset)
+            if syntax.exit_code != 0 or syntax.timed_out:
+                continue
+            public = _run_case_tests(repo, case, public_only=True)
+            feedback = _run_case_tests(repo, case, public_only=False)
+            if _validation_advanced(
+                baseline_public,
+                baseline_feedback,
+                public,
+                feedback,
+            ):
+                return {
+                    "applied_files": subset,
+                    "public_tests": public,
+                    "feedback_tests": feedback,
+                }
+    restore()
+    return {}
+
+
 def _apply_local_edit_bundle(
     repo: Path,
     paths: Sequence[str],
@@ -2344,6 +2543,11 @@ def _apply_planned_edits(
     }
     optional_baseline_public: dict[str, Any] | None = None
     optional_baseline_feedback: dict[str, Any] | None = None
+    repair_baseline_public: dict[str, Any] | None = None
+    repair_baseline_feedback: dict[str, Any] | None = None
+    if failure_output and (repo / "tests").is_dir():
+        repair_baseline_public = _run_case_tests(repo, case, public_only=True)
+        repair_baseline_feedback = _run_case_tests(repo, case, public_only=False)
 
     def current_attempted_diff() -> str:
         return _snapshot_diff(
@@ -2383,9 +2587,7 @@ def _apply_planned_edits(
     satisfied: list[str] = []
     skipped_optional: list[str] = []
     optional_rejected_diffs: list[dict[str, str]] = []
-    use_coordinated_bundle = bool(
-        len(paths) > 1 and not optional_paths and not allow_model_recovery
-    )
+    use_coordinated_bundle = bool(len(paths) > 1 and not optional_paths)
 
     def record_optional_rejection(
         rel: str,
@@ -2409,6 +2611,8 @@ def _apply_planned_edits(
     if use_coordinated_bundle:
         bundle_change = (
             f"Overall request:\n{case.get('prompt')}\n\n"
+            "Approved causal plan and cross-file contracts:\n"
+            f"{code_agent._build_editor_handoff(plan)}\n\n"
             f"Evidence-gated diagnosis:\n{diagnostic_reasoning.report_context(report)}\n"
             f"Strongest causal evidence:\n{evidence_context or '(none)'}\n\n"
             f"Deterministic mechanism invariants:\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
@@ -2426,6 +2630,7 @@ def _apply_planned_edits(
             calls,
             timeout,
             stage=f"{stage_prefix}_bundle",
+            allow_adapter_recovery=allow_model_recovery,
         )
         warnings.extend(str(value) for value in bundle.get("warnings") or [])
         applied.extend(str(value) for value in bundle.get("applied_files") or [])
@@ -2494,6 +2699,8 @@ def _apply_planned_edits(
         )
         change = (
             f"{description}\n\n"
+            "Approved causal plan and cross-file contracts:\n"
+            f"{code_agent._build_editor_handoff(plan, target_path=rel)}\n\n"
             f"Overall request:\n{case.get('prompt')}\n\n"
             f"Evidence-gated diagnosis:\n{diagnostic_reasoning.report_context(report)}\n"
             f"Strongest causal evidence:\n{evidence_context or '(none)'}\n\n"
@@ -2678,6 +2885,37 @@ def _apply_planned_edits(
                     )
                 else:
                     attempted_diff = current_attempted_diff()
+                    attempted_contents = {
+                        relative: (repo / relative).read_text(
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                        for relative in originals
+                    }
+                    salvaged = _salvage_progressing_edit_subset(
+                        repo,
+                        case,
+                        originals,
+                        attempted_contents,
+                        repair_baseline_public,
+                        repair_baseline_feedback,
+                    )
+                    if salvaged:
+                        salvaged_files = list(salvaged["applied_files"])
+                        return {
+                            "patch_applied": True,
+                            "selected_files": paths,
+                            "applied_files": salvaged_files,
+                            "satisfied_files": satisfied,
+                            "skipped_optional_files": skipped_optional,
+                            "optional_rejected_diffs": optional_rejected_diffs,
+                            "attempted_diff": attempted_diff,
+                            "warnings": [
+                                *warnings,
+                                "Retained a syntax-clean edit subset after isolated validation proved contract progress.",
+                            ],
+                            "salvaged_from_failed_group": True,
+                        }
                     for original_rel, content in originals.items():
                         (repo / original_rel).write_text(content, encoding="utf-8")
                     final_detail = "\n".join(
@@ -2704,6 +2942,37 @@ def _apply_planned_edits(
                     }
             if syntax.exit_code != 0 or syntax.timed_out:
                 attempted_diff = current_attempted_diff()
+                attempted_contents = {
+                    relative: (repo / relative).read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    for relative in originals
+                }
+                salvaged = _salvage_progressing_edit_subset(
+                    repo,
+                    case,
+                    originals,
+                    attempted_contents,
+                    repair_baseline_public,
+                    repair_baseline_feedback,
+                )
+                if salvaged:
+                    salvaged_files = list(salvaged["applied_files"])
+                    return {
+                        "patch_applied": True,
+                        "selected_files": paths,
+                        "applied_files": salvaged_files,
+                        "satisfied_files": satisfied,
+                        "skipped_optional_files": skipped_optional,
+                        "optional_rejected_diffs": optional_rejected_diffs,
+                        "attempted_diff": attempted_diff,
+                        "warnings": [
+                            *warnings,
+                            "Retained a syntax-clean edit subset after isolated validation proved contract progress.",
+                        ],
+                        "salvaged_from_failed_group": True,
+                    }
                 for original_rel, content in originals.items():
                     (repo / original_rel).write_text(content, encoding="utf-8")
                 return {
@@ -2824,6 +3093,9 @@ def _generate_patch(
     model: str,
     calls: list[dict[str, Any]],
     timeout: float,
+    *,
+    planning_model: str = "",
+    public_context: str = "",
 ) -> dict[str, Any]:
     candidates = [
         rel
@@ -2837,7 +3109,7 @@ def _generate_patch(
     report = diagnosis.get("report") if isinstance(diagnosis.get("report"), Mapping) else {}
     max_files = _case_max_files(case)
     plan_text = _local_call(
-        model,
+        planning_model or model,
         [
             {"role": "system", "content": "You are a senior coding architect. Return compact JSON only."},
             {
@@ -2848,6 +3120,7 @@ def _generate_patch(
                     context,
                     report,
                     max_files,
+                    public_context,
                 ),
             },
         ],
@@ -2915,6 +3188,7 @@ def _repair_after_failure(
     compact_escalation: bool = False,
     failure_signature: str = "",
     attempted_plan_fingerprints: set[str] | None = None,
+    planning_model: str = "",
 ) -> dict[str, Any]:
     candidates = [
         rel
@@ -2962,7 +3236,7 @@ def _repair_after_failure(
         f"Current candidate contents:\n{context}"
     )
     plan_text = _local_call(
-        model,
+        planning_model or model,
         [
             {"role": "system", "content": "You are CHILI's local test-repair architect. Return JSON only."},
             {"role": "user", "content": repair_prompt},
@@ -3017,13 +3291,10 @@ def _repair_after_failure(
         }
     if attempted_plan_fingerprints is not None:
         attempted_plan_fingerprints.add(attempt_key)
-    skip_repair_review = bool(
-        mechanism_invariants
-        and _repair_plan_has_complete_contract_coverage(
-            plan,
-            candidates,
-            contract_evidence,
-        )
+    skip_repair_review = _repair_plan_has_complete_contract_coverage(
+        plan,
+        candidates,
+        contract_evidence,
     )
     review_prompt = (
         "Return one corrected repair-plan JSON object only. Act as an adversarial validation judge: the draft "
@@ -3064,12 +3335,12 @@ def _repair_after_failure(
             "review_skipped_reason": (
                 "compact local escalation permits one planning decision and no generative review"
                 if compact_escalation
-                else "deterministic invariants and complete stable-contract ownership made another generative review redundant"
+                else "complete stable-contract ownership made another generative review redundant"
             ),
         }
     else:
         reviewed_text = _local_call(
-            model,
+            planning_model or model,
             [
                 {
                     "role": "system",
@@ -3297,7 +3568,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     installed = ollama_client.list_models()
     repair_schedule = _repair_model_schedule(args)
-    required_models = {str(args.model), *repair_schedule}
+    reasoning_model = str(getattr(args, "reasoning_model", "") or "").strip()
+    reasoning_model = reasoning_model or str(args.model)
+    required_models = {str(args.model), reasoning_model, *repair_schedule}
     missing_models = sorted(model for model in required_models if model not in installed)
     if missing_models:
         raise SystemExit(
@@ -3313,13 +3586,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             float(getattr(args, "case_model_time_budget", 690.0) or 690.0),
         )
         calls: list[dict[str, Any]] = _ModelCallLedger(
-            deadline=started + case_model_budget,
+            model_time_budget=case_model_budget,
         )
         with tempfile.TemporaryDirectory(prefix=f"chili-fix-{case['case_id']}-") as temp:
             repo = Path(temp) / "repo"
             _init_repo(repo, case.get("repo_files") or {})
             baseline_snapshot = _candidate_snapshot(repo, case)
-            diagnosis = _diagnose(repo, case, args.model, calls, args.timeout)
+            initial_public = _run_case_tests(repo, case, public_only=True)
+            public_context = _read_only_test_context(
+                repo,
+                initial_public.get("test_files") or [],
+                max_chars=12_000,
+            )
+            diagnosis = _diagnose(
+                repo,
+                case,
+                reasoning_model,
+                calls,
+                args.timeout,
+                public_context=public_context,
+                public_result=initial_public,
+            )
             _initialize_accepted_diagnosis(diagnosis)
             deterministic_contract_repair = _apply_deterministic_contract_repair(
                 repo,
@@ -3338,6 +3625,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     args.model,
                     calls,
                     args.timeout,
+                    planning_model=reasoning_model,
+                    public_context=public_context,
                 )
             )
             initial_plan_dimension = _plan_dimension(patch.get("plan") or {})
@@ -3580,6 +3869,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     compact_escalation=repair_model != str(args.model),
                     failure_signature=before_failure_signature,
                     attempted_plan_fingerprints=attempted_plan_fingerprints,
+                    planning_model=reasoning_model,
                 )
                 repair_attempts.append(repair)
                 repair["model"] = repair_model
@@ -3948,28 +4238,53 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     accepted_diagnostic_stages = sum(
         1 for stage in diagnostic_stages if stage.get("accepted")
     )
+    parsed_diagnostic_stages = sum(
+        1
+        for stage in diagnostic_stages
+        if bool(stage.get("json_parsed", stage.get("accepted")))
+    )
+    schema_valid_diagnostic_stages = sum(
+        1
+        for stage in diagnostic_stages
+        if bool(stage.get("raw_schema_valid", stage.get("accepted")))
+    )
     causally_confirmed_diagnostic_stages = sum(
         1
         for stage in diagnostic_stages
-        if str(((stage.get("report") or {}).get("conclusion") or {}).get("status"))
-        == "confirmed"
+        for conclusion in [
+            stage.get("conclusion")
+            if isinstance(stage.get("conclusion"), Mapping)
+            else ((stage.get("report") or {}).get("conclusion") or {})
+        ]
+        if str(conclusion.get("status")) == "confirmed"
         and str(
-            ((stage.get("report") or {}).get("conclusion") or {}).get(
-                "causal_sufficiency"
-            )
+            conclusion.get("causal_sufficiency")
         )
         in {"graph_linked", "isolated"}
+    )
+    accepted_diagnoses = sum(
+        1
+        for item in case_results
+        if bool((item.get("accepted_diagnosis_conclusion") or {}).get("accepted"))
     )
     causally_accepted_diagnoses = sum(
         1
         for item in case_results
         if bool((item.get("accepted_diagnosis_conclusion") or {}).get("accepted"))
+        and bool((item.get("checks") or {}).get("diagnosis"))
     )
+    all_model_calls = [
+        call
+        for item in case_results
+        for call in item.get("model_calls") or []
+        if isinstance(call, Mapping)
+    ]
     results = {
         "schema": "chili.diagnosis-to-fix-results.v5",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "evaluation_context": evaluation_context,
         "model": args.model,
+        "reasoning_model": reasoning_model,
         "escalation_model": str(getattr(args, "escalation_model", "") or ""),
         "reference_family": manifest.get("reference_family") or "claude-fable-5",
         "overall_score": round(average, 2),
@@ -4000,7 +4315,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if diagnostic_stages
         else 0.0,
         "diagnostic_stage_schema_acceptance_rate": round(
-            100 * accepted_diagnostic_stages / len(diagnostic_stages),
+            100 * schema_valid_diagnostic_stages / len(diagnostic_stages),
+            2,
+        )
+        if diagnostic_stages
+        else 0.0,
+        "diagnostic_stage_json_parse_rate": round(
+            100 * parsed_diagnostic_stages / len(diagnostic_stages),
             2,
         )
         if diagnostic_stages
@@ -4012,6 +4333,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if diagnostic_stages
         else 0.0,
         "causally_accepted_diagnosis_count": causally_accepted_diagnoses,
+        "accepted_diagnosis_count": accepted_diagnoses,
         "causal_diagnosis_acceptance_rate": round(
             100 * causally_accepted_diagnoses / total_cases,
             2,
@@ -4020,6 +4342,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "verdict": _verdict(case_results),
         "evaluation_verdict": evaluation_verdict,
         "premium_calls": 0,
+        "total_model_calls": len(all_model_calls),
+        "model_call_error_count": sum(
+            1 for call in all_model_calls if not bool(call.get("ok"))
+        ),
+        "model_call_transport_error_count": sum(
+            1
+            for call in all_model_calls
+            if str(call.get("error_kind") or "") == "transport_error"
+        ),
         "max_repair_rounds": len(repair_schedule),
         "max_base_repair_rounds": max(
             0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs))
@@ -4050,6 +4381,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixture-root", default=str(DEFAULT_FIXTURE_ROOT))
     parser.add_argument("--model", default="qwen2.5-coder:7b")
+    parser.add_argument("--reasoning-model", default="")
     parser.add_argument("--case", action="append")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--case-model-time-budget", type=float, default=690.0)

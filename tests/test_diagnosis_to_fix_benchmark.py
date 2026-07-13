@@ -6,6 +6,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -230,6 +231,67 @@ def test_local_call_uses_one_total_case_model_deadline(monkeypatch):
     assert invoked is False
     assert calls[-1]["budget_exhausted"] is True
     assert calls[-1]["error"] == "case_model_time_budget_exhausted"
+
+
+def test_local_call_records_prompt_timing_and_distinguishes_call_timeout(monkeypatch):
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "chat",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=False,
+            text="",
+            latency_ms=1000,
+            tokens_out=0,
+            error="TimeoutError: timed out",
+            raw={"prompt_eval_count": 77, "prompt_eval_duration": 1234},
+        ),
+    )
+    calls = benchmark._ModelCallLedger(model_time_budget=300.0)
+
+    benchmark._local_call(
+        "local-model",
+        [{"role": "user", "content": "derive the repair"}],
+        stage="repair_plan",
+        calls=calls,
+        timeout=180.0,
+        num_predict=100,
+        json_mode=True,
+    )
+
+    assert calls[-1]["error_kind"] == "call_timeout"
+    assert calls[-1]["prompt_chars"] == len("derive the repair")
+    assert calls[-1]["prompt_eval_count"] == 77
+    assert calls[-1]["prompt_eval_duration_ns"] == 1234
+    assert calls.model_time_used >= 0
+
+
+def test_local_call_labels_deadline_clamped_timeout_as_case_budget(monkeypatch):
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "chat",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=False,
+            text="",
+            latency_ms=1,
+            tokens_out=0,
+            error="TimeoutError: timed out",
+            raw={},
+        ),
+    )
+    calls = benchmark._ModelCallLedger(model_time_budget=0.5)
+
+    benchmark._local_call(
+        "local-model",
+        [{"role": "user", "content": "repair"}],
+        stage="repair_edit",
+        calls=calls,
+        timeout=180.0,
+        num_predict=100,
+        json_mode=False,
+    )
+
+    assert calls[-1]["case_deadline_clamped"] is True
+    assert calls[-1]["error_kind"] == "case_budget_timeout"
 
 
 def test_scoring_requires_real_final_repair_and_correct_ownership():
@@ -647,6 +709,56 @@ def test_multifile_edit_group_continues_past_already_satisfied_member(
     assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 20\n"
 
 
+def test_failed_multifile_group_salvages_only_isolated_contract_progress(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "first.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "second.py").write_text("VALUE = 2\n", encoding="utf-8")
+    originals = {"first.py": "VALUE = 1\n", "second.py": "VALUE = 2\n"}
+    attempted = {"first.py": "VALUE = 10\n", "second.py": "BROKEN =\n"}
+
+    def fake_syntax(_repo, *, changed_files):
+        failed = "second.py" in changed_files
+        return SimpleNamespace(exit_code=1 if failed else 0, timed_out=False)
+
+    def fake_tests(repo_path, _case, *, public_only):
+        first_changed = (repo_path / "first.py").read_text(encoding="utf-8") == "VALUE = 10\n"
+        if public_only:
+            return {"passed": True, "exit_code": 0, "test_contract_status": {"public": "passed"}}
+        return {
+            "passed": first_changed,
+            "exit_code": 0 if first_changed else 1,
+            "test_contract_status": {
+                "tests/test_contract.py::test_value": "passed" if first_changed else "failed"
+            },
+            "test_contracts_complete": True,
+        }
+
+    monkeypatch.setattr(benchmark.validator_runner, "run_ast_syntax", fake_syntax)
+    monkeypatch.setattr(benchmark, "_run_case_tests", fake_tests)
+
+    result = benchmark._salvage_progressing_edit_subset(
+        repo,
+        {"candidate_paths": ["first.py", "second.py"]},
+        originals,
+        attempted,
+        {"passed": True, "exit_code": 0, "test_contract_status": {"public": "passed"}},
+        {
+            "passed": False,
+            "exit_code": 1,
+            "test_contract_status": {"tests/test_contract.py::test_value": "failed"},
+            "test_contracts_complete": True,
+        },
+    )
+
+    assert result["applied_files"] == ["first.py"]
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 10\n"
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
 def test_multifile_bundle_is_generated_once_and_applied_atomically(
     tmp_path,
     monkeypatch,
@@ -853,7 +965,7 @@ def test_multifile_bundle_rejects_omitted_owner_without_partial_write(
     assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
-def test_base_multifile_repairs_keep_per_file_adapter_with_shared_plan_context(
+def test_base_multifile_repairs_use_one_atomic_bundle_with_adapter_recovery(
     tmp_path,
     monkeypatch,
 ):
@@ -861,22 +973,33 @@ def test_base_multifile_repairs_keep_per_file_adapter_with_shared_plan_context(
     repo.mkdir()
     (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
     (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
-    edited: list[str] = []
+    bundled: list[list[str]] = []
 
-    def fake_edit(repo_path, selected, *_args, **_kwargs):
-        edited.append(selected)
-        target = repo_path / selected
-        target.write_text(
-            target.read_text(encoding="utf-8").replace("1", "2"),
-            encoding="utf-8",
-        )
-        return {"patch_applied": True, "warnings": []}
+    def fake_bundle(repo_path, paths, *_args, allow_adapter_recovery, **_kwargs):
+        bundled.append(list(paths))
+        assert allow_adapter_recovery is True
+        for selected in paths:
+            target = repo_path / selected
+            target.write_text(
+                target.read_text(encoding="utf-8").replace("1", "2"),
+                encoding="utf-8",
+            )
+        return {
+            "patch_applied": True,
+            "applied_files": list(paths),
+            "satisfied_files": [],
+            "warnings": [],
+        }
 
-    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
     monkeypatch.setattr(
         benchmark,
         "_apply_local_edit_bundle",
-        lambda *_args, **_kwargs: pytest.fail("base repair must not use compact bundle"),
+        fake_bundle,
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_local_edit",
+        lambda *_args, **_kwargs: pytest.fail("multi-owner repair must stay coordinated"),
     )
 
     outcome = benchmark._apply_planned_edits(
@@ -899,7 +1022,7 @@ def test_base_multifile_repairs_keep_per_file_adapter_with_shared_plan_context(
     )
 
     assert outcome["patch_applied"] is True
-    assert edited == ["producer.py", "consumer.py"]
+    assert bundled == [["producer.py", "consumer.py"]]
 
 
 def test_optional_owner_rejection_does_not_cancel_required_sibling(
@@ -1808,7 +1931,8 @@ def test_validation_failure_context_keeps_public_and_feedback_failures():
         },
     )
 
-    assert context.startswith("NON-NEGOTIABLE VALIDATION CONTRACTS")
+    assert context.startswith("STRUCTURED FAILURE DELTAS")
+    assert "NON-NEGOTIABLE VALIDATION CONTRACTS" in context
     assert 'assert sink["XYZ"] == []' in context
     assert 'assert sink["XYZ"] is not source["XYZ"]' in context
     assert "observed: KeyError" in context

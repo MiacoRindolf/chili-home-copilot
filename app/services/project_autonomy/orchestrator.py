@@ -46,6 +46,7 @@ from ..code_brain import insights as insights_mod
 from ..code_brain.agent import (
     _MAX_FILES_PER_EDIT,
     _build_edit_prompt,
+    _build_editor_handoff,
     _gather_context,
     _is_mutating_plan_action,
     _parse_plan_json,
@@ -2473,6 +2474,7 @@ _MODEL_PREFERENCE = (
     "qwen2.5-coder:14b",
     "qwen2.5-coder",
     "qwen3-coder",
+    "qwen3:8b",
     "qwen3:4b",
     "phi4-mini:latest",
     "llama3:latest",
@@ -2480,8 +2482,8 @@ _MODEL_PREFERENCE = (
 )
 
 _PLAN_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC") or "90")
-_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "120")
-_PLAN_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_CTX") or "2048")
+_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "700")
+_PLAN_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_CTX") or "8192")
 _DIAGNOSTIC_TIMEOUT_SEC = float(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_TIMEOUT_SEC") or "150"
 )
@@ -2517,7 +2519,7 @@ _DIAGNOSTIC_MEMORY_ENABLED = str(
 _DIAGNOSTIC_EVALUATION_MODE = str(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_EVALUATION_MODE") or "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
-_PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "9000")
+_PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "24000")
 _EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC") or "150")
 _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
 _EDIT_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_CTX") or "4096")
@@ -6175,6 +6177,47 @@ def select_local_model() -> dict[str, Any]:
     }
 
 
+def select_local_reasoning_model(
+    base_model_info: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Choose an explicitly configured local reasoner or fall back to the coder."""
+    from ...config import settings as _settings
+
+    base = dict(base_model_info or select_local_model())
+    configured = str(
+        getattr(_settings, "chili_code_local_reasoning_model", "") or ""
+    ).strip()
+    installed = {
+        str(value)
+        for value in base.get("installed_models") or []
+        if str(value)
+    }
+    if not installed and base.get("model"):
+        installed.add(str(base["model"]))
+    if (
+        configured
+        and configured in installed
+        and configured not in set(_active_model_cooldowns())
+    ):
+        return {
+            **base,
+            "model": configured,
+            "available": True,
+            "role": "reasoning",
+            "fallback_to_coder": False,
+        }
+    return {
+        **base,
+        "role": "reasoning",
+        "fallback_to_coder": True,
+        "requested_reasoning_model": configured or None,
+    }
+
+
+def _reasoning_model_supports_thinking(model: object) -> bool:
+    return str(model or "").strip().lower().startswith("qwen3")
+
+
 def _candidate_exists(repo_path: Path | None, rel_path: str) -> bool:
     rel = _safe_rel_path(rel_path)
     if rel is None:
@@ -6221,6 +6264,39 @@ def _plan_candidate_files(context: dict[str, Any], repo_path: Path | None, promp
     return out
 
 
+def _bounded_plan_source_context(
+    repo_path: Path | None,
+    candidates: Sequence[str],
+    *,
+    max_files: int = 6,
+    max_chars: int = 14_000,
+) -> str:
+    """Render bounded current source for planning instead of filenames alone."""
+    if repo_path is None or not repo_path.is_dir() or max_chars <= 0:
+        return ""
+    parts: list[str] = []
+    remaining = max_chars
+    for value in candidates:
+        relative = _safe_rel_path(str(value or ""))
+        if not relative or remaining <= 0 or len(parts) >= max_files:
+            continue
+        content = _read_file_content(
+            str(repo_path),
+            relative,
+            max_lines=max(80, _EDIT_MAX_FILE_LINES),
+        )
+        if content is None:
+            continue
+        header = f"### {relative}\n"
+        allowance = min(4_000, max(0, remaining - len(header)))
+        if allowance <= 0:
+            break
+        excerpt = _clip(content, allowance)
+        parts.append(header + excerpt)
+        remaining -= len(header) + len(excerpt) + 2
+    return "\n\n".join(parts)
+
+
 def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None) -> str:
     request = str(context.get("operator_request") or "")
     candidates = _plan_candidate_files(context, repo_path, request)
@@ -6249,6 +6325,15 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
     if candidates:
         parts.extend(["", "Candidate files:"])
         parts.extend(f"- {path}" for path in candidates[:12])
+        source_context = _bounded_plan_source_context(repo_path, candidates)
+        if source_context:
+            parts.extend(
+                [
+                    "",
+                    "Current candidate source (authoritative, bounded, read-only):",
+                    source_context,
+                ]
+            )
 
     insights = [
         str(item.get("description") or "")
@@ -6278,11 +6363,16 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
             "",
             "JSON shape:",
             (
-                '{"analysis":"<=18 words","files":[{"path":"candidate/path","action":"modify","description":"<=12 words"}],'
+                '{"analysis":"causal mechanism and rejected alternatives, <=120 words",'
+                '"files":[{"path":"candidate/path","action":"modify",'
+                '"description":"owned behavior, algorithm, and compatibility constraints, <=80 words"}],'
                 '"contract_coverage":[{"contract":"independent behavior","owner_paths":["candidate/path"],'
-                '"postcondition":"observable result"}],"notes":"<=12 words"}'
+                '"postcondition":"observable result"}],"notes":"risks and proof, <=80 words"}'
                 if diagnostic_context
-                else '{"analysis":"<=18 words","files":[{"path":"candidate/path","action":"modify","description":"<=12 words"}],"notes":"<=12 words"}'
+                else '{"analysis":"implementation mechanism, <=120 words",'
+                '"files":[{"path":"candidate/path","action":"modify",'
+                '"description":"owned behavior, algorithm, and compatibility constraints, <=80 words"}],'
+                '"notes":"risks and proof, <=80 words"}'
             ),
             f"Rules: max {max_files} files, prefer existing candidate files exactly, include only repo-relative paths.",
         ]
@@ -6539,6 +6629,7 @@ def _run_local_diagnostic_reasoning(
                 "keep_alive": _OLLAMA_KEEP_ALIVE,
                 "format": "json",
             },
+            think=_reasoning_model_supports_thinking(model_name),
         )
         _note_model_call_result(model_name, result)
         model_calls.append(
@@ -6824,34 +6915,47 @@ def build_local_plan(
             _add_artifact(db, run.run_id, "plan", "heuristic_plan_fast_path", content_json=fallback)
             return fallback
     model_info = select_local_model()
+    reasoning_model_info = select_local_reasoning_model(model_info)
     if diagnostic_reasoning.looks_like_diagnostic_request(run.prompt):
         debate = _run_local_diagnostic_reasoning(
             db,
             run,
             context,
             repo_path,
-            model_info,
+            reasoning_model_info,
         )
         report = debate.get("report") if isinstance(debate.get("report"), dict) else {}
         context["diagnostic_report"] = report
         context["diagnostic_context"] = diagnostic_reasoning.report_context(report)
-    if not model_info.get("model"):
+    if not reasoning_model_info.get("model"):
         fallback = _fallback_plan_from_context(
             context,
             repo_path,
             run.prompt,
-            str(model_info.get("recommendation") or "No local Ollama model is available."),
+            str(
+                reasoning_model_info.get("recommendation")
+                or "No local Ollama model is available."
+            ),
         )
         _add_artifact(
             db,
             run.run_id,
             "plan",
             "heuristic_plan_fallback",
-            content_json={**fallback, "model_selection": model_info},
+            content_json={
+                **fallback,
+                "model_selection": model_info,
+                "reasoning_model_selection": reasoning_model_info,
+            },
         )
         if fallback.get("files"):
             return fallback
-        raise AutonomyBlocked(str(model_info.get("recommendation") or "No local Ollama model is available."))
+        raise AutonomyBlocked(
+            str(
+                reasoning_model_info.get("recommendation")
+                or "No local Ollama model is available."
+            )
+        )
     prompt = _build_autonomy_plan_prompt(context, repo_path)
     messages = [
         {
@@ -6865,28 +6969,34 @@ def build_local_plan(
     ]
     result = ollama_client.chat(
         messages,
-        str(model_info["model"]),
+        str(reasoning_model_info["model"]),
         temperature=0.15,
         timeout_sec=_PLAN_TIMEOUT_SEC,
         options={
             "num_predict": _PLAN_NUM_PREDICT,
             "num_ctx": _PLAN_NUM_CTX,
             "keep_alive": _OLLAMA_KEEP_ALIVE,
+            "format": "json",
         },
+        think=_reasoning_model_supports_thinking(reasoning_model_info["model"]),
     )
-    _note_model_call_result(str(model_info["model"]), result)
+    _note_model_call_result(str(reasoning_model_info["model"]), result)
     _add_artifact(
         db,
         run.run_id,
         "model_call",
         "plan_model_call",
         content_json={
-            "model": model_info["model"],
+            "model": reasoning_model_info["model"],
+            "coder_model": model_info.get("model"),
+            "reasoning_fallback_to_coder": bool(
+                reasoning_model_info.get("fallback_to_coder")
+            ),
             "ok": result.ok,
             "latency_ms": result.latency_ms,
             "error": result.error,
-            "installed_models": model_info.get("installed_models"),
-            "skipped_models": model_info.get("skipped_models"),
+            "installed_models": reasoning_model_info.get("installed_models"),
+            "skipped_models": reasoning_model_info.get("skipped_models"),
             "prompt_chars": len(prompt),
             "timeout_sec": _PLAN_TIMEOUT_SEC,
             "num_predict": _PLAN_NUM_PREDICT,
@@ -7134,6 +7244,10 @@ def generate_diffs_from_plan(
         if ins.get("description")
     ]
     mechanism_invariants = diagnostic_reasoning.derive_contract_invariants(run.prompt)
+    editor_plan = _json_load(run.plan_json, {})
+    if not isinstance(editor_plan, dict):
+        editor_plan = {}
+    editor_plan = {**editor_plan, "files": [dict(item) for item in files]}
     diffs: list[str] = []
     rejections: list[str] = []
 
@@ -7171,6 +7285,11 @@ def generate_diffs_from_plan(
         _check_cancel(db, run)
         rel = str(item.get("path") or "")
         desc = str(item.get("description") or "")
+        editor_handoff = _build_editor_handoff(editor_plan, target_path=rel)
+        desc = (
+            "Implement the emphasized target in this coordinated plan:\n"
+            + editor_handoff
+        )
         safe_edit_path = _safe_edit_worktree_path(repo_path, rel)
         if safe_edit_path is None:
             _add_artifact(
@@ -7535,9 +7654,10 @@ def generate_diffs_from_plan(
             continue
         diffs.append(diff)
         _add_artifact(db, run.run_id, "diff", rel, content=diff)
-    if validation_context and rejections:
+    if rejections and (validation_context or len(files) > 1):
         raise AutonomyBlocked(
-            "Required repair group was incomplete; no partial repair was retained. "
+            "Required multi-file or repair group was incomplete; no partial repair was retained "
+            "and no partial edit was retained. "
             + " ".join(rejections[:3])
         )
     if not diffs and rejections:
@@ -8964,6 +9084,66 @@ def validation_repair_decision(
     }
 
 
+def _salvage_progressing_repair_file(
+    worktree: Path,
+    editable_files: Sequence[Mapping[str, Any]],
+    before_snapshot: Mapping[str, Mapping[str, Any]],
+    attempted_snapshot: Mapping[str, Mapping[str, Any]],
+    before_validation: Sequence[Mapping[str, Any]],
+    *,
+    pinned_test_files: Sequence[str],
+    contract_entries: Sequence[Mapping[str, Any]],
+    before_contract_snapshot: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Retain one isolated repair edit only when validation proves progress."""
+    candidates = [
+        relative
+        for item in editable_files
+        if isinstance(item, Mapping)
+        and (relative := _safe_rel_path(str(item.get("path") or "")))
+        and relative in before_snapshot
+        and relative in attempted_snapshot
+        and attempted_snapshot[relative] != before_snapshot[relative]
+    ]
+    if len(candidates) < 2:
+        return {}
+    for relative in candidates[:_MAX_DIAGNOSTIC_REPAIR_FILES]:
+        _restore_repair_worktree_snapshot(worktree, before_snapshot)
+        _restore_repair_file_snapshot(
+            worktree,
+            {relative: attempted_snapshot[relative]},
+        )
+        changed_files = _changed_files(worktree)
+        validation = run_validation(
+            worktree,
+            changed_files,
+            pinned_test_files=pinned_test_files,
+        )
+        contract_snapshot = _repair_file_snapshot(worktree, contract_entries)
+        if _repair_snapshot_fingerprint(
+            contract_snapshot
+        ) != _repair_snapshot_fingerprint(before_contract_snapshot):
+            continue
+        decision = validation_repair_decision(before_validation, validation)
+        if decision.get("accepted"):
+            retained_snapshot = _repair_file_snapshot(
+                worktree,
+                _repair_snapshot_entries([], changed_files),
+            )
+            return {
+                "path": relative,
+                "changed_files": changed_files,
+                "validation": validation,
+                "decision": {
+                    **decision,
+                    "reason": "isolated_file_progress:" + str(decision.get("reason") or "validated"),
+                },
+                "snapshot": retained_snapshot,
+            }
+    _restore_repair_worktree_snapshot(worktree, before_snapshot)
+    return {}
+
+
 def _repair_attempt_context(
     attempts: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -9023,9 +9203,18 @@ def validation_repair_context(
     failed_steps: list[dict[str, Any]] = []
     assertion_contracts: list[str] = []
     exception_facts: list[str] = []
+    failure_deltas: list[dict[str, Any]] = []
     for item in validation:
         if not isinstance(item, Mapping) or not _validation_step_failed(item):
             continue
+        delta = validation_contracts.failure_delta_evidence(item)
+        if delta.get("failed_ids") or delta.get("facts"):
+            failure_deltas.append(
+                {
+                    "step_key": str(item.get("step_key") or "validation"),
+                    **delta,
+                }
+            )
         for output in (str(item.get("stdout") or ""), str(item.get("stderr") or "")):
             for raw_line in output.splitlines():
                 line = raw_line.strip()
@@ -9071,6 +9260,7 @@ def validation_repair_context(
         "plan_files": [dict(item) for item in plan_files if isinstance(item, Mapping)],
         "assertion_contracts": assertion_contracts[:20],
         "exception_facts": exception_facts[:12],
+        "failure_deltas": failure_deltas[:12],
         "failed_steps": failed_steps,
         "read_only_test_contracts": test_contracts,
         "source_owner_candidates": owner_candidates,
@@ -9084,6 +9274,14 @@ def validation_repair_context_text(context: Mapping[str, Any]) -> str:
         "schema: chili.validation-repair-context.v2",
         "changed_files: " + changed_text,
     ]
+    failure_deltas = [
+        item
+        for item in context.get("failure_deltas") or []
+        if isinstance(item, Mapping)
+    ]
+    if failure_deltas:
+        lines.append("structured_failure_deltas:")
+        lines.append(json.dumps(failure_deltas, indent=2, sort_keys=True))
     immutable_contracts = [
         str(value) for value in context.get("immutable_test_contracts") or []
     ]
@@ -9752,14 +9950,44 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
             )
             after_signature = validation_failure_signature(attempted_validation)
             decision = validation_repair_decision(before_validation, attempted_validation)
-            if _repair_snapshot_fingerprint(
+            contract_snapshot_unchanged = _repair_snapshot_fingerprint(
                 after_validation_contract_snapshot
-            ) != _repair_snapshot_fingerprint(before_contract_snapshot):
+            ) == _repair_snapshot_fingerprint(before_contract_snapshot)
+            if not contract_snapshot_unchanged:
                 decision = {
                     **decision,
                     "accepted": False,
                     "reason": "immutable_test_contract_modified_during_validation",
                 }
+            elif not decision.get("accepted"):
+                salvaged = _salvage_progressing_repair_file(
+                    worktree,
+                    editable_files,
+                    before_snapshot,
+                    attempted_snapshot,
+                    before_validation,
+                    pinned_test_files=pinned_test_files,
+                    contract_entries=contract_entries,
+                    before_contract_snapshot=before_contract_snapshot,
+                )
+                if salvaged:
+                    attempted_changed_files = list(salvaged["changed_files"])
+                    attempted_validation = list(salvaged["validation"])
+                    decision = dict(salvaged["decision"])
+                    attempted_snapshot = _repair_file_snapshot(
+                        worktree,
+                        snapshot_entries,
+                    )
+                    attempted_diff = _repair_snapshot_diff(
+                        before_snapshot,
+                        attempted_snapshot,
+                    )
+                    attempt_fingerprint = _repair_snapshot_fingerprint(
+                        attempted_snapshot
+                    )
+                    after_signature = validation_failure_signature(
+                        attempted_validation
+                    )
             accepted = bool(decision.get("accepted"))
             attempt = {
                 "round": repair_round,

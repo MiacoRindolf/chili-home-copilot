@@ -155,3 +155,127 @@ def test_failure_normalization_ignores_addresses_times_and_temp_paths():
     assert validation_contracts.normalize_failure_text(first) == (
         validation_contracts.normalize_failure_text(second)
     )
+
+
+def test_node_failure_delta_extracts_full_output_diff_and_reference_error():
+    evidence = validation_contracts.failure_delta_evidence(
+        {
+            "runner": "node_test",
+            "contract_status": {
+                "tests/transform.test.mjs::returns normalized value": "failed",
+            },
+            "output": (
+                "Expected: { total: 5 }\n"
+                "Actual: { total: 4 }\n"
+                "ReferenceError: cacheKey is not defined\n"
+                + "\n".join(f"diagnostic noise {index}" for index in range(400))
+            ),
+        }
+    )
+
+    assert evidence == {
+        "failed_ids": [
+            "tests/transform.test.mjs::returns normalized value",
+        ],
+        "facts": [
+            "expected: { total: 5 }; actual: { total: 4 }",
+            "ReferenceError: cacheKey is not defined",
+        ],
+    }
+
+
+def test_python_failure_delta_extracts_assertion_and_name_error():
+    evidence = validation_contracts.failure_delta_evidence(
+        {
+            "step_key": "pytest_targeted",
+            "stdout": (
+                "tests/test_math.py::test_total FAILED [100%]\n"
+                "E       assert 4 == 5\n"
+                "E       NameError: name 'subtotal' is not defined\n"
+            ),
+        }
+    )
+
+    assert evidence["failed_ids"] == ["tests/test_math.py::test_total"]
+    assert evidence["facts"] == [
+        "assertion: 4 == 5",
+        "NameError: name 'subtotal' is not defined",
+    ]
+
+
+def test_dart_failure_delta_extracts_bad_state_and_type_error():
+    evidence = validation_contracts.failure_delta_evidence(
+        {
+            "runner": "dart_test",
+            "test_contract_status": {
+                "test/parser_test.dart::rejects invalid record": "failed",
+            },
+            "stderr": (
+                "Bad state: No element\n"
+                "type 'String' is not a subtype of type 'int' in type cast\n"
+            ),
+        }
+    )
+
+    assert evidence["failed_ids"] == [
+        "test/parser_test.dart::rejects invalid record",
+    ]
+    assert evidence["facts"] == [
+        "Bad state: No element",
+        "TypeError: type 'String' is not a subtype of type 'int' in type cast",
+    ]
+
+
+def test_sql_failure_delta_extracts_no_such_column_operational_error():
+    evidence = validation_contracts.failure_delta_evidence(
+        {
+            "contract_status": {"schema/orders.sql": "error"},
+            "stderr": (
+                "sqlite3.OperationalError: no such column: orders.legacy_total"
+            ),
+        }
+    )
+
+    assert evidence == {
+        "failed_ids": ["schema/orders.sql"],
+        "facts": [
+            "OperationalError: no such column: orders.legacy_total",
+        ],
+    }
+
+
+def test_failure_delta_normalizes_deduplicates_and_bounds_evidence():
+    duplicate_errors = "\n".join(
+        (
+            "ReferenceError: token is not defined at "
+            f"C:/Temp/chili-fix-{index}/repo/app.js:{index + 1}:2 "
+            f"(object 0x{index + 1000:X}, {index + 1}ms)"
+        )
+        for index in range(6)
+    )
+    unique_errors = "\n".join(
+        f"TypeError: distinct diagnostic {index} " + ("x" * 80)
+        for index in range(6)
+    )
+    evidence = validation_contracts.failure_delta_evidence(
+        {
+            "contract_status": {
+                f"tests/test_{index}.py::test_contract": "failed"
+                for index in range(5)
+            },
+            "output": duplicate_errors + "\n" + unique_errors,
+        },
+        max_failed_ids=2,
+        max_facts=3,
+        max_contract_id_chars=32,
+        max_fact_chars=48,
+    )
+
+    assert len(evidence["failed_ids"]) == 2
+    assert len(evidence["facts"]) == 3
+    assert sum(fact.startswith("ReferenceError:") for fact in evidence["facts"]) == 1
+    assert all(len(value) <= 32 for value in evidence["failed_ids"])
+    assert all(len(value) <= 48 for value in evidence["facts"])
+    assert evidence["facts"][0] == (
+        "ReferenceError: token is not defined at <path..."
+    )
