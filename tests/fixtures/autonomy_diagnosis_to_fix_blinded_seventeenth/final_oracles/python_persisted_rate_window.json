@@ -1,0 +1,6 @@
+{
+  "case_id": "python_persisted_rate_window",
+  "final_files": {
+    "tests/test_final.py": "from quota.limiter import TokenBucket\n\n\ndef test_restart_elapsed_time_and_backward_clock_correction_are_both_bounded():\n    old = {\"mono\": 3000.0, \"wall\": 10000.0}\n    bucket = TokenBucket(5, 1, lambda: old[\"mono\"], lambda: old[\"wall\"])\n    assert bucket.consume(4)\n    payload = bucket.snapshot()\n\n    later = {\"mono\": 7.0, \"wall\": 10003.0}\n    refilled = TokenBucket.restore(payload, 5, 1, lambda: later[\"mono\"], lambda: later[\"wall\"])\n    assert refilled.tokens == 4\n\n    corrected = {\"mono\": 8.0, \"wall\": 9990.0}\n    bounded = TokenBucket.restore(payload, 5, 1, lambda: corrected[\"mono\"], lambda: corrected[\"wall\"])\n    assert bounded.tokens == 1\n"
+  }
+}

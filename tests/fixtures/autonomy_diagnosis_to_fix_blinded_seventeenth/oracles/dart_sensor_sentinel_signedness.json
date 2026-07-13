@@ -1,0 +1,14 @@
+{
+  "case_id": "dart_sensor_sentinel_signedness",
+  "expected_dimensions": [
+    "signed wire-value decoding",
+    "missing-sample sentinel preservation"
+  ],
+  "expected_files": [
+    "lib/packet_decoder.dart",
+    "lib/temperature.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/packet_decoder.dart';\nimport '../lib/temperature.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final negative = decodeSensorFrame([0xda, 0xfd, 0x01]);\n  check(negative.rawTemperature == -550, 'negative raw reading remains negative');\n  check(temperatureCelsius(negative) == -5.5, 'negative Celsius conversion');\n\n  final unavailable = decodeSensorFrame([0x00, 0x80, 0x01]);\n  check(\n    temperatureCelsius(unavailable) == null,\n    'unavailable sample is not converted into a temperature',\n  );\n}\n"
+  }
+}

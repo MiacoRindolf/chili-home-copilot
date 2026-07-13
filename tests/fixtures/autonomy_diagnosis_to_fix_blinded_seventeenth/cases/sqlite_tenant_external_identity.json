@@ -1,0 +1,19 @@
+{
+  "case_id": "sqlite_tenant_external_identity",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "Following a second enterprise onboarding, account imports report false duplicate identifiers, while a manually bypassed import can make lookups return an account belonging to a different organization. Existing single-organization tests are green because partner identifiers are stable within each organization. Repair storage integrity and lookup resolution as one isolation contract without changing the identifiers partners send.",
+  "candidate_paths": [
+    "db/schema.sql",
+    "db/account_lookup.sql",
+    "db/import_staging.sql"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "db/schema.sql": "PRAGMA foreign_keys = ON;\n\nCREATE TABLE tenants (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL\n);\n\nCREATE TABLE accounts (\n  id INTEGER PRIMARY KEY,\n  tenant_id TEXT NOT NULL REFERENCES tenants(id),\n  external_id TEXT NOT NULL,\n  display_name TEXT NOT NULL,\n  UNIQUE (external_id)\n);\n\nCREATE TABLE account_lookup_requests (\n  request_id TEXT PRIMARY KEY,\n  tenant_id TEXT NOT NULL REFERENCES tenants(id),\n  external_id TEXT NOT NULL\n);\n",
+    "db/account_lookup.sql": "CREATE VIEW resolved_accounts AS\nSELECT request.request_id, account.id AS account_id, account.tenant_id, account.display_name\nFROM account_lookup_requests AS request\nJOIN accounts AS account\n  ON account.external_id = request.external_id;\n",
+    "db/import_staging.sql": "CREATE TABLE account_import_staging (\n  tenant_id TEXT NOT NULL,\n  external_id TEXT NOT NULL,\n  display_name TEXT NOT NULL\n);\n",
+    "tests/public.sql": ".bail on\n.read db/schema.sql\n.read db/account_lookup.sql\n\nINSERT INTO tenants(id, name) VALUES ('north', 'North Division');\nINSERT INTO accounts(tenant_id, external_id, display_name) VALUES ('north', 'acct-7', 'North Primary');\nINSERT INTO account_lookup_requests(request_id, tenant_id, external_id) VALUES ('lookup-1', 'north', 'acct-7');\n\nCREATE TEMP TABLE assertion(ok INTEGER NOT NULL CHECK(ok = 1));\nINSERT INTO assertion\nSELECT CASE WHEN COUNT(*) = 1 AND MIN(display_name) = 'North Primary' THEN 1 ELSE 0 END\nFROM resolved_accounts\nWHERE request_id = 'lookup-1';\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef execute_cli_fixture(name):\n    script = []\n    for line in (ROOT / \"tests\" / name).read_text(encoding=\"utf-8\").splitlines():\n        directive = line.strip()\n        if directive.startswith(\".read \"):\n            script.append((ROOT / directive[6:].strip()).read_text(encoding=\"utf-8\"))\n        elif not directive.startswith(\".\"):\n            script.append(line)\n    connection = sqlite3.connect(\":memory:\")\n    try:\n        connection.executescript(\"\\n\".join(script))\n    finally:\n        connection.close()\n\n\ndef test_public_sql_contract():\n    execute_cli_fixture(\"public.sql\")\n"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "case_id": "node_wrapped_sequence_window",
+  "expected_dimensions": [
+    "bounded serial-number ordering",
+    "classifier-authoritative replica application"
+  ],
+  "expected_files": [
+    "src/serialOrder.js",
+    "src/replica.js"
+  ],
+  "feedback_files": {
+    "tests/feedback.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { classifySequence } = require('../src/serialOrder');\nconst { Replica } = require('../src/replica');\n\ntest('rollover successors are classified and applied as forward progress', () => {\n  assert.equal(classifySequence(65535, 0).kind, 'forward');\n  const replica = new Replica();\n  replica.accept({ sequence: 65535, value: 'before' });\n  assert.equal(replica.accept({ sequence: 0, value: 'after' }), true);\n  assert.equal(replica.current.value, 'after');\n});\n"
+  }
+}

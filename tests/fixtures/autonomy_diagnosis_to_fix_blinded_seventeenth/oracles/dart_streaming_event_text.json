@@ -1,0 +1,14 @@
+{
+  "case_id": "dart_streaming_event_text",
+  "expected_dimensions": [
+    "stateful UTF-8 decoding across transport chunks",
+    "line-ending normalization at the event parser"
+  ],
+  "expected_files": [
+    "lib/chunk_text_decoder.dart",
+    "lib/event_parser.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import 'dart:async';\nimport 'dart:convert';\n\nimport '../lib/event_parser.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nbool sameList(List<String> actual, List<String> expected) {\n  if (actual.length != expected.length) return false;\n  for (var index = 0; index < actual.length; index++) {\n    if (actual[index] != expected[index]) return false;\n  }\n  return true;\n}\n\nFuture<void> main() async {\n  final encoded = utf8.encode('data: caf?\\n');\n  final marker = encoded.indexOf(0xc3);\n  final split = Stream<List<int>>.fromIterable([\n    encoded.sublist(0, marker + 1),\n    encoded.sublist(marker + 1),\n  ]);\n  check(\n    sameList(await parseEventData(split).toList(), ['caf?']),\n    'split multibyte text is decoded without replacement characters',\n  );\n\n  final crlf = Stream<List<int>>.value(utf8.encode('data: accepted\\r\\n'));\n  check(\n    sameList(await parseEventData(crlf).toList(), ['accepted']),\n    'proxy CRLF does not become event data',\n  );\n}\n"
+  }
+}

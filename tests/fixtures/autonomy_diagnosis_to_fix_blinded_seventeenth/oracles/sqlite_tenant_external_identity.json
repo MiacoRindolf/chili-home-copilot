@@ -1,0 +1,15 @@
+{
+  "case_id": "sqlite_tenant_external_identity",
+  "expected_dimensions": [
+    "tenant-scoped external identifier integrity",
+    "tenant-scoped account resolution"
+  ],
+  "expected_files": [
+    "db/schema.sql",
+    "db/account_lookup.sql"
+  ],
+  "feedback_files": {
+    "tests/feedback.sql": ".bail on\n.read db/schema.sql\n.read db/account_lookup.sql\n\nINSERT INTO tenants(id, name) VALUES ('red', 'Red Org'), ('blue', 'Blue Org');\nINSERT INTO accounts(tenant_id, external_id, display_name) VALUES\n  ('red', 'shared-42', 'Red Account'),\n  ('blue', 'shared-42', 'Blue Account');\nINSERT INTO account_lookup_requests(request_id, tenant_id, external_id) VALUES\n  ('red-request', 'red', 'shared-42'),\n  ('blue-request', 'blue', 'shared-42');\n\nCREATE TEMP TABLE assertion(ok INTEGER NOT NULL CHECK(ok = 1));\nINSERT INTO assertion\nSELECT CASE WHEN\n  (SELECT COUNT(*) FROM resolved_accounts) = 2\n  AND (SELECT display_name FROM resolved_accounts WHERE request_id = 'red-request') = 'Red Account'\n  AND (SELECT display_name FROM resolved_accounts WHERE request_id = 'blue-request') = 'Blue Account'\nTHEN 1 ELSE 0 END;\n",
+    "tests/test_feedback.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef execute_cli_fixture(name):\n    script = []\n    for line in (ROOT / \"tests\" / name).read_text(encoding=\"utf-8\").splitlines():\n        directive = line.strip()\n        if directive.startswith(\".read \"):\n            script.append((ROOT / directive[6:].strip()).read_text(encoding=\"utf-8\"))\n        elif not directive.startswith(\".\"):\n            script.append(line)\n    connection = sqlite3.connect(\":memory:\")\n    try:\n        connection.executescript(\"\\n\".join(script))\n    finally:\n        connection.close()\n\n\ndef test_feedback_sql_contract():\n    execute_cli_fixture(\"feedback.sql\")\n"
+  }
+}

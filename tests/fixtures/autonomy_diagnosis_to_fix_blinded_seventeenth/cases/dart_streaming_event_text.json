@@ -1,0 +1,19 @@
+{
+  "case_id": "dart_streaming_event_text",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "A mobile event client works against the development server but corrupts a small fraction of international event payloads behind production proxies. Captures show valid bytes, and failures correlate with different transport chunking and line endings rather than particular messages. Diagnose the byte-to-event boundary and make parsing invariant to legal chunk boundaries and proxy line formatting without buffering the entire response.",
+  "candidate_paths": [
+    "lib/chunk_text_decoder.dart",
+    "lib/event_parser.dart",
+    "lib/event_model.dart"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "pubspec.yaml": "name: streaming_event_case\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\ndev_dependencies:\n  test: any\n",
+    "lib/chunk_text_decoder.dart": "import 'dart:convert';\n\nStream<String> decodeByteChunks(Stream<List<int>> chunks) {\n  return chunks.map((chunk) => utf8.decode(chunk, allowMalformed: true));\n}\n",
+    "lib/event_parser.dart": "import 'chunk_text_decoder.dart';\n\nStream<String> parseEventData(Stream<List<int>> bytes) async* {\n  var pending = '';\n  await for (final piece in decodeByteChunks(bytes)) {\n    pending += piece;\n    while (true) {\n      final newline = pending.indexOf('\\n');\n      if (newline < 0) break;\n      final line = pending.substring(0, newline);\n      pending = pending.substring(newline + 1);\n      if (line.startsWith('data:')) {\n        yield line.substring(5).trimLeft();\n      }\n    }\n  }\n}\n",
+    "lib/event_model.dart": "class EventRecord {\n  final String data;\n  const EventRecord(this.data);\n}\n",
+    "tests/public_test.dart": "import 'dart:async';\n\nimport '../lib/event_parser.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nbool sameList(List<String> actual, List<String> expected) {\n  if (actual.length != expected.length) return false;\n  for (var index = 0; index < actual.length; index++) {\n    if (actual[index] != expected[index]) return false;\n  }\n  return true;\n}\n\nFuture<void> main() async {\n  final bytes = Stream<List<int>>.fromIterable([\n    'data: first\\n'.codeUnits,\n    'data: second\\n'.codeUnits,\n  ]);\n  check(\n    sameList(await parseEventData(bytes).toList(), ['first', 'second']),\n    'ASCII LF events parse across ordinary chunks',\n  );\n\n  final ignored = Stream<List<int>>.value('id: 7\\ndata: ready\\n'.codeUnits);\n  check(\n    sameList(await parseEventData(ignored).toList(), ['ready']),\n    'non-data fields remain ignored',\n  );\n}\n"
+  }
+}

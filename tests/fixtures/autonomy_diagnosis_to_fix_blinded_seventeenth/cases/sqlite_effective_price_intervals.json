@@ -1,0 +1,19 @@
+{
+  "case_id": "sqlite_effective_price_intervals",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "A catalog price change scheduled exactly when the prior price expires either fails to publish or briefly produces two prices for one lookup instant, depending on which environment created the history. Prices well inside an effective period resolve correctly. Repair the write-time and read-time temporal contract together so contiguous history is legal, overlap remains impossible, and every boundary instant resolves unambiguously.",
+  "candidate_paths": [
+    "db/schema.sql",
+    "db/resolved_prices.sql",
+    "db/catalog_seed.sql"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "db/schema.sql": "PRAGMA foreign_keys = ON;\n\nCREATE TABLE prices (\n  id INTEGER PRIMARY KEY,\n  sku TEXT NOT NULL,\n  amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),\n  valid_from TEXT NOT NULL,\n  valid_to TEXT,\n  CHECK (valid_to IS NULL OR valid_from < valid_to)\n);\n\nCREATE TABLE price_requests (\n  request_id TEXT PRIMARY KEY,\n  sku TEXT NOT NULL,\n  at_time TEXT NOT NULL\n);\n\nCREATE TRIGGER prices_no_overlap\nBEFORE INSERT ON prices\nWHEN EXISTS (\n  SELECT 1\n  FROM prices AS existing\n  WHERE existing.sku = NEW.sku\n    AND existing.valid_from <= COALESCE(NEW.valid_to, '9999-12-31T23:59:59Z')\n    AND NEW.valid_from <= COALESCE(existing.valid_to, '9999-12-31T23:59:59Z')\n)\nBEGIN\n  SELECT RAISE(ABORT, 'overlapping price interval');\nEND;\n",
+    "db/resolved_prices.sql": "CREATE VIEW resolved_prices AS\nSELECT request.request_id, price.sku, price.amount_cents\nFROM price_requests AS request\nJOIN prices AS price\n  ON price.sku = request.sku\n AND price.valid_from <= request.at_time\n AND (price.valid_to IS NULL OR request.at_time <= price.valid_to);\n",
+    "db/catalog_seed.sql": "INSERT INTO prices(sku, amount_cents, valid_from, valid_to)\nVALUES ('sample', 100, '2026-01-01T00:00:00Z', NULL);\n",
+    "tests/public.sql": ".bail on\n.read db/schema.sql\n.read db/resolved_prices.sql\n\nINSERT INTO prices(sku, amount_cents, valid_from, valid_to)\nVALUES ('tea', 125, '2026-01-01T00:00:00Z', NULL);\nINSERT INTO price_requests(request_id, sku, at_time)\nVALUES ('inside', 'tea', '2026-03-01T12:00:00Z');\n\nCREATE TEMP TABLE assertion(ok INTEGER NOT NULL CHECK(ok = 1));\nINSERT INTO assertion\nSELECT CASE WHEN COUNT(*) = 1 AND MIN(amount_cents) = 125 THEN 1 ELSE 0 END\nFROM resolved_prices\nWHERE request_id = 'inside';\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef execute_cli_fixture(name):\n    script = []\n    for line in (ROOT / \"tests\" / name).read_text(encoding=\"utf-8\").splitlines():\n        directive = line.strip()\n        if directive.startswith(\".read \"):\n            script.append((ROOT / directive[6:].strip()).read_text(encoding=\"utf-8\"))\n        elif not directive.startswith(\".\"):\n            script.append(line)\n    connection = sqlite3.connect(\":memory:\")\n    try:\n        connection.executescript(\"\\n\".join(script))\n    finally:\n        connection.close()\n\n\ndef test_public_sql_contract():\n    execute_cli_fixture(\"public.sql\")\n"
+  }
+}

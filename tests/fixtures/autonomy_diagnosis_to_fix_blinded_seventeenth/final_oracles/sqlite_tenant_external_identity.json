@@ -1,0 +1,7 @@
+{
+  "case_id": "sqlite_tenant_external_identity",
+  "final_files": {
+    "tests/final.sql": ".bail on\n.read db/schema.sql\n.read db/account_lookup.sql\n\nINSERT INTO tenants(id, name) VALUES ('a', 'Alpha'), ('b', 'Beta'), ('c', 'Gamma');\nINSERT INTO accounts(tenant_id, external_id, display_name) VALUES\n  ('a', 'partner-9', 'Alpha Nine'),\n  ('b', 'partner-9', 'Beta Nine'),\n  ('c', 'partner-9', 'Gamma Nine');\nINSERT INTO account_lookup_requests(request_id, tenant_id, external_id)\nVALUES ('gamma-only', 'c', 'partner-9');\n\nCREATE TEMP TABLE assertion(ok INTEGER NOT NULL CHECK(ok = 1));\nINSERT INTO assertion\nSELECT CASE WHEN COUNT(*) = 1 AND MIN(tenant_id) = 'c' AND MIN(display_name) = 'Gamma Nine' THEN 1 ELSE 0 END\nFROM resolved_accounts\nWHERE request_id = 'gamma-only';\n",
+    "tests/test_final.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef execute_cli_fixture(name):\n    script = []\n    for line in (ROOT / \"tests\" / name).read_text(encoding=\"utf-8\").splitlines():\n        directive = line.strip()\n        if directive.startswith(\".read \"):\n            script.append((ROOT / directive[6:].strip()).read_text(encoding=\"utf-8\"))\n        elif not directive.startswith(\".\"):\n            script.append(line)\n    connection = sqlite3.connect(\":memory:\")\n    try:\n        connection.executescript(\"\\n\".join(script))\n    finally:\n        connection.close()\n\n\ndef test_final_sql_contract():\n    execute_cli_fixture(\"final.sql\")\n"
+  }
+}

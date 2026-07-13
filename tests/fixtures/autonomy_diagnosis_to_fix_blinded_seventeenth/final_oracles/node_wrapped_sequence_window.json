@@ -1,0 +1,6 @@
+{
+  "case_id": "node_wrapped_sequence_window",
+  "final_files": {
+    "tests/final.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { Replica } = require('../src/replica');\n\ntest('a rollover run advances while delayed pre-rollover traffic stays stale', () => {\n  const replica = new Replica();\n  for (const frame of [\n    { sequence: 65534, value: 'a' },\n    { sequence: 65535, value: 'b' },\n    { sequence: 0, value: 'c' },\n    { sequence: 1, value: 'd' },\n  ]) {\n    assert.equal(replica.accept(frame), true);\n  }\n  assert.equal(replica.accept({ sequence: 65535, value: 'delayed' }), false);\n  assert.deepEqual(replica.current, { sequence: 1, value: 'd' });\n});\n"
+  }
+}

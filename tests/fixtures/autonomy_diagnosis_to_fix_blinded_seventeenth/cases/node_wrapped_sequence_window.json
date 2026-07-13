@@ -1,0 +1,19 @@
+{
+  "case_id": "node_wrapped_sequence_window",
+  "language": "javascript",
+  "test_runner": "node_test",
+  "prompt": "A long-lived edge replica occasionally freezes for one full counter cycle just after a gateway sequence rolls over. Logs show that the transport continues delivering frames, including a few delayed frames from immediately before the rollover, but the projected state stops advancing. Short-lived integration tests and ordinary duplicate suppression still pass. Diagnose the disagreement between sequence classification and state application, preserving protection against replayed or delayed frames.",
+  "candidate_paths": [
+    "src/serialOrder.js",
+    "src/replica.js",
+    "src/frameCodec.js"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "package.json": "{\"name\":\"wrapped-sequence-case\",\"private\":true,\"scripts\":{\"test\":\"node --test\"}}\n",
+    "src/serialOrder.js": "'use strict';\n\nfunction classifySequence(previous, candidate) {\n  if (candidate === previous) return { kind: 'duplicate', distance: 0 };\n  if (candidate > previous) return { kind: 'forward', distance: candidate - previous };\n  return { kind: 'stale', distance: previous - candidate };\n}\n\nmodule.exports = { classifySequence };\n",
+    "src/replica.js": "'use strict';\n\nconst { classifySequence } = require('./serialOrder');\n\nclass Replica {\n  constructor() {\n    this.current = null;\n  }\n\n  accept(frame) {\n    if (this.current === null) {\n      this.current = { sequence: frame.sequence, value: frame.value };\n      return true;\n    }\n    const order = classifySequence(this.current.sequence, frame.sequence);\n    if (order.kind === 'forward' && frame.sequence > this.current.sequence) {\n      this.current = { sequence: frame.sequence, value: frame.value };\n      return true;\n    }\n    return false;\n  }\n}\n\nmodule.exports = { Replica };\n",
+    "src/frameCodec.js": "'use strict';\n\nfunction decodeFrame(payload) {\n  return { sequence: payload.readUInt16BE(0), value: payload.readUInt16BE(2) };\n}\n\nmodule.exports = { decodeFrame };\n",
+    "tests/public.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { Replica } = require('../src/replica');\n\ntest('ordinary forward frames advance and duplicates are ignored', () => {\n  const replica = new Replica();\n  assert.equal(replica.accept({ sequence: 40, value: 'a' }), true);\n  assert.equal(replica.accept({ sequence: 41, value: 'b' }), true);\n  assert.equal(replica.accept({ sequence: 41, value: 'duplicate' }), false);\n  assert.equal(replica.current.value, 'b');\n});\n\ntest('an older ordinary frame cannot replace current state', () => {\n  const replica = new Replica();\n  replica.accept({ sequence: 800, value: 'new' });\n  assert.equal(replica.accept({ sequence: 799, value: 'late' }), false);\n  assert.equal(replica.current.value, 'new');\n});\n"
+  }
+}

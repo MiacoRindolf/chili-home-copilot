@@ -1,0 +1,6 @@
+{
+  "case_id": "python_invoice_residual_allocation",
+  "final_files": {
+    "tests/test_final.py": "from decimal import Decimal\n\nfrom billing.allocation import allocate\n\n\ndef test_small_three_way_refund_uses_native_precision_and_conserves_sign():\n    shares = allocate(Decimal(\"-0.007\"), [1, 1, 1], \"KWD\")\n    assert shares == [Decimal(\"-0.003\"), Decimal(\"-0.002\"), Decimal(\"-0.002\")]\n    assert sum(shares) == Decimal(\"-0.007\")\n"
+  }
+}
