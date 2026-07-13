@@ -1,0 +1,965 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 226980.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "code",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 374,
+        "exit_code": 1,
+        "output": "[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (2.0944ms)\n\u2716 scoped vendor directories remain loadable (7.1545ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 113.888\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (2.0944ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-zwqinrs8/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (7.1545ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-zwqinrs8\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-zwqinrs8\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-zwqinrs8/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (1.0694ms)\n\u2714 an ordinary vendor package activates through the registry (8.9622ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 114.5007",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/feedback.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "baseline_final_tests": {
+        "duration_ms": 378,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.mjs]\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (5.978ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 1\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 114.0695\n\n\u2716 failing tests:\n\ntest at tests\\final.test.mjs:7:1\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (5.978ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-bd42c3vn\\repo\\tests\\final_data\\vendor' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-bd42c3vn\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-bd42c3vn/repo/tests/final_data/vendor#suite/browser.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.9414ms)\n\u2714 an ordinary vendor package activates through the registry (9.1179ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 106.8323",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/final.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 174,
+        "exit_code": 0,
+        "output": "[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.8003ms)\n\u2714 an ordinary vendor package activates through the registry (7.7043ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 106.3834",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.mjs"
+        ]
+      },
+      "case_id": "th14_node_esm_plugin_loading",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": false,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "code",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "code",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Resolver logic may misinterpret export conditions",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Browser export selected",
+            "expected_if_true": "Package resolves to node export",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "dependency"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "code",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "app"
+              ],
+              "probe_id": "p1",
+              "query": "browser export priority",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Resolver prioritizes browser over node exports",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Test package with only node export resolves correctly",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1"
+            ]
+          },
+          {
+            "claim": "Cache paths with # fail path resolution",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Verify # in path is escaped properly",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Test harness lacks isolation for vendor cache",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Run tests with isolated cache directory",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 142,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "code"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Browser export selected",
+            "expected_if_true": "Package resolves to node export",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "dependency"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-13T16:27:06.386622+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "code"
+            ],
+            "dimension": "code",
+            "duration_ms": 136,
+            "exit_code": 1,
+            "expected_if_false": "Browser export selected",
+            "expected_if_true": "Package resolves to node export",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "dependency"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-13T16:27:06.386622+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th14_node_esm_plugin_loading",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Resolver prioritizes browser over node exports",
+          "confidence": 0.0,
+          "dimension": "code",
+          "evidence_ids": [
+            "operator-1"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Resolver logic may misinterpret export conditions",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Resolver prioritizes browser over node exports",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0.65,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Test package with only node export resolves correctly",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Cache paths with # fail path resolution",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify # in path is escaped properly",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Test harness lacks isolation for vendor cache",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Run tests with isolated cache directory",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Test package with only node export resolves correctly",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify # in path is escaped properly",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Run tests with isolated cache directory",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Resolver prioritizes browser over node exports",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-1"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Resolver logic may misinterpret export conditions",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Resolver prioritizes browser over node exports",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-1"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Resolver logic may misinterpret export conditions",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Resolver logic may misinterpret export conditions",
+            "status": "provisional"
+          },
+          "response_chars": 1257,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Resolver prioritizes browser over node exports",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-1"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Resolver logic may misinterpret export conditions",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Resolver prioritizes browser over node exports",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-1"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Resolver logic may misinterpret export conditions",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": false,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": false,
+          "json_parsed": false,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": false,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Resolver logic may misinterpret export conditions",
+            "status": "provisional"
+          },
+          "response_chars": 0,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 226980,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 367,
+        "exit_code": 1,
+        "output": "[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.6618ms)\n\u2716 scoped vendor directories remain loadable (7.9783ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 109.4117\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.6618ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-m_s1fom2/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (7.9783ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-m_s1fom2/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (1.0064ms)\n\u2714 an ordinary vendor package activates through the registry (7.3959ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 110.6326",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/feedback.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "final_tests": {
+        "duration_ms": 344,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.mjs]\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (5.6854ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 1\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 98.6025\n\n\u2716 failing tests:\n\ntest at tests\\final.test.mjs:7:1\n\u2716 registry activation uses the deployed module for a scoped vendor bundle (5.6854ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-9yjffe89\\repo\\tests\\final_data\\vendor' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-9yjffe89\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-9yjffe89/repo/tests/final_data/vendor#suite/browser.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (0.8859ms)\n\u2714 an ordinary vendor package activates through the registry (8.8885ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 106.6193",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/final.test.mjs",
+          "tests/public.test.mjs"
+        ]
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "code",
+      "language": "typescript",
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 13145722000,
+          "json_object_valid": true,
+          "latency_ms": 50520,
+          "load_duration_ns": 6463594300,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 9374,
+          "prompt_eval_count": 2643,
+          "prompt_eval_duration_ns": 3103169000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Resolver prioritizes browser over node exports\",\"dimension\":\"code\",\"support_evidence_ids\":[\"operator-1\"],\"contradict_evidence_ids\":[],\"falsification\":\"Test package with only node export resolves correctly\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Cache paths with # fail path resolution\",\"dimension\":\"data\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify # in path is escaped properly\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Test harness lacks isolation for vendor cache\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"baseline-public-contracts\"],\"contradict_evidence_ids\":[],\"falsification\":\"Run tests with isolated cache directory\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"dependency\"],\"expected_if_true\":\"Package resolves to node export\",\"expected_if_false\":\"Browser export selected\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"app\"],\"query\":\"browser export priority\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"operator-1\"],\"reason\":\"Resolver logic may misinterpret export conditions\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 2660,
+          "thinking_enabled": true,
+          "tokens_out": 284,
+          "wall_ms": 50520
+        },
+        {
+          "case_budget_remaining_before_sec": 429.47914439998567,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 51081384000,
+          "json_object_valid": false,
+          "latency_ms": 57464,
+          "load_duration_ns": 175820500,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 12649,
+          "prompt_eval_count": 2892,
+          "prompt_eval_duration_ns": 5975706000,
+          "requested_timeout_sec": 150.0,
+          "response": "",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": true,
+          "thinking_chars": 4811,
+          "thinking_enabled": true,
+          "tokens_out": 1000,
+          "wall_ms": 57464
+        },
+        {
+          "case_budget_remaining_before_sec": 372.0142700999859,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 12284540000,
+          "latency_ms": 16048,
+          "load_duration_ns": 237702900,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 7444,
+          "prompt_eval_count": 1702,
+          "prompt_eval_duration_ns": 3222079000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"Resolver prioritizes browser over node exports, leading to incorrect selection of browser implementation despite Node import. The issue likely stems from the resolver logic in package-exports.mjs.\",\n  \"files\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Fix resolver to prioritize node over browser exports when conditions include 'node'.\"\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure correct handling of resolved export paths to avoid loading browser implementations for Node imports.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"resolveExportTarget\",\n      \"owner_paths\": [\"src/package-exports.mjs\"],\n      \"postcondition\": \"Returns the correct export path based on conditions, prioritizing 'node' over 'browser'.\"\n    },\n    {\n      \"contract\": \"loadPlugin\",\n      \"owner_paths\": [\"src/plugin-loader.mjs\"],\n      \"postcondition\": \"Loads the correct plugin based on resolved export path, ensuring Node imports are handled properly.\"\n    }\n  ],\n  \"notes\": \"Ensure resolver logic in package-exports.mjs prioritizes 'node' over 'browser' exports when conditions include 'node'.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 279,
+          "wall_ms": 16049
+        },
+        {
+          "case_budget_remaining_before_sec": 355.9652226000035,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 12679388000,
+          "latency_ms": 21734,
+          "load_duration_ns": 6675077400,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 6546,
+          "prompt_eval_count": 1450,
+          "prompt_eval_duration_ns": 2350153000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null;\",\n          \"replace\": \"if (conditions.includes('node')) { return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null; } else { return null; }\"\n        }\n      ]\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const target = resolveExportTarget(manifest.exports, { subpath: options.subpath ?? '.', conditions: options.conditions ?? ['node', 'import'] });\",\n          \"replace\": \"const target = resolveExportTarget(manifest.exports, { subpath: options.subpath ?? '.', conditions: options.conditions ?? ['node', 'import'] }); if (target === null) { throw new Error(`package ${manifest.name ?? '<anonymous>'} has no matching export for Node import`); }\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "edit_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 234,
+          "wall_ms": 21734
+        },
+        {
+          "case_budget_remaining_before_sec": 334.23084380000364,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 12302556000,
+          "latency_ms": 14172,
+          "load_duration_ns": 180791900,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 7135,
+          "prompt_eval_count": 1572,
+          "prompt_eval_duration_ns": 1653512000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null;\",\n          \"replace\": \"if (conditions.includes('node')) { return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null; } else { return null; }\"\n        }\n      ]\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const target = resolveExportTarget(manifest.exports, { subpath: options.subpath ?? '.', conditions: options.conditions ?? ['node', 'import'] });\",\n          \"replace\": \"const target = resolveExportTarget(manifest.exports, { subpath: options.subpath ?? '.', conditions: options.conditions ?? ['node', 'import'] }); if (target === null) { throw new Error(`package ${manifest.name ?? '<anonymous>'} has no matching export`); }\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "edit_bundle_adapter_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 231,
+          "wall_ms": 14172
+        },
+        {
+          "case_budget_remaining_before_sec": 320.0585748000012,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 12993945000,
+          "latency_ms": 26541,
+          "load_duration_ns": 6872107500,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 12852,
+          "prompt_eval_count": 3182,
+          "prompt_eval_duration_ns": 6620856000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"Resolver prioritizes browser over node exports, leading to incorrect resolution of exports. The scoped vendor directory path with # is not properly escaped, causing module resolution failure.\",\n  \"files\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Update resolveExportTarget to prioritize node over browser exports when conditions include 'node'.\"\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure paths with # are properly escaped before resolving module paths.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"tests/feedback.test.mjs::deployment conditions select the server plugin\",\n      \"owner_paths\": [\"src/package-exports.mjs\"],\n      \"postcondition\": \"resolveExportTarget returns './node.mjs' when conditions include 'node'.\"\n    },\n    {\n      \"contract\": \"tests/feedback.test.mjs::scoped vendor directories remain loadable\",\n      \"owner_paths\": [\"src/plugin-loader.mjs\"],\n      \"postcondition\": \"Module paths with # are properly escaped and resolved.\"\n    }\n  ],\n  \"notes\": \"Ensure the resolver correctly prioritizes node exports and handles special characters in paths.\"\n}",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 275,
+          "wall_ms": 26541
+        },
+        {
+          "case_budget_remaining_before_sec": 293.5170628000051,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 11765489000,
+          "latency_ms": 21424,
+          "load_duration_ns": 6324521400,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 11581,
+          "prompt_eval_count": 2867,
+          "prompt_eval_duration_ns": 3274558000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const firstTarget = Object.values(entry)[0];\\nreturn typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null;\",\n          \"replace\": \"if (conditions.includes('node')) {\\n  const nodeTargets = Object.values(entry).filter(target => target.startsWith('./node.'));\\n  if (nodeTargets.length > 0) {\\n    return nodeTargets[0];\\n  }\\n}\\nconst firstTarget = Object.values(entry)[0];\\nreturn typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null;\"\n        }\n      ]\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const modulePath = resolve(packageRoot, target);\\nconst namespace = await import(rawFileUrl(modulePath));\\nreturn namespace.default;\",\n          \"replace\": \"const escapedModulePath = encodeURIComponent(target).replace(/#/g, '%23');\\nconst modulePath = resolve(packageRoot, escapedModulePath);\\nconst namespace = await import(rawFileUrl(modulePath));\\nreturn namespace.default;\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "repair_edit_1_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 281,
+          "wall_ms": 21424
+        },
+        {
+          "case_budget_remaining_before_sec": 272.09276339999633,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 13066039000,
+          "latency_ms": 14476,
+          "load_duration_ns": 191392300,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "prompt_chars": 12198,
+          "prompt_eval_count": 2996,
+          "prompt_eval_duration_ns": 1173078000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"src/package-exports.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const firstTarget = Object.values(entry)[0];\\nreturn typeof firstTarget === 'string' && firstTarget.startsWith('./') ?\",\n          \"replace\": \"return entry[subpath] ?? null;\"\n        }\n      ]\n    },\n    {\n      \"path\": \"src/plugin-loader.mjs\",\n      \"blocks\": [\n        {\n          \"search\": \"const modulePath = resolve(packageRoot, target);\\nconst namespace = await import(rawFileUrl(modulePath));\\nreturn namespace.default;\",\n          \"replace\": \"const modulePath = resolve(packageRoot, target);\\ntry {\\n  const namespace = await import(rawFileUrl(modulePath));\\n  return namespace.default;\\n} catch (error) {\\n  if (error.code === 'ERR_MODULE_NOT_FOUND' && target.includes('#')) {\\n    const escapedTarget = target.replace(/#/g, '%23');\\n    const escapedModulePath = resolve(packageRoot, escapedTarget);\\n    return await import(rawFileUrl(escapedModulePath)).then(namespace => namespace.default);\\n  }\\n  throw error;\\n}\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "repair_edit_1_bundle_adapter_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 267,
+          "wall_ms": 14476
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 8,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": false,
+      "patch_warnings": [
+        "block 1: SEARCH text not found in file (hallucinated or stale content): \"return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null;\"",
+        "atomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied",
+        "Coordinated edit for src/package-exports.mjs was rejected or made no change.",
+        "block 1: SEARCH text not found in file (hallucinated or stale content): \"return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? firstTarget : null;\"",
+        "atomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied",
+        "Coordinated edit for src/package-exports.mjs was rejected or made no change.",
+        "Atomic bundle adapter recovery did not produce an applicable edit.",
+        "Rolled back coordinated multi-file edit group after bundle rejection.",
+        "block 1: SEARCH text not found in file (hallucinated or stale content): \"const firstTarget = Object.values(entry)[0]; | return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? \"",
+        "atomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied",
+        "Coordinated edit for src/package-exports.mjs was rejected or made no change.",
+        "block 1: SEARCH text not found in file (hallucinated or stale content): \"const firstTarget = Object.values(entry)[0]; | return typeof firstTarget === 'string' && firstTarget.startsWith('./') ?\"",
+        "atomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied",
+        "Coordinated edit for src/package-exports.mjs was rejected or made no change.",
+        "Atomic bundle adapter recovery did not produce an applicable edit.",
+        "Rolled back coordinated multi-file edit group after bundle rejection."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 165,
+        "exit_code": 0,
+        "output": "[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (1.0399ms)\n\u2714 an ordinary vendor package activates through the registry (7.7955ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 98.4399",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.mjs"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "adapter_rejection": "CHILI adapter rejected the attempted edit:\nblock 1: SEARCH text not found in file (hallucinated or stale content): \"const firstTarget = Object.values(entry)[0]; | return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? \"\natomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied\nCoordinated edit for src/package-exports.mjs was rejected or made no change.\nblock 1: SEARCH text not found in file (hallucinated or stale content): \"const firstTarget = Object.values(entry)[0]; | return typeof firstTarget === 'string' && firstTarget.startsWith('./') ?\"\natomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied\nCoordinated edit for src/package-exports.mjs was rejected or made no change.\nAtomic bundle adapter recovery did not produce an applicable edit.\nRolled back coordinated multi-file edit group after bundle rejection.",
+          "after_failure_signature": "00693fa119ba33787a0e9cc79b1076f88f799d8832b866a3718160808eb56a87",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable",
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ],
+            "passed_ids": [
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ]
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"expected: './node.mjs'; actual: './browser.mjs'\",\n      \"AssertionError: Expected values to be strictly equal:\"\n    ],\n    \"failed_ids\": [\n      \"tests/feedback.test.mjs::deployment conditions select the server plugin\",\n      \"tests/feedback.test.mjs::scoped vendor directories remain loadable\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- Do not invent or install dependencies; use platform primitives and existing repository imports.\n- observed: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n- observed: code: 'ERR_ASSERTION',\n- observed: Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\src\\plugin-loader.mjs\n- observed: code: 'ERR_MODULE_NOT_FOUND',\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.6618ms)\n\u2716 scoped vendor directories remain loadable (7.9783ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 109.4117\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.6618ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-m_s1fom2/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (7.9783ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-m_s1fom2/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (1.0064ms)\n\u2714 an ordinary vendor package activates through the registry (7.3959ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 110.6326",
+          "applied_files": [],
+          "attempted_diff": "",
+          "before_failure_signature": "00693fa119ba33787a0e9cc79b1076f88f799d8832b866a3718160808eb56a87",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/feedback.test.mjs::deployment conditions select the server plugin",
+              "tests/feedback.test.mjs::scoped vendor directories remain loadable",
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ],
+            "passed_ids": [
+              "tests/public.test.mjs::a package with one entry resolves as before",
+              "tests/public.test.mjs::an ordinary vendor package activates through the registry"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"expected: './node.mjs'; actual: './browser.mjs'\",\n      \"AssertionError: Expected values to be strictly equal:\"\n    ],\n    \"failed_ids\": [\n      \"tests/feedback.test.mjs::deployment conditions select the server plugin\",\n      \"tests/feedback.test.mjs::scoped vendor directories remain loadable\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- Do not invent or install dependencies; use platform primitives and existing repository imports.\n- observed: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n- observed: code: 'ERR_ASSERTION',\n- observed: Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\src\\plugin-loader.mjs\n- observed: code: 'ERR_MODULE_NOT_FOUND',\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n[tests/feedback.test.mjs]\n\u2716 deployment conditions select the server plugin (1.6618ms)\n\u2716 scoped vendor directories remain loadable (7.9783ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 109.4117\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.mjs:8:1\n\u2716 deployment conditions select the server plugin (1.6618ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  + actual - expected\n  \n  + './browser.mjs'\n  - './node.mjs'\n       ^\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-m_s1fom2/repo/tests/feedback.test.mjs:9:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: './browser.mjs',\n    expected: './node.mjs',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\feedback.test.mjs:22:1\n\u2716 scoped vendor directories remain loadable (7.9783ms)\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\tests\\feedback_data\\channel' imported from C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_node_esm_plugin_loading-m_s1fom2\\repo\\src\\plugin-loader.mjs\n      at finalizeResolution (node:internal/modules/esm/resolve:271:11)\n      at moduleResolve (node:internal/modules/esm/resolve:861:10)\n      at defaultResolve (node:internal/modules/esm/resolve:988:11)\n      at #cachedDefaultResolve (node:internal/modules/esm/loader:697:20)\n      at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:714:38)\n      at ModuleLoader.resolveSync (node:internal/modules/esm/loader:746:52)\n      at #resolve (node:internal/modules/esm/loader:679:17)\n      at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:599:35)\n      at node:internal/modules/esm/loader:628:32\n      at TracingChannel.tracePromise (node:diagnostics_channel:362:14) {\n    code: 'ERR_MODULE_NOT_FOUND',\n    url: 'file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-th14_node_esm_plugin_loading-m_s1fom2/repo/tests/feedback_data/channel#edge/index.mjs'\n  }\n\n[tests/public.test.mjs]\n\u2714 a package with one entry resolves as before (1.0064ms)\n\u2714 an ordinary vendor package activates through the registry (7.3959ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 110.6326",
+          "escalated": false,
+          "feedback_context_files": [
+            "src/package-exports.mjs",
+            "src/plugin-loader.mjs"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": false,
+          "plan": {
+            "analysis": "Resolver prioritizes browser over node exports, leading to incorrect resolution of exports. The scoped vendor directory path with # is not properly escaped, causing module resolution failure.",
+            "contract_coverage": [
+              {
+                "contract": "tests/feedback.test.mjs::deployment conditions select the server plugin",
+                "owner_paths": [
+                  "src/package-exports.mjs"
+                ],
+                "postcondition": "resolveExportTarget returns './node.mjs' when conditions include 'node'."
+              },
+              {
+                "contract": "tests/feedback.test.mjs::scoped vendor directories remain loadable",
+                "owner_paths": [
+                  "src/plugin-loader.mjs"
+                ],
+                "postcondition": "Module paths with # are properly escaped and resolved."
+              }
+            ],
+            "dimension": "code",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Update resolveExportTarget to prioritize node over browser exports when conditions include 'node'.",
+                "path": "src/package-exports.mjs"
+              },
+              {
+                "action": "modify",
+                "description": "Ensure paths with # are properly escaped before resolving module paths.",
+                "path": "src/plugin-loader.mjs"
+              }
+            ],
+            "notes": "Ensure the resolver correctly prioritizes node exports and handles special characters in paths.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "49dd276a7b5d2f890d059a2dd69bfc687118e40b05b9a1259e39b0513f2935db",
+          "proposed_diagnosis_dimension": "code",
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "src/package-exports.mjs",
+          "selected_files": [
+            "src/package-exports.mjs",
+            "src/plugin-loader.mjs"
+          ],
+          "skipped_optional_files": [],
+          "warnings": [
+            "block 1: SEARCH text not found in file (hallucinated or stale content): \"const firstTarget = Object.values(entry)[0]; | return typeof firstTarget === 'string' && firstTarget.startsWith('./') ? \"",
+            "atomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied",
+            "Coordinated edit for src/package-exports.mjs was rejected or made no change.",
+            "block 1: SEARCH text not found in file (hallucinated or stale content): \"const firstTarget = Object.values(entry)[0]; | return typeof firstTarget === 'string' && firstTarget.startsWith('./') ?\"",
+            "atomic edit rejected: every SEARCH/REPLACE block in a file must apply or already be satisfied",
+            "Coordinated edit for src/package-exports.mjs was rejected or made no change.",
+            "Atomic bundle adapter recovery did not produce an applicable edit.",
+            "Rolled back coordinated multi-file edit group after bundle rejection."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "code",
+      "score": 25,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "src/package-exports.mjs",
+        "src/plugin-loader.mjs"
+      ],
+      "split": "disclosed_replay",
+      "test_runner": "node_test"
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-13T16:29:04.499525+00:00",
+  "development_regression_case_count": 1,
+  "development_regression_score": 25.0,
+  "diagnosis_accuracy": 0.0,
+  "diagnosis_correct_count": 0,
+  "diagnostic_stage_acceptance_rate": 50.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 50.0,
+  "diagnostic_stage_schema_acceptance_rate": 50.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "max_base_repair_rounds": 1,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 1,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 25.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v5",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "total_model_calls": 8,
+  "verdict": "needs_improvement"
+}
