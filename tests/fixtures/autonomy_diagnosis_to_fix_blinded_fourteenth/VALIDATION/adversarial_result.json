@@ -1,0 +1,208 @@
+{
+  "schema": "chili.adversarial-validation-result.v1",
+  "validator": "Codex independent adversarial validator",
+  "target_commit": "64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3",
+  "verdict": "REJECT",
+  "checks": [
+    {
+      "id": "target_provenance",
+      "status": "PASS",
+      "evidence": {
+        "validation_branch": "codex/fourteenth-adversarial-validation",
+        "branch_base": "64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3",
+        "command": "git rev-parse HEAD"
+      }
+    },
+    {
+      "id": "manifest_and_triple_structure",
+      "status": "PASS",
+      "evidence": {
+        "case_count": 12,
+        "unique_case_ids": 12,
+        "language_counts": {
+          "dart": 3,
+          "typescript": 3,
+          "python": 3,
+          "sql": 3
+        },
+        "dimension_counts": {
+          "data": 4,
+          "dependency": 4,
+          "state": 3,
+          "runtime": 1
+        },
+        "candidate_paths_per_case": 3,
+        "max_files_per_case": 2,
+        "expected_files_per_case": 2,
+        "partition_path_overlap": 0,
+        "ascii_or_bom_errors": 0
+      }
+    },
+    {
+      "id": "official_validation_preflight",
+      "status": "PASS",
+      "evidence": {
+        "command": "python -B scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root D:\\dev\\c14v\\tests\\fixtures\\autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures --json",
+        "mode": "validation_only",
+        "fixture_valid": true,
+        "public_passed": 12,
+        "feedback_failed_as_required": 12,
+        "sealed_final_failed_as_required": 12,
+        "external_final_oracles": 12
+      }
+    },
+    {
+      "id": "exact_duplicate_scan",
+      "status": "PASS",
+      "evidence": {
+        "all_case_documents_compared": 141,
+        "diagnosis_to_fix_cases_compared": 77,
+        "embedded_payloads_compared": 421,
+        "exact_normalized_prompt_duplicates": 0,
+        "exact_cross_fixture_embedded_payload_duplicates": 0,
+        "exact_canonical_source_skeleton_duplicates": 0
+      }
+    },
+    {
+      "id": "material_mechanism_and_source_skeleton_uniqueness",
+      "status": "REJECT",
+      "evidence": {
+        "case_id": "th14_dart_keyset_pagination",
+        "prior_case_id": "dart-equal-time-event-order",
+        "prior_fixture": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_ninth",
+        "shared_contract": "A timestamp-only event order and timestamp-only continuation lose peers at a tied instant; both repairs require a compound event position using a stable secondary identity and continuation across that full position."
+      }
+    },
+    {
+      "id": "material_assertion_family_uniqueness",
+      "status": "REJECT",
+      "evidence": {
+        "case_id": "th14_dart_keyset_pagination",
+        "prior_case_id": "dart-equal-time-event-order",
+        "shared_assertion_family": "Exact ordered event-ID sequences for equal timestamps plus gap-free continuation across a persisted cursor or batch boundary."
+      }
+    },
+    {
+      "id": "weak_final_partition_independence",
+      "status": "PASS",
+      "evidence": {
+        "disjoint_test_paths": true,
+        "byte_identical_weak_final_payloads": 0,
+        "materially_strengthened_finals": 12
+      }
+    },
+    {
+      "id": "public_test_name_and_prompt_leakage",
+      "status": "PASS",
+      "evidence": {
+        "public_tests_cover_only_healthy_baselines": true,
+        "final_test_paths_present_in_public_cases": 0,
+        "repair_or_final_assertions_present_in_public_cases": 0,
+        "note": "Descriptive feedback names become available only in the intended repair-feedback partition."
+      }
+    },
+    {
+      "id": "two_owner_and_nonconstant_repair_scope",
+      "status": "PASS",
+      "evidence": {
+        "cases_with_two_independently_exercised_expected_owners": 12,
+        "cases_with_an_accidentally_sufficient_distractor_or_single_owner": 0,
+        "cases_solved_end_to_end_by_a_literal_constant_substitution": 0,
+        "note": "Several cases contain one easy local edit, but every final contract also requires the second expected owner."
+      }
+    },
+    {
+      "id": "current_deterministic_operator_direct_solvability",
+      "status": "PASS",
+      "evidence": {
+        "cases_scanned": 12,
+        "cases_with_derived_invariants": 0,
+        "cases_with_known_dimensions": 0,
+        "cases_with_repair_proposals": 0,
+        "cases_with_invariant_warnings": 0,
+        "operator_api": "derive_contract_invariants + contract_repair_dimension + contract_repair_proposals + contract_invariant_warnings"
+      }
+    },
+    {
+      "id": "case_level_review",
+      "status": "REJECT",
+      "evidence": {
+        "REJECT": [
+          "th14_dart_keyset_pagination"
+        ],
+        "PASS": [
+          "th14_dart_semver_selection",
+          "th14_dart_websocket_fragments",
+          "th14_node_esm_plugin_loading",
+          "th14_node_http_preconditions",
+          "th14_node_partition_commits",
+          "th14_py_context_offload",
+          "th14_py_decorated_handlers",
+          "th14_py_link_pagination",
+          "th14_sql_partner_search",
+          "th14_sql_registry_refresh",
+          "th14_sql_suppression_batches"
+        ]
+      }
+    },
+    {
+      "id": "authored_input_integrity",
+      "status": "PASS",
+      "evidence": {
+        "authored_input_file_count": 41,
+        "aggregate_sha256": "2782dcb63fe1dabfb5a9fee510d4fe878abc408e9b2873f6f410e8955b9286d5",
+        "digest_definition": "SHA-256 over sorted UTF-8 lines of relative-path, NUL, lowercase file SHA-256, LF; VALIDATION excluded.",
+        "changed_paths_outside_validation": 0
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "ADV-001",
+      "severity": "high",
+      "category": "material_prior_holdout_reuse",
+      "case_id": "th14_dart_keyset_pagination",
+      "disposition": "REJECT",
+      "summary": "The case materially reuses the ninth holdout's equal-time compound event-position mechanism, source shape, and assertion family.",
+      "evidence": [
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth/cases/th14_dart_keyset_pagination.json",
+          "sha256": "071e74f9c2aafe82c2ac1bf54617066a744c14681bc7bdbd863867a1c41b58bf",
+          "fact": "The baseline sorts only by occurredAt and resumes from a cursor containing only occurredAt; the prompt says tied records disappear and tied ordering is unstable."
+        },
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_ninth/cases/dart-equal-time-event-order.json",
+          "sha256": "f3e57232a64ca3195c1b8dbc6cedf37e72db735b4dd848294d2982e53b72b983",
+          "fact": "The prior prompt says same-millisecond events disappear and explicitly requires ordering and cursor advancement to honor the complete event position."
+        },
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth/oracles/th14_dart_keyset_pagination.json",
+          "sha256": "c8da9865fdc600415e1bdf20957133f948572a42d200d4477b1077f05d1d8025",
+          "fact": "Feedback requires equal-instant secondary identity order and retention of peers at the continuation boundary."
+        },
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_ninth/oracles/dart-equal-time-event-order.json",
+          "sha256": "ddde1ba320c1de80c4f95d45e983aebc89d2ffda60ec74a9e87cd380f53e8597",
+          "fact": "The prior feedback requires exact secondary sequence order for equal-time events."
+        },
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth/final_oracles/th14_dart_keyset_pagination.json",
+          "sha256": "3bf46fcb5970976de5c4c8fcecef0b66d430811b418fbcfe39df40aa6e694d30",
+          "fact": "The final walks a compound boundary over tied records exactly once."
+        },
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_ninth/final_oracles/dart-equal-time-event-order.json",
+          "sha256": "0b7e4b61f166f1017dfb24fb1d6c025df30e868ef3614c0d536f2de605f4c8ef",
+          "fact": "The prior final advances a cross-batch cursor over tied records while suppressing a duplicate exactly once."
+        }
+      ],
+      "commands": [
+        "git grep -l -F 'dart-equal-time-event-order' 64b32b8 -- tests/fixtures",
+        "git show 64b32b8:tests/fixtures/autonomy_diagnosis_to_fix_blinded_ninth/cases/dart-equal-time-event-order.json",
+        "git show 64b32b8:tests/fixtures/autonomy_diagnosis_to_fix_blinded_ninth/oracles/dart-equal-time-event-order.json",
+        "git show 64b32b8:tests/fixtures/autonomy_diagnosis_to_fix_blinded_ninth/final_oracles/dart-equal-time-event-order.json"
+      ]
+    }
+  ],
+  "authored_files_unchanged": true
+}
