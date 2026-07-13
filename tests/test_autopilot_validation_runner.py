@@ -101,6 +101,37 @@ def test_changed_typescript_syntax_never_executes_repository_code(tmp_path):
     assert result.metadata["changed_files"] == ["src/side_effect.ts"]
 
 
+def test_changed_javascript_rejects_unbound_instanceof_class_reference(tmp_path):
+    if not shutil.which("node"):
+        return
+    _write(
+        tmp_path,
+        "src/client.mjs",
+        "export function classify(error) { return error instanceof ClientInputError; }\n",
+    )
+
+    result = run_ast_syntax(tmp_path, changed_files=["src/client.mjs"])
+
+    assert result.exit_code == 1
+    assert "unbound instanceof identifier(s): ClientInputError" in result.stdout
+
+
+def test_changed_javascript_accepts_imported_instanceof_class_reference(tmp_path):
+    if not shutil.which("node"):
+        return
+    _write(tmp_path, "src/errors.mjs", "export class ClientInputError extends Error {}\n")
+    _write(
+        tmp_path,
+        "src/client.mjs",
+        "import { ClientInputError } from './errors.mjs';\n"
+        "export function classify(error) { return error instanceof ClientInputError; }\n",
+    )
+
+    result = run_ast_syntax(tmp_path, changed_files=["src/client.mjs"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+
 def test_changed_dart_syntax_uses_analyzer_when_available(tmp_path):
     if not shutil.which("dart"):
         return
@@ -208,6 +239,20 @@ def test_changed_sql_still_checks_statements_after_missing_schema(tmp_path):
     assert result.metadata["sql_schema_dependent"] == [
         {"path": "queries/broken.sql", "error": "no such table: customer"}
     ]
+
+
+def test_changed_sql_rejects_non_sqlite_function_instead_of_deferring_it(tmp_path):
+    _write(
+        tmp_path,
+        "queries/unsupported.sql",
+        "SELECT json_contains('[\"reader\"]', 'reader');\n",
+    )
+
+    result = run_ast_syntax(tmp_path, changed_files=["queries/unsupported.sql"])
+
+    assert result.exit_code == 1
+    assert "no such function: json_contains" in result.stdout
+    assert result.metadata["sql_schema_dependent"] == []
 
 
 def test_changed_sql_keeps_external_database_actions_blocked(tmp_path):

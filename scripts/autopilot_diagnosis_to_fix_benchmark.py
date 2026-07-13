@@ -125,6 +125,9 @@ REPAIR_PLAN_SCHEMA = {
             "items": {
                 "type": "object",
                 "required": ["contract", "owner_paths", "postcondition"],
+                "properties": {
+                    "polarity": {"enum": ["required", "forbidden"]},
+                },
             },
         },
         "notes": {"type": "string"},
@@ -1576,6 +1579,39 @@ def _candidate_snapshot(repo: Path, case: Mapping[str, Any]) -> dict[str, str]:
     return snapshot
 
 
+def _prompt_contract_obligations(prompt: str) -> dict[str, dict[str, str]]:
+    """Give prompt-derived invariants stable positive and negative obligation ids."""
+    obligations: dict[str, dict[str, str]] = {}
+    negative = re.compile(
+        r"\b(?:cannot|must\s+not|never|no\s+|not\s+|without|rejects?|rejected|"
+        r"forbidden|prohibited|only)\b",
+        re.IGNORECASE,
+    )
+    for invariant in diagnostic_reasoning.derive_contract_invariants(prompt):
+        statement = " ".join(str(invariant or "").split()).strip()
+        if not statement:
+            continue
+        required_digest = hashlib.sha256(
+            f"required\0{statement}".encode("utf-8")
+        ).hexdigest()[:12]
+        obligations[f"prompt_obligation::required::{required_digest}"] = {
+            "polarity": "required",
+            "statement": statement,
+        }
+        if negative.search(statement):
+            forbidden_digest = hashlib.sha256(
+                f"forbidden\0{statement}".encode("utf-8")
+            ).hexdigest()[:12]
+            obligations[f"prompt_obligation::forbidden::{forbidden_digest}"] = {
+                "polarity": "forbidden",
+                "statement": (
+                    "Do not introduce or retain any shortcut explicitly prohibited by this invariant: "
+                    + statement
+                ),
+            }
+    return obligations
+
+
 def _prompt_contract_closure(
     repo: Path,
     case: Mapping[str, Any],
@@ -1837,6 +1873,7 @@ def _validation_progress(
     lower = output.lower()
     syntax_markers = (
         "syntaxerror",
+        "semanticerror",
         "compile error",
         "compilation failed",
         "validator_unavailable",
@@ -1897,6 +1934,32 @@ def _validation_advanced(
         and after_progress[1] > 0
         and after_contracts.get("identity_available")
     )
+
+
+def _mark_repair_completion(
+    patch: dict[str, Any],
+    public_tests: Mapping[str, Any],
+    feedback_tests: Mapping[str, Any],
+    prompt_contract_closure: Mapping[str, Any],
+) -> None:
+    """Separate useful intermediate diffs from a fully validated repair."""
+    changed_files = [str(value) for value in patch.get("changed_files") or [] if str(value)]
+    complete = bool(
+        changed_files
+        and public_tests.get("passed")
+        and feedback_tests.get("passed")
+        and not prompt_contract_closure
+    )
+    provisional = bool(changed_files and not complete)
+    patch["repair_contract_complete"] = complete
+    patch["provisional_patch_applied"] = provisional
+    patch["patch_applied"] = complete
+    warning = (
+        "Retained validation progress as provisional evidence; unresolved feedback or prompt contracts "
+        "prevent completed-patch credit."
+    )
+    if provisional and warning not in (patch.get("warnings") or []):
+        patch["warnings"] = [*(patch.get("warnings") or []), warning]
 
 
 def _attempt_ledger_context(attempts: Sequence[Mapping[str, Any]]) -> str:
@@ -1984,8 +2047,15 @@ def _repair_plan_has_complete_contract_coverage(
     prompt_contract_details = (
         (contract_evidence or {}).get("prompt_contract_details") or {}
     )
+    prompt_obligation_details = (
+        (contract_evidence or {}).get("prompt_obligation_details") or {}
+    )
     failed_ids = _normalized_failed_contract_ids(contract_evidence)
-    if not coverage or (not failed_ids and not prompt_contract_details):
+    if (
+        not coverage
+        or (not failed_ids and not prompt_contract_details and not prompt_obligation_details)
+        or plan.get("contract_owner_budget_exceeded")
+    ):
         return False
     owner_union: set[str] = set()
     for item in coverage:
@@ -2008,7 +2078,7 @@ def _repair_plan_has_complete_contract_coverage(
     }
     if not owner_union <= selected:
         return False
-    if not failed_ids:
+    if not failed_ids and not prompt_obligation_details:
         return True
     terminal_counts: dict[str, int] = {}
     for value in failed_ids:
@@ -2028,6 +2098,24 @@ def _repair_plan_has_complete_contract_coverage(
             for contract in coverage_contracts
             for alias in aliases
         ):
+            return False
+    for obligation_id, detail in prompt_obligation_details.items():
+        normalized_id = validation_contracts.normalize_contract_id(obligation_id)
+        matches = [
+            item
+            for item in coverage
+            if normalized_id
+            and normalized_id
+            in validation_contracts.normalize_contract_id(item.get("contract"))
+        ]
+        if len(matches) != 1:
+            return False
+        expected_polarity = str(
+            detail.get("polarity") if isinstance(detail, Mapping) else ""
+        ).strip().casefold()
+        if expected_polarity not in {"required", "forbidden"}:
+            return False
+        if str(matches[0].get("polarity") or "").strip().casefold() != expected_polarity:
             return False
     return True
 
@@ -2138,8 +2226,16 @@ def _align_plan_files_to_contract_coverage(
             owner_contracts[relative].append(contract)
     if not owner_order:
         return dict(plan)
+    if len(owner_order) > max_files:
+        return {
+            **dict(plan),
+            "contract_owner_budget_exceeded": {
+                "max_files": max_files,
+                "required_owner_paths": owner_order,
+            },
+        }
     aligned: list[dict[str, Any]] = []
-    for relative in owner_order[:max_files]:
+    for relative in owner_order:
         existing = by_path.get(relative, {})
         description = str(existing.get("description") or "").strip()
         if not description:
@@ -2159,7 +2255,9 @@ def _align_plan_files_to_contract_coverage(
                 "description": description,
             }
         )
-    return {**dict(plan), "files": aligned}
+    result = {**dict(plan), "files": aligned}
+    result.pop("contract_owner_budget_exceeded", None)
+    return result
 
 
 def _repair_plan_fingerprint(plan: Mapping[str, Any]) -> str:
@@ -2196,6 +2294,7 @@ def _repair_plan_fingerprint(plan: Mapping[str, Any]) -> str:
                     )
                 ),
                 validation_contracts.normalize_contract_id(item.get("postcondition")),
+                str(item.get("polarity") or "").strip().casefold(),
             )
             for item in plan.get("contract_coverage") or []
             if isinstance(item, Mapping)
@@ -2215,6 +2314,7 @@ def _plan_prompt(
     public_context: str = "",
 ) -> str:
     invariants = diagnostic_reasoning.derive_contract_invariants(prompt)
+    obligations = _prompt_contract_obligations(prompt)
     return (
         "Return one JSON object only. Classify the causal owner with the supplied dimension rubric, then select "
         "only the owning source files required for the diagnosed bug. "
@@ -2228,6 +2328,8 @@ def _plan_prompt(
         f"Request:\n{prompt}\n\n"
         f"Dimension rubric:\n{json.dumps(REPAIR_DIMENSION_RUBRIC, indent=2)}\n\n"
         f"Deterministic mechanism invariants:\n{json.dumps(invariants, indent=2)}\n\n"
+        "Prompt obligation ledger (copy every id into one contract_coverage.contract and preserve its exact "
+        f"polarity):\n{json.dumps(obligations, indent=2, sort_keys=True)}\n\n"
         f"Evidence decision:\n{diagnostic_reasoning.report_context(report)}\n\n"
         f"Read-only public contracts that must remain green:\n{public_context or '(unavailable)'}\n\n"
         f"Allowed candidate paths: {json.dumps(candidates)}\n\n"
@@ -3932,6 +4034,7 @@ def _repair_after_failure(
     mechanism_invariants = diagnostic_reasoning.derive_contract_invariants(
         str(case.get("prompt") or "")
     )
+    prompt_obligations = _prompt_contract_obligations(str(case.get("prompt") or ""))
     repair_prompt = (
         "Return one compact JSON object only. A previous locally generated patch failed validation. "
         "Use the failure output and read-only feedback tests to propose a causal dimension, reconsider ownership, "
@@ -3949,6 +4052,8 @@ def _repair_after_failure(
         f"Evidence decision:\n{diagnostic_reasoning.report_context(report)}\n"
         f"Strongest evidence:\n{evidence_context or '(none)'}\n\n"
         f"Deterministic mechanism invariants:\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
+        "Required prompt obligation ids (copy each id verbatim into exactly one contract field and preserve "
+        f"its polarity):\n{json.dumps(prompt_obligations, indent=2, sort_keys=True)}\n\n"
         f"Previous selected files: {json.dumps(previous_patch.get('selected_files') or [])}\n\n"
         f"Rejected/no-progress attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
         "Required failed contract ids (copy each id verbatim into exactly one contract field):\n"
@@ -4042,6 +4147,8 @@ def _repair_after_failure(
         f"Original operator contract (must also remain true):\n{case.get('prompt')}\n\n"
         "Deterministic mechanism invariants (must be implemented by their causal source owner, not merely "
         f"reviewed):\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
+        "Required prompt obligation ids (copy each id verbatim into exactly one contract field and preserve "
+        f"its polarity):\n{json.dumps(prompt_obligations, indent=2, sort_keys=True)}\n\n"
         f"Repair-feedback validation contracts:\n{failure_output[:12000]}\n\n"
         f"Read-only repair-feedback tests:\n{feedback_context or '(unavailable)'}\n\n"
         f"Rejected/no-progress attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
@@ -5057,6 +5164,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     before_test_contracts["prompt_contract_details"] = dict(
                         prompt_contract_closure
                     )
+                prompt_obligations = _prompt_contract_obligations(
+                    str(case.get("prompt") or "")
+                )
+                if prompt_obligations:
+                    before_test_contracts["prompt_obligation_details"] = dict(
+                        prompt_obligations
+                    )
                 before_failure_signature = hashlib.sha256(
                     (
                         before_failure_signature
@@ -5168,6 +5282,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     repair["after_test_contracts"]["prompt_contract_details"] = dict(
                         prompt_contract_closure
                     )
+                if prompt_obligations:
+                    repair["after_test_contracts"]["prompt_obligation_details"] = dict(
+                        prompt_obligations
+                    )
                 repair["after_validation_output"] = _validation_failure_context(
                     public_tests,
                     feedback_tests,
@@ -5246,7 +5364,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             patch["changed_files"] = _changed_candidate_files(
                 repo, case.get("candidate_paths") or []
             )
-            patch["patch_applied"] = bool(patch["changed_files"])
+            _mark_repair_completion(
+                patch,
+                public_tests,
+                feedback_tests,
+                prompt_contract_closure,
+            )
             patch["selected_file"] = (
                 patch["changed_files"][0] if len(patch["changed_files"]) == 1 else ""
             )

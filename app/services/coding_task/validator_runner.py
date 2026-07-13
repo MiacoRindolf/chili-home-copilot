@@ -247,13 +247,88 @@ def _sqlite_authorizer(
 _SQLITE_SCHEMA_DEPENDENT_ERRORS = (
     "no such table:",
     "no such column:",
-    "no such function:",
     "no such index:",
     "no such trigger:",
     "no such view:",
     "has no column named",
     "ambiguous column name:",
 )
+
+_JAVASCRIPT_GLOBAL_CONSTRUCTORS = frozenset(
+    {
+        "AggregateError",
+        "Array",
+        "ArrayBuffer",
+        "BigInt",
+        "Boolean",
+        "DataView",
+        "Date",
+        "Error",
+        "EvalError",
+        "Function",
+        "Map",
+        "Number",
+        "Object",
+        "Promise",
+        "RangeError",
+        "ReferenceError",
+        "RegExp",
+        "Set",
+        "SharedArrayBuffer",
+        "String",
+        "SyntaxError",
+        "TypeError",
+        "URIError",
+        "WeakMap",
+        "WeakSet",
+    }
+)
+
+
+def _javascript_unbound_instanceof_identifiers(source: str) -> list[str]:
+    """Catch a high-value ESM import defect that a syntax-only parse cannot see."""
+    declared = set(_JAVASCRIPT_GLOBAL_CONSTRUCTORS)
+    declared.update(
+        match.group(1)
+        for match in re.finditer(
+            r"\b(?:class|function|const|let|var)\s+([A-Za-z_$][\w$]*)",
+            source,
+        )
+    )
+    for match in re.finditer(
+        r"\bimport\s+(?P<clause>[^;\n]+?)\s+from\s+['\"][^'\"]+['\"]",
+        source,
+    ):
+        clause = match.group("clause").strip()
+        namespace = re.search(r"\*\s+as\s+([A-Za-z_$][\w$]*)", clause)
+        if namespace:
+            declared.add(namespace.group(1))
+        named = re.search(r"\{(?P<names>[^}]*)\}", clause)
+        if named:
+            for item in named.group("names").split(","):
+                value = item.strip()
+                if not value:
+                    continue
+                alias = re.split(r"\s+as\s+", value)
+                declared.add(alias[-1].strip())
+        default = clause.split(",", 1)[0].strip()
+        if default and not default.startswith(("{", "*")):
+            declared.add(default)
+    for match in re.finditer(r"\bfunction\b[^()]*\((?P<params>[^)]*)\)", source):
+        declared.update(
+            value
+            for value in re.findall(r"[A-Za-z_$][\w$]*", match.group("params"))
+            if value not in {"const", "let", "var"}
+        )
+    missing = {
+        match.group(1)
+        for match in re.finditer(
+            r"\binstanceof\s+([A-Z_$][A-Za-z0-9_$]*)\b",
+            source,
+        )
+        if match.group(1) not in declared
+    }
+    return sorted(missing)
 
 
 def _sqlite_statement_chunks(script: str) -> list[str]:
@@ -416,7 +491,16 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
                 detail = (stderr or stdout or "syntax check failed").strip()
                 output_lines.append(f"SyntaxError {relative}: {detail}")
             else:
-                output_lines.append(f"ok {relative}")
+                source = path.read_text(encoding="utf-8", errors="replace")
+                missing = _javascript_unbound_instanceof_identifiers(source)
+                if missing:
+                    errors += 1
+                    output_lines.append(
+                        f"SemanticError {relative}: unbound instanceof identifier(s): "
+                        + ", ".join(missing)
+                    )
+                else:
+                    output_lines.append(f"ok {relative}")
             continue
         if not dart:
             errors += 1

@@ -26,6 +26,9 @@ TWELFTH_FIXTURE_ROOT = (
 FOURTEENTH_FIXTURE_ROOT = (
     Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_fourteenth"
 )
+FIFTEENTH_FIXTURE_ROOT = (
+    Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_fifteenth"
+)
 
 
 def _write_protocol_fixture(
@@ -1701,6 +1704,46 @@ def test_prompt_contract_closure_uses_semantic_guard_not_a_fake_test_identity():
     ) is True
 
 
+def test_prompt_obligation_coverage_requires_stable_ids_and_negative_polarity():
+    prompt = (
+        "A compact envelope uses a varint prefix and advances a cursor. Malformed or non-canonical "
+        "prefixes must remain rejected."
+    )
+    obligations = benchmark._prompt_contract_obligations(prompt)
+    assert {item["polarity"] for item in obligations.values()} == {
+        "required",
+        "forbidden",
+    }
+    coverage = [
+        {
+            "contract": obligation_id,
+            "owner_paths": ["owner.dart"],
+            "postcondition": detail["statement"],
+            "polarity": detail["polarity"],
+        }
+        for obligation_id, detail in obligations.items()
+    ]
+    plan = {
+        "files": [
+            {"path": "owner.dart", "action": "modify", "description": "Repair framing."}
+        ],
+        "contract_coverage": coverage,
+    }
+    evidence = {"prompt_obligation_details": obligations}
+
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        plan, ["owner.dart"], evidence
+    ) is True
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        {**plan, "contract_coverage": coverage[:1]}, ["owner.dart"], evidence
+    ) is False
+    wrong_polarity = [dict(item) for item in coverage]
+    wrong_polarity[-1]["polarity"] = "required"
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        {**plan, "contract_coverage": wrong_polarity}, ["owner.dart"], evidence
+    ) is False
+
+
 def test_contract_owner_mapping_replaces_unowned_draft_file_selection():
     plan = benchmark._align_plan_files_to_contract_coverage(
         {
@@ -1730,6 +1773,65 @@ def test_contract_owner_mapping_replaces_unowned_draft_file_selection():
             "description": "Implement the owned validation contracts: The owner returns the required value.",
         }
     ]
+
+
+def test_contract_owner_alignment_refuses_to_truncate_required_owner_union():
+    draft = {
+        "files": [
+            {"path": "first.py", "action": "modify", "description": "Fix first."},
+            {"path": "second.py", "action": "modify", "description": "Fix second."},
+        ],
+        "contract_coverage": [
+            {
+                "contract": "tests/test_contract.py::test_cross_file",
+                "owner_paths": ["first.py", "second.py"],
+                "postcondition": "Both sides of the interface change together.",
+            }
+        ],
+    }
+
+    aligned = benchmark._align_plan_files_to_contract_coverage(
+        draft,
+        ["first.py", "second.py"],
+        1,
+    )
+
+    assert [item["path"] for item in aligned["files"]] == ["first.py", "second.py"]
+    assert aligned["contract_owner_budget_exceeded"] == {
+        "max_files": 1,
+        "required_owner_paths": ["first.py", "second.py"],
+    }
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        aligned,
+        ["first.py", "second.py"],
+        {"failed_ids": ["tests/test_contract.py::test_cross_file"]},
+    ) is False
+
+
+def test_partial_validation_progress_is_explicitly_provisional_not_completed():
+    patch = {"changed_files": ["owner.py"], "warnings": []}
+
+    benchmark._mark_repair_completion(
+        patch,
+        {"passed": True},
+        {"passed": False},
+        {},
+    )
+
+    assert patch["patch_applied"] is False
+    assert patch["repair_contract_complete"] is False
+    assert patch["provisional_patch_applied"] is True
+    assert any("provisional evidence" in warning for warning in patch["warnings"])
+
+    benchmark._mark_repair_completion(
+        patch,
+        {"passed": True},
+        {"passed": True},
+        {},
+    )
+    assert patch["patch_applied"] is True
+    assert patch["repair_contract_complete"] is True
+    assert patch["provisional_patch_applied"] is False
 
 
 def test_contract_alignment_preserves_executable_editor_handoff_fields():
@@ -3832,3 +3934,49 @@ def test_run_policy_rejects_model_and_language_drift(tmp_path, monkeypatch):
     policy.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(benchmark.FixtureIntegrityError, match="primary_model mismatch"):
         benchmark._validate_run_policy(policy, **common)
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        "th15_d01",
+        "th15_n01",
+        "th15_n02",
+        "th15_p01",
+        "th15_p02",
+        "th15_s01",
+        "th15_s02",
+    ],
+)
+def test_disclosed_fifteenth_contract_operators_pass_feedback_and_final(
+    tmp_path,
+    case_id,
+):
+    case = benchmark._read_json(
+        FIFTEENTH_FIXTURE_ROOT / "cases" / f"{case_id}.json"
+    )
+    oracle = benchmark._read_json(
+        FIFTEENTH_FIXTURE_ROOT / "oracles" / f"{case_id}.json"
+    )
+    final_oracle = benchmark._read_json(
+        FIFTEENTH_FIXTURE_ROOT / "final_oracles" / f"{case_id}.json"
+    )
+    repo = tmp_path / case_id
+    benchmark._init_repo(repo, case["repo_files"])
+
+    repair = benchmark._apply_deterministic_contract_repair(repo, case)
+    benchmark._write_files(repo, oracle["feedback_files"])
+    public = benchmark._run_case_tests(repo, case, public_only=True)
+    feedback = benchmark._run_case_tests(repo, case, public_only=False)
+    final = benchmark._run_final_adjudication(
+        case,
+        final_oracle["final_files"],
+        candidate_repo=repo,
+    )
+
+    assert repair["patch_applied"] is True, repair
+    assert set(repair["selected_files"]) == set(oracle["expected_files"])
+    assert repair["proposed_dimension"] == oracle["expected_dimension"]
+    assert public["passed"] is True, public["output"]
+    assert feedback["passed"] is True, feedback["output"]
+    assert final["passed"] is True, final["output"]

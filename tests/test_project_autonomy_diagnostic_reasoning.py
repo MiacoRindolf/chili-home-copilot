@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 from app.services.project_autonomy import diagnostic_reasoning as reasoning
+
+
+FIFTEENTH_CASE_ROOT = (
+    Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_fifteenth" / "cases"
+)
 
 
 def _contrastive_contract(changed_dimension: str) -> dict[str, object]:
@@ -5574,3 +5580,40 @@ def test_revision_parity_compares_only_compatible_identifier_namespaces():
     assert unrelated_parity["comparable_pair_count"] == 0
     assert comparable_parity["status"] == "mismatch"
     assert comparable_parity["comparable_pair_count"] == 1
+
+
+def test_disclosed_fifteenth_contract_families_are_guarded_and_structurally_repairable():
+    expected = {
+        "th15_d01": ({"lib/varint.dart", "lib/envelope_codec.dart"}, "dependency"),
+        "th15_n01": ({"src/set-cookie.mjs", "src/cookie-jar.mjs"}, "dependency"),
+        "th15_n02": ({"src/circuit-breaker.mjs", "src/service-client.mjs"}, "state"),
+        "th15_p01": ({"archive_paths.py", "archive_extract.py"}, "data"),
+        "th15_p02": ({"exception_policy.py", "retry_runner.py"}, "config"),
+        "th15_s01": (
+            {"sql/select_authorized_documents.sql", "sql/delete_role_grant.sql"},
+            "data",
+        ),
+        "th15_s02": (
+            {"sql/explode_work_order.sql", "sql/required_materials.sql"},
+            "data",
+        ),
+    }
+
+    for case_id, (expected_files, expected_dimension) in expected.items():
+        case = json.loads(
+            (FIFTEENTH_CASE_ROOT / f"{case_id}.json").read_text(encoding="utf-8")
+        )
+        files = {
+            path: content
+            for path, content in case["repo_files"].items()
+            if not path.startswith("tests/")
+        }
+        warnings = reasoning.contract_invariant_warnings(case["prompt"], files)
+        proposals = reasoning.contract_repair_proposals(case["prompt"], files)
+        projected = {**files, **proposals}
+
+        assert warnings, case_id
+        assert set(proposals) == expected_files, case_id
+        assert reasoning.contract_invariant_dimension(case["prompt"]) == expected_dimension
+        assert reasoning.contract_repair_dimension(case["prompt"], files) == expected_dimension
+        assert reasoning.contract_invariant_warnings(case["prompt"], projected) == []

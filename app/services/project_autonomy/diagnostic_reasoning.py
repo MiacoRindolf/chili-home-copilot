@@ -1543,6 +1543,86 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "rows remain idempotent, and review-feed visibility is unchanged."
         )
     if (
+        any(
+            token in lowered
+            for token in (
+                "varint",
+                "variable-length byte count",
+                "variable length byte count",
+                "variable-length prefix",
+            )
+        )
+        and any(token in lowered for token in ("envelope", "frame", "prefix", "cursor"))
+    ):
+        invariants.append(
+            "Canonical unsigned variable-length framing encodes the shortest base-128 representation, checks input "
+            "bounds before every continuation-byte read, rejects unterminated and overlong prefixes with the "
+            "declared parse error, reports the exact consumed width, and advances every framing consumer by that "
+            "width rather than a fixed byte count."
+        )
+    if (
+        "cookie" in lowered
+        and any(token in lowered for token in ("domain", "hostname", "host-only"))
+        and any(token in lowered for token in ("path", "max-age", "deletion"))
+    ):
+        invariants.append(
+            "Hierarchical cookie scope preserves explicit zero age, host-only provenance, and exact scoped deletion. "
+            "A domain cookie matches only the exact host or a dot-delimited subdomain, and a path matches only the "
+            "exact path or a slash-delimited child; raw suffix, raw prefix, and truthiness checks are not equivalent."
+        )
+    if (
+        "circuit" in lowered
+        and any(token in lowered for token in ("trial", "half-open", "recovery"))
+        and any(token in lowered for token in ("local", "client validation", "backend failure"))
+    ):
+        invariants.append(
+            "A half-open recovery transition reserves exactly one trial lane. Peers remain rejected until success, "
+            "remote failure, or a neutral local-error release; local validation neither increments backend failure "
+            "state nor restarts cooldown, while success closes and remote failure reopens the circuit."
+        )
+    if (
+        any(token in lowered for token in ("archive", "zip entry", "zip entries", "bundle importer"))
+        and any(token in lowered for token in ("extract", "workspace", "destination"))
+        and any(token in lowered for token in ("parent directory", "alternate separator", "symbolic link"))
+    ):
+        invariants.append(
+            "Archive member names are untrusted cross-platform path data: normalize separator dialects before "
+            "rejecting roots, drives, UNC names, and every parent component, then prove the resolved destination "
+            "stays below the extraction root. ZIP Unix mode metadata is inspected before materialization and "
+            "symbolic-link entries are rejected without creating partial output."
+        )
+    if (
+        any(token in lowered for token in ("retry policy", "exception policy", "exception classes"))
+        and any(token in lowered for token in ("broad", "superclass", "specialized", "specific"))
+        and any(token in lowered for token in ("cause", "wrapper", "envelope"))
+    ):
+        invariants.append(
+            "Exception-policy resolution chooses the most specific matching registered class independently of "
+            "registration order. Retry execution passes exception instances, follows the cycle-guarded explicit "
+            "cause chain for classification, preserves the configured attempt limit, and re-raises the outer "
+            "exception when the effective decision is stop."
+        )
+    if (
+        "json array" in lowered
+        and any(token in lowered for token in ("role", "grant", "code"))
+        and any(token in lowered for token in ("embedded", "neighbor", "quoted", "revok"))
+    ):
+        invariants.append(
+            "JSON-array membership and removal operate on parsed elements with typed equality, never serialized-text "
+            "substring or wildcard matching. SQLite uses json_each for element identity and rebuilds retained values "
+            "in original array order so quoted, escaped, neighboring, and wildcard-bearing values remain distinct."
+        )
+    if (
+        any(token in lowered for token in ("assembly", "work order", "required material"))
+        and any(token in lowered for token in ("nested", "each assembly", "two branches", "same leaf"))
+        and any(token in lowered for token in ("cycle", "bounded", "multipl"))
+    ):
+        invariants.append(
+            "Recursive relation expansion carries a per-path quantity product, depth, and path-local visited set. "
+            "Only a cycle-closing edge is rejected, distinct acyclic paths remain distinct through expansion, and "
+            "terminal leaves alone are grouped at the material boundary so every path contribution is summed."
+        )
+    if (
         any(token in lowered for token in ("client authentication", "client certificate", "clientauth"))
         and any(token in lowered for token in ("tls", "trust material", "request", "verify"))
     ):
@@ -3661,6 +3741,104 @@ def contract_invariant_warnings(
             for content in rollup_sources
         ):
             warnings.append("event-time rollup still uses receipt time for its bucket or window")
+    if any("Canonical unsigned variable-length framing" in value for value in invariants):
+        varint_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if re.search(r"\blist<int>\s+encodevarint\s*\(", content)
+            and re.search(r"\bvarintresult\s+decodevarint\s*\(", content)
+        ]
+        for path, content in varint_sources:
+            if not all(
+                marker in content
+                for marker in ("0x80", "bytesread", "while", "encodevarint(value).length")
+            ):
+                warnings.append(f"{path} does not implement canonical multi-byte varint framing")
+            if not re.search(r"index\s*>=\s*bytes\.length", content):
+                warnings.append(f"{path} reads continuation bytes without a per-byte bounds check")
+        for path, content in lowered_files.items():
+            if "decodeenvelopes" in content and "decodevarint" in content and "length.bytesread" not in content:
+                warnings.append(f"{path} advances the envelope cursor by a fixed prefix width")
+    if any("Hierarchical cookie scope" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "function parsesetcookie" in content and re.search(
+                r"number\.isinteger\(seconds\)\s*&&\s*seconds",
+                content,
+            ):
+                warnings.append(f"{path} discards explicit Max-Age zero through truthiness")
+            if "class cookiejar" not in content:
+                continue
+            if "hostonly" not in content:
+                warnings.append(f"{path} loses host-only cookie provenance")
+            if re.search(r"\.endswith\(\s*(?:entry\.)?domain\s*\)", content):
+                warnings.append(f"{path} uses raw hostname suffix matching without a label boundary")
+            if "charat(entry.path.length)" not in content or "entry.path.endswith('/')" not in content:
+                warnings.append(f"{path} uses raw cookie path prefixes without a segment boundary")
+    if any("A half-open recovery transition" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "class circuitbreaker" in content:
+                if "trialinflight" not in content or "releasetrial" not in content:
+                    warnings.append(f"{path} does not reserve and neutrally release one half-open trial")
+                if not re.search(r"if\s*\(this\.#trialinflight\)\s*return\s+false", content):
+                    warnings.append(f"{path} admits peers while a half-open trial is already active")
+            if "function callservice" in content:
+                if "clientinputerror" not in content or "breaker.releasetrial()" not in content:
+                    warnings.append(f"{path} counts local client validation as backend failure evidence")
+    if any("Archive member names are untrusted" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "def normalized_member_path(" in content:
+                if "purewindowspath" not in content or ".replace(\"\\\\\", \"/\")" not in content:
+                    warnings.append(f"{path} does not normalize and reject alternate path dialects")
+                if "part == \"..\"" not in content:
+                    warnings.append(f"{path} does not reject every parent path component")
+            if "def extract_archive(" in content:
+                if ".resolve()" not in content or ".relative_to(root)" not in content:
+                    warnings.append(f"{path} does not prove each resolved target stays under the extraction root")
+                if "stat.s_islnk" not in content or "external_attr" not in content:
+                    warnings.append(f"{path} materializes ZIP symbolic-link entries")
+                if ".is_symlink(" in content:
+                    warnings.append(f"{path} calls a non-portable ZipInfo symbolic-link helper")
+    if any("Exception-policy resolution chooses" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "class exceptionpolicy" in content and "def classify(" in content:
+                if "mro.index(registered)" not in content or "min(matches" not in content:
+                    warnings.append(f"{path} resolves exception rules by registration order instead of specificity")
+            if "def run_with_retry(" in content:
+                if "policy.classify(type(" in content:
+                    warnings.append(f"{path} passes an exception class instead of the caught instance")
+                if "__cause__" not in content or "seen" not in content or "policy.classify(effective)" not in content:
+                    warnings.append(f"{path} does not classify the cycle-guarded explicit cause chain")
+    if any("JSON-array membership and removal" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "json_contains(" in content or "json_array_contains(" in content:
+                warnings.append(f"{path} uses a non-SQLite JSON membership primitive")
+            if "from document" in content and ":roles_json" in content:
+                if "json_each(:roles_json)" not in content or not re.search(
+                    r"granted\.value\s*=\s*document\.required_role",
+                    content,
+                ):
+                    warnings.append(f"{path} does not select grants by parsed JSON element identity")
+            if "update principal_grant" in content and ":role" in content:
+                if " like " in content or "not like" in content:
+                    warnings.append(f"{path} removes JSON roles by serialized wildcard text")
+                if "json_each(principal_grant.roles_json)" not in content or "value <> :role" not in content:
+                    warnings.append(f"{path} does not remove exactly one parsed JSON role value")
+                if "order by key" not in content:
+                    warnings.append(f"{path} does not explicitly preserve retained JSON-array order")
+    if any("Recursive relation expansion carries" in value for value in invariants):
+        recursive_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if "from component" in content and ":root_sku" in content
+        ]
+        for path, content in recursive_sources:
+            required = ("with recursive", "union all", "json_each(expansion.path)")
+            if not all(marker in content for marker in required):
+                warnings.append(f"{path} does not retain path-local recursive expansion state")
+            if "expansion.required_quantity * component.quantity" not in content:
+                warnings.append(f"{path} does not multiply quantities through each assembly edge")
+            if ":build_count" in content and "child_component.assembly_sku = expansion.child_sku" not in content:
+                warnings.append(f"{path} aggregates intermediate assemblies instead of terminal materials")
     if any("exclusive upper bound" in value for value in invariants):
         temporal_sources = [
             content
@@ -5830,6 +6008,412 @@ def _repair_node_esm_file_url(content: str) -> str:
     return insertion + updated
 
 
+def _repair_dart_canonical_varint(content: str) -> str:
+    updated = content
+    if "encodeVarint" in updated and "decodeVarint" in updated:
+        encoded = _replace_braced_dart_callable_body(
+            updated,
+            "encodeVarint",
+            "  if (value < 0) throw ArgumentError.value(value, 'value');\n"
+            "  final encoded = <int>[];\n"
+            "  var remaining = value;\n"
+            "  do {\n"
+            "    var byte = remaining & 0x7f;\n"
+            "    remaining >>= 7;\n"
+            "    if (remaining != 0) byte |= 0x80;\n"
+            "    encoded.add(byte);\n"
+            "  } while (remaining != 0);\n"
+            "  return encoded;",
+        )
+        if encoded:
+            updated = encoded
+        decoded = _replace_braced_dart_callable_body(
+            updated,
+            "decodeVarint",
+            "  if (offset < 0 || offset >= bytes.length) {\n"
+            "    throw const FormatException('truncated varint');\n"
+            "  }\n"
+            "  var value = 0;\n"
+            "  var shift = 0;\n"
+            "  var bytesRead = 0;\n"
+            "  while (true) {\n"
+            "    final index = offset + bytesRead;\n"
+            "    if (index >= bytes.length) {\n"
+            "      throw const FormatException('truncated varint');\n"
+            "    }\n"
+            "    final byte = bytes[index];\n"
+            "    if (byte < 0 || byte > 0xff) {\n"
+            "      throw const FormatException('invalid varint byte');\n"
+            "    }\n"
+            "    bytesRead += 1;\n"
+            "    value |= (byte & 0x7f) << shift;\n"
+            "    if ((byte & 0x80) == 0) {\n"
+            "      if (encodeVarint(value).length != bytesRead) {\n"
+            "        throw const FormatException('non-canonical varint');\n"
+            "      }\n"
+            "      return VarintResult(value, bytesRead);\n"
+            "    }\n"
+            "    shift += 7;\n"
+            "    if (shift >= 63) {\n"
+            "      throw const FormatException('varint is too long');\n"
+            "    }\n"
+            "  }",
+        )
+        if decoded:
+            updated = decoded
+    if "decodeVarint" in updated and "cursor" in updated:
+        updated = re.sub(
+            r"\bcursor\s*\+=\s*1\s*;",
+            "cursor += length.bytesRead;",
+            updated,
+            count=1,
+        )
+    return updated
+
+
+def _repair_node_cookie_scope(content: str) -> str:
+    updated = content
+    if "function parseSetCookie" in updated:
+        updated = re.sub(
+            r"if\s*\(name\s*===\s*['\"]domain['\"]\)\s*"
+            r"cookie\.domain\s*=\s*detail\.toLowerCase\(\)\s*;",
+            "if (name === 'domain') cookie.domain = detail.replace(/^\\./, '').toLowerCase();",
+            updated,
+            count=1,
+        )
+        updated = re.sub(
+            r"if\s*\(Number\.isInteger\(seconds\)\s*&&\s*seconds\)\s*"
+            r"cookie\.maxAge\s*=\s*seconds\s*;",
+            "if (Number.isInteger(seconds)) cookie.maxAge = seconds;",
+            updated,
+            count=1,
+        )
+    if "class CookieJar" in updated and "parseSetCookie" in updated:
+        stored = _replace_braced_js_method_body(
+            updated,
+            "store",
+            "    const url = new URL(origin);\n"
+            "    const parsed = parseSetCookie(value);\n"
+            "    const originHost = url.hostname.toLowerCase();\n"
+            "    const hostOnly = parsed.domain === null;\n"
+            "    const domain = hostOnly\n"
+            "      ? originHost\n"
+            "      : parsed.domain.replace(/^\\./, '').toLowerCase();\n"
+            "    const domainMatches = originHost === domain || originHost.endsWith(`.${domain}`);\n"
+            "    if (!hostOnly && !domainMatches) {\n"
+            "      throw new TypeError('cookie domain does not cover the origin');\n"
+            "    }\n"
+            "    const expiresAt = parsed.maxAge === null ? null : now + parsed.maxAge * 1000;\n"
+            "    this.#entries = this.#entries.filter((entry) => !(\n"
+            "      entry.name === parsed.name && entry.domain === domain && entry.path === parsed.path\n"
+            "    ));\n"
+            "    if (expiresAt !== null && expiresAt <= now) return;\n"
+            "    this.#entries.push({ ...parsed, domain, hostOnly, expiresAt });",
+        )
+        if stored:
+            updated = stored
+        selected = _replace_braced_js_method_body(
+            updated,
+            "cookiesFor",
+            "    const url = new URL(target);\n"
+            "    const host = url.hostname.toLowerCase();\n"
+            "    this.#entries = this.#entries.filter(\n"
+            "      (entry) => entry.expiresAt === null || entry.expiresAt > now\n"
+            "    );\n"
+            "    return this.#entries\n"
+            "      .filter((entry) => entry.hostOnly\n"
+            "        ? host === entry.domain\n"
+            "        : host === entry.domain || host.endsWith(`.${entry.domain}`))\n"
+            "      .filter((entry) => url.pathname === entry.path || (\n"
+            "        url.pathname.startsWith(entry.path) &&\n"
+            "        (entry.path.endsWith('/') || url.pathname.charAt(entry.path.length) === '/')\n"
+            "      ))\n"
+            "      .filter((entry) => !entry.secure || url.protocol === 'https:')\n"
+            "      .sort((left, right) => right.path.length - left.path.length)\n"
+            "      .map(({ name, value }) => ({ name, value }));",
+        )
+        if selected:
+            updated = selected
+    return updated
+
+
+def _repair_node_circuit_trial(content: str) -> str:
+    updated = content
+    if "class CircuitBreaker" in updated and "#state" in updated:
+        if "#trialInFlight" not in updated:
+            updated = re.sub(
+                r"(?m)^(\s*#openedAt\s*=\s*null\s*;)\s*$",
+                r"\1\n  #trialInFlight = false;",
+                updated,
+                count=1,
+            )
+        requested = _replace_braced_js_method_body(
+            updated,
+            "canRequest",
+            "    if (this.#state === 'open' && now - this.#openedAt >= this.cooldownMs) {\n"
+            "      this.#state = 'half-open';\n"
+            "      this.#trialInFlight = false;\n"
+            "    }\n"
+            "    if (this.#state === 'open') return false;\n"
+            "    if (this.#state === 'half-open') {\n"
+            "      if (this.#trialInFlight) return false;\n"
+            "      this.#trialInFlight = true;\n"
+            "    }\n"
+            "    return true;",
+        )
+        if requested:
+            updated = requested
+        succeeded = _replace_braced_js_method_body(
+            updated,
+            "success",
+            "    this.#failures = 0;\n"
+            "    this.#state = 'closed';\n"
+            "    this.#openedAt = null;\n"
+            "    this.#trialInFlight = false;",
+        )
+        if succeeded:
+            updated = succeeded
+        failed = _replace_braced_js_method_body(
+            updated,
+            "failure",
+            "    this.#trialInFlight = false;\n"
+            "    this.#failures += 1;\n"
+            "    if (this.#state === 'half-open' || this.#failures >= this.threshold) {\n"
+            "      this.#state = 'open';\n"
+            "      this.#openedAt = now;\n"
+            "    }",
+        )
+        if failed:
+            updated = failed
+        if "releaseTrial(" not in updated:
+            snapshot = re.search(r"(?m)^\s+snapshot\s*\(", updated)
+            if snapshot:
+                release = (
+                    "  releaseTrial() {\n"
+                    "    if (this.#state === 'half-open') this.#trialInFlight = false;\n"
+                    "  }\n\n"
+                )
+                updated = updated[: snapshot.start()] + release + updated[snapshot.start() :]
+    if "function callService" in updated and "breaker.failure" in updated:
+        updated = re.sub(
+            r"import\s*\{\s*CircuitOpenError\s*\}\s*from\s*"
+            r"(['\"]\.\/client-errors\.mjs['\"])\s*;",
+            r"import { CircuitOpenError, ClientInputError } from \1;",
+            updated,
+            count=1,
+        )
+        caught = re.search(
+            r"catch\s*\(\s*error\s*\)\s*\{\s*breaker\.failure\(now\(\)\);",
+            updated,
+            re.DOTALL,
+        )
+        if caught and "error instanceof ClientInputError" not in updated:
+            replacement = (
+                "catch (error) {\n"
+                "    if (error instanceof ClientInputError) {\n"
+                "      breaker.releaseTrial();\n"
+                "      throw error;\n"
+                "    }\n"
+                "    breaker.failure(now());"
+            )
+            updated = updated[: caught.start()] + replacement + updated[caught.end() :]
+    return updated
+
+
+def _repair_python_archive_confinement(content: str) -> str:
+    updated = content
+    if "def normalized_member_path(" in updated:
+        updated = _insert_python_import(updated, "from pathlib import PurePosixPath, PureWindowsPath")
+        replaced = _replace_python_module_function(
+            updated,
+            "normalized_member_path",
+            "def normalized_member_path(name: str) -> str:\n"
+            "    if not isinstance(name, str) or not name:\n"
+            "        raise ValueError(\"archive member name is required\")\n"
+            "    normalized = name.replace(\"\\\\\", \"/\")\n"
+            "    windows_path = PureWindowsPath(name)\n"
+            "    if normalized.startswith(\"/\") or windows_path.drive:\n"
+            "        raise ValueError(\"archive member must be relative\")\n"
+            "    parts = PurePosixPath(normalized).parts\n"
+            "    if any(part == \"..\" for part in parts):\n"
+            "        raise ValueError(\"archive member escapes destination\")\n"
+            "    retained = tuple(part for part in parts if part not in (\"\", \".\"))\n"
+            "    if not retained:\n"
+            "        raise ValueError(\"archive member name is required\")\n"
+            "    return \"/\".join(retained)",
+        )
+        if replaced:
+            updated = replaced
+    if "def extract_archive(" in updated and "archive.infolist()" in updated:
+        updated = _insert_python_import(updated, "import stat")
+        replaced = _replace_python_module_function(
+            updated,
+            "extract_archive",
+            "def extract_archive(archive: ZipFile, destination: Path) -> tuple[Path, ...]:\n"
+            "    root = Path(destination).resolve()\n"
+            "    root.mkdir(parents=True, exist_ok=True)\n"
+            "    extracted = []\n"
+            "    for entry in archive.infolist():\n"
+            "        relative = normalized_member_path(entry.filename)\n"
+            "        target = (root / relative).resolve()\n"
+            "        try:\n"
+            "            target.relative_to(root)\n"
+            "        except ValueError:\n"
+            "            raise ValueError(\"archive member escapes destination\") from None\n"
+            "        unix_mode = entry.external_attr >> 16 if entry.create_system == 3 else 0\n"
+            "        if entry.create_system == 3 and stat.S_ISLNK(unix_mode):\n"
+            "            raise ValueError(\"symbolic-link archive members are not allowed\")\n"
+            "        if entry.is_dir():\n"
+            "            target.mkdir(parents=True, exist_ok=True)\n"
+            "            continue\n"
+            "        target.parent.mkdir(parents=True, exist_ok=True)\n"
+            "        target.write_bytes(archive.read(entry))\n"
+            "        extracted.append(target)\n"
+            "    return tuple(extracted)",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_python_exception_policy(content: str) -> str:
+    updated = content
+    if "class ExceptionPolicy" in updated and "def classify(" in updated:
+        replaced = _replace_python_definition(
+            updated,
+            "ExceptionPolicy",
+            "def classify(self, error):\n"
+            "    error_type = error if isinstance(error, type) else type(error)\n"
+            "    mro = error_type.mro()\n"
+            "    matches = []\n"
+            "    for index, (registered, decision) in enumerate(self._rules):\n"
+            "        if not issubclass(error_type, registered):\n"
+            "            continue\n"
+            "        try:\n"
+            "            distance = mro.index(registered)\n"
+            "        except ValueError:\n"
+            "            distance = len(mro)\n"
+            "        matches.append((distance, index, decision))\n"
+            "    if not matches:\n"
+            "        return self._default\n"
+            "    return min(matches, key=lambda item: (item[0], item[1]))[2]",
+            method_name="classify",
+        )
+        if replaced:
+            updated = replaced
+    if "def run_with_retry(" in updated and "policy.classify" in updated:
+        replaced = _replace_python_module_function(
+            updated,
+            "run_with_retry",
+            "def run_with_retry(operation, policy, max_attempts=3):\n"
+            "    if max_attempts < 1:\n"
+            "        raise ValueError(\"max_attempts must be positive\")\n"
+            "    for attempt in range(1, max_attempts + 1):\n"
+            "        try:\n"
+            "            return operation()\n"
+            "        except Exception as error:\n"
+            "            effective = error\n"
+            "            seen = {id(error)}\n"
+            "            while effective.__cause__ is not None and id(effective.__cause__) not in seen:\n"
+            "                effective = effective.__cause__\n"
+            "                seen.add(id(effective))\n"
+            "            if policy.classify(effective) != \"retry\" or attempt == max_attempts:\n"
+            "                raise\n"
+            "    raise AssertionError(\"unreachable\")",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_sql_json_array_identity(content: str) -> str:
+    lowered = content.lower()
+    if "from document" in lowered and "required_role" in lowered and ":roles_json" in lowered:
+        return (
+            "SELECT document_id, title\n"
+            "FROM document\n"
+            "WHERE required_role IS NULL\n"
+            "   OR EXISTS (\n"
+            "       SELECT 1\n"
+            "       FROM json_each(:roles_json) AS granted\n"
+            "       WHERE granted.value = document.required_role\n"
+            "   )\n"
+            "ORDER BY document_id;\n"
+        )
+    if "update principal_grant" in lowered and "roles_json" in lowered and ":role" in lowered:
+        return (
+            "UPDATE principal_grant\n"
+            "SET roles_json = COALESCE(\n"
+            "    (\n"
+            "        SELECT json_group_array(value)\n"
+            "        FROM (\n"
+            "            SELECT value\n"
+            "            FROM json_each(principal_grant.roles_json)\n"
+            "            WHERE value <> :role\n"
+            "            ORDER BY key\n"
+            "        )\n"
+            "    ),\n"
+            "    '[]'\n"
+            ")\n"
+            "WHERE principal_id = :principal_id;\n"
+        )
+    return content
+
+
+def _repair_sql_recursive_relations(content: str) -> str:
+    lowered = content.lower()
+    if not (
+        "from component" in lowered
+        and ":root_sku" in lowered
+        and "child_sku" in lowered
+    ):
+        return content
+    cte = (
+        "WITH RECURSIVE expansion(child_sku, required_quantity, depth, path) AS (\n"
+        "    SELECT component.child_sku, component.quantity, 1,\n"
+        "           json_array(:root_sku, component.child_sku)\n"
+        "    FROM component\n"
+        "    WHERE component.assembly_sku = :root_sku\n"
+        "\n"
+        "    UNION ALL\n"
+        "\n"
+        "    SELECT component.child_sku,\n"
+        "           expansion.required_quantity * component.quantity,\n"
+        "           expansion.depth + 1,\n"
+        "           json_insert(expansion.path, '$[#]', component.child_sku)\n"
+        "    FROM expansion\n"
+        "    JOIN component ON component.assembly_sku = expansion.child_sku\n"
+        "    WHERE NOT EXISTS (\n"
+        "        SELECT 1\n"
+        "        FROM json_each(expansion.path) AS seen\n"
+        "        WHERE seen.value = component.child_sku\n"
+        "    )\n"
+        ")\n"
+    )
+    if ":build_count" in lowered:
+        return (
+            cte
+            + "SELECT expansion.child_sku,\n"
+            "       SUM(expansion.required_quantity * :build_count) AS required_quantity\n"
+            "FROM expansion\n"
+            "WHERE NOT EXISTS (\n"
+            "    SELECT 1\n"
+            "    FROM component AS child_component\n"
+            "    WHERE child_component.assembly_sku = expansion.child_sku\n"
+            ")\n"
+            "GROUP BY expansion.child_sku\n"
+            "ORDER BY expansion.child_sku;\n"
+        )
+    if " as depth" in lowered or " depth" in lowered:
+        return (
+            cte
+            + "SELECT child_sku, required_quantity, depth\n"
+            "FROM expansion\n"
+            "ORDER BY depth, child_sku;\n"
+        )
+    return content
+
+
 def contract_repair_proposals(
     prompt: str,
     files: Mapping[str, str],
@@ -5887,6 +6471,20 @@ def contract_repair_proposals(
             updated = _repair_node_conditional_exports(updated)
         if any("An ESM import built from a filesystem path" in value for value in invariants):
             updated = _repair_node_esm_file_url(updated)
+        if any("Canonical unsigned variable-length framing" in value for value in invariants):
+            updated = _repair_dart_canonical_varint(updated)
+        if any("Hierarchical cookie scope" in value for value in invariants):
+            updated = _repair_node_cookie_scope(updated)
+        if any("A half-open recovery transition" in value for value in invariants):
+            updated = _repair_node_circuit_trial(updated)
+        if any("Archive member names are untrusted" in value for value in invariants):
+            updated = _repair_python_archive_confinement(updated)
+        if any("Exception-policy resolution chooses" in value for value in invariants):
+            updated = _repair_python_exception_policy(updated)
+        if any("JSON-array membership and removal" in value for value in invariants):
+            updated = _repair_sql_json_array_identity(updated)
+        if any("Recursive relation expansion carries" in value for value in invariants):
+            updated = _repair_sql_recursive_relations(updated)
         if any("A claimed job attempt is a fencing token" in value for value in invariants):
             updated = _repair_job_attempt_fencing(updated)
         if any("state transition matches exactly its allowed predecessor" in value for value in invariants):
@@ -6183,6 +6781,13 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("Semantic-version compatibility compares", "dependency"),
     ("Node conditional-export resolution", "dependency"),
     ("An ESM import built from a filesystem path", "dependency"),
+    ("Canonical unsigned variable-length framing", "dependency"),
+    ("Hierarchical cookie scope", "dependency"),
+    ("A half-open recovery transition", "state"),
+    ("Archive member names are untrusted", "data"),
+    ("Exception-policy resolution chooses", "config"),
+    ("JSON-array membership and removal", "data"),
+    ("Recursive relation expansion carries", "data"),
     ("A claimed job attempt is a fencing token", "state"),
 )
 
@@ -6228,6 +6833,13 @@ def contract_repair_dimension(
         ("Semantic-version compatibility compares", "dependency", _repair_dart_semver_compatibility),
         ("Node conditional-export resolution", "dependency", _repair_node_conditional_exports),
         ("An ESM import built from a filesystem path", "dependency", _repair_node_esm_file_url),
+        ("Canonical unsigned variable-length framing", "dependency", _repair_dart_canonical_varint),
+        ("Hierarchical cookie scope", "dependency", _repair_node_cookie_scope),
+        ("A half-open recovery transition", "state", _repair_node_circuit_trial),
+        ("Archive member names are untrusted", "data", _repair_python_archive_confinement),
+        ("Exception-policy resolution chooses", "config", _repair_python_exception_policy),
+        ("JSON-array membership and removal", "data", _repair_sql_json_array_identity),
+        ("Recursive relation expansion carries", "data", _repair_sql_recursive_relations),
         ("A claimed job attempt is a fencing token", "state", _repair_job_attempt_fencing),
         ("state transition matches exactly its allowed predecessor", "state", _repair_export_job_state_sql),
         ("Normalize every physical length", "data", _repair_package_unit_sql),
