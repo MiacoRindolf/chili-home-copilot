@@ -1,0 +1,29 @@
+{
+  "schema": "chili.diagnosis-to-fix-run-policy.v1",
+  "fixture_root": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fifteenth",
+  "implementation_commit": "7824daca87efe57097ee5a38ab4521076439a67c",
+  "implementation_tree": "ef6b8c9af5424826cdf345cf12b7420dcd8ffcc9",
+  "primary_model": "qwen2.5-coder:7b",
+  "reasoning_model": "qwen3:8b",
+  "escalation_model": "disabled",
+  "max_base_repairs": 2,
+  "max_escalation_repairs": 0,
+  "per_call_timeout_sec": 150,
+  "case_model_time_budget_sec": 480,
+  "premium_calls_allowed": 0,
+  "evaluation_context": "protocol",
+  "expected_case_count": 8,
+  "expected_language_counts": {
+    "dart": 2,
+    "node": 2,
+    "python": 2,
+    "sql": 2
+  },
+  "sealed_final_required": true,
+  "external_final_oracle_required": true,
+  "mechanism_disjoint_from_training_regressions": true,
+  "independent_fixture_author_required": true,
+  "independent_fixture_validator_required": true,
+  "source_edits_after_fixture_freeze_allowed": false,
+  "authenticated_fable5_head_to_head_required_for_parity_claim": true
+}
