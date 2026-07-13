@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_s01",
+  "final_files": {
+    "tests/test_final.py": "import json\n\nfrom test_public import database, sql\n\n\ndef test_escaped_and_neighboring_role_codes_compose_without_text_matching():\n    db = database()\n    db.executemany(\"INSERT INTO document VALUES (?, ?, ?)\", [\n        (1, \"Quoted\", 'qa\"lead'), (2, \"Neighbor\", \"qa-lead\"), (3, \"Short\", \"qa\")\n    ])\n    rows = db.execute(\n        sql(\"select_authorized_documents.sql\"),\n        {\"roles_json\": json.dumps(['qa\"lead', \"qa-lead\"])},\n    ).fetchall()\n    assert rows == [(1, \"Quoted\"), (2, \"Neighbor\")]\n\n    db.execute(\n        \"INSERT INTO principal_grant VALUES (?, ?)\",\n        (\"p3\", json.dumps([\"qa\", 'qa\"lead', \"qa-lead\"])),\n    )\n    db.execute(sql(\"delete_role_grant.sql\"), {\"principal_id\": \"p3\", \"role\": \"qa\"})\n    roles = json.loads(db.execute(\"SELECT roles_json FROM principal_grant\").fetchone()[0])\n    assert roles == ['qa\"lead', \"qa-lead\"]\n"
+  }
+}

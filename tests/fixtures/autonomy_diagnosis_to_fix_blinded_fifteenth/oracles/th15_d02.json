@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_d02",
+  "expected_dimension": "state",
+  "expected_files": [
+    "lib/recency_index.dart",
+    "lib/asset_cache.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/asset.dart';\nimport '../lib/asset_cache.dart';\nimport '../lib/recency_index.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final index = RecencyIndex()..record('a')..record('b')..record('a');\n  check(index.keys.join(',') == 'b,a', 'recording an existing key refreshes order');\n\n  final cache = AssetCache(2);\n  cache.put('a', Asset('1', <int>[1]));\n  cache.put('b', Asset('1', <int>[2]));\n  check(cache.get('a') != null, 'read returns the asset');\n  cache.put('c', Asset('1', <int>[3]));\n  check(cache.get('a') != null && cache.get('b') == null, 'read refresh controls eviction');\n  print('feedback tests passed');\n}\n"
+  }
+}

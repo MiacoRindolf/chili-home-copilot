@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_n01",
+  "final_files": {
+    "tests/final.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { CookieJar } from '../src/cookie-jar.mjs';\nimport { formatCookieHeader } from '../src/cookie-header.mjs';\n\ntest('scoping, transport policy, and deletion compose for a domain cookie', () => {\n  const jar = new CookieJar();\n  jar.store(\n    'sid=live; Domain=.example.test; Path=/app; Secure',\n    'https://api.example.test/app/login',\n    1000\n  );\n  assert.equal(\n    formatCookieHeader(jar.cookiesFor('https://edge.example.test/app/jobs', 1000)),\n    'sid=live'\n  );\n  assert.equal(formatCookieHeader(jar.cookiesFor('https://edge.example.test/appetite', 1000)), '');\n  assert.equal(formatCookieHeader(jar.cookiesFor('http://edge.example.test/app/jobs', 1000)), '');\n  assert.equal(formatCookieHeader(jar.cookiesFor('https://notexample.test/app/jobs', 1000)), '');\n\n  jar.store(\n    'sid=deleted; Domain=.example.test; Path=/app; Secure; Max-Age=0',\n    'https://api.example.test/app/login',\n    1000\n  );\n  assert.equal(formatCookieHeader(jar.cookiesFor('https://edge.example.test/app/jobs', 1000)), '');\n});\n"
+  }
+}

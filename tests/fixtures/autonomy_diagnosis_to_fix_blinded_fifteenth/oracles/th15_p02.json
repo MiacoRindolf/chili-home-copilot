@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_p02",
+  "expected_dimension": "config",
+  "expected_files": [
+    "exception_policy.py",
+    "retry_runner.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import pytest\n\nfrom exception_policy import ExceptionPolicy\nfrom retry_runner import run_with_retry\nfrom service_errors import PermanentError, ServiceError, TemporaryError\n\n\ndef test_most_specific_registered_rule_wins():\n    policy = ExceptionPolicy([(ServiceError, \"retry\"), (PermanentError, \"stop\")])\n    assert policy.classify(PermanentError(\"terminal\")) == \"stop\"\n\n\ndef test_runner_supplies_the_exception_instance_to_policy():\n    seen = []\n\n    class ProbePolicy:\n        def classify(self, error):\n            seen.append(error)\n            return \"stop\"\n\n    with pytest.raises(TemporaryError):\n        run_with_retry(lambda: (_ for _ in ()).throw(TemporaryError(\"later\")), ProbePolicy())\n    assert len(seen) == 1\n    assert isinstance(seen[0], TemporaryError)\n"
+  }
+}

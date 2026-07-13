@@ -1,0 +1,18 @@
+{
+  "candidate_paths": [
+    "src/circuit-breaker.mjs",
+    "src/service-client.mjs",
+    "src/client-errors.mjs"
+  ],
+  "case_id": "th15_n02",
+  "language": "javascript",
+  "max_files": 2,
+  "prompt": "A backend circuit opens after repeated remote failures and later admits a trial call. Under recovery load, several trial calls can enter together. Separately, a request rejected locally by client validation is counted as a backend failure and can reopen the circuit. Closed-state successes and ordinary remote failure thresholds work. Preserve the breaker, client, and error APIs.",
+  "repo_files": {
+    "src/circuit-breaker.mjs": "export class CircuitBreaker {\n  #failures = 0;\n  #state = 'closed';\n  #openedAt = null;\n\n  constructor({ threshold = 2, cooldownMs = 1000 } = {}) {\n    if (!Number.isInteger(threshold) || threshold < 1) throw new TypeError('invalid threshold');\n    if (!Number.isFinite(cooldownMs) || cooldownMs < 0) throw new TypeError('invalid cooldown');\n    this.threshold = threshold;\n    this.cooldownMs = cooldownMs;\n  }\n\n  canRequest(now) {\n    if (this.#state === 'open' && now - this.#openedAt >= this.cooldownMs) {\n      this.#state = 'half-open';\n    }\n    return this.#state !== 'open';\n  }\n\n  success() {\n    this.#failures = 0;\n    this.#state = 'closed';\n    this.#openedAt = null;\n  }\n\n  failure(now) {\n    this.#failures += 1;\n    if (this.#state === 'half-open' || this.#failures >= this.threshold) {\n      this.#state = 'open';\n      this.#openedAt = now;\n    }\n  }\n\n  snapshot() {\n    return { state: this.#state, failures: this.#failures, openedAt: this.#openedAt };\n  }\n}\n",
+    "src/client-errors.mjs": "export class CircuitOpenError extends Error {\n  constructor() {\n    super('backend circuit is open');\n    this.name = 'CircuitOpenError';\n  }\n}\n\nexport class ClientInputError extends Error {\n  constructor(message) {\n    super(message);\n    this.name = 'ClientInputError';\n  }\n}\n",
+    "src/service-client.mjs": "import { CircuitOpenError } from './client-errors.mjs';\n\nexport async function callService(operation, breaker, now = Date.now) {\n  if (!breaker.canRequest(now())) throw new CircuitOpenError();\n  try {\n    const result = await operation();\n    breaker.success();\n    return result;\n  } catch (error) {\n    breaker.failure(now());\n    throw error;\n  }\n}\n",
+    "tests/public.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { CircuitBreaker } from '../src/circuit-breaker.mjs';\nimport { CircuitOpenError } from '../src/client-errors.mjs';\nimport { callService } from '../src/service-client.mjs';\n\ntest('closed calls succeed and remote failures open at the threshold', async () => {\n  const breaker = new CircuitBreaker({ threshold: 2, cooldownMs: 50 });\n  assert.equal(await callService(async () => 'ok', breaker, () => 0), 'ok');\n  await assert.rejects(callService(async () => { throw new Error('one'); }, breaker, () => 1));\n  await assert.rejects(callService(async () => { throw new Error('two'); }, breaker, () => 2));\n  assert.deepEqual(breaker.snapshot(), { state: 'open', failures: 2, openedAt: 2 });\n  await assert.rejects(callService(async () => 'late', breaker, () => 20), CircuitOpenError);\n});\n"
+  },
+  "test_runner": "node_test"
+}

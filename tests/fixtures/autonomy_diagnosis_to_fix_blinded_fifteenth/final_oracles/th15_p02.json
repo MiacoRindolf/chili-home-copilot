@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_p02",
+  "final_files": {
+    "tests/test_final.py": "import pytest\n\nfrom exception_policy import ExceptionPolicy\nfrom retry_runner import run_with_retry\nfrom service_errors import OperationEnvelope, PermanentError, ServiceError, TemporaryError\n\n\ndef wrapped(cause):\n    try:\n        raise cause\n    except ServiceError as inner:\n        raise OperationEnvelope(\"operation failed\") from inner\n\n\ndef test_specific_explicit_causes_control_composed_retry_behavior():\n    policy = ExceptionPolicy([\n        (ServiceError, \"retry\"),\n        (PermanentError, \"stop\"),\n        (TemporaryError, \"retry\"),\n    ])\n    permanent_calls = []\n\n    def permanent():\n        permanent_calls.append(\"call\")\n        wrapped(PermanentError(\"denied\"))\n\n    with pytest.raises(OperationEnvelope):\n        run_with_retry(permanent, policy, max_attempts=3)\n    assert permanent_calls == [\"call\"]\n\n    transient_calls = []\n\n    def transient():\n        transient_calls.append(\"call\")\n        if len(transient_calls) == 1:\n            wrapped(TemporaryError(\"busy\"))\n        return \"ok\"\n\n    assert run_with_retry(transient, policy, max_attempts=3) == \"ok\"\n    assert transient_calls == [\"call\", \"call\"]\n"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_s02",
+  "final_files": {
+    "tests/test_final.py": "from test_public import database, sql\n\n\ndef test_shared_leaf_quantity_remains_correct_with_a_legacy_cycle():\n    db = database([\n        (\"kit\", \"module\", 2),\n        (\"kit\", \"bolt\", 1),\n        (\"module\", \"bolt\", 3),\n        (\"module\", \"kit\", 1),\n    ])\n    exploded = db.execute(sql(\"explode_work_order.sql\"), {\"root_sku\": \"kit\"}).fetchall()\n    assert exploded == [(\"bolt\", 1, 1), (\"module\", 2, 1), (\"bolt\", 6, 2)]\n    assert db.execute(\n        sql(\"required_materials.sql\"), {\"root_sku\": \"kit\", \"build_count\": 4}\n    ).fetchall() == [(\"bolt\", 28)]\n"
+  }
+}

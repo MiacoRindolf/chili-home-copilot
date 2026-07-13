@@ -1,0 +1,117 @@
+{
+  "schema": "chili.fifteenth-contestant-integrity-receipt.v1",
+  "provenance": {
+    "base_parent_commit": "6d72095199d5b930381d1e58525af9805d5f3c0a",
+    "author_commit": "94a35ab02baf03070dac3273f45bb66daf3c548e",
+    "author_aggregate_sha256": "be56b957925b0372a8ab6e2699895030a70d84762c2f1edc0f3d18d012d24675",
+    "author_commit_verified": true,
+    "author_aggregate_verified": true,
+    "sanitized_history_excludes_author_commit": true
+  },
+  "payload": {
+    "algorithm": "sha256",
+    "text_canonicalization": "crlf_to_lf",
+    "path_order": "case_insensitive_posix",
+    "aggregate_sha256": "29c7ba391ef1c60c595fc3d46102bc8a14ac109ffc928e737a575a36507ea8a1",
+    "file_count": 25,
+    "path_categories": {
+      "manifest": 1,
+      "cases": 8,
+      "oracles": 8,
+      "final_oracles": 8
+    },
+    "files": {
+      "cases/th15_d01.json": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+      "cases/th15_d02.json": "26459765bbd4eac0919362e652b6b9d47072227fdc8d1246c6c5b81271d0398f",
+      "cases/th15_n01.json": "2bc32ea069e47ca7d7d5042dfa0c27cc722290725ced34cd63d85ebb6654b54c",
+      "cases/th15_n02.json": "8cfae5426ecd00eb8664cf86f3765c9858a6812692601cbbd1ed9e3437a0ed34",
+      "cases/th15_p01.json": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+      "cases/th15_p02.json": "0ef9a9413158c6e89bbcffaf39d70e5193c1fc86816da5d91450c940ecfe210c",
+      "cases/th15_s01.json": "6ae0ccf295251589ff218aa465cecf78579c496b8be930ecfc008359c5fa71d8",
+      "cases/th15_s02.json": "5b3dcf441260c49a09db88ec9e24b82b21665d1af2d36f44b721e5cf3a49da98",
+      "final_oracles/th15_d01.json": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+      "final_oracles/th15_d02.json": "01fb1bb3f78adfa916902a934d9fbfe4e17c734b156c093305f02d5099b32aae",
+      "final_oracles/th15_n01.json": "5deb75be7d8ef19c24cd11c4e440cad51de3901dcb90e5b1477bd6a3da4c5a2b",
+      "final_oracles/th15_n02.json": "057e360e170e50593783c601b2f2544bf0fe201a3b9f1837d32296a8b9da7ab8",
+      "final_oracles/th15_p01.json": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+      "final_oracles/th15_p02.json": "0a01f669e2551cbb21e8097ad2c20baff1b7023074cd0c7a60dce603500d7f54",
+      "final_oracles/th15_s01.json": "c011b6141b5feb57a2924631d72b000a3cb777e07684c5142cad4f42862ce8a9",
+      "final_oracles/th15_s02.json": "86e07b63883bdb7f9c04236c5fa559e72ccca3b6240ea9c89dec926f61068325",
+      "manifest.json": "373b5f7518626e19faaec4556c613aef80b0cb618ef28a5e8d26d14568b50f28",
+      "oracles/th15_d01.json": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+      "oracles/th15_d02.json": "01b75b849350e8b20bd0a2c09047b3f1717da4c26a5a60fbc597d7a79f0f97ff",
+      "oracles/th15_n01.json": "dd3825fcc96ba2cbbd47f2c30257a358a2f45419922cfd56977e513a82f78b2e",
+      "oracles/th15_n02.json": "d27c9c4b07043000816bd515a8e06722d66ca17489a35c4834b89229e31436d4",
+      "oracles/th15_p01.json": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+      "oracles/th15_p02.json": "96c4e5e082037e7eeff9d7dceb43faebf72988cc337b68ccce893f5497598813",
+      "oracles/th15_s01.json": "6910dcb76ef1a5d0e5f3752731a3c37d2a2ebcfb8104a947049abcdb38f3da68",
+      "oracles/th15_s02.json": "dd1c77ed824366281e063218a4cf14191544a1b6ea1aec09b7850e34e94a2d78"
+    }
+  },
+  "case_inventory": {
+    "case_count": 8,
+    "case_ids": [
+      "th15_d01",
+      "th15_d02",
+      "th15_n01",
+      "th15_n02",
+      "th15_p01",
+      "th15_p02",
+      "th15_s01",
+      "th15_s02"
+    ],
+    "language_distribution": {
+      "dart": 2,
+      "javascript": 2,
+      "python": 2,
+      "sql": 2
+    }
+  },
+  "validation": {
+    "strict_blinded_holdout_roles": true,
+    "strict_holdout_sealed_splits": true,
+    "external_final_paths": true,
+    "exact_three_candidates_per_case": true,
+    "exact_two_required_owners_per_case": true,
+    "single_context_only_candidate_per_case": true,
+    "mechanism_disjoint_from_current_recognized_contract_families": true,
+    "mechanism_disjoint_from_prior_suites": true,
+    "public_baselines_pass": true,
+    "broken_feedback_partitions_fail": true,
+    "broken_final_partitions_fail": true,
+    "reference_repairs_public_pass": true,
+    "reference_repairs_feedback_pass": true,
+    "reference_repairs_final_pass": true,
+    "exact_two_owner_necessity": true,
+    "context_only_candidate_unchanged": true
+  },
+  "adversarial_scan": {
+    "host_fixture_or_oracle_discovery_absent": true,
+    "git_access_absent": true,
+    "process_spawning_absent": true,
+    "network_access_absent": true,
+    "operational_absolute_paths_absent": true,
+    "candidate_source_mutation_absent": true,
+    "temporary_input_writes_isolated_from_candidate_owners": true
+  },
+  "execution": {
+    "runtime_validation_complete": true,
+    "external_network_used": false,
+    "model_pipeline_run": false
+  },
+  "runner_requirements": {
+    "evaluation_context": "protocol",
+    "external_final_oracles_required": true,
+    "feedback_execution_must_not_access_final_oracles": true,
+    "candidate_sources_must_be_read_only_during_tests": true,
+    "final_oracle_digest_must_be_reverified_at_sealed_read": true,
+    "no_model_calls_after_final_oracle_read": true
+  },
+  "excluded_sensitive_categories": [
+    "AUTHORING",
+    "AUTHORS",
+    "reference_repairs",
+    "validation_scripts",
+    "author_validation_receipts"
+  ]
+}

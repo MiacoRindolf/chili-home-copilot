@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_d01",
+  "final_files": {
+    "tests/final_test.dart": "import '../lib/envelope_codec.dart';\nimport '../lib/message.dart';\nimport '../lib/varint.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nbool formatFails(void Function() action) {\n  try {\n    action();\n    return false;\n  } on FormatException {\n    return true;\n  }\n}\n\nvoid main() {\n  final firstText = List<String>.filled(140, 'z').join();\n  final stream = <int>[\n    ...encodeEnvelope(Message('first', firstText)),\n    ...encodeEnvelope(const Message('second', 'tail')),\n  ];\n  final decoded = decodeEnvelopes(stream);\n  check(decoded.length == 2, 'concatenated mixed-size envelopes');\n  check(decoded[0].text == firstText && decoded[1].id == 'second', 'cursor follows prefix width');\n  check(formatFails(() => decodeVarint(<int>[0x80, 0x00])), 'non-canonical prefix rejection');\n  check(formatFails(() => decodeVarint(<int>[0x80])), 'truncated prefix rejection');\n  print('final tests passed');\n}\n"
+  }
+}

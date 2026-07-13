@@ -1,0 +1,18 @@
+{
+  "candidate_paths": [
+    "lib/recency_index.dart",
+    "lib/asset_cache.dart",
+    "lib/asset.dart"
+  ],
+  "case_id": "th15_d02",
+  "language": "dart",
+  "max_files": 2,
+  "prompt": "An in-memory asset cache evicts the oldest inserted entry correctly, but reading an entry does not protect it from the next eviction and replacing an existing key does not make that key recent. Capacity and value lookup behavior are otherwise stable. Preserve the recency index, cache, and asset APIs without packages.",
+  "repo_files": {
+    "lib/asset.dart": "class Asset {\n  final String revision;\n  final List<int> bytes;\n\n  Asset(this.revision, Iterable<int> bytes) : bytes = List<int>.unmodifiable(bytes);\n}\n",
+    "lib/asset_cache.dart": "import 'asset.dart';\nimport 'recency_index.dart';\n\nclass AssetCache {\n  final int capacity;\n  final Map<String, Asset> _values = <String, Asset>{};\n  final RecencyIndex _recency = RecencyIndex();\n\n  AssetCache(this.capacity) {\n    if (capacity < 1) throw ArgumentError.value(capacity, 'capacity');\n  }\n\n  Asset? get(String key) => _values[key];\n\n  void put(String key, Asset value) {\n    _values[key] = value;\n    _recency.record(key);\n    if (_values.length > capacity) {\n      final evicted = _recency.removeOldest();\n      if (evicted != null) _values.remove(evicted);\n    }\n  }\n\n  List<String> get keys => _recency.keys;\n}\n",
+    "lib/recency_index.dart": "class RecencyIndex {\n  final List<String> _keys = <String>[];\n\n  void record(String key) {\n    if (!_keys.contains(key)) _keys.add(key);\n  }\n\n  String? removeOldest() => _keys.isEmpty ? null : _keys.removeAt(0);\n\n  List<String> get keys => List<String>.unmodifiable(_keys);\n}\n",
+    "tests/public_test.dart": "import '../lib/asset.dart';\nimport '../lib/asset_cache.dart';\nimport '../lib/recency_index.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final index = RecencyIndex()..record('a')..record('b');\n  check(index.removeOldest() == 'a', 'insertion order eviction');\n\n  final cache = AssetCache(2);\n  final a = Asset('1', <int>[1]);\n  cache.put('a', a);\n  cache.put('b', Asset('1', <int>[2]));\n  cache.put('c', Asset('1', <int>[3]));\n  check(cache.get('a') == null, 'oldest insertion evicted');\n  check(cache.get('b') != null && cache.get('c') != null, 'new entries retained');\n  print('public tests passed');\n}\n"
+  },
+  "test_runner": "dart"
+}

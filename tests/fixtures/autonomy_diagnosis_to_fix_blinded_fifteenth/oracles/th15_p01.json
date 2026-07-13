@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_p01",
+  "expected_dimension": "data",
+  "expected_files": [
+    "archive_paths.py",
+    "archive_extract.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import stat\nfrom io import BytesIO\nfrom zipfile import ZipFile, ZipInfo\n\nimport pytest\n\nfrom archive_extract import extract_archive\nfrom archive_paths import normalized_member_path\n\n\n@pytest.mark.parametrize(\"name\", [\"../outside.txt\", r\"logs\\..\\outside.txt\", \"/root.txt\", r\"C:\\drive.txt\"])\ndef test_member_paths_reject_escape_forms(name):\n    with pytest.raises(ValueError):\n        normalized_member_path(name)\n\n\ndef test_symbolic_link_entries_are_not_materialized(tmp_path):\n    payload = BytesIO()\n    info = ZipInfo(\"links/current\")\n    info.create_system = 3\n    info.external_attr = (stat.S_IFLNK | 0o777) << 16\n    with ZipFile(payload, \"w\") as archive:\n        archive.writestr(info, \"../outside\")\n    payload.seek(0)\n    with ZipFile(payload) as archive, pytest.raises(ValueError):\n        extract_archive(archive, tmp_path / \"workspace\")\n"
+  }
+}

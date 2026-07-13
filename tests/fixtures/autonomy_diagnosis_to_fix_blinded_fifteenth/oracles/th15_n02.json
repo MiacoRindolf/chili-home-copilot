@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_n02",
+  "expected_dimension": "state",
+  "expected_files": [
+    "src/circuit-breaker.mjs",
+    "src/service-client.mjs"
+  ],
+  "feedback_files": {
+    "tests/feedback.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { CircuitBreaker } from '../src/circuit-breaker.mjs';\nimport { ClientInputError } from '../src/client-errors.mjs';\nimport { callService } from '../src/service-client.mjs';\n\ntest('only one recovery trial receives admission', () => {\n  const breaker = new CircuitBreaker({ threshold: 1, cooldownMs: 10 });\n  breaker.failure(0);\n  assert.equal(breaker.canRequest(10), true);\n  assert.equal(breaker.canRequest(10), false);\n});\n\ntest('local validation does not count as backend health evidence', async () => {\n  const breaker = new CircuitBreaker({ threshold: 1, cooldownMs: 10 });\n  await assert.rejects(\n    callService(async () => { throw new ClientInputError('bad request'); }, breaker, () => 0),\n    ClientInputError\n  );\n  assert.deepEqual(breaker.snapshot(), { state: 'closed', failures: 0, openedAt: null });\n});\n"
+  }
+}

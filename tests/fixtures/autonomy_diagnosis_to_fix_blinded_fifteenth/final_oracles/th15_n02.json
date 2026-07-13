@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_n02",
+  "final_files": {
+    "tests/final.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { CircuitBreaker } from '../src/circuit-breaker.mjs';\nimport { CircuitOpenError, ClientInputError } from '../src/client-errors.mjs';\nimport { callService } from '../src/service-client.mjs';\n\ntest('a local rejection releases one recovery lane without admitting a peer', async () => {\n  const breaker = new CircuitBreaker({ threshold: 1, cooldownMs: 10 });\n  await assert.rejects(\n    callService(async () => { throw new Error('offline'); }, breaker, () => 0)\n  );\n\n  let release;\n  const gate = new Promise((resolve) => { release = resolve; });\n  const trial = callService(async () => {\n    await gate;\n    throw new ClientInputError('invalid payload');\n  }, breaker, () => 10);\n\n  await assert.rejects(\n    callService(async () => 'must not enter', breaker, () => 10),\n    CircuitOpenError\n  );\n  release();\n  await assert.rejects(trial, ClientInputError);\n  assert.equal(await callService(async () => 'recovered', breaker, () => 10), 'recovered');\n  assert.deepEqual(breaker.snapshot(), { state: 'closed', failures: 0, openedAt: null });\n});\n"
+  }
+}

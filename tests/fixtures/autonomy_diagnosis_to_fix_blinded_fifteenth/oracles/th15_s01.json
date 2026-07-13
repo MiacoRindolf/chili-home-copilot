@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_s01",
+  "expected_dimension": "data",
+  "expected_files": [
+    "sql/select_authorized_documents.sql",
+    "sql/delete_role_grant.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import json\n\nfrom test_public import database, sql\n\n\ndef test_selection_uses_json_element_identity():\n    db = database()\n    db.executemany(\"INSERT INTO document VALUES (?, ?, ?)\", [\n        (1, \"Operations\", \"ops\"), (2, \"Developer Operations\", \"devops\")\n    ])\n    rows = db.execute(sql(\"select_authorized_documents.sql\"), {\"roles_json\": json.dumps([\"devops\"])}).fetchall()\n    assert rows == [(2, \"Developer Operations\")]\n\n\ndef test_deletion_preserves_roles_that_only_contain_the_text():\n    db = database()\n    db.execute(\"INSERT INTO principal_grant VALUES (?, ?)\", (\"p2\", json.dumps([\"ops\", \"devops\", \"finance\"])))\n    db.execute(sql(\"delete_role_grant.sql\"), {\"principal_id\": \"p2\", \"role\": \"ops\"})\n    roles = json.loads(db.execute(\"SELECT roles_json FROM principal_grant\").fetchone()[0])\n    assert roles == [\"devops\", \"finance\"]\n"
+  }
+}

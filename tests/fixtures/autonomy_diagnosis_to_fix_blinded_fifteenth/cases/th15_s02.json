@@ -1,0 +1,18 @@
+{
+  "candidate_paths": [
+    "sql/explode_work_order.sql",
+    "sql/required_materials.sql",
+    "sql/list_components.sql"
+  ],
+  "case_id": "th15_s02",
+  "language": "sql",
+  "max_files": 2,
+  "prompt": "Manufacturing work orders expand nested assemblies into required material quantities. One-level kits are correct, but nested quantities are not multiplied through each assembly and the same leaf reached through two branches is not combined. Legacy data may contain a cycle and must remain bounded. Preserve query parameters, result columns, direct component listing, and SQLite compatibility.",
+  "repo_files": {
+    "sql/explode_work_order.sql": "SELECT child_sku, quantity AS required_quantity, 1 AS depth\nFROM component\nWHERE assembly_sku = :root_sku\nORDER BY depth, child_sku;\n",
+    "sql/list_components.sql": "SELECT child_sku, quantity\nFROM component\nWHERE assembly_sku = :assembly_sku\nORDER BY child_sku;\n",
+    "sql/required_materials.sql": "SELECT child_sku, SUM(quantity * :build_count) AS required_quantity\nFROM component\nWHERE assembly_sku = :root_sku\nGROUP BY child_sku\nORDER BY child_sku;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef sql(name):\n    return (ROOT / \"sql\" / name).read_text()\n\n\ndef database(rows):\n    db = sqlite3.connect(\":memory:\")\n    db.execute(\"CREATE TABLE component (assembly_sku TEXT, child_sku TEXT, quantity INTEGER CHECK (quantity > 0))\")\n    db.executemany(\"INSERT INTO component VALUES (?, ?, ?)\", rows)\n    return db\n\n\ndef test_one_level_work_order_and_component_listing():\n    db = database([(\"kit\", \"bolt\", 4), (\"kit\", \"nut\", 2)])\n    assert db.execute(sql(\"explode_work_order.sql\"), {\"root_sku\": \"kit\"}).fetchall() == [\n        (\"bolt\", 4, 1), (\"nut\", 2, 1)\n    ]\n    assert db.execute(\n        sql(\"required_materials.sql\"), {\"root_sku\": \"kit\", \"build_count\": 3}\n    ).fetchall() == [(\"bolt\", 12), (\"nut\", 6)]\n    assert db.execute(sql(\"list_components.sql\"), {\"assembly_sku\": \"kit\"}).fetchall() == [\n        (\"bolt\", 4), (\"nut\", 2)\n    ]\n"
+  },
+  "test_runner": "pytest"
+}

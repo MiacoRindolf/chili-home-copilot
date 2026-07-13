@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_s02",
+  "expected_dimension": "data",
+  "expected_files": [
+    "sql/explode_work_order.sql",
+    "sql/required_materials.sql"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "from test_public import database, sql\n\n\ndef test_explosion_multiplies_each_nested_edge():\n    db = database([(\"kit\", \"module\", 2), (\"module\", \"bolt\", 3)])\n    assert db.execute(sql(\"explode_work_order.sql\"), {\"root_sku\": \"kit\"}).fetchall() == [\n        (\"module\", 2, 1), (\"bolt\", 6, 2)\n    ]\n\n\ndef test_leaf_requirements_sum_independent_paths():\n    db = database([\n        (\"kit\", \"left\", 2), (\"kit\", \"right\", 3),\n        (\"left\", \"screw\", 5), (\"right\", \"screw\", 7),\n    ])\n    assert db.execute(\n        sql(\"required_materials.sql\"), {\"root_sku\": \"kit\", \"build_count\": 1}\n    ).fetchall() == [(\"screw\", 31)]\n"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_d01",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "lib/varint.dart",
+    "lib/envelope_codec.dart"
+  ],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/envelope_codec.dart';\nimport '../lib/message.dart';\nimport '../lib/varint.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  check(encodeVarint(300).join(',') == '172,2', 'multi-byte varint encoding');\n  final decodedNumber = decodeVarint(<int>[0xac, 0x02]);\n  check(decodedNumber.value == 300 && decodedNumber.bytesRead == 2, 'multi-byte varint decoding');\n\n  final text = List<String>.filled(180, 'x').join();\n  final messages = decodeEnvelopes(encodeEnvelope(Message('large', text)));\n  check(messages.single.text == text, 'envelope consumes the full length prefix');\n  print('feedback tests passed');\n}\n"
+  }
+}

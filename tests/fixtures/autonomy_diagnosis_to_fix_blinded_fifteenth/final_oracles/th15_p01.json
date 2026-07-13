@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_p01",
+  "final_files": {
+    "tests/test_final.py": "import stat\nfrom io import BytesIO\nfrom zipfile import ZipFile, ZipInfo\n\nimport pytest\n\nfrom archive_extract import extract_archive\nfrom archive_paths import normalized_member_path\n\n\ndef test_mixed_separator_escape_and_nested_link_are_both_confined(tmp_path):\n    with pytest.raises(ValueError):\n        normalized_member_path(r\"safe\\..\\..\\outside.txt\")\n\n    escape = BytesIO()\n    with ZipFile(escape, \"w\") as archive:\n        archive.writestr(r\"safe\\..\\..\\outside.txt\", \"no\")\n    escape.seek(0)\n    with ZipFile(escape) as archive, pytest.raises(ValueError):\n        extract_archive(archive, tmp_path / \"workspace-a\")\n    assert not (tmp_path / \"outside.txt\").exists()\n\n    linked = BytesIO()\n    info = ZipInfo(\"safe/link\")\n    info.create_system = 3\n    info.external_attr = (stat.S_IFLNK | 0o777) << 16\n    with ZipFile(linked, \"w\") as archive:\n        archive.writestr(info, \"../../outside.txt\")\n    linked.seek(0)\n    with ZipFile(linked) as archive, pytest.raises(ValueError):\n        extract_archive(archive, tmp_path / \"workspace-b\")\n    assert not (tmp_path / \"workspace-b\" / \"safe\" / \"link\").exists()\n"
+  }
+}

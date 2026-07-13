@@ -1,0 +1,18 @@
+{
+  "candidate_paths": [
+    "exception_policy.py",
+    "retry_runner.py",
+    "service_errors.py"
+  ],
+  "case_id": "th15_p02",
+  "language": "python",
+  "max_files": 2,
+  "prompt": "A retry policy assigns exception classes to retry or stop decisions. A broad service rule registered before a specialized permanent-failure rule wins unexpectedly, and an operation wrapper hides an explicit permanent cause so the runner retries it. Exact transient errors still retry and succeed. Preserve the policy, runner, and exception APIs and the configured call limit.",
+  "repo_files": {
+    "exception_policy.py": "class ExceptionPolicy:\n    def __init__(self, rules, default=\"stop\"):\n        self._rules = tuple(rules)\n        self._default = default\n\n    def classify(self, error):\n        error_type = error if isinstance(error, type) else type(error)\n        for registered, decision in self._rules:\n            if issubclass(error_type, registered):\n                return decision\n        return self._default\n",
+    "retry_runner.py": "def run_with_retry(operation, policy, max_attempts=3):\n    if max_attempts < 1:\n        raise ValueError(\"max_attempts must be positive\")\n    for attempt in range(1, max_attempts + 1):\n        try:\n            return operation()\n        except Exception as error:\n            if policy.classify(type(error)) != \"retry\" or attempt == max_attempts:\n                raise\n    raise AssertionError(\"unreachable\")\n",
+    "service_errors.py": "class ServiceError(Exception):\n    pass\n\n\nclass TemporaryError(ServiceError):\n    pass\n\n\nclass PermanentError(ServiceError):\n    pass\n\n\nclass OperationEnvelope(ServiceError):\n    pass\n",
+    "tests/test_public.py": "from exception_policy import ExceptionPolicy\nfrom retry_runner import run_with_retry\nfrom service_errors import ServiceError, TemporaryError\n\n\ndef test_exact_transient_rule_retries_then_returns():\n    policy = ExceptionPolicy([(TemporaryError, \"retry\"), (ServiceError, \"stop\")])\n    calls = []\n\n    def operation():\n        calls.append(\"call\")\n        if len(calls) == 1:\n            raise TemporaryError(\"again\")\n        return \"ready\"\n\n    assert policy.classify(TemporaryError) == \"retry\"\n    assert run_with_retry(operation, policy, max_attempts=2) == \"ready\"\n    assert calls == [\"call\", \"call\"]\n"
+  },
+  "test_runner": "pytest"
+}

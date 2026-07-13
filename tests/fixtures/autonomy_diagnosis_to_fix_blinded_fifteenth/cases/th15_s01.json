@@ -1,0 +1,18 @@
+{
+  "candidate_paths": [
+    "sql/select_authorized_documents.sql",
+    "sql/delete_role_grant.sql",
+    "sql/audit_role_change.sql"
+  ],
+  "case_id": "th15_s01",
+  "language": "sql",
+  "max_files": 2,
+  "prompt": "Document access grants store role codes as a JSON array. Exact single-role checks work, but a short role matches text embedded inside a different role, revoking it also removes those neighboring roles, and quoted role codes are not handled consistently. Preserve bind parameters, result columns, grant storage, and audit behavior using SQLite SQL only.",
+  "repo_files": {
+    "sql/audit_role_change.sql": "INSERT INTO role_audit (principal_id, role_code, action)\nVALUES (:principal_id, :role, :action);\n",
+    "sql/delete_role_grant.sql": "UPDATE principal_grant\nSET roles_json = COALESCE(\n    (\n        SELECT json_group_array(value)\n        FROM json_each(principal_grant.roles_json)\n        WHERE value NOT LIKE '%' || :role || '%'\n    ),\n    '[]'\n)\nWHERE principal_id = :principal_id;\n",
+    "sql/select_authorized_documents.sql": "SELECT document_id, title\nFROM document\nWHERE required_role IS NULL\n   OR instr(:roles_json, required_role) > 0\nORDER BY document_id;\n",
+    "tests/test_public.py": "import json\nimport sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef sql(name):\n    return (ROOT / \"sql\" / name).read_text()\n\n\ndef database():\n    db = sqlite3.connect(\":memory:\")\n    db.executescript(\"\"\"\n        CREATE TABLE document (document_id INTEGER PRIMARY KEY, title TEXT, required_role TEXT);\n        CREATE TABLE principal_grant (principal_id TEXT PRIMARY KEY, roles_json TEXT NOT NULL CHECK (json_valid(roles_json)));\n        CREATE TABLE role_audit (principal_id TEXT, role_code TEXT, action TEXT);\n    \"\"\")\n    return db\n\n\ndef test_exact_role_selection_deletion_and_audit():\n    db = database()\n    db.executemany(\"INSERT INTO document VALUES (?, ?, ?)\", [\n        (1, \"Public\", None), (2, \"Guide\", \"reader\"), (3, \"Admin\", \"admin\")\n    ])\n    rows = db.execute(sql(\"select_authorized_documents.sql\"), {\"roles_json\": json.dumps([\"reader\"])}).fetchall()\n    assert rows == [(1, \"Public\"), (2, \"Guide\")]\n\n    db.execute(\"INSERT INTO principal_grant VALUES (?, ?)\", (\"p1\", json.dumps([\"reader\"])))\n    db.execute(sql(\"delete_role_grant.sql\"), {\"principal_id\": \"p1\", \"role\": \"reader\"})\n    assert json.loads(db.execute(\"SELECT roles_json FROM principal_grant\").fetchone()[0]) == []\n\n    db.execute(sql(\"audit_role_change.sql\"), {\"principal_id\": \"p1\", \"role\": \"reader\", \"action\": \"removed\"})\n    assert db.execute(\"SELECT * FROM role_audit\").fetchone() == (\"p1\", \"reader\", \"removed\")\n"
+  },
+  "test_runner": "pytest"
+}

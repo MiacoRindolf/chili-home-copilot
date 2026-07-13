@@ -1,0 +1,6 @@
+{
+  "case_id": "th15_d02",
+  "final_files": {
+    "tests/final_test.dart": "import '../lib/asset.dart';\nimport '../lib/asset_cache.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final cache = AssetCache(2);\n  cache.put('a', Asset('1', <int>[1]));\n  cache.put('b', Asset('1', <int>[2]));\n  check(cache.get('a')?.revision == '1', 'initial read');\n  cache.put('a', Asset('2', <int>[9]));\n  cache.put('c', Asset('1', <int>[3]));\n  check(cache.get('b') == null, 'replacement and read make a recent key');\n  check(cache.get('a')?.revision == '2', 'replacement value retained');\n  cache.put('d', Asset('1', <int>[4]));\n  check(cache.get('c') == null && cache.get('a') != null && cache.get('d') != null, 'composed access order');\n  print('final tests passed');\n}\n"
+  }
+}

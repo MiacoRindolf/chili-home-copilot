@@ -1,0 +1,11 @@
+{
+  "case_id": "th15_n01",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "src/set-cookie.mjs",
+    "src/cookie-jar.mjs"
+  ],
+  "feedback_files": {
+    "tests/feedback.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { CookieJar } from '../src/cookie-jar.mjs';\nimport { parseSetCookie } from '../src/set-cookie.mjs';\n\ntest('zero is retained as an explicit deletion age', () => {\n  assert.equal(parseSetCookie('sid=gone; Max-Age=0').maxAge, 0);\n});\n\ntest('domain and path matching use label and segment boundaries', () => {\n  const jar = new CookieJar();\n  jar.store('region=west; Domain=example.test; Path=/docs', 'https://api.example.test/docs');\n  assert.deepEqual(jar.cookiesFor('https://badexample.test/docs'), []);\n  assert.deepEqual(jar.cookiesFor('https://api.example.test/docset'), []);\n  assert.deepEqual(jar.cookiesFor('https://edge.example.test/docs/1'), [\n    { name: 'region', value: 'west' }\n  ]);\n});\n"
+  }
+}

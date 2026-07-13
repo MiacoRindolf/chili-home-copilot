@@ -1,0 +1,18 @@
+{
+  "candidate_paths": [
+    "lib/varint.dart",
+    "lib/envelope_codec.dart",
+    "lib/message.dart"
+  ],
+  "case_id": "th15_d01",
+  "language": "dart",
+  "max_files": 2,
+  "prompt": "A compact telemetry envelope prefixes each UTF-8 JSON message with an unsigned variable-length byte count. Small messages decode correctly, but larger messages are truncated and a following envelope is read from the wrong position. Malformed or non-canonical prefixes must remain rejected. Preserve the varint, envelope, and message APIs without adding packages.",
+  "repo_files": {
+    "lib/envelope_codec.dart": "import 'dart:convert';\n\nimport 'message.dart';\nimport 'varint.dart';\n\nList<int> encodeEnvelope(Message message) {\n  final payload = utf8.encode(jsonEncode(message.toJson()));\n  return <int>[...encodeVarint(payload.length), ...payload];\n}\n\nList<Message> decodeEnvelopes(List<int> bytes) {\n  final messages = <Message>[];\n  var cursor = 0;\n  while (cursor < bytes.length) {\n    final length = decodeVarint(bytes, cursor);\n    cursor += 1;\n    final end = cursor + length.value;\n    if (end > bytes.length) throw const FormatException('truncated envelope');\n    final document = jsonDecode(utf8.decode(bytes.sublist(cursor, end)));\n    messages.add(Message.fromJson(document as Map<String, dynamic>));\n    cursor = end;\n  }\n  return messages;\n}\n",
+    "lib/message.dart": "class Message {\n  final String id;\n  final String text;\n\n  const Message(this.id, this.text);\n\n  Map<String, dynamic> toJson() => <String, dynamic>{'id': id, 'text': text};\n\n  factory Message.fromJson(Map<String, dynamic> value) {\n    return Message(value['id'] as String, value['text'] as String);\n  }\n}\n",
+    "lib/varint.dart": "class VarintResult {\n  final int value;\n  final int bytesRead;\n\n  const VarintResult(this.value, this.bytesRead);\n}\n\nList<int> encodeVarint(int value) {\n  if (value < 0) throw ArgumentError.value(value, 'value');\n  return <int>[value & 0x7f];\n}\n\nVarintResult decodeVarint(List<int> bytes, [int offset = 0]) {\n  if (offset < 0 || offset >= bytes.length) {\n    throw const FormatException('truncated varint');\n  }\n  return VarintResult(bytes[offset] & 0x7f, 1);\n}\n",
+    "tests/public_test.dart": "import '../lib/envelope_codec.dart';\nimport '../lib/message.dart';\nimport '../lib/varint.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  check(encodeVarint(12).single == 12, 'small varint encoding');\n  final encoded = encodeEnvelope(const Message('a', 'ready'));\n  final decoded = decodeEnvelopes(encoded);\n  check(decoded.length == 1, 'one small envelope');\n  check(decoded.single.id == 'a' && decoded.single.text == 'ready', 'small message round trip');\n  print('public tests passed');\n}\n"
+  },
+  "test_runner": "dart"
+}

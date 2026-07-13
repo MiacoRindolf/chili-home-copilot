@@ -1,0 +1,62 @@
+{
+  "cases": [
+    {
+      "case": "cases/th15_d01.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_d01.json",
+      "oracle": "oracles/th15_d01.json",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/th15_d02.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_d02.json",
+      "oracle": "oracles/th15_d02.json",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/th15_n01.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_n01.json",
+      "oracle": "oracles/th15_n01.json",
+      "split": "holdout-sealed-javascript-multifile"
+    },
+    {
+      "case": "cases/th15_n02.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_n02.json",
+      "oracle": "oracles/th15_n02.json",
+      "split": "holdout-sealed-javascript-multifile"
+    },
+    {
+      "case": "cases/th15_p01.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_p01.json",
+      "oracle": "oracles/th15_p01.json",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/th15_p02.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_p02.json",
+      "oracle": "oracles/th15_p02.json",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/th15_s01.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_s01.json",
+      "oracle": "oracles/th15_s01.json",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/th15_s02.json",
+      "evaluation_role": "blinded_holdout",
+      "final_oracle": "final_oracles/th15_s02.json",
+      "oracle": "oracles/th15_s02.json",
+      "split": "holdout-sealed-sql-multifile"
+    }
+  ],
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-manifest.v3"
+}
