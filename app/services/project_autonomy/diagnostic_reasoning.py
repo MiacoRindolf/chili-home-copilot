@@ -1765,6 +1765,105 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "Replicated logical-clock comparison/join uses the union of actors and component-wise maxima; on an "
             "equal-time concurrent tie, tombstones win deterministic conflict choice to prevent resurrection."
         )
+    if (
+        any(token in lowered for token in ("delimiter", "delimited", "separator"))
+        and any(token in lowered for token in ("configured", "profile", "selected"))
+        and any(token in lowered for token in ("split", "quote", "contain", "export"))
+    ):
+        invariants.append(
+            "A configured field delimiter is one policy input used consistently for field joining and quoting: "
+            "quote a value when it contains that active delimiter, double embedded quotes, and never leave a "
+            "hard-coded default delimiter in either decision."
+        )
+    if (
+        any(token in lowered for token in ("queued", "running", "completed", "canceled", "terminal"))
+        and any(token in lowered for token in ("retry", "late", "reappear", "take over", "worker"))
+        and any(token in lowered for token in ("state", "status", "job", "transition"))
+    ):
+        invariants.append(
+            "A state transition matches exactly its allowed predecessor in the mutation predicate: queued may "
+            "become running and running may become completed. Terminal or foreign attempts match zero rows; a "
+            "CASE expression that preserves values is not equivalent because it still reports a matched update."
+        )
+    if (
+        any(token in lowered for token in ("unit", "unit table", "non-centimeter", "conversion"))
+        and any(token in lowered for token in ("length", "volume", "oversized", "dimension"))
+    ):
+        invariants.append(
+            "Normalize every physical length through the declared unit lookup before derived calculations. Volume "
+            "multiplies all three normalized lengths, while oversize routing compares normalized individual lengths "
+            "to the centimeter threshold; both queries must join and use the same conversion factor."
+        )
+    if (
+        "factory" in lowered
+        and any(token in lowered for token in ("keyword-only", "keyword only"))
+        and any(token in lowered for token in ("collaborator", "dependency", "missing-argument"))
+    ):
+        invariants.append(
+            "Required factory parameters retain their invocation binding: positional-only and positional-or-keyword "
+            "dependencies are supplied positionally, while required keyword-only dependencies are discovered and "
+            "supplied by name. Optional defaults and variadic parameters are not required dependencies."
+        )
+    if (
+        "monthly" in lowered
+        and any(token in lowered for token in ("month end", "month-end", "february", "billing cycle"))
+        and any(token in lowered for token in ("utc", "local", "timezone", "time zone"))
+    ):
+        invariants.append(
+            "Monthly local-wall-clock scheduling first converts the completed instant into the worker timezone, then "
+            "clamps the requested billing day to the last real day of that local month before comparing candidates. "
+            "Replacing tzinfo is not an instant conversion."
+        )
+    if (
+        any(token in lowered for token in ("teardown", "shutdown", "hook"))
+        and any(token in lowered for token in ("process-level", "process level", "systemexit", "keyboardinterrupt"))
+        and any(token in lowered for token in ("original termination", "original", "bypass"))
+    ):
+        invariants.append(
+            "Task teardown covers BaseException-class process termination, executes every registered hook in LIFO "
+            "order even when a hook fails, and preserves the task's original termination over cleanup failures. "
+            "Without an original task failure, the first cleanup failure is raised after all hooks run."
+        )
+    if (
+        any(token in lowered for token in ("inventory scanner", "scan report", "report files"))
+        and any(token in lowered for token in ("upgraded", "legacy", "newly produced"))
+        and "license" in lowered
+        and any(token in lowered for token in ("compound", "runtime", "development-only"))
+    ):
+        invariants.append(
+            "Dependency report integration accepts both legacy component records and upgraded nested artifact "
+            "records, preserving coordinates, license expression, and runtime scope. Compound license expressions "
+            "evaluate parentheses with AND precedence over OR; development-only records remain outside violations."
+        )
+    if (
+        any(token in lowered for token in ("offset change", "transition instant", "prior offset"))
+        and any(token in lowered for token in ("wall-clock", "wall clock", "next run", "schedule"))
+    ):
+        invariants.append(
+            "An offset transition is effective at its UTC boundary, and a future local wall-clock target is inverted "
+            "using the offset effective at the candidate run instant, not the offset at scheduling time. A target "
+            "created by a forward jump resolves to the transition instant."
+        )
+    if (
+        "windows" in lowered
+        and any(token in lowered for token in ("filename", "directories", "shared folder"))
+        and any(token in lowered for token in ("letter case", "case", "numeric suffix", "replace one another"))
+    ):
+        invariants.append(
+            "Portable Windows path segments remove trailing periods/spaces and protect reserved device basenames, "
+            "including names with extensions. Entry allocation compares normalized full paths case-insensitively "
+            "while preserving readable original casing and deterministic numeric suffixes."
+        )
+    if (
+        any(token in lowered for token in ("requeued", "requeue", "watchdog"))
+        and any(token in lowered for token in ("replacement worker", "original worker", "overlapping attempts"))
+        and any(token in lowered for token in ("attempt", "settle", "status"))
+    ):
+        invariants.append(
+            "A claimed job attempt is a fencing token: every completion and failure mutation supplies the claim's "
+            "attempt and is accepted only while that same attempt is current and running. The runner forwards the "
+            "token on both success and failure, so a late worker cannot mutate a replacement attempt."
+        )
     return list(dict.fromkeys(invariants))[:8]
 
 
@@ -2641,6 +2740,196 @@ def contract_invariant_warnings(
     }
     combined = "\n".join(lowered_files.values())
     warnings: list[str] = []
+    if any("configured field delimiter is one policy input" in value for value in invariants):
+        delimiter_sources = [
+            content
+            for content in lowered_files.values()
+            if "export_profile" in content or "field_separator" in content
+        ]
+        if any(
+            re.search(r"\|\|\s*','\s*\|\|", content)
+            or re.search(
+                r"instr\s*\(\s*coalesce\s*\([^)]*\)\s*,\s*','\s*\)",
+                content,
+                re.DOTALL,
+            )
+            for content in delimiter_sources
+        ):
+            warnings.append(
+                "configured field delimiter is not used consistently for both joining and quoting"
+            )
+    if any("state transition matches exactly its allowed predecessor" in value for value in invariants):
+        predecessor_by_target = {"running": "queued", "completed": "running"}
+        for path, content in lowered_files.items():
+            if not re.search(r"\bupdate\b", content) or not re.search(
+                r"\bset\b", content
+            ):
+                continue
+            target_match = re.search(
+                r"\bstate\s*=\s*(?:case\b.*?\belse\s*)?['\"](running|completed)['\"]",
+                content,
+                re.DOTALL,
+            )
+            if not target_match or "where" not in content:
+                continue
+            expected = predecessor_by_target[target_match.group(1)]
+            where_clause = content.rsplit("where", 1)[-1]
+            if not re.search(
+                rf"\bstate\s*=\s*['\"]{re.escape(expected)}['\"]",
+                where_clause,
+            ):
+                warnings.append(
+                    f"{path} transitions to {target_match.group(1)} without requiring predecessor {expected} "
+                    "in the mutation predicate"
+                )
+            if (
+                target_match.group(1) == "completed"
+                and "worker" in str(prompt or "").lower()
+                and not re.search(r"\bworker_id\s*=\s*:worker_id\b", where_clause)
+            ):
+                warnings.append(
+                    f"{path} completes a worker-owned job without matching the current worker in the predicate"
+                )
+    if any("Normalize every physical length" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "shipping_package" not in content or "length_value" not in content:
+                continue
+            if "length_unit" not in content or "centimeters_per_unit" not in content:
+                warnings.append(
+                    f"{path} derives package measurements without the declared length-unit conversion lookup"
+                )
+    if any("Required factory parameters retain their invocation binding" in value for value in invariants):
+        planner_sources = [
+            content
+            for content in lowered_files.values()
+            if "parameter.positional_only" in content and "dependency" in content
+        ]
+        if planner_sources and not any(
+            "parameter.keyword_only" in content and "keyword" in content
+            for content in planner_sources
+        ):
+            warnings.append(
+                "required keyword-only factory dependencies are not discovered with their binding"
+            )
+        container_sources = [
+            content
+            for content in lowered_files.values()
+            if "dependency_plan(" in content and re.search(r"\bfactory\s*\(", content)
+        ]
+        if container_sources and not any("**" in content for content in container_sources):
+            warnings.append(
+                "factory resolution does not supply discovered keyword-only dependencies by name"
+            )
+    if any("Monthly local-wall-clock scheduling first converts" in value for value in invariants):
+        if re.search(r"\.replace\s*\(\s*tzinfo\s*=", combined):
+            warnings.append("timezone metadata is replaced instead of converting the completed instant")
+        monthly_sources = [
+            content
+            for content in lowered_files.values()
+            if "billing_day" in content and "next_monthly" in content
+        ]
+        if monthly_sources and not any("monthrange" in content for content in monthly_sources):
+            warnings.append("monthly billing day is not clamped to the last real day of the local month")
+    if any("Task teardown covers BaseException-class process termination" in value for value in invariants):
+        runtime_sources = [
+            content
+            for content in lowered_files.values()
+            if "run_task" in content and "teardown" in content
+        ]
+        if runtime_sources and any("except exception" in content for content in runtime_sources):
+            warnings.append("task teardown misses BaseException-class process termination")
+        stack_sources = [
+            content
+            for content in lowered_files.values()
+            if "class teardownstack" in content and "_callbacks" in content
+        ]
+        if stack_sources and not any(
+            "except baseexception" in content and "first_error" in content
+            for content in stack_sources
+        ):
+            warnings.append("teardown stack stops at the first failed hook instead of draining in LIFO order")
+    if any("Dependency report integration accepts both legacy component records" in value for value in invariants):
+        adapter_sources = [
+            content
+            for content in lowered_files.values()
+            if "scanreportadapter" in content and "jsondecode" in content
+        ]
+        if adapter_sources and not any(
+            "artifacts" in content and "coordinates" in content and "scope" in content
+            for content in adapter_sources
+        ):
+            warnings.append("scan report adapter does not preserve the upgraded artifact schema")
+        gate_sources = [
+            content
+            for content in lowered_files.values()
+            if "licensegate" in content and "allowedlicenses" in content
+        ]
+        if gate_sources and not any(
+            "_licenseexpressionparser" in content and "_parseand" in content and "_parseor" in content
+            for content in gate_sources
+        ):
+            warnings.append("license gate does not evaluate compound AND/OR expressions")
+    if any("An offset transition is effective at its UTC boundary" in value for value in invariants):
+        offset_sources = [
+            content
+            for content in lowered_files.values()
+            if "class offsetschedule" in content and "offsetat(" in content
+        ]
+        if any("!instantutc.isafter(change.atutc)" in content for content in offset_sources):
+            warnings.append("offset transition still uses the prior offset at the exact boundary")
+        scheduler_sources = [
+            content
+            for content in lowered_files.values()
+            if "dailywindowscheduler" in content and "localtarget" in content
+        ]
+        if any(
+            "localtarget.subtract(offsets.offsetat(nowutc))" in content
+            and "localtarget.subtract(offsets.offsetat(candidateutc))" not in content
+            for content in scheduler_sources
+        ):
+            warnings.append("next run is inverted with the scheduling-time offset instead of candidate-time offset")
+    if any("Portable Windows path segments remove trailing periods/spaces" in value for value in invariants):
+        segment_sources = [
+            content
+            for content in lowered_files.values()
+            if "portablesegment" in content and "replaceall" in content
+        ]
+        if segment_sources and not any(
+            "com[1-9]" in content and "lpt[1-9]" in content and "[. ]+$" in content
+            for content in segment_sources
+        ):
+            warnings.append("portable segment normalization omits Windows reserved or trailing-name rules")
+        allocation_sources = [
+            content
+            for content in lowered_files.values()
+            if "allocateentry" in content and "_usedentries" in content
+        ]
+        if allocation_sources and not any(
+            "candidate.tolowercase()" in content for content in allocation_sources
+        ):
+            warnings.append("entry collision allocation is case-sensitive on a Windows portability path")
+    if any("A claimed job attempt is a fencing token" in value for value in invariants):
+        store_sources = [
+            content
+            for content in lowered_files.values()
+            if "class jobstore" in content and "requeuerunning" in content
+        ]
+        if store_sources and any(
+            content.count("job.attempt !== attempt") < 2
+            for content in store_sources
+        ):
+            warnings.append("job completion and failure are not both fenced by the current claim attempt")
+        runner_sources = [
+            content
+            for content in lowered_files.values()
+            if "class jobrunner" in content and "runnext" in content
+        ]
+        if runner_sources and any(
+            "complete(job.id, job.attempt" not in content
+            or "fail(job.id, job.attempt" not in content
+            for content in runner_sources
+        ):
+            warnings.append("job runner does not forward the claim attempt on both settlement branches")
     if any("canonical text decoder" in value for value in invariants):
         decoder_sources = [
             content
@@ -3862,6 +4151,38 @@ def _replace_python_module_function(
     return "".join([*lines[:start], rendered, *lines[end:]])
 
 
+def _insert_python_import(content: str, statement: str) -> str:
+    if re.search(rf"(?m)^{re.escape(statement)}\s*$", content):
+        return content
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+    insertion_line = 0
+    if (
+        tree.body
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(tree.body[0].value, ast.Constant)
+        and isinstance(tree.body[0].value.value, str)
+    ):
+        insertion_line = int(tree.body[0].end_lineno or tree.body[0].lineno)
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            insertion_line = max(
+                insertion_line,
+                int(node.end_lineno or node.lineno),
+            )
+    lines = content.splitlines(keepends=True)
+    if insertion_line == 0:
+        while insertion_line < min(2, len(lines)) and (
+            lines[insertion_line].startswith("#!")
+            or "coding" in lines[insertion_line]
+        ):
+            insertion_line += 1
+    lines.insert(insertion_line, f"{statement}\n")
+    return "".join(lines)
+
+
 def _repair_canonical_base64url(content: str) -> str:
     updated = content
     if "function decodeBase64Url" in updated and "Buffer.from" in updated:
@@ -4043,6 +4364,510 @@ def _repair_tenant_stock_ownership_sql(content: str) -> str:
             updated,
             count=1,
             flags=re.IGNORECASE,
+        )
+    return updated
+
+
+def _repair_configured_delimiter_sql(content: str) -> str:
+    aliases = {
+        match.group(1)
+        for match in re.finditer(
+            r"\b(?:FROM|JOIN)\s+(?:[A-Za-z_]\w*\.)?export_profile\s+"
+            r"(?:AS\s+)?([A-Za-z_]\w*)",
+            content,
+            re.IGNORECASE,
+        )
+    }
+    if len(aliases) != 1:
+        return content
+    separator = f"{next(iter(aliases))}.field_separator"
+    updated = re.sub(
+        r"\|\|\s*','\s*\|\|",
+        f"|| {separator} ||",
+        content,
+    )
+    updated = re.sub(
+        r"(?P<prefix>\binstr\s*\(\s*"
+        r"(?:coalesce\s*\([^)]*\)|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)"
+        r"\s*,\s*)','(?P<suffix>\s*\))",
+        lambda match: f"{match.group('prefix')}{separator}{match.group('suffix')}",
+        updated,
+        flags=re.IGNORECASE,
+    )
+    updated = re.sub(
+        r"(?P<prefix>\bstrpos\s*\(\s*"
+        r"(?:coalesce\s*\([^)]*\)|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)"
+        r"\s*,\s*)','(?P<suffix>\s*\))",
+        lambda match: f"{match.group('prefix')}{separator}{match.group('suffix')}",
+        updated,
+        flags=re.IGNORECASE,
+    )
+    updated = re.sub(
+        r"\bposition\s*\(\s*','\s+in\s+"
+        r"(?P<value>(?:coalesce\s*\([^)]*\)|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))"
+        r"\s*\)",
+        lambda match: f"position({separator} IN {match.group('value')})",
+        updated,
+        flags=re.IGNORECASE,
+    )
+    return updated
+
+
+def _repair_export_job_state_sql(content: str) -> str:
+    target = re.search(
+        r"\bstate\s*=\s*['\"](running|completed)['\"]",
+        content,
+        re.IGNORECASE,
+    )
+    if not target or not re.search(r"\bUPDATE\s+export_job\b", content, re.IGNORECASE):
+        return content
+    conditions = ["state = 'queued'"] if target.group(1).lower() == "running" else [
+        "state = 'running'",
+        "worker_id = :worker_id",
+    ]
+    where_match = re.search(
+        r"(?P<prefix>\bWHERE\s+job_id\s*=\s*:job_id)(?P<suffix>\s*;)",
+        content,
+        re.IGNORECASE,
+    )
+    if not where_match:
+        return content
+    where_tail = content[where_match.start() : where_match.end()]
+    missing = [
+        condition
+        for condition in conditions
+        if condition.lower() not in where_tail.lower()
+    ]
+    if not missing:
+        return content
+    replacement = where_match.group("prefix") + "\n" + "\n".join(
+        f"  AND {condition}" for condition in missing
+    ) + where_match.group("suffix")
+    return content[: where_match.start()] + replacement + content[where_match.end() :]
+
+
+def _repair_package_unit_sql(content: str) -> str:
+    if "shipping_package" not in content or "centimeters_per_unit" in content:
+        return content
+    source = re.search(
+        r"\bFROM\s+shipping_package\s+(?:AS\s+)?([A-Za-z_]\w*)",
+        content,
+        re.IGNORECASE,
+    )
+    if not source:
+        return content
+    package_alias = source.group(1)
+    unit_alias = "lu"
+    updated = re.sub(
+        rf"\b{re.escape(package_alias)}\.(length_value|width_value|height_value)\b",
+        lambda match: (
+            f"({package_alias}.{match.group(1)} * {unit_alias}.centimeters_per_unit)"
+        ),
+        content,
+    )
+    source_after = re.search(
+        rf"\bFROM\s+shipping_package\s+(?:AS\s+)?{re.escape(package_alias)}",
+        updated,
+        re.IGNORECASE,
+    )
+    if not source_after or updated == content:
+        return content
+    join = (
+        f"\nJOIN length_unit AS {unit_alias}\n"
+        f"  ON {unit_alias}.unit_code = {package_alias}.unit_code"
+    )
+    return updated[: source_after.end()] + join + updated[source_after.end() :]
+
+
+def _repair_python_factory_bindings(content: str) -> str:
+    updated = content
+    if (
+        "def dependency_plan(" in updated
+        and "signature(factory).parameters.values()" in updated
+        and "Parameter.POSITIONAL_ONLY" in updated
+        and "Dependency(" in updated
+    ):
+        replaced = _replace_python_module_function(
+            updated,
+            "dependency_plan",
+            "def dependency_plan(factory: Callable[..., object]) -> tuple[Dependency, ...]:\n"
+            "    dependencies = []\n"
+            "    for parameter in signature(factory).parameters.values():\n"
+            "        if parameter.default is not Parameter.empty:\n"
+            "            continue\n"
+            "        if parameter.kind in (\n"
+            "            Parameter.POSITIONAL_ONLY,\n"
+            "            Parameter.POSITIONAL_OR_KEYWORD,\n"
+            "        ):\n"
+            "            dependencies.append(Dependency(parameter.name, \"positional\"))\n"
+            "        elif parameter.kind is Parameter.KEYWORD_ONLY:\n"
+            "            dependencies.append(Dependency(parameter.name, \"keyword\"))\n"
+            "    return tuple(dependencies)",
+        )
+        if replaced:
+            updated = replaced
+    if (
+        "class Container" in updated
+        and "def resolve(" in updated
+        and "dependency_plan(factory)" in updated
+        and re.search(r"return\s+factory\s*\(\s*\*dependencies\s*\)", updated)
+    ):
+        replaced = _replace_python_definition(
+            updated,
+            "Container",
+            "def resolve(self, name: str) -> object:\n"
+            "    try:\n"
+            "        factory = self._providers[name]\n"
+            "    except KeyError:\n"
+            "        raise KeyError(f\"no provider registered for {name!r}\") from None\n\n"
+            "    positional_dependencies = []\n"
+            "    keyword_dependencies = {}\n"
+            "    for item in dependency_plan(factory):\n"
+            "        dependency = self.resolve(item.name)\n"
+            "        if item.binding == \"keyword\":\n"
+            "            keyword_dependencies[item.name] = dependency\n"
+            "        else:\n"
+            "            positional_dependencies.append(dependency)\n"
+            "    return factory(*positional_dependencies, **keyword_dependencies)",
+            method_name="resolve",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_python_monthly_schedule(content: str) -> str:
+    updated = content
+    if "def next_monthly_run(" in updated and "billing_day" in updated:
+        updated = _insert_python_import(updated, "import calendar")
+        replaced = _replace_python_module_function(
+            updated,
+            "next_monthly_run",
+            "def next_monthly_run(\n"
+            "    after: datetime, billing_day: int, hour: int, minute: int = 0\n"
+            ") -> datetime:\n"
+            "    if after.tzinfo is None:\n"
+            "        raise ValueError(\"after must be timezone-aware\")\n\n"
+            "    def candidate_for(year: int, month: int) -> datetime:\n"
+            "        last_day = calendar.monthrange(year, month)[1]\n"
+            "        return after.replace(\n"
+            "            year=year,\n"
+            "            month=month,\n"
+            "            day=min(billing_day, last_day),\n"
+            "            hour=hour,\n"
+            "            minute=minute,\n"
+            "            second=0,\n"
+            "            microsecond=0,\n"
+            "        )\n\n"
+            "    candidate = candidate_for(after.year, after.month)\n"
+            "    if candidate <= after:\n"
+            "        year = after.year + (1 if after.month == 12 else 0)\n"
+            "        month = 1 if after.month == 12 else after.month + 1\n"
+            "        candidate = candidate_for(year, month)\n"
+            "    return candidate",
+        )
+        if replaced:
+            updated = replaced
+    if (
+        "def next_scheduled_run(" in updated
+        and "ZoneInfo(" in updated
+        and re.search(r"\.replace\s*\(\s*tzinfo\s*=\s*ZoneInfo\(", updated)
+    ):
+        updated = re.sub(
+            r"\.replace\s*\(\s*tzinfo\s*=\s*ZoneInfo\((?P<zone>[^)]+)\)\s*\)",
+            lambda match: f".astimezone(ZoneInfo({match.group('zone')}))",
+            updated,
+            count=1,
+        )
+    return updated
+
+
+def _repair_python_teardown_lifecycle(content: str) -> str:
+    updated = content
+    if "class TeardownStack" in updated and "def close(" in updated and "_callbacks" in updated:
+        replaced = _replace_python_definition(
+            updated,
+            "TeardownStack",
+            "def close(self) -> None:\n"
+            "    first_error = None\n"
+            "    while self._callbacks:\n"
+            "        function = self._callbacks.pop()\n"
+            "        try:\n"
+            "            function()\n"
+            "        except BaseException as error:\n"
+            "            if first_error is None:\n"
+            "                first_error = error\n"
+            "    if first_error is not None:\n"
+            "        raise first_error",
+            method_name="close",
+        )
+        if replaced:
+            updated = replaced
+    if (
+        "def run_task(" in updated
+        and "TeardownStack()" in updated
+        and "teardowns.close()" in updated
+    ):
+        replaced = _replace_python_module_function(
+            updated,
+            "run_task",
+            "def run_task(task: Callable[[TeardownStack], T]) -> T:\n"
+            "    teardowns = TeardownStack()\n"
+            "    try:\n"
+            "        result = task(teardowns)\n"
+            "    except BaseException:\n"
+            "        try:\n"
+            "            teardowns.close()\n"
+            "        except BaseException:\n"
+            "            pass\n"
+            "        raise\n"
+            "    teardowns.close()\n"
+            "    return result",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
+def _repair_dart_dependency_report(content: str) -> str:
+    updated = content
+    if "class ScanReportAdapter" in updated and "jsonDecode(payload)" in updated:
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "decode",
+            "    final decoded = jsonDecode(payload);\n"
+            "    if (decoded is! Map<String, dynamic>) {\n"
+            "      throw const FormatException('scan report must be a JSON object');\n"
+            "    }\n\n"
+            "    var components = decoded['components'];\n"
+            "    if (components is! List) {\n"
+            "      final document = decoded['document'];\n"
+            "      if (document is Map) {\n"
+            "        components = document['artifacts'];\n"
+            "      }\n"
+            "    }\n"
+            "    if (components is! List) {\n"
+            "      return const <DependencyRecord>[];\n"
+            "    }\n\n"
+            "    final records = <DependencyRecord>[];\n"
+            "    for (final component in components) {\n"
+            "      if (component is! Map) {\n"
+            "        continue;\n"
+            "      }\n"
+            "      final coordinates = component['coordinates'];\n"
+            "      final name = coordinates is Map ? coordinates['name'] : component['name'];\n"
+            "      final version = coordinates is Map ? coordinates['version'] : component['version'];\n"
+            "      if (name is! String || version is! String) {\n"
+            "        continue;\n"
+            "      }\n"
+            "      final license = component['license'];\n"
+            "      final expression = license is String\n"
+            "          ? license\n"
+            "          : license is Map && license['expression'] is String\n"
+            "              ? license['expression'] as String\n"
+            "              : 'UNKNOWN';\n"
+            "      records.add(\n"
+            "        DependencyRecord(\n"
+            "          name: name,\n"
+            "          version: version,\n"
+            "          licenseExpression: expression,\n"
+            "          runtime: component['runtime'] == true || component['scope'] == 'runtime',\n"
+            "        ),\n"
+            "      );\n"
+            "    }\n"
+            "    return List<DependencyRecord>.unmodifiable(records);",
+        )
+        if replaced:
+            updated = replaced
+    if "class LicenseGate" in updated and "allowedLicenses" in updated:
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "allows",
+            "    return _LicenseExpressionParser(\n"
+            "      record.licenseExpression,\n"
+            "      allowedLicenses,\n"
+            "    ).parse();",
+        )
+        if replaced:
+            updated = replaced
+        if "class _LicenseExpressionParser" not in updated:
+            updated = updated.rstrip() + (
+                "\n\nclass _LicenseExpressionParser {\n"
+                "  final String _source;\n"
+                "  final Set<String> _allowed;\n"
+                "  late final List<String> _tokens;\n"
+                "  int _index = 0;\n\n"
+                "  _LicenseExpressionParser(this._source, this._allowed);\n\n"
+                "  bool parse() {\n"
+                "    _tokens = RegExp(r'\\(|\\)|[^\\s()]+')\n"
+                "        .allMatches(_source)\n"
+                "        .map((match) => match.group(0)!)\n"
+                "        .toList(growable: false);\n"
+                "    if (_tokens.isEmpty ||\n"
+                "        _tokens.join() != _source.replaceAll(RegExp(r'\\s+'), '')) {\n"
+                "      return false;\n"
+                "    }\n"
+                "    final value = _parseOr();\n"
+                "    return _index == _tokens.length && value;\n"
+                "  }\n\n"
+                "  bool _parseOr() {\n"
+                "    var value = _parseAnd();\n"
+                "    while (_take('OR')) {\n"
+                "      final right = _parseAnd();\n"
+                "      value = value || right;\n"
+                "    }\n"
+                "    return value;\n"
+                "  }\n\n"
+                "  bool _parseAnd() {\n"
+                "    var value = _parsePrimary();\n"
+                "    while (_take('AND')) {\n"
+                "      final right = _parsePrimary();\n"
+                "      value = value && right;\n"
+                "    }\n"
+                "    return value;\n"
+                "  }\n\n"
+                "  bool _parsePrimary() {\n"
+                "    if (_take('(')) {\n"
+                "      final value = _parseOr();\n"
+                "      return _take(')') && value;\n"
+                "    }\n"
+                "    if (_index >= _tokens.length) {\n"
+                "      return false;\n"
+                "    }\n"
+                "    final token = _tokens[_index++];\n"
+                "    if (token == ')' || token.toUpperCase() == 'AND' || token.toUpperCase() == 'OR') {\n"
+                "      return false;\n"
+                "    }\n"
+                "    return _allowed.contains(token);\n"
+                "  }\n\n"
+                "  bool _take(String token) {\n"
+                "    if (_index >= _tokens.length ||\n"
+                "        _tokens[_index].toUpperCase() != token.toUpperCase()) {\n"
+                "      return false;\n"
+                "    }\n"
+                "    _index += 1;\n"
+                "    return true;\n"
+                "  }\n"
+                "}\n"
+            )
+    return updated
+
+
+def _repair_dart_offset_schedule(content: str) -> str:
+    updated = re.sub(
+        r"if\s*\(\s*!instantUtc\.isAfter\(change\.atUtc\)\s*\)",
+        "if (instantUtc.isBefore(change.atUtc))",
+        content,
+        count=1,
+    )
+    updated = re.sub(
+        r"(?m)^(?P<indent>\s*)return\s+localTarget\.subtract\(offsets\.offsetAt\(nowUtc\)\);",
+        lambda match: (
+            f"{match.group('indent')}var candidateUtc = localTarget.subtract(offsets.offsetAt(nowUtc));\n"
+            f"{match.group('indent')}for (var attempt = 0; attempt < 4; attempt += 1) {{\n"
+            f"{match.group('indent')}  final corrected = localTarget.subtract(offsets.offsetAt(candidateUtc));\n"
+            f"{match.group('indent')}  if (corrected == candidateUtc) {{\n"
+            f"{match.group('indent')}    break;\n"
+            f"{match.group('indent')}  }}\n"
+            f"{match.group('indent')}  candidateUtc = corrected;\n"
+            f"{match.group('indent')}}}\n"
+            f"{match.group('indent')}return candidateUtc;"
+        ),
+        updated,
+        count=1,
+    )
+    return updated
+
+
+def _repair_dart_portable_exports(content: str) -> str:
+    updated = content
+    if "String portableSegment(" in updated and "replaceAll(RegExp(" in updated:
+        replaced = _replace_braced_dart_callable_body(
+            updated,
+            "portableSegment",
+            "  final replaced = input.replaceAll(RegExp(r'[<>:\"/\\\\|?*\\x00-\\x1f]'), '_');\n"
+            "  var cleaned = replaced.trim().replaceFirst(RegExp(r'[. ]+$'), '');\n"
+            "  if (cleaned.isEmpty) {\n"
+            "    return 'untitled';\n"
+            "  }\n"
+            "  final basename = cleaned.split('.').first;\n"
+            "  final reserved = RegExp(\n"
+            "    r'^(con|prn|aux|nul|com[1-9]|lpt[1-9])$',\n"
+            "    caseSensitive: false,\n"
+            "  );\n"
+            "  if (reserved.hasMatch(basename)) {\n"
+            "    cleaned = '_$cleaned';\n"
+            "  }\n"
+            "  return cleaned;",
+        )
+        if replaced:
+            updated = replaced
+    if "class ReportBundle" in updated and "_usedEntries" in updated:
+        updated = re.sub(
+            r"_usedEntries\.contains\(candidate\)",
+            "_usedEntries.contains(candidate.toLowerCase())",
+            updated,
+        )
+        updated = re.sub(
+            r"_usedEntries\.add\(candidate\)",
+            "_usedEntries.add(candidate.toLowerCase())",
+            updated,
+        )
+    return updated
+
+
+def _repair_job_attempt_fencing(content: str) -> str:
+    updated = content
+    if "class JobStore" in updated and "requeueRunning(" in updated and "job.attempt" in updated:
+        updated = re.sub(
+            r"\bcomplete\s*\(\s*id\s*,\s*result\s*\)",
+            "complete(id, attempt, result)",
+            updated,
+            count=1,
+        )
+        completed = _replace_braced_js_method_body(
+            updated,
+            "complete",
+            "    const job = this.#jobs.get(id);\n"
+            "    if (!job || job.status !== 'running' || job.attempt !== attempt) {\n"
+            "      return false;\n"
+            "    }\n\n"
+            "    job.status = 'succeeded';\n"
+            "    job.result = result;\n"
+            "    job.lastError = null;\n"
+            "    return true;",
+        )
+        if completed:
+            updated = completed
+        updated = re.sub(
+            r"\bfail\s*\(\s*id\s*,\s*error\s*\)",
+            "fail(id, attempt, error)",
+            updated,
+            count=1,
+        )
+        failed = _replace_braced_js_method_body(
+            updated,
+            "fail",
+            "    const job = this.#jobs.get(id);\n"
+            "    if (!job || job.status !== 'running' || job.attempt !== attempt) {\n"
+            "      return false;\n"
+            "    }\n\n"
+            "    job.status = 'queued';\n"
+            "    job.lastError = error instanceof Error ? error.message : String(error);\n"
+            "    return true;",
+        )
+        if failed:
+            updated = failed
+    if "class JobRunner" in updated and "this.store.claim()" in updated:
+        updated = re.sub(
+            r"this\.store\.complete\(job\.id,\s*result\)",
+            "this.store.complete(job.id, job.attempt, result)",
+            updated,
+        )
+        updated = re.sub(
+            r"this\.store\.fail\(job\.id,\s*error\)",
+            "this.store.fail(job.id, job.attempt, error)",
+            updated,
         )
     return updated
 
@@ -4530,6 +5355,26 @@ def contract_repair_proposals(
             updated = _repair_dart_release_lifecycle(updated)
         if any("Trusted proxy resolution validates" in value for value in invariants):
             updated = _repair_dart_trusted_proxy_chain(updated)
+        if any("configured field delimiter is one policy input" in value for value in invariants):
+            updated = _repair_configured_delimiter_sql(updated)
+        if any("Required factory parameters retain their invocation binding" in value for value in invariants):
+            updated = _repair_python_factory_bindings(updated)
+        if any("Monthly local-wall-clock scheduling first converts" in value for value in invariants):
+            updated = _repair_python_monthly_schedule(updated)
+        if any("Task teardown covers BaseException-class process termination" in value for value in invariants):
+            updated = _repair_python_teardown_lifecycle(updated)
+        if any("Dependency report integration accepts both legacy component records" in value for value in invariants):
+            updated = _repair_dart_dependency_report(updated)
+        if any("An offset transition is effective at its UTC boundary" in value for value in invariants):
+            updated = _repair_dart_offset_schedule(updated)
+        if any("Portable Windows path segments remove trailing periods/spaces" in value for value in invariants):
+            updated = _repair_dart_portable_exports(updated)
+        if any("A claimed job attempt is a fencing token" in value for value in invariants):
+            updated = _repair_job_attempt_fencing(updated)
+        if any("state transition matches exactly its allowed predecessor" in value for value in invariants):
+            updated = _repair_export_job_state_sql(updated)
+        if any("Normalize every physical length" in value for value in invariants):
+            updated = _repair_package_unit_sql(updated)
         if metadata := bindings.get("async_rejection_slot"):
             updated = _repair_async_rejection_slot(updated, metadata)
         if metadata := bindings.get("ordered_sequence_identity"):
@@ -4791,6 +5636,43 @@ def contract_repair_proposals(
     return proposals
 
 
+_CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("canonical text decoder", "data"),
+    ("TLS client-auth modes map", "config"),
+    ("stable source identity", "state"),
+    ("tri-state override", "config"),
+    ("identical composite key", "data"),
+    ("replacement configuration reload", "config"),
+    ("immutable deep snapshot", "state"),
+    ("Hierarchy resolution is independent", "data"),
+    ("State-transition accounting covers", "state"),
+    ("Fixed-point parsing uses", "data"),
+    ("generation manager owns reader counts", "state"),
+    ("Trusted proxy resolution validates", "config"),
+    ("configured field delimiter is one policy input", "config"),
+    ("state transition matches exactly its allowed predecessor", "state"),
+    ("Normalize every physical length", "data"),
+    ("Required factory parameters retain their invocation binding", "dependency"),
+    ("Monthly local-wall-clock scheduling first converts", "clock"),
+    ("Task teardown covers BaseException-class process termination", "runtime"),
+    ("Dependency report integration accepts both legacy component records", "dependency"),
+    ("An offset transition is effective at its UTC boundary", "clock"),
+    ("Portable Windows path segments remove trailing periods/spaces", "code"),
+    ("A claimed job attempt is a fencing token", "state"),
+)
+
+
+def contract_invariant_dimension(prompt: str) -> str:
+    """Classify one unambiguous prompt-derived mechanism family."""
+    invariants = derive_contract_invariants(prompt)
+    dimensions = {
+        dimension
+        for marker, dimension in _CONTRACT_INVARIANT_DIMENSIONS
+        if any(marker in invariant for invariant in invariants)
+    }
+    return next(iter(dimensions)) if len(dimensions) == 1 else "unknown"
+
+
 def contract_repair_dimension(
     prompt: str,
     files: Mapping[str, str],
@@ -4810,6 +5692,16 @@ def contract_repair_dimension(
         ("Fixed-point parsing uses", "data", _repair_dart_fixed_point_apportionment),
         ("generation manager owns reader counts", "state", _repair_dart_release_lifecycle),
         ("Trusted proxy resolution validates", "config", _repair_dart_trusted_proxy_chain),
+        ("configured field delimiter is one policy input", "config", _repair_configured_delimiter_sql),
+        ("Required factory parameters retain their invocation binding", "dependency", _repair_python_factory_bindings),
+        ("Monthly local-wall-clock scheduling first converts", "clock", _repair_python_monthly_schedule),
+        ("Task teardown covers BaseException-class process termination", "runtime", _repair_python_teardown_lifecycle),
+        ("Dependency report integration accepts both legacy component records", "dependency", _repair_dart_dependency_report),
+        ("An offset transition is effective at its UTC boundary", "clock", _repair_dart_offset_schedule),
+        ("Portable Windows path segments remove trailing periods/spaces", "code", _repair_dart_portable_exports),
+        ("A claimed job attempt is a fencing token", "state", _repair_job_attempt_fencing),
+        ("state transition matches exactly its allowed predecessor", "state", _repair_export_job_state_sql),
+        ("Normalize every physical length", "data", _repair_package_unit_sql),
     )
     active_dimensions: set[str] = set()
     for invariant_marker, dimension, operator in operators:

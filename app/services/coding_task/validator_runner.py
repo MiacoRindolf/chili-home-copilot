@@ -244,12 +244,47 @@ def _sqlite_authorizer(
     return sqlite3.SQLITE_OK
 
 
+_SQLITE_SCHEMA_DEPENDENT_ERRORS = (
+    "no such table:",
+    "no such column:",
+    "no such function:",
+    "no such index:",
+    "no such trigger:",
+    "no such view:",
+    "has no column named",
+    "ambiguous column name:",
+)
+
+
+def _sqlite_statement_chunks(script: str) -> list[str]:
+    """Split a script at SQLite-complete statement boundaries."""
+    chunks: list[str] = []
+    pending: list[str] = []
+    for char in script:
+        pending.append(char)
+        if char == ";" and sqlite3.complete_statement("".join(pending)):
+            statement = "".join(pending).strip()
+            if statement:
+                chunks.append(statement)
+            pending = []
+    remainder = "".join(pending).strip()
+    if remainder:
+        chunks.append(remainder)
+    return chunks
+
+
+def _sqlite_schema_dependent_error(exc: sqlite3.Error) -> bool:
+    message = str(exc or "").casefold()
+    return any(marker in message for marker in _SQLITE_SCHEMA_DEPENDENT_ERRORS)
+
+
 def _run_sqlite_changed_files(
     sql_files: list[tuple[str, Path]],
-) -> tuple[list[str], list[str], int]:
+) -> tuple[list[str], list[str], int, list[dict[str, str]]]:
     """Materialize changed SQLite scripts in order without an external DB."""
     output_lines: list[str] = []
     validated_files: list[str] = []
+    schema_dependent: list[dict[str, str]] = []
     errors = 0
     connection = sqlite3.connect(":memory:")
     try:
@@ -261,15 +296,38 @@ def _run_sqlite_changed_files(
             validated_files.append(relative)
             try:
                 script = path.read_text(encoding="utf-8", errors="replace")
-                connection.executescript(script)
-            except (OSError, sqlite3.Error) as exc:
+            except OSError as exc:
                 errors += 1
                 output_lines.append(f"SyntaxError {relative}: SQLite validation failed: {exc}")
                 break
-            output_lines.append(f"ok {relative}")
+            deferred_for_file: list[str] = []
+            for statement in _sqlite_statement_chunks(script):
+                try:
+                    connection.execute(statement)
+                except sqlite3.Error as exc:
+                    if _sqlite_schema_dependent_error(exc):
+                        deferred_for_file.append(str(exc))
+                        schema_dependent.append(
+                            {"path": relative, "error": str(exc)}
+                        )
+                        continue
+                    errors += 1
+                    output_lines.append(
+                        f"SyntaxError {relative}: SQLite validation failed: {exc}"
+                    )
+                    break
+            if errors:
+                break
+            if deferred_for_file:
+                output_lines.append(
+                    f"ok {relative} (schema-dependent references deferred: "
+                    f"{len(deferred_for_file)})"
+                )
+            else:
+                output_lines.append(f"ok {relative}")
     finally:
         connection.close()
-    return output_lines, validated_files, errors
+    return output_lines, validated_files, errors, schema_dependent
 
 
 def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
@@ -313,13 +371,17 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
     validated_files = list(python_files)
     languages = {"python"} if python_files else set()
     dart_analyzer_warnings: list[str] = []
+    sql_schema_dependent: list[dict[str, str]] = []
     node = shutil.which("node") or ""
     dart = _dart_executable()
 
     if sql_files:
-        sql_output, validated_sql_files, sql_errors = _run_sqlite_changed_files(
-            sql_files,
-        )
+        (
+            sql_output,
+            validated_sql_files,
+            sql_errors,
+            sql_schema_dependent,
+        ) = _run_sqlite_changed_files(sql_files)
         output_lines.extend(sql_output)
         validated_files.extend(validated_sql_files)
         languages.add("sql")
@@ -413,6 +475,7 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
             "validation_scope": "changed_file_syntax",
             "syntax_languages": sorted(languages),
             "dart_analyzer_warnings": dart_analyzer_warnings,
+            "sql_schema_dependent": sql_schema_dependent,
         },
     )
 

@@ -1648,6 +1648,531 @@ def test_cross_boundary_contract_guards_reject_known_partial_mechanisms():
         )
 
 
+def test_configured_delimiter_contract_guards_joining_and_quoting_together():
+    prompt = (
+        "A configured delimited export profile uses the selected separator, and values "
+        "containing that separator must be quoted."
+    )
+    invariants = reasoning.derive_contract_invariants(prompt)
+    rejected = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "render.sql": (
+                "SELECT id || p.field_separator || CASE "
+                "WHEN instr(COALESCE(label, ''), ',') > 0 THEN quote(label) ELSE label END "
+                "FROM item JOIN export_profile p;"
+            )
+        },
+    )
+    partial_join_rejected = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "render.sql": (
+                "SELECT id || ',' || CASE "
+                "WHEN instr(COALESCE(label, ''), p.field_separator) > 0 "
+                "THEN '\"' || replace(label, '\"', '\"\"') || '\"' ELSE label END "
+                "FROM item JOIN export_profile p;"
+            )
+        },
+    )
+    accepted = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "render.sql": (
+                "SELECT id || p.field_separator || CASE "
+                "WHEN instr(COALESCE(label, ''), p.field_separator) > 0 "
+                "THEN '\"' || replace(label, '\"', '\"\"') || '\"' ELSE label END "
+                "FROM item JOIN export_profile p;"
+            )
+        },
+    )
+
+    assert any("used consistently for field joining and quoting" in value for value in invariants)
+    assert reasoning.contract_invariant_dimension(prompt) == "config"
+    assert any("not used consistently" in value for value in rejected)
+    assert any("not used consistently" in value for value in partial_join_rejected)
+    assert accepted == []
+
+
+def test_configured_delimiter_contract_repair_updates_join_and_quote_predicate():
+    prompt = (
+        "Exports generated with a non-default delimited profile still arrive comma-separated, "
+        "and values containing the selected separator must be quoted."
+    )
+    source = (
+        "SELECT CAST(c.id AS TEXT) || ',' || CASE\n"
+        "  WHEN instr(COALESCE(c.label, ''), ',') > 0 THEN quote(c.label)\n"
+        "  ELSE c.label END || p.record_separator\n"
+        "FROM customer AS c JOIN export_profile AS p ON p.name = :profile;\n"
+    )
+
+    proposals = reasoning.contract_repair_proposals(
+        prompt,
+        {"sql/render.sql": source},
+    )
+
+    assert proposals["sql/render.sql"] == (
+        "SELECT CAST(c.id AS TEXT) || p.field_separator || CASE\n"
+        "  WHEN instr(COALESCE(c.label, ''), p.field_separator) > 0 THEN quote(c.label)\n"
+        "  ELSE c.label END || p.record_separator\n"
+        "FROM customer AS c JOIN export_profile AS p ON p.name = :profile;\n"
+    )
+    assert reasoning.contract_repair_dimension(
+        prompt,
+        {"sql/render.sql": source},
+    ) == "config"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_configured_delimiter_contract_repair_requires_one_profile_alias():
+    prompt = (
+        "A configured delimited export profile must use its selected separator for joining "
+        "and quoting."
+    )
+    source = (
+        "SELECT id || ',' || label FROM export_profile AS first "
+        "JOIN export_profile AS second ON second.name = first.name;"
+    )
+
+    assert reasoning.contract_repair_proposals(
+        prompt,
+        {"sql/render.sql": source},
+    ) == {}
+    assert reasoning.contract_repair_dimension(
+        prompt,
+        {"sql/render.sql": source},
+    ) == "unknown"
+
+
+def test_required_factory_binding_repair_coordinates_planner_and_invocation():
+    prompt = (
+        "Extension activation fails when a factory declares a required collaborator after a "
+        "keyword-only separator, while ordinary dependencies still work."
+    )
+    files = {
+        "dependency_plan.py": (
+            "from inspect import Parameter, signature\n"
+            "from typing import Callable\n\n"
+            "class Dependency:\n"
+            "    def __init__(self, name, binding):\n"
+            "        self.name = name\n"
+            "        self.binding = binding\n\n"
+            "def dependency_plan(factory: Callable[..., object]):\n"
+            "    dependencies = []\n"
+            "    for parameter in signature(factory).parameters.values():\n"
+            "        if parameter.default is not Parameter.empty:\n"
+            "            continue\n"
+            "        if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD):\n"
+            "            dependencies.append(Dependency(parameter.name, \"positional\"))\n"
+            "    return tuple(dependencies)\n"
+        ),
+        "service_container.py": (
+            "class Container:\n"
+            "    def resolve(self, name: str) -> object:\n"
+            "        factory = self._providers[name]\n"
+            "        dependencies = [self.resolve(item.name) for item in dependency_plan(factory)]\n"
+            "        return factory(*dependencies)\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert set(proposals) == set(files)
+    assert "Parameter.KEYWORD_ONLY" in proposals["dependency_plan.py"]
+    assert 'Dependency(parameter.name, "keyword")' in proposals["dependency_plan.py"]
+    assert "**keyword_dependencies" in proposals["service_container.py"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "dependency"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_monthly_local_schedule_repair_clamps_day_and_converts_instant():
+    prompt = (
+        "Monthly settlement near month end fails in February, and a worker completion in UTC "
+        "must schedule against the local timezone without slipping a billing cycle."
+    )
+    files = {
+        "billing_clock.py": (
+            "from __future__ import annotations\n"
+            "from datetime import datetime\n\n"
+            "def next_monthly_run(after: datetime, billing_day: int, hour: int, minute: int = 0):\n"
+            "    candidate = after.replace(day=billing_day, hour=hour, minute=minute)\n"
+            "    return candidate\n"
+        ),
+        "settlement_runner.py": (
+            "from zoneinfo import ZoneInfo\n\n"
+            "def next_scheduled_run(completed_at, timezone_name):\n"
+            "    completed = datetime.fromisoformat(completed_at)\n"
+            "    return completed.replace(tzinfo=ZoneInfo(timezone_name))\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert "calendar.monthrange" in proposals["billing_clock.py"]
+    assert proposals["billing_clock.py"].startswith(
+        "from __future__ import annotations\nimport calendar\n"
+    )
+    assert "day=min(billing_day, last_day)" in proposals["billing_clock.py"]
+    assert ".astimezone(ZoneInfo(timezone_name))" in proposals["settlement_runner.py"]
+    assert ".replace(tzinfo=" not in proposals["settlement_runner.py"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "clock"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_task_teardown_repair_drains_lifo_and_preserves_original_termination():
+    prompt = (
+        "Worker shutdown teardown hooks must all run after process-level SystemExit or "
+        "KeyboardInterrupt, and incident reporting must preserve the original termination."
+    )
+    files = {
+        "teardown_stack.py": (
+            "class TeardownStack:\n"
+            "    def __init__(self):\n"
+            "        self._callbacks = []\n\n"
+            "    def close(self):\n"
+            "        while self._callbacks:\n"
+            "            function = self._callbacks.pop()\n"
+            "            function()\n"
+        ),
+        "task_runtime.py": (
+            "def run_task(task):\n"
+            "    teardowns = TeardownStack()\n"
+            "    try:\n"
+            "        result = task(teardowns)\n"
+            "    except Exception:\n"
+            "        teardowns.close()\n"
+            "        raise\n"
+            "    teardowns.close()\n"
+            "    return result\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert any("misses BaseException" in warning for warning in rejected)
+    assert any("stops at the first failed hook" in warning for warning in rejected)
+    assert "except BaseException as error" in proposals["teardown_stack.py"]
+    assert "first_error" in proposals["teardown_stack.py"]
+    assert "except BaseException:" in proposals["task_runtime.py"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "runtime"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_dart_dependency_report_repair_adapts_schema_and_compound_licenses():
+    prompt = (
+        "After the inventory scanner was upgraded, newly produced report files are empty; "
+        "compound license choices for runtime records must work while development-only tools "
+        "remain outside violations and legacy reports continue to work."
+    )
+    files = {
+        "lib/scan_report_adapter.dart": (
+            "import 'dart:convert';\n"
+            "class DependencyRecord { final String name; final String version; "
+            "final String licenseExpression; final bool runtime; "
+            "const DependencyRecord({required this.name, required this.version, "
+            "required this.licenseExpression, required this.runtime}); }\n"
+            "class ScanReportAdapter {\n"
+            "  List<DependencyRecord> decode(String payload) {\n"
+            "    final decoded = jsonDecode(payload);\n"
+            "    if (decoded is! Map<String, dynamic>) throw const FormatException();\n"
+            "    final components = decoded['components'];\n"
+            "    if (components is! List) return const <DependencyRecord>[];\n"
+            "    return const <DependencyRecord>[];\n"
+            "  }\n"
+            "}\n"
+        ),
+        "lib/license_gate.dart": (
+            "class LicenseGate {\n"
+            "  final Set<String> allowedLicenses;\n"
+            "  LicenseGate(this.allowedLicenses);\n"
+            "  bool allows(DependencyRecord record) {\n"
+            "    return allowedLicenses.contains(record.licenseExpression);\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert set(proposals) == set(files)
+    assert "decoded['components']" in proposals["lib/scan_report_adapter.dart"]
+    assert "decoded['document']" in proposals["lib/scan_report_adapter.dart"]
+    assert "document['artifacts']" in proposals["lib/scan_report_adapter.dart"]
+    assert "component['scope'] == 'runtime'" in proposals["lib/scan_report_adapter.dart"]
+    assert "class _LicenseExpressionParser" in proposals["lib/license_gate.dart"]
+    assert "bool _parseAnd()" in proposals["lib/license_gate.dart"]
+    assert "bool _parseOr()" in proposals["lib/license_gate.dart"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "dependency"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_dart_offset_schedule_repair_uses_transition_and_candidate_offsets():
+    prompt = (
+        "A daily local wall-clock schedule is late on an offset change; the transition instant "
+        "must use the new offset and the next run must use the offset at that run."
+    )
+    files = {
+        "lib/offset_schedule.dart": (
+            "class OffsetSchedule {\n"
+            "  Duration offsetAt(DateTime instantUtc) {\n"
+            "    var result = initialOffset;\n"
+            "    for (final change in _changes) {\n"
+            "      if (!instantUtc.isAfter(change.atUtc)) { break; }\n"
+            "      result = change.offsetAfter;\n"
+            "    }\n"
+            "    return result;\n"
+            "  }\n"
+            "}\n"
+        ),
+        "lib/daily_window.dart": (
+            "class DailyWindowScheduler {\n"
+            "  DateTime nextRun(DateTime nowUtc) {\n"
+            "    final localTarget = DateTime.utc(2026, 3, 8, 9);\n"
+            "    return localTarget.subtract(offsets.offsetAt(nowUtc));\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert any("exact boundary" in warning for warning in rejected)
+    assert any("candidate-time offset" in warning for warning in rejected)
+    assert "instantUtc.isBefore(change.atUtc)" in proposals["lib/offset_schedule.dart"]
+    assert "offsets.offsetAt(candidateUtc)" in proposals["lib/daily_window.dart"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "clock"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_dart_portable_export_repair_coordinates_name_and_collision_domains():
+    prompt = (
+        "Windows report directories reject some filenames, and labels differing only by letter "
+        "case replace one another instead of receiving a numeric suffix in the shared folder."
+    )
+    files = {
+        "lib/export_name.dart": (
+            "String portableSegment(String input) {\n"
+            "  final replaced = input.replaceAll(RegExp(r'[<>:\"/\\\\|?*\\x00-\\x1f]'), '_');\n"
+            "  final cleaned = replaced.trim();\n"
+            "  return cleaned.isEmpty ? 'untitled' : cleaned;\n"
+            "}\n"
+        ),
+        "lib/report_bundle.dart": (
+            "class ReportBundle {\n"
+            "  final Set<String> _usedEntries = <String>{};\n"
+            "  String allocateEntry(String folder, String title) {\n"
+            "    var candidate = '$folder/$title.txt';\n"
+            "    while (_usedEntries.contains(candidate)) { candidate = '$candidate (2)'; }\n"
+            "    _usedEntries.add(candidate);\n"
+            "    return candidate;\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert any("Windows reserved" in warning for warning in rejected)
+    assert any("case-sensitive" in warning for warning in rejected)
+    assert "com[1-9]" in proposals["lib/export_name.dart"]
+    assert "lpt[1-9]" in proposals["lib/export_name.dart"]
+    assert "[. ]+$" in proposals["lib/export_name.dart"]
+    assert "candidate.toLowerCase()" in proposals["lib/report_bundle.dart"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "code"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_job_attempt_fencing_repair_covers_success_and_failure_settlement():
+    prompt = (
+        "A watchdog can requeue a job for a replacement worker, but the original worker may "
+        "settle later; overlapping attempts must not change the replacement attempt's status."
+    )
+    files = {
+        "src/job-store.mjs": (
+            "export class JobStore {\n"
+            "  #jobs = new Map();\n"
+            "  claim() { const job = this.#jobs.values().next().value; job.attempt += 1; return job; }\n"
+            "  requeueRunning(id) { return true; }\n"
+            "  complete(id, result) {\n"
+            "    const job = this.#jobs.get(id);\n"
+            "    if (!job || job.status !== 'running') return false;\n"
+            "    job.status = 'succeeded';\n"
+            "    job.result = result;\n"
+            "    return true;\n"
+            "  }\n"
+            "  fail(id, error) {\n"
+            "    const job = this.#jobs.get(id);\n"
+            "    if (!job || job.status !== 'running') return false;\n"
+            "    job.status = 'queued';\n"
+            "    job.lastError = String(error);\n"
+            "    return true;\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/job-runner.mjs": (
+            "export class JobRunner {\n"
+            "  async runNext() {\n"
+            "    const job = this.store.claim();\n"
+            "    try {\n"
+            "      const result = await this.execute(job.payload);\n"
+            "      return this.store.complete(job.id, result);\n"
+            "    } catch (error) {\n"
+            "      return this.store.fail(job.id, error);\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert any("not both fenced" in warning for warning in rejected)
+    assert any("both settlement branches" in warning for warning in rejected)
+    assert proposals["src/job-store.mjs"].count("job.attempt !== attempt") == 2
+    assert "complete(id, attempt, result)" in proposals["src/job-store.mjs"]
+    assert "fail(id, attempt, error)" in proposals["src/job-store.mjs"]
+    assert "complete(job.id, job.attempt, result)" in proposals["src/job-runner.mjs"]
+    assert "fail(job.id, job.attempt, error)" in proposals["src/job-runner.mjs"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "state"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_terminal_state_contract_requires_predecessor_in_update_predicate():
+    prompt = (
+        "A queued job becomes running and then completed, but a late worker retry must not "
+        "change completed or canceled terminal state."
+    )
+    invariants = reasoning.derive_contract_invariants(prompt)
+    rejected = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "claim.sql": "UPDATE job SET state = 'running' WHERE job_id = :job_id;",
+            "finish.sql": (
+                "UPDATE job SET state = CASE WHEN state = 'completed' THEN state "
+                "ELSE 'completed' END WHERE job_id = :job_id AND worker_id = :worker_id;"
+            ),
+        },
+    )
+    accepted = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "claim.sql": (
+                "UPDATE job SET state = 'running' WHERE job_id = :job_id "
+                "AND state = 'queued';"
+            ),
+            "finish.sql": (
+                "UPDATE job SET state = 'completed' WHERE job_id = :job_id "
+                "AND worker_id = :worker_id AND state = 'running';"
+            ),
+        },
+    )
+
+    assert any("matches exactly its allowed predecessor" in value for value in invariants)
+    assert reasoning.contract_invariant_dimension(prompt) == "state"
+    assert any("predecessor queued" in value for value in rejected)
+    assert any("predecessor running" in value for value in rejected)
+    assert accepted == []
+
+
+def test_export_job_state_repair_adds_predecessor_and_worker_predicates():
+    prompt = (
+        "Export workers take over jobs already started; canceled jobs reappear as running and "
+        "a late worker retry can change a completed result. Queued becomes running, then completed."
+    )
+    files = {
+        "sql/claim.sql": (
+            "UPDATE export_job SET state = 'running', worker_id = :worker_id "
+            "WHERE job_id = :job_id;"
+        ),
+        "sql/finish.sql": (
+            "UPDATE export_job SET state = 'completed', result_uri = :result_uri "
+            "WHERE job_id = :job_id;"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    assert "AND state = 'queued'" in proposals["sql/claim.sql"]
+    assert "AND state = 'running'" in proposals["sql/finish.sql"]
+    assert "AND worker_id = :worker_id" in proposals["sql/finish.sql"]
+    assert reasoning.contract_repair_dimension(prompt, files) == "state"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
+def test_measurement_contract_requires_shared_unit_lookup_for_derived_values():
+    prompt = (
+        "Supplier package lengths use a supported unit table; cubic volume and oversized "
+        "routing must normalize non-centimeter dimensions."
+    )
+    invariants = reasoning.derive_contract_invariants(prompt)
+    rejected = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "volume.sql": (
+                "SELECT length_value * width_value * height_value AS volume_cm3 "
+                "FROM shipping_package;"
+            ),
+            "oversize.sql": (
+                "SELECT package_id FROM shipping_package "
+                "WHERE max(length_value, width_value, height_value) >= :limit_cm;"
+            ),
+        },
+    )
+    accepted = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "volume.sql": (
+                "SELECT (p.length_value * u.centimeters_per_unit) * "
+                "(p.width_value * u.centimeters_per_unit) * "
+                "(p.height_value * u.centimeters_per_unit) AS volume_cm3 "
+                "FROM shipping_package p JOIN length_unit u ON u.unit_code = p.unit_code;"
+            ),
+            "oversize.sql": (
+                "SELECT p.package_id FROM shipping_package p JOIN length_unit u "
+                "ON u.unit_code = p.unit_code WHERE max("
+                "p.length_value * u.centimeters_per_unit, "
+                "p.width_value * u.centimeters_per_unit, "
+                "p.height_value * u.centimeters_per_unit) >= :limit_cm;"
+            ),
+        },
+    )
+
+    assert any("Normalize every physical length" in value for value in invariants)
+    assert reasoning.contract_invariant_dimension(prompt) == "data"
+    assert len([value for value in rejected if "length-unit" in value]) == 2
+    assert accepted == []
+
+
+def test_package_unit_repair_normalizes_all_dimensions_before_derivation():
+    prompt = (
+        "Supplier packages use a supported length-unit table, but non-centimeter lengths have "
+        "wrong cubic volume and oversized routing."
+    )
+    files = {
+        "sql/volume.sql": (
+            "SELECT p.package_id, p.length_value * p.width_value * p.height_value AS volume_cm3 "
+            "FROM shipping_package AS p WHERE p.package_id = :package_id;"
+        ),
+        "sql/oversize.sql": (
+            "SELECT p.package_id FROM shipping_package AS p "
+            "WHERE max(p.length_value, p.width_value, p.height_value) >= :limit_cm;"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+
+    for content in proposals.values():
+        assert "JOIN length_unit AS lu" in content
+        assert "lu.unit_code = p.unit_code" in content
+        assert content.count("lu.centimeters_per_unit") == 3
+    assert reasoning.contract_repair_dimension(prompt, files) == "data"
+    assert reasoning.contract_invariant_warnings(prompt, proposals) == []
+
+
 def test_contract_invariant_guard_rejects_and_accepts_known_mechanisms():
     prompt = "A single-flight promise poisons later retry for the same key."
     rejected = reasoning.contract_invariant_warnings(

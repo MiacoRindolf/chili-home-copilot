@@ -392,6 +392,7 @@ def _parse_search_replace_blocks(reply: str) -> List[tuple]:
 def _retryable_edit_adapter_rejection(warnings: List[str]) -> bool:
     retryable_markers = (
         "SEARCH text not found",
+        "not unique",
         "full-file fallback rejected embedded SEARCH/REPLACE markers",
         "full-file fallback rejected a unified diff fence",
         "full-file fallback requires exactly one fenced block",

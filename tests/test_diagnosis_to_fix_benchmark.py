@@ -397,6 +397,94 @@ def test_same_family_partial_repair_progress_does_not_claim_causal_acceptance():
     assert diagnosis["accepted_conclusion"]["stage"] == "repair_1_validated"
 
 
+def test_completed_source_intervention_accepts_revised_causal_family():
+    diagnosis = {
+        "report": {"conclusion": {"dimension": "code"}},
+        "accepted_conclusion": {
+            "dimension": "code",
+            "stage": "diagnostic_judge",
+            "accepted": False,
+        },
+        "diagnosis_history": [],
+    }
+
+    accepted = benchmark._accept_validated_contract_repair_diagnosis(
+        diagnosis,
+        "dependency",
+        stage="generative_repair_2_validated",
+        validation_evidence="public stayed green and every red feedback contract became green",
+    )
+
+    assert accepted is True
+    assert diagnosis["accepted_conclusion"]["dimension"] == "dependency"
+    assert diagnosis["accepted_conclusion"]["accepted"] is True
+    assert diagnosis["accepted_conclusion"]["causal_sufficiency"] == "isolated"
+    assert diagnosis["accepted_conclusion"]["repair_progress_validated"] is True
+
+
+def test_validated_repair_dimension_prefers_proven_mechanism_family():
+    case = {
+        "prompt": (
+            "Package lengths use a supported unit table; volume and oversized routing "
+            "must normalize every non-centimeter dimension."
+        )
+    }
+
+    assert benchmark._validated_repair_dimension(case, "code") == "data"
+    assert benchmark._validated_repair_dimension(
+        {"prompt": "A generic source defect."},
+        "code",
+    ) == "code"
+
+
+def test_completed_repair_cannot_override_independently_accepted_family():
+    diagnosis = {
+        "report": {"conclusion": {"dimension": "runtime"}},
+        "accepted_conclusion": {
+            "dimension": "runtime",
+            "stage": "diagnostic_judge",
+            "accepted": True,
+        },
+        "diagnosis_history": [],
+    }
+
+    accepted = benchmark._accept_validated_contract_repair_diagnosis(
+        diagnosis,
+        "code",
+        stage="generative_repair_1_validated",
+        validation_evidence="feedback passed",
+    )
+
+    assert accepted is False
+    assert diagnosis["accepted_conclusion"]["dimension"] == "runtime"
+    assert "did not override" in diagnosis["diagnosis_history"][-1][
+        "rejection_reason"
+    ]
+
+
+def test_sealed_failure_retracts_validated_repair_causality():
+    diagnosis = {
+        "accepted_conclusion": {
+            "dimension": "state",
+            "stage": "generative_repair_1_validated",
+            "accepted": True,
+            "causal_status": "accepted",
+            "repair_progress_validated": True,
+        },
+        "diagnosis_history": [],
+    }
+
+    retracted = benchmark._retract_unclosed_validated_diagnosis(
+        diagnosis,
+        {"passed": False},
+    )
+
+    assert retracted is True
+    assert diagnosis["accepted_conclusion"]["accepted"] is False
+    assert diagnosis["accepted_conclusion"]["causal_status"] == "retracted"
+    assert "sealed final" in diagnosis["accepted_conclusion"]["retraction_reason"]
+
+
 def test_prompt_contract_closure_surfaces_hidden_boundary_without_final_oracle(
     tmp_path,
 ):
@@ -602,6 +690,128 @@ def test_multifile_bundle_is_generated_once_and_applied_atomically(
     assert outcome["patch_applied"] is True
     assert outcome["applied_files"] == ["producer.py", "consumer.py"]
     assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 2\n"
+
+
+def test_multifile_bundle_recovers_once_from_stale_search(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    stages: list[str] = []
+
+    def fake_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        producer_search = "VALUE = stale" if len(stages) == 1 else "VALUE = 1"
+        return json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "producer.py",
+                        "blocks": [
+                            {"search": producer_search, "replace": "VALUE = 2"}
+                        ],
+                    },
+                    {
+                        "path": "consumer.py",
+                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Keep producer and consumer on the same generation.",
+        "local-model",
+        [],
+        1.0,
+        stage="coordinated_bundle",
+    )
+
+    assert stages == ["coordinated_bundle", "coordinated_bundle_adapter_retry"]
+    assert outcome["patch_applied"] is True
+    assert "Recovered the atomic bundle" in outcome["warnings"][0]
+    assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 2\n"
+
+
+def test_ambiguous_search_rejection_is_retryable():
+    assert benchmark._retryable_edit_adapter_rejection(
+        ["block 1: SEARCH text matches 14 times - not unique, add surrounding lines"]
+    ) is True
+
+
+def test_multifile_bundle_recovers_once_from_nonunique_search(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text(
+        "PRIMARY = 1\nMARK = 1\nSECONDARY = 1\nMARK = 1\n",
+        encoding="utf-8",
+    )
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    stages: list[str] = []
+    prompts: list[list[dict[str, str]]] = []
+
+    def fake_call(*args, stage, **_kwargs):
+        stages.append(stage)
+        prompts.append(args[1])
+        producer_search = (
+            "MARK = 1"
+            if len(stages) == 1
+            else "PRIMARY = 1\nMARK = 1"
+        )
+        producer_replace = (
+            "MARK = 2"
+            if len(stages) == 1
+            else "PRIMARY = 2\nMARK = 2"
+        )
+        return json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "producer.py",
+                        "blocks": [
+                            {"search": producer_search, "replace": producer_replace}
+                        ],
+                    },
+                    {
+                        "path": "consumer.py",
+                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Keep producer and consumer on the same generation.",
+        "local-model",
+        [],
+        1.0,
+        stage="coordinated_bundle",
+    )
+
+    assert stages == ["coordinated_bundle", "coordinated_bundle_adapter_retry"]
+    assert outcome["patch_applied"] is True
+    assert "Recovered the atomic bundle" in outcome["warnings"][0]
+    assert "must match exactly once" in prompts[0][0]["content"]
+    assert "stale or ambiguous SEARCH" in prompts[1][1]["content"]
+    assert (repo / "producer.py").read_text(encoding="utf-8") == (
+        "PRIMARY = 2\nMARK = 2\nSECONDARY = 1\nMARK = 1\n"
+    )
     assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 2\n"
 
 
@@ -1120,6 +1330,81 @@ def test_contract_coverage_count_cannot_hide_an_unmapped_failure():
     ) is False
 
 
+def test_generic_contract_coverage_is_bound_to_explicit_failed_ids_with_owner_evidence():
+    plan = {
+        "files": [
+            {"path": "first.sql", "action": "modify", "description": "Fix first."},
+            {"path": "second.sql", "action": "modify", "description": "Fix second."},
+        ],
+        "contract_coverage": [
+            {
+                "contract": "configured delimiter invariant",
+                "owner_paths": ["first.sql", "second.sql"],
+                "postcondition": "Both renderers use the configured delimiter consistently.",
+            }
+        ],
+    }
+    evidence = {
+        "failed_ids": [
+            "tests/test_rows.py::test_first_row",
+            "tests/test_rows.py::test_second_row",
+        ]
+    }
+
+    canonical = benchmark._canonicalize_generic_repair_contract_coverage(
+        plan,
+        ["first.sql", "second.sql", "distractor.sql"],
+        evidence,
+        ["first.sql", "second.sql"],
+    )
+
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        canonical,
+        ["first.sql", "second.sql", "distractor.sql"],
+        evidence,
+    ) is True
+    assert [item["contract"] for item in canonical["contract_coverage"]] == [
+        "configured delimiter invariant",
+        "tests/test_rows.py::test_first_row",
+        "tests/test_rows.py::test_second_row",
+    ]
+
+
+def test_partial_explicit_contract_mapping_is_not_auto_completed():
+    plan = {
+        "files": [
+            {"path": "owner.py", "action": "modify", "description": "Fix alpha."}
+        ],
+        "contract_coverage": [
+            {
+                "contract": "tests/test_owner.py::test_alpha",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The alpha value is retained.",
+            }
+        ],
+    }
+    evidence = {
+        "failed_ids": [
+            "tests/test_owner.py::test_alpha",
+            "tests/test_owner.py::test_beta",
+        ]
+    }
+
+    canonical = benchmark._canonicalize_generic_repair_contract_coverage(
+        plan,
+        ["owner.py"],
+        evidence,
+        ["owner.py"],
+    )
+
+    assert canonical == plan
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        canonical,
+        ["owner.py"],
+        evidence,
+    ) is False
+
+
 def test_prompt_contract_closure_uses_semantic_guard_not_a_fake_test_identity():
     plan = {
         "files": [
@@ -1185,9 +1470,11 @@ def test_complete_contract_repair_plan_skips_redundant_model_review(
     repo.mkdir()
     (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
     stages: list[str] = []
+    prompts: list[str] = []
 
-    def fake_call(*_args, stage, **_kwargs):
+    def fake_call(*args, stage, **_kwargs):
         stages.append(stage)
+        prompts.append(args[1][-1]["content"])
         if "repair_review" in stage:
             raise AssertionError("complete contract plan should not invoke reviewer")
         return json.dumps(
@@ -1236,6 +1523,7 @@ def test_complete_contract_repair_plan_skips_redundant_model_review(
         [],
         1.0,
         1,
+        feedback_context="from owner import VALUE",
         contract_evidence={
             "failed_ids": ["tests/test_delay.py::test_numeric_delay"],
         },
@@ -1244,6 +1532,10 @@ def test_complete_contract_repair_plan_skips_redundant_model_review(
     assert stages == ["repair_plan_1"]
     assert result["plan"]["review_skipped_reason"]
     assert result["patch_applied"] is True
+    assert "copy each id verbatim" in prompts[0]
+    assert "tests/test_delay.py::test_numeric_delay" in prompts[0]
+    assert "Feedback source-reference hints" in prompts[0]
+    assert '"owner.py"' in prompts[0]
 
 
 def test_empty_repair_plan_stops_before_review_and_cannot_gain_feedback_edit_authority(
@@ -1449,7 +1741,7 @@ def test_empty_local_edit_response_does_not_trigger_adapter_retry(tmp_path, monk
     assert (tmp_path / "owner.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
-def test_compact_escalation_skips_review_and_adapter_recovery(tmp_path, monkeypatch):
+def test_compact_escalation_skips_review_and_per_file_recovery(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -2312,6 +2604,7 @@ def test_validated_structural_intervention_revises_family_and_labels_disclosed_r
     assert case_result["original_evaluation_role"] == "blinded_holdout"
     assert case_result["evaluation_role"] == "development_regression"
     assert case_result["diagnosis_dimension"] == "config"
+    assert case_result["retained_diagnosis_dimension"] == "config"
     assert case_result["accepted_diagnosis_conclusion"]["accepted"] is True
     assert case_result["functional_repair_passed"] is True
     assert case_result["score"] == 100

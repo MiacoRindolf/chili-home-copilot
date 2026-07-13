@@ -165,6 +165,64 @@ def test_changed_sql_reports_invalid_script_without_external_database(tmp_path):
     assert result.metadata["syntax_languages"] == ["sql"]
 
 
+def test_changed_sql_defers_missing_application_schema(tmp_path):
+    _write(
+        tmp_path,
+        "queries/customer.sql",
+        "SELECT display_name FROM customer WHERE customer_id = 1;\n",
+    )
+    _write(
+        tmp_path,
+        "queries/order.sql",
+        "UPDATE export_order SET status = 'ready' WHERE order_id = 2;\n",
+    )
+
+    result = run_ast_syntax(
+        tmp_path,
+        changed_files=["queries/customer.sql", "queries/order.sql"],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert result.metadata["changed_files"] == [
+        "queries/customer.sql",
+        "queries/order.sql",
+    ]
+    assert result.metadata["sql_schema_dependent"] == [
+        {"path": "queries/customer.sql", "error": "no such table: customer"},
+        {"path": "queries/order.sql", "error": "no such table: export_order"},
+    ]
+    assert "schema-dependent references deferred" in result.stdout
+
+
+def test_changed_sql_still_checks_statements_after_missing_schema(tmp_path):
+    _write(
+        tmp_path,
+        "queries/broken.sql",
+        "SELECT * FROM customer;\nSELECT FROM definitely_broken;\n",
+    )
+
+    result = run_ast_syntax(tmp_path, changed_files=["queries/broken.sql"])
+
+    assert result.exit_code == 1
+    assert "near \"FROM\": syntax error" in result.stdout
+    assert result.metadata["sql_schema_dependent"] == [
+        {"path": "queries/broken.sql", "error": "no such table: customer"}
+    ]
+
+
+def test_changed_sql_keeps_external_database_actions_blocked(tmp_path):
+    _write(
+        tmp_path,
+        "queries/unsafe.sql",
+        "ATTACH DATABASE 'outside.sqlite3' AS outside;\n",
+    )
+
+    result = run_ast_syntax(tmp_path, changed_files=["queries/unsafe.sql"])
+
+    assert result.exit_code == 1
+    assert "not authorized" in result.stdout.lower()
+
+
 # ── run_validation end-to-end (the TypeError regression) ────────────────
 
 
