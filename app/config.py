@@ -2633,6 +2633,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_BUY_ENABLED"),
         description="Enable the algo-flush V-bounce dip-buy entry trigger (buy the reclaim after a fast flush).",
     )
+    chili_momentum_first_dip_reclaim_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_DIP_RECLAIM_ENABLED"),
+        description="FIRST-DIP-OF-DAY front-side certificate on the flush-dip trigger (2026-07-13 PLSM lesson: Ross +$2,363 on the first deep dip CHILI watched — both trend yardsticks fall DURING a violent first pullback by construction, so front-side rejects exactly the dip Ross buys). ON ⇒ on a VERTICAL day-leg (HOD/base − 1 ≥ 3×ATR%, the lane's vol-derived bar) whose retrace stays within 0.618 of the leg (the one documented base), the FIRST such dip of the symbol-day may certify front-side by the day's own structure — ONCE per day (le marker), with a STRONGER parameter-free bounce proof (live price must fully reclaim the flush bar's HIGH; the VWAP-reclaim yardstick sits near the local top on deep dips and fires too late). Every other flush-dip guard still binds (RTH, morning window, bottoming tail, ATR-scaled depth, support touch, curl candle, undercut). OFF ⇒ byte-identical pre-certificate behavior.",
+    )
     chili_momentum_red_vol_exhaustion_veto_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RED_VOL_EXHAUSTION_VETO_ENABLED"),

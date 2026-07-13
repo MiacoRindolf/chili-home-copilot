@@ -3888,6 +3888,7 @@ def flush_dip_buy_confirmation(
     live_price: float | None = None,
     symbol: str | None = None,
     now: Any = None,
+    first_dip_state: dict[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """AS101 algo-flush V-bounce dip-buy (flag ``chili_momentum_flush_dip_buy_enabled``).
 
@@ -4011,8 +4012,55 @@ def flush_dip_buy_confirmation(
             v_f = vwap[flush_idx] if flush_idx < len(vwap) and vwap[flush_idx] is not None else None
             v_p = vwap[flush_idx - 1] if (flush_idx - 1) < len(vwap) and vwap[flush_idx - 1] is not None else None
             if not (v_f is not None and v_p is not None and float(v_f) > float(v_p)):
-                return False, "flush_dip_not_front_side", debug  # 9-EMA not rising, VWAP not rising
-            debug["front_side_via"] = "rising_vwap"
+                # FIRST-DIP-OF-DAY certificate (2026-07-13, PLSM lesson — Ross +$2,363 on
+                # the dip CHILI watched: after a violent ignition BOTH trend yardsticks
+                # are falling DURING the first pullback by construction, so front-side
+                # rejects exactly the dip Ross buys. The honest third certificate is the
+                # DAY LEG itself: on a VERTICAL day (day-leg >= 3×ATR%, the same vol-
+                # derived bar used lane-wide) whose retrace stays within 0.618 of that
+                # leg (the one documented base), the FIRST such dip of the symbol-day is
+                # front-side BY the day's own structure. ONCE per day (the caller's
+                # le-backed marker); every other guard still binds, and the bounce proof
+                # for this certificate is STRONGER (full flush-bar-high reclaim, GUARD 3).
+                _fd_cert = False
+                if bool(getattr(settings, "chili_momentum_first_dip_reclaim_enabled", True)):
+                    try:
+                        _fd_used = None
+                        if isinstance(first_dip_state, dict):
+                            _fd_used = first_dip_state.get("first_dip_used_date")
+                        _fd_today = None
+                        try:
+                            _fd_today = str(pd.Timestamp(df.index[cur]).date())
+                        except Exception:
+                            _fd_today = None
+                        if _fd_today is not None and _fd_used != _fd_today:
+                            _hi_all = high.iloc[: cur + 1].astype(float)
+                            _hod_idx = int(_hi_all.values.argmax())
+                            _hod = float(_hi_all.iloc[_hod_idx])
+                            _base = float(low.iloc[: _hod_idx + 1].astype(float).min()) if _hod_idx >= 0 else None
+                            _a_fd = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+                            # Intactness is measured on the flush bar's CLOSE, not its
+                            # LOW: the low is the stop-run wick by definition (the
+                            # bottoming-tail guard REQUIRES close >> low) — the wick is
+                            # the algo-flush noise this trigger exists to buy. PLSM
+                            # 07-13: low-basis retrace 69% (refused) vs close-basis
+                            # ~60% (intact) — Ross bought it.
+                            if (
+                                _base is not None and _base > 0 and _hod > _base and _a_fd > 0
+                                and (_hod / _base - 1.0) >= 3.0 * _a_fd          # vertical day-leg
+                                and (_hod - float(close.iloc[flush_idx])) <= 0.618 * (_hod - _base)  # intact
+                                and flush_idx > _hod_idx                          # the dip FOLLOWS the leg
+                            ):
+                                _fd_cert = True
+                                debug["front_side_via"] = "first_dip_day_leg"
+                                debug["day_leg_hod"] = round(_hod, 6)
+                                debug["day_leg_base"] = round(_base, 6)
+                    except Exception:
+                        _fd_cert = False
+                if not _fd_cert:
+                    return False, "flush_dip_not_front_side", debug  # 9-EMA not rising, VWAP not rising
+            else:
+                debug["front_side_via"] = "rising_vwap"
         vwap_flush = vwap[flush_idx] if flush_idx < len(vwap) and vwap[flush_idx] is not None else None
         # Pre-flush strength: the bar BEFORE the flush closed above VWAP (was front-side).
         pre = flush_idx - 1
@@ -4055,9 +4103,18 @@ def flush_dip_buy_confirmation(
         # Live tick (when present) is the reclaim price; else the curl bar close.
         px = float(live_price) if (live_price is not None and float(live_price) > 0) else c_c
         vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
-        reclaimed = True
-        if vwap_cur is not None and float(vwap_cur) > 0:
-            reclaimed = px >= float(vwap_cur)
+        if debug.get("front_side_via") == "first_dip_day_leg":
+            # FIRST-DIP bounce proof: on a deep first pullback VWAP sits far ABOVE the
+            # bounce (the ignition's volume anchors it near the top), so the VWAP
+            # reclaim would fire near the local top — too late, and wrong (Ross buys
+            # the bounce at the dip, not the VWAP touch). The STRONGER, parameter-free
+            # bar-level proof replaces it: the live price must FULLY RECLAIM the flush
+            # bar's HIGH — buyers have absorbed the entire flush range.
+            reclaimed = px > f_h
+        else:
+            reclaimed = True
+            if vwap_cur is not None and float(vwap_cur) > 0:
+                reclaimed = px >= float(vwap_cur)
         if not reclaimed:
             return False, "flush_dip_not_reclaimed", debug
         # The dip must HOLD on the curl bar (its low at/above the flush low minus noise).

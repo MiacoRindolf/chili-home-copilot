@@ -6751,9 +6751,22 @@ def tick_live_session(
                                     _fd_ok, _fd_reason, _fd_debug = flush_dip_buy_confirmation(
                                         _df_trig, entry_interval=_iv_trig, live_price=_live_px,
                                         symbol=sess.symbol, now=None,
+                                        first_dip_state=le,
                                     )
                                     if _fd_ok:
                                         _trigger_ok, _trigger_reason, _pb_debug = _fd_ok, _fd_reason, _fd_debug
+                                        # FIRST-DIP once-per-day marker (PLSM lesson): stamp on
+                                        # acceptance so the certificate can never fire twice in
+                                        # a session-day (the fade re-tests are NOT first dips).
+                                        if (
+                                            isinstance(_fd_debug, dict)
+                                            and _fd_debug.get("front_side_via") == "first_dip_day_leg"
+                                        ):
+                                            try:
+                                                le["first_dip_used_date"] = str(_utcnow().date())
+                                                _commit_le(sess, le)
+                                            except Exception:
+                                                pass
                                         # GAP 5 BIG-BUYER-ON-BID starter (Warrior re-audit):
                                         # an ENABLER overlay (NEVER a veto — it cannot block).
                                         # When a flush-dip starter fires, read the bid-side L2
