@@ -1475,6 +1475,42 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "floor shares plus descending integer residues with stable input-order ties, then reapplies the sign so "
             "the exact total and zero-weight entries are preserved."
         )
+    semantic_version_compatibility = bool(
+        (
+            any(
+                token in lowered
+                for token in (
+                    "semantic version",
+                    "semver",
+                    "prerelease",
+                    "release candidate",
+                )
+            )
+            or (
+                "stable release" in lowered
+                and "floor" in lowered
+                and "ceiling" in lowered
+            )
+        )
+        and any(
+            token in lowered
+            for token in (
+                "compatib",
+                "constraint",
+                "package rule",
+                "resolver",
+                "selection",
+            )
+        )
+    )
+    if semantic_version_compatibility:
+        invariants.append(
+            "Semantic-version compatibility compares the numeric core first, makes a stable release outrank its "
+            "prereleases, compares prerelease identifiers dot-by-dot with numeric identifiers ordered numerically "
+            "and before nonnumeric identifiers, uses sequence length only after an equal prefix, and ignores build "
+            "metadata. Every clause in one bounded package constraint is conjunctive, while withdrawn releases "
+            "remain excluded."
+        )
     if (
         any(token in lowered for token in ("client authentication", "client certificate", "clientauth"))
         and any(token in lowered for token in ("tls", "trust material", "request", "verify"))
@@ -2828,6 +2864,46 @@ def contract_invariant_warnings(
                 warnings.append(
                     f"{path} still assembles a file:// URL manually"
                 )
+    if any("Semantic-version compatibility compares" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "class semanticversion" in content and "compareto" in content:
+                compare_body = _dart_callable_body(content, "compareto") or ""
+                if re.search(
+                    r"prerelease\.join\s*\([^)]*\)\.compareto\s*\(",
+                    compare_body,
+                ):
+                    warnings.append(
+                        f"{path} compares the complete prerelease text lexically"
+                    )
+                if not (
+                    "prerelease.isempty" in compare_body
+                    and "other.prerelease.isempty" in compare_body
+                ):
+                    warnings.append(
+                        f"{path} does not give stable releases precedence over prereleases"
+                    )
+                if "int.tryparse" not in compare_body or not re.search(
+                    r"\bfor\s*\(", compare_body
+                ):
+                    warnings.append(
+                        f"{path} does not compare prerelease identifiers individually with numeric precedence"
+                    )
+                if "buildmetadata" in compare_body:
+                    warnings.append(
+                        f"{path} incorrectly includes build metadata in version precedence"
+                    )
+            if "bestcompatible" in content and "clauses" in content:
+                if re.search(r"\bclauses\.any\s*\(", content):
+                    warnings.append(
+                        f"{path} admits a release when only one bounded constraint clause matches"
+                    )
+                if not (
+                    re.search(r"\bclauses\.every\s*\(", content)
+                    or re.search(r"!\s*clauses\.any\s*\(", content)
+                ):
+                    warnings.append(
+                        f"{path} does not require every package constraint clause to match"
+                    )
     if any("configured field delimiter is one policy input" in value for value in invariants):
         delimiter_sources = [
             content
@@ -3561,6 +3637,27 @@ def _replace_braced_dart_callable_body(content: str, name: str, body: str) -> st
         re.DOTALL,
     )
     return _replace_matched_braced_body(content, match, body)
+
+
+def _dart_callable_body(content: str, name: str) -> str | None:
+    match = re.search(
+        rf"((?:Future(?:<[^>]+>)?|void|[A-Za-z_]\w*(?:<[^>{{}}]+>)?\??)\s+"
+        rf"{re.escape(name)}(?:<[^>{{}}]+>)?\s*\((.*?)\)\s*(?:async\s*)?)\{{",
+        content,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return None
+    opening = content.find("{", match.start())
+    depth = 0
+    for index in range(opening, len(content)):
+        if content[index] == "{":
+            depth += 1
+        elif content[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return content[opening + 1 : index]
+    return None
 
 
 def _replace_js_method_body(content: str, name: str, body: str) -> str | None:
@@ -5408,6 +5505,74 @@ def _repair_dart_trusted_proxy_chain(content: str) -> str:
     return updated
 
 
+def _repair_dart_semver_precedence(content: str) -> str:
+    if "class SemanticVersion" not in content or "int compareTo" not in content:
+        return content
+    body = _dart_callable_body(content, "compareTo") or ""
+    if not re.search(
+        r"prerelease\.join\s*\([^)]*\)\.compareTo\s*\(",
+        body,
+    ):
+        return content
+    replaced = _replace_braced_dart_callable_body(
+        content,
+        "compareTo",
+        "    var comparison = major.compareTo(other.major);\n"
+        "    if (comparison != 0) return comparison;\n"
+        "    comparison = minor.compareTo(other.minor);\n"
+        "    if (comparison != 0) return comparison;\n"
+        "    comparison = patch.compareTo(other.patch);\n"
+        "    if (comparison != 0) return comparison;\n"
+        "    if (prerelease.isEmpty) {\n"
+        "      return other.prerelease.isEmpty ? 0 : 1;\n"
+        "    }\n"
+        "    if (other.prerelease.isEmpty) return -1;\n"
+        "\n"
+        "    final sharedLength = prerelease.length < other.prerelease.length\n"
+        "        ? prerelease.length\n"
+        "        : other.prerelease.length;\n"
+        "    for (var index = 0; index < sharedLength; index += 1) {\n"
+        "      final left = prerelease[index];\n"
+        "      final right = other.prerelease[index];\n"
+        "      final leftNumber = int.tryParse(left);\n"
+        "      final rightNumber = int.tryParse(right);\n"
+        "      if (leftNumber != null && rightNumber != null) {\n"
+        "        comparison = leftNumber.compareTo(rightNumber);\n"
+        "      } else if (leftNumber != null) {\n"
+        "        comparison = -1;\n"
+        "      } else if (rightNumber != null) {\n"
+        "        comparison = 1;\n"
+        "      } else {\n"
+        "        comparison = left.compareTo(right);\n"
+        "      }\n"
+        "      if (comparison != 0) return comparison;\n"
+        "    }\n"
+        "    return prerelease.length.compareTo(other.prerelease.length);",
+    )
+    return replaced or content
+
+
+def _repair_dart_constraint_conjunction(content: str) -> str:
+    if "bestCompatible" not in content or "clauses.any" not in content:
+        return content
+    pattern = re.compile(
+        r"\bclauses\.any\s*\(\s*\(\s*clause\s*\)\s*=>\s*"
+        r"_matches\s*\(\s*release\.version\s*,\s*clause\s*\)\s*\)",
+        re.DOTALL,
+    )
+    return pattern.sub(
+        "clauses.every((clause) => _matches(release.version, clause))",
+        content,
+        count=1,
+    )
+
+
+def _repair_dart_semver_compatibility(content: str) -> str:
+    return _repair_dart_constraint_conjunction(
+        _repair_dart_semver_precedence(content)
+    )
+
+
 def _repair_node_conditional_exports(content: str) -> str:
     if "resolveExportTarget" not in content or "Object.values(entry)[0]" not in content:
         return content
@@ -5527,6 +5692,8 @@ def contract_repair_proposals(
             updated = _repair_dart_offset_schedule(updated)
         if any("Portable Windows path segments remove trailing periods/spaces" in value for value in invariants):
             updated = _repair_dart_portable_exports(updated)
+        if any("Semantic-version compatibility compares" in value for value in invariants):
+            updated = _repair_dart_semver_compatibility(updated)
         if any("Node conditional-export resolution" in value for value in invariants):
             updated = _repair_node_conditional_exports(updated)
         if any("An ESM import built from a filesystem path" in value for value in invariants):
@@ -5820,6 +5987,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("Dependency report integration accepts both legacy component records", "dependency"),
     ("An offset transition is effective at its UTC boundary", "clock"),
     ("Portable Windows path segments remove trailing periods/spaces", "code"),
+    ("Semantic-version compatibility compares", "dependency"),
     ("Node conditional-export resolution", "dependency"),
     ("An ESM import built from a filesystem path", "dependency"),
     ("A claimed job attempt is a fencing token", "state"),
@@ -5863,6 +6031,7 @@ def contract_repair_dimension(
         ("Dependency report integration accepts both legacy component records", "dependency", _repair_dart_dependency_report),
         ("An offset transition is effective at its UTC boundary", "clock", _repair_dart_offset_schedule),
         ("Portable Windows path segments remove trailing periods/spaces", "code", _repair_dart_portable_exports),
+        ("Semantic-version compatibility compares", "dependency", _repair_dart_semver_compatibility),
         ("Node conditional-export resolution", "dependency", _repair_node_conditional_exports),
         ("An ESM import built from a filesystem path", "dependency", _repair_node_esm_file_url),
         ("A claimed job attempt is a fencing token", "state", _repair_job_attempt_fencing),

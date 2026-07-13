@@ -3500,6 +3500,64 @@ def test_node_esm_contract_family_repairs_and_guards_structural_owners():
     assert reasoning.contract_repair_dimension(prompt, files) == "dependency"
 
 
+def test_dart_semver_contract_family_repairs_precedence_and_bounded_selection():
+    prompt = (
+        "A SemVer package resolver chooses a release candidate ahead of the stable "
+        "release and admits an incompatible major through a floor-and-ceiling constraint."
+    )
+    files = {
+        "lib/version.dart": (
+            "class SemanticVersion implements Comparable<SemanticVersion> {\n"
+            "  final int major;\n"
+            "  final int minor;\n"
+            "  final int patch;\n"
+            "  final List<String> prerelease;\n"
+            "  final String buildMetadata;\n"
+            "  SemanticVersion(this.major, this.minor, this.patch, "
+            "this.prerelease, this.buildMetadata);\n"
+            "  @override\n"
+            "  int compareTo(SemanticVersion other) {\n"
+            "    var result = major.compareTo(other.major);\n"
+            "    if (result != 0) return result;\n"
+            "    result = minor.compareTo(other.minor);\n"
+            "    if (result != 0) return result;\n"
+            "    result = patch.compareTo(other.patch);\n"
+            "    if (result != 0) return result;\n"
+            "    return prerelease.join('.').compareTo(other.prerelease.join('.'));\n"
+            "  }\n"
+            "}\n"
+        ),
+        "lib/release.dart": "class PackageRelease {}\n",
+        "lib/selector.dart": (
+            "class ReleaseSelector {\n"
+            "  PackageRelease? bestCompatible(releases, String constraint) {\n"
+            "    final clauses = constraint.split(' ');\n"
+            "    final candidates = releases.where((release) =>\n"
+            "      clauses.any((clause) => _matches(release.version, clause)));\n"
+            "    return candidates.isEmpty ? null : candidates.last;\n"
+            "  }\n"
+            "  bool _matches(version, clause) => true;\n"
+            "}\n"
+        ),
+    }
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {**files, **proposals}
+
+    assert any("stable release outrank" in value for value in invariants)
+    assert any("conjunctive" in value for value in invariants)
+    assert any("lexically" in value for value in rejected)
+    assert any("only one bounded constraint" in value for value in rejected)
+    assert set(proposals) == {"lib/version.dart", "lib/selector.dart"}
+    assert "int.tryParse(left)" in proposals["lib/version.dart"]
+    assert "other.prerelease.isEmpty ? 0 : 1" in proposals["lib/version.dart"]
+    assert "clauses.every" in proposals["lib/selector.dart"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_dimension(prompt, files) == "dependency"
+
+
 def test_retry_contract_operator_transfers_across_field_and_local_names():
     prompt = (
         "Numeric Retry-After exceeds the remaining allowance; an explicit zero delay is "
