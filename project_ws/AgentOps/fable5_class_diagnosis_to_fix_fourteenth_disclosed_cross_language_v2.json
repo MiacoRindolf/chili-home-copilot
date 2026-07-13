@@ -1,0 +1,2119 @@
+{
+  "accepted_diagnosis_count": 3,
+  "average_case_duration_ms": 108567.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "dependency",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 629,
+        "exit_code": 255,
+        "output": "[tests/feedback_test.dart]\nUnhandled exception:\nBad state: a stable release outranks its prerelease\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-uv1h7t1l/repo/tests/feedback_test.dart:7:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-uv1h7t1l/repo/tests/feedback_test.dart:16:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": false,
+        "runner": "dart",
+        "test_contract_status": {
+          "tests/feedback_test.dart::a stable release outranks its prerelease": "failed",
+          "tests/public_test.dart::orders stable versions by numeric core": "passed",
+          "tests/public_test.dart::selects the best active release": "passed"
+        },
+        "test_contracts_complete": false,
+        "test_files": [
+          "tests/feedback_test.dart",
+          "tests/public_test.dart"
+        ]
+      },
+      "baseline_final_tests": {
+        "duration_ms": 656,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/final_test.dart]\nUnhandled exception:\nBad state: prerelease precedence and bounded selection compose correctly\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-ys6pnpyy/repo/tests/final_test.dart:7:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-ys6pnpyy/repo/tests/final_test.dart:45:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": false,
+        "runner": "dart",
+        "test_contract_status": {
+          "tests/final_test.dart::a shorter equal prerelease sequence has lower precedence": "passed",
+          "tests/final_test.dart::build metadata does not change version precedence": "passed",
+          "tests/final_test.dart::numeric identifiers precede nonnumeric identifiers": "passed",
+          "tests/final_test.dart::prerelease precedence and bounded selection compose correctly": "failed",
+          "tests/public_test.dart::orders stable versions by numeric core": "passed",
+          "tests/public_test.dart::selects the best active release": "passed"
+        },
+        "test_contracts_complete": false,
+        "test_files": [
+          "tests/final_test.dart",
+          "tests/public_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 311,
+        "exit_code": 0,
+        "output": "[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "test_contract_status": {
+          "tests/public_test.dart::orders stable versions by numeric core": "passed",
+          "tests/public_test.dart::selects the best active release": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/public_test.dart"
+        ]
+      },
+      "case_id": "th14_dart_semver_selection",
+      "changed_files": [
+        "lib/release_selector.dart",
+        "lib/semantic_version.dart"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "dependency",
+        "selected_files": [
+          "lib/release_selector.dart",
+          "lib/semantic_version.dart"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "dependency",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "code",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "dependency",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Version comparison logic may prioritize prereleases",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "stable versions selected",
+            "expected_if_true": "prereleases outrank stable",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "dependency"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "code",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "lib"
+              ],
+              "probe_id": "p1",
+              "query": "bestCompatible",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "ReleaseSelector prioritizes prereleases over stable versions",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Check version comparison logic in bestCompatible",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-4"
+            ]
+          },
+          {
+            "claim": "Prerelease identifiers are lexicographically sorted",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Verify prerelease parsing as numeric sequences",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-10"
+            ]
+          },
+          {
+            "claim": "Floor constraints are ignored with ceiling bounds",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Test constraint resolution with floor+ceiling",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "operator-1"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 49,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "code"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "code",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "stable versions selected",
+            "expected_if_true": "prereleases outrank stable",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "dependency"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-13T17:53:51.968010+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.9,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: lib\\release_selector.dart:5:  PackageRelease? bestCompatible("
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "code"
+            ],
+            "dimension": "code",
+            "duration_ms": 43,
+            "exit_code": 0,
+            "expected_if_false": "stable versions selected",
+            "expected_if_true": "prereleases outrank stable",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "dependency"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-13T17:53:51.968010+00:00",
+            "output": "lib\\release_selector.dart:5:  PackageRelease? bestCompatible(",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th14_dart_semver_selection",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "ReleaseSelector prioritizes prereleases over stable versions",
+          "confidence": 0.0,
+          "dimension": "code",
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Version comparison logic may prioritize prereleases",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "Semantic-version compatibility compares the numeric core first, makes a stable release outrank its prereleases, compares prerelease identifiers dot-by-dot with numeric identifiers ordered numerically and before nonnumeric identifiers, uses sequence length only after an equal prefix, and ignores build metadata. Every clause in one bounded package constraint is conjunctive, while withdrawn releases remain excluded."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "ReleaseSelector prioritizes prereleases over stable versions",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Check version comparison logic in bestCompatible",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-4"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Prerelease identifiers are lexicographically sorted",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0.9,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify prerelease parsing as numeric sequences",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-10"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Floor constraints are ignored with ceiling bounds",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Test constraint resolution with floor+ceiling",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Check version comparison logic in bestCompatible",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify prerelease parsing as numeric sequences",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Test constraint resolution with floor+ceiling",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "ReleaseSelector prioritizes prereleases over stable versions",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-9"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Version comparison logic may prioritize prereleases",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "ReleaseSelector prioritizes prereleases over stable versions",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-9"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Version comparison logic may prioritize prereleases",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4",
+              "source-9"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Version comparison logic may prioritize prereleases",
+            "status": "provisional"
+          },
+          "response_chars": 1310,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "ReleaseSelector prioritizes prereleases over stable versions",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Version comparison logic may prioritize prereleases",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "ReleaseSelector prioritizes prereleases over stable versions",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Version comparison logic may prioritize prereleases",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Version comparison logic may prioritize prereleases",
+            "status": "provisional"
+          },
+          "response_chars": 1265,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 113659,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 798,
+        "exit_code": 0,
+        "output": "[tests/feedback_test.dart]\nfeedback tests passed\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "test_contract_status": {
+          "tests/feedback_test.dart::a stable release outranks its prerelease": "passed",
+          "tests/feedback_test.dart::all clauses in one compatibility range must hold": "passed",
+          "tests/feedback_test.dart::numeric prerelease identifiers use numeric precedence": "passed",
+          "tests/public_test.dart::orders stable versions by numeric core": "passed",
+          "tests/public_test.dart::selects the best active release": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/feedback_test.dart",
+          "tests/public_test.dart"
+        ]
+      },
+      "final_tests": {
+        "duration_ms": 669,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "[tests/final_test.dart]\nfinal tests passed\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "test_contract_status": {
+          "tests/final_test.dart::a shorter equal prerelease sequence has lower precedence": "passed",
+          "tests/final_test.dart::build metadata does not change version precedence": "passed",
+          "tests/final_test.dart::numeric identifiers precede nonnumeric identifiers": "passed",
+          "tests/final_test.dart::prerelease precedence and bounded selection compose correctly": "passed",
+          "tests/public_test.dart::orders stable versions by numeric core": "passed",
+          "tests/public_test.dart::selects the best active release": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/final_test.dart",
+          "tests/public_test.dart"
+        ]
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "code",
+      "language": "dart",
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 18198779000,
+          "json_object_valid": true,
+          "latency_ms": 79100,
+          "load_duration_ns": 15918734800,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 15061,
+          "prompt_eval_count": 4089,
+          "prompt_eval_duration_ns": 1687334000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"ReleaseSelector prioritizes prereleases over stable versions\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-4\",\"source-9\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check version comparison logic in bestCompatible\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Prerelease identifiers are lexicographically sorted\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-10\",\"source-11\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify prerelease parsing as numeric sequences\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Floor constraints are ignored with ceiling bounds\",\"dimension\":\"dependency\",\"support_evidence_ids\":[\"operator-1\",\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Test constraint resolution with floor+ceiling\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"dependency\"],\"expected_if_true\":\"prereleases outrank stable\",\"expected_if_false\":\"stable versions selected\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"lib\"],\"query\":\"bestCompatible\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-4\",\"source-9\"],\"reason\":\"Version comparison logic may prioritize prereleases\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 3198,
+          "thinking_enabled": true,
+          "tokens_out": 304,
+          "wall_ms": 79101
+        },
+        {
+          "case_budget_remaining_before_sec": 400.8989567999961,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 16965219000,
+          "json_object_valid": true,
+          "latency_ms": 28651,
+          "load_duration_ns": 233006400,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 18433,
+          "prompt_eval_count": 4322,
+          "prompt_eval_duration_ns": 10892567000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"ReleaseSelector prioritizes prereleases over stable versions\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check version comparison logic in bestCompatible\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Prerelease identifiers are lexicographically sorted\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-10\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify prerelease parsing as numeric sequences\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Floor constraints are ignored with ceiling bounds\",\"dimension\":\"dependency\",\"support_evidence_ids\":[\"operator-1\"],\"contradict_evidence_ids\":[],\"falsification\":\"Test constraint resolution with floor+ceiling\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"dependency\"],\"expected_if_true\":\"prereleases outrank stable\",\"expected_if_false\":\"stable versions selected\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"lib\"],\"query\":\"bestCompatible\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-4\"],\"reason\":\"Version comparison logic may prioritize prereleases\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 287,
+          "wall_ms": 28651
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 336,
+        "exit_code": 0,
+        "output": "[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "test_contract_status": {
+          "tests/public_test.dart::orders stable versions by numeric core": "passed",
+          "tests/public_test.dart::selects the best active release": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/public_test.dart"
+        ]
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "dependency",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "lib/release_selector.dart",
+        "lib/semantic_version.dart"
+      ],
+      "split": "disclosed_replay",
+      "test_runner": "dart"
+    },
+    {
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "runtime",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 732,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-lnlog_5q\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_delivery_feedback.py::test_delivery_timeline_closes_after_handler_work FAILED [ 20%]\ntests/test_delivery_feedback.py::test_object_handler_returns_completed_result FAILED [ 40%]\ntests/test_public.py::test_synchronous_trace_preserves_return_and_event_order PASSED [ 60%]\ntests/test_public.py::test_direct_coroutine_handler_is_completed PASSED  [ 80%]\ntests/test_public.py::test_registry_returns_the_registered_handler PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_delivery_timeline_closes_after_handler_work _______________\ntests\\test_delivery_feedback.py:18: in test_delivery_timeline_closes_after_handler_work\n    assert asyncio.run(dispatch(wrapped, \"invoice\")) == \"done:invoice\"\nE   AssertionError: assert <coroutine object test_delivery_timeline_closes_after_handler_work.<locals>.handle at 0x0000016D1D39E8E0> == 'done:invoice'\nE    +  where <coroutine object test_delivery_timeline_closes_after_handler_work.<locals>.handle at 0x0000016D1D39E8E0> = <function run at 0x0000016D1B3C0AE0>(<coroutine object dispatch at 0x0000016D1D39E400>)\nE    +    where <function run at 0x0000016D1B3C0AE0> = asyncio.run\nE    +    and   <coroutine object dispatch at 0x0000016D1D39E400> = dispatch(<function test_delivery_timeline_closes_after_handler_work.<locals>.handle at 0x0000016D1D408900>, 'invoice')\n________________ test_object_handler_returns_completed_result _________________\ntests\\test_delivery_feedback.py:33: in test_object_handler_returns_completed_result\n    assert asyncio.run(dispatch(Handler(), \"shipment\")) == {\nE   AssertionError: assert <coroutine object test_object_handler_returns_completed_result.<locals>.Handler.__call__ at 0x0000016D1D39EF60> == {'message': 'shipment', 'status': 'done'}\nE    +  where <coroutine object test_object_handler_returns_completed_result.<locals>.Handler.__call__ at 0x0000016D1D39EF60> = <function run at 0x0000016D1B3C0AE0>(<coroutine object dispatch at 0x0000016D1D39E9B0>)\nE    +    where <function run at 0x0000016D1B3C0AE0> = asyncio.run\nE    +    and   <coroutine object dispatch at 0x0000016D1D39E9B0> = dispatch(<test_delivery_feedback.test_object_handler_returns_completed_result.<locals>.Handler object at 0x0000016D1D3D0590>, 'shipment')\nE    +      where <test_delivery_feedback.test_object_handler_returns_completed_result.<locals>.Handler object at 0x0000016D1D3D0590> = <class 'test_delivery_feedback.test_object_handler_returns_completed_result.<locals>.Handler'>()\n=========================== short test summary info ===========================\nFAILED tests/test_delivery_feedback.py::test_delivery_timeline_closes_after_handler_work - AssertionError: assert <coroutine object test_delivery_timeline_closes_after_handler_work.<locals>.handle at 0x0000016D1D39E8E0> == 'done:invoice'\n +  where <coroutine object test_delivery_timeline_closes_after_handler_work.<locals>.handle at 0x0000016D1D39E8E0> = <function run at 0x0000016D1B3C0AE0>(<coroutine object dispatch at 0x0000016D1D39E400>)\n +    where <function run at 0x0000016D1B3C0AE0> = asyncio.run\n +    and   <coroutine object dispatch at 0x0000016D1D39E400> = dispatch(<function test_delivery_timeline_closes_after_handler_work.<locals>.handle at 0x0000016D1D408900>, 'invoice')\nFAILED tests/test_delivery_feedback.py::test_object_handler_returns_completed_result - AssertionError: assert <coroutine object test_object_handler_returns_completed_result.<locals>.Handler.__call__ at 0x0000016D1D39EF60> == {'message': 'shipment', 'status': 'done'}\n +  where <coroutine object test_object_handler_returns_completed_result.<locals>.Handler.__call__ at 0x0000016D1D39EF60> = <function run at 0x0000016D1B3C0AE0>(<coroutine object dispatch at 0x0000016D1D39E9B0>)\n +    where <function run at 0x0000016D1B3C0AE0> = asyncio.run\n +    and   <coroutine object dispatch at 0x0000016D1D39E9B0> = dispatch(<test_delivery_feedback.test_object_handler_returns_completed_result.<locals>.Handler object at 0x0000016D1D3D0590>, 'shipment')\n +      where <test_delivery_feedback.test_object_handler_returns_completed_result.<locals>.Handler object at 0x0000016D1D3D0590> = <class 'test_delivery_feedback.test_object_handler_returns_completed_result.<locals>.Handler'>()\n========================= 2 failed, 3 passed in 0.13s =========================\n\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\unraisableexception.py:33: RuntimeWarning: coroutine 'test_delivery_timeline_closes_after_handler_work.<locals>.handle' was never awaited\n  gc.collect()\nRuntimeWarning: Enable tracemalloc to get the object allocation traceback\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\unraisableexception.py:33: RuntimeWarning: coroutine 'test_object_handler_returns_completed_result.<locals>.Handler.__call__' was never awaited\n  gc.collect()\nRuntimeWarning: Enable tracemalloc to get the object allocation traceback",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_final_tests": {
+        "duration_ms": 751,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-yopiesis\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_delivery_final.py::test_registered_traced_object_has_one_complete_timeline FAILED [ 25%]\ntests/test_public.py::test_synchronous_trace_preserves_return_and_event_order PASSED [ 50%]\ntests/test_public.py::test_direct_coroutine_handler_is_completed PASSED  [ 75%]\ntests/test_public.py::test_registry_returns_the_registered_handler PASSED [100%]\n\n================================== FAILURES ===================================\n___________ test_registered_traced_object_has_one_complete_timeline ___________\ntests\\test_delivery_final.py:25: in test_registered_traced_object_has_one_complete_timeline\n    assert result == \"RENEWAL\"\nE   AssertionError: assert <coroutine object test_registered_traced_object_has_one_complete_timeline.<locals>.Handler.__call__ at 0x000001F1EAFCEC00> == 'RENEWAL'\n=========================== short test summary info ===========================\nFAILED tests/test_delivery_final.py::test_registered_traced_object_has_one_complete_timeline - AssertionError: assert <coroutine object test_registered_traced_object_has_one_complete_timeline.<locals>.Handler.__call__ at 0x000001F1EAFCEC00> == 'RENEWAL'\n========================= 1 failed, 3 passed in 0.11s =========================\n\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\unraisableexception.py:33: RuntimeWarning: coroutine 'test_registered_traced_object_has_one_complete_timeline.<locals>.Handler.__call__' was never awaited\n  gc.collect()\nRuntimeWarning: Enable tracemalloc to get the object allocation traceback",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 774,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-lnlog_5q\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_synchronous_trace_preserves_return_and_event_order PASSED [ 33%]\ntests/test_public.py::test_direct_coroutine_handler_is_completed PASSED  [ 66%]\ntests/test_public.py::test_registry_returns_the_registered_handler PASSED [100%]\n\n============================== 3 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "th14_py_decorated_handlers",
+      "changed_files": [
+        "handler_dispatch.py",
+        "trace_hooks.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "runtime",
+        "selected_files": [
+          "handler_dispatch.py",
+          "trace_hooks.py"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "runtime",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "code",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "runtime",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Dispatch code lacks await for non-coroutine async handlers",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Early return persists",
+            "expected_if_true": "Dispatch awaits all awaitables",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "runtime",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "code",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "handler_dispatch.py"
+              ],
+              "probe_id": "p1",
+              "query": "await handler",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Dispatch fails to await non-coroutine async handlers",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Check if dispatch awaits all awaitables",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-1",
+              "source-2"
+            ]
+          },
+          {
+            "claim": "Tracing decorator returns before handler completes",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Verify decorator awaits handler result",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "State tracking precedes handler execution",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Confirm state updates after handler completes",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Test harness misses async callable cases",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Validate test coverage for async callables",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "source-5",
+              "source-9"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 25,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "code"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "code",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Early return persists",
+            "expected_if_true": "Dispatch awaits all awaitables",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "runtime",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-13T17:55:53.516467+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.9,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: handler_dispatch.py:7:        return await handler(message)"
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "code"
+            ],
+            "dimension": "code",
+            "duration_ms": 19,
+            "exit_code": 0,
+            "expected_if_false": "Early return persists",
+            "expected_if_true": "Dispatch awaits all awaitables",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "runtime",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-13T17:55:53.516467+00:00",
+            "output": "handler_dispatch.py:7:        return await handler(message)",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th14_py_decorated_handlers",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Dispatch fails to await non-coroutine async handlers",
+          "confidence": 0.0,
+          "dimension": "code",
+          "evidence_ids": [
+            "source-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Dispatch code lacks await for non-coroutine async handlers",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "Handler completion follows the value returned by one invocation: a synchronous tracing wrapper keeps synchronous results immediate but defers its finished event until an awaitable result settles, and dispatch awaits inspect.isawaitable results. This covers decorated async handlers and callable objects with async __call__ without relying on inspect.iscoroutinefunction identity."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Dispatch fails to await non-coroutine async handlers",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Check if dispatch awaits all awaitables",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Tracing decorator returns before handler completes",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify decorator awaits handler result",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "State tracking precedes handler execution",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Confirm state updates after handler completes",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Test harness misses async callable cases",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.15,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Validate test coverage for async callables",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-5",
+              "source-9"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Check if dispatch awaits all awaitables",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify decorator awaits handler result",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Confirm state updates after handler completes",
+            "dimension": "state",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Validate test coverage for async callables",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Dispatch fails to await non-coroutine async handlers",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Dispatch code lacks await for non-coroutine async handlers",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Dispatch fails to await non-coroutine async handlers",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Dispatch code lacks await for non-coroutine async handlers",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Dispatch code lacks await for non-coroutine async handlers",
+            "status": "provisional"
+          },
+          "response_chars": 1536,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Dispatch fails to await non-coroutine async handlers",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Dispatch code lacks await for non-coroutine async handlers",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Dispatch fails to await non-coroutine async handlers",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Dispatch code lacks await for non-coroutine async handlers",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Dispatch code lacks await for non-coroutine async handlers",
+            "status": "provisional"
+          },
+          "response_chars": 1420,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 122042,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 671,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_py_decorated_handlers-6v1g6h2q\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_delivery_feedback.py::test_delivery_timeline_closes_after_handler_work PASSED [ 20%]\ntests/test_delivery_feedback.py::test_object_handler_returns_completed_result PASSED [ 40%]\ntests/test_public.py::test_synchronous_trace_preserves_return_and_event_order PASSED [ 60%]\ntests/test_public.py::test_direct_coroutine_handler_is_completed PASSED  [ 80%]\ntests/test_public.py::test_registry_returns_the_registered_handler PASSED [100%]\n\n============================== 5 passed in 0.05s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "final_tests": {
+        "duration_ms": 819,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-3ypuhmx9\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_delivery_final.py::test_registered_traced_object_has_one_complete_timeline PASSED [ 25%]\ntests/test_public.py::test_synchronous_trace_preserves_return_and_event_order PASSED [ 50%]\ntests/test_public.py::test_direct_coroutine_handler_is_completed PASSED  [ 75%]\ntests/test_public.py::test_registry_returns_the_registered_handler PASSED [100%]\n\n============================== 4 passed in 0.06s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "code",
+      "language": "python",
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 21003474000,
+          "json_object_valid": true,
+          "latency_ms": 84453,
+          "load_duration_ns": 190477300,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 14573,
+          "prompt_eval_count": 4252,
+          "prompt_eval_duration_ns": 2584878000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Dispatch fails to await non-coroutine async handlers\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\",\"source-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check if dispatch awaits all awaitables\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Tracing decorator returns before handler completes\",\"dimension\":\"runtime\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify decorator awaits handler result\"},{\"hypothesis_id\":\"h3\",\"claim\":\"State tracking precedes handler execution\",\"dimension\":\"state\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm state updates after handler completes\"},{\"hypothesis_id\":\"h4\",\"claim\":\"Test harness misses async callable cases\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"source-5\",\"source-9\"],\"contradict_evidence_ids\":[],\"falsification\":\"Validate test coverage for async callables\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"runtime\",\"data\"],\"expected_if_true\":\"Dispatch awaits all awaitables\",\"expected_if_false\":\"Early return persists\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"handler_dispatch.py\"],\"query\":\"await handler\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-1\",\"source-2\"],\"reason\":\"Dispatch code lacks await for non-coroutine async handlers\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 4550,
+          "thinking_enabled": true,
+          "tokens_out": 355,
+          "wall_ms": 84453
+        },
+        {
+          "case_budget_remaining_before_sec": 395.5462194000138,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 19219873000,
+          "json_object_valid": true,
+          "latency_ms": 30851,
+          "load_duration_ns": 185912200,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 18399,
+          "prompt_eval_count": 4270,
+          "prompt_eval_duration_ns": 11011344000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Dispatch fails to await non-coroutine async handlers\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\",\"source-2\"],\"falsification\":\"Check if dispatch awaits all awaitables\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Tracing decorator returns before handler completes\",\"dimension\":\"runtime\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\"],\"falsification\":\"Verify decorator awaits handler result\"},{\"hypothesis_id\":\"h3\",\"claim\":\"State tracking precedes handler execution\",\"dimension\":\"state\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\"],\"falsification\":\"Confirm state updates after handler completes\"},{\"hypothesis_id\":\"h4\",\"claim\":\"Test harness misses async callable cases\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"source-5\",\"source-9\"],\"falsification\":\"Validate test coverage for async callables\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"runtime\",\"data\"],\"expected_if_true\":\"Dispatch awaits all awaitables\",\"expected_if_false\":\"Early return persists\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"handler_dispatch.py\"],\"query\":\"await handler\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-1\",\"source-2\"],\"reason\":\"Dispatch code lacks await for non-coroutine async handlers\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 323,
+          "wall_ms": 30852
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 715,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_py_decorated_handlers-6v1g6h2q\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_synchronous_trace_preserves_return_and_event_order PASSED [ 33%]\ntests/test_public.py::test_direct_coroutine_handler_is_completed PASSED  [ 66%]\ntests/test_public.py::test_registry_returns_the_registered_handler PASSED [100%]\n\n============================== 3 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "runtime",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "handler_dispatch.py",
+        "trace_hooks.py"
+      ],
+      "split": "disclosed_replay",
+      "test_runner": "pytest"
+    },
+    {
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "data",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 701,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-k2rln4n_\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_feedback.py::test_email_batch_matches_the_imported_policy FAILED [ 20%]\ntests/test_feedback.py::test_webhook_batch_matches_the_imported_policy FAILED [ 40%]\ntests/test_public.py::test_email_batch_keeps_eligible_recipients_in_order PASSED [ 60%]\ntests/test_public.py::test_webhook_batch_keeps_ready_deliveries_in_order PASSED [ 80%]\ntests/test_public.py::test_suppression_review_lists_both_channels PASSED [100%]\n\n================================== FAILURES ===================================\n________________ test_email_batch_matches_the_imported_policy _________________\ntests\\test_feedback.py:61: in test_email_batch_matches_the_imported_policy\n    assert len(rows) == 2\nE   assert 0 == 2\nE    +  where 0 = len([])\n_______________ test_webhook_batch_matches_the_imported_policy ________________\ntests\\test_feedback.py:84: in test_webhook_batch_matches_the_imported_policy\n    assert len(rows) == 2\nE   assert 0 == 2\nE    +  where 0 = len([])\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_email_batch_matches_the_imported_policy - assert 0 == 2\n +  where 0 = len([])\nFAILED tests/test_feedback.py::test_webhook_batch_matches_the_imported_policy - assert 0 == 2\n +  where 0 = len([])\n========================= 2 failed, 3 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_final_tests": {
+        "duration_ms": 717,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-quw_x4gp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_email_scope_keeps_only_its_own_targeted_exclusions FAILED [ 16%]\ntests/test_final.py::test_webhook_scope_keeps_only_its_own_targeted_exclusions FAILED [ 33%]\ntests/test_final.py::test_review_retains_advisory_and_targeted_rows PASSED [ 50%]\ntests/test_public.py::test_email_batch_keeps_eligible_recipients_in_order PASSED [ 66%]\ntests/test_public.py::test_webhook_batch_keeps_ready_deliveries_in_order PASSED [ 83%]\ntests/test_public.py::test_suppression_review_lists_both_channels PASSED [100%]\n\n================================== FAILURES ===================================\n___________ test_email_scope_keeps_only_its_own_targeted_exclusions ___________\ntests\\test_final.py:71: in test_email_scope_keeps_only_its_own_targeted_exclusions\n    assert len(rows) == 2\nE   assert 0 == 2\nE    +  where 0 = len([])\n__________ test_webhook_scope_keeps_only_its_own_targeted_exclusions __________\ntests\\test_final.py:101: in test_webhook_scope_keeps_only_its_own_targeted_exclusions\n    assert len(rows) == 2\nE   assert 0 == 2\nE    +  where 0 = len([])\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_email_scope_keeps_only_its_own_targeted_exclusions - assert 0 == 2\n +  where 0 = len([])\nFAILED tests/test_final.py::test_webhook_scope_keeps_only_its_own_targeted_exclusions - assert 0 == 2\n +  where 0 = len([])\n========================= 2 failed, 4 passed in 0.13s =========================",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 554,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-k2rln4n_\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_email_batch_keeps_eligible_recipients_in_order PASSED [ 33%]\ntests/test_public.py::test_webhook_batch_keeps_ready_deliveries_in_order PASSED [ 66%]\ntests/test_public.py::test_suppression_review_lists_both_channels PASSED [100%]\n\n============================== 3 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "th14_sql_suppression_batches",
+      "changed_files": [
+        "sql/select_email_batch.sql",
+        "sql/select_webhook_batch.sql"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "data",
+        "selected_files": [
+          "sql/select_email_batch.sql",
+          "sql/select_webhook_batch.sql"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "data",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "data",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "suppression feed includes advisory records without target_id",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "no NULL target_ids found",
+            "expected_if_true": "find NULL target_ids in suppression feed",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "data",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "sql"
+              ],
+              "probe_id": "p1",
+              "query": "target_id IS NULL",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "NULL target ids poison NOT IN clauses",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "verify suppression feed lacks NULL target_ids",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-4"
+            ]
+          },
+          {
+            "claim": "code uses NOT IN instead of NOT EXISTS",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "check query uses correlated NOT EXISTS",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-1",
+              "source-2"
+            ]
+          },
+          {
+            "claim": "test_harness misses NULL suppression scenarios",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "run test with NULL target_ids",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "source-3"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 29,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "data"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "no NULL target_ids found",
+            "expected_if_true": "find NULL target_ids in suppression feed",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-13T17:57:24.189139+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "data"
+            ],
+            "dimension": "data",
+            "duration_ms": 22,
+            "exit_code": 1,
+            "expected_if_false": "no NULL target_ids found",
+            "expected_if_true": "find NULL target_ids in suppression feed",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-13T17:57:24.189139+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th14_sql_suppression_batches",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "NULL target ids poison NOT IN clauses",
+          "confidence": 0.0,
+          "dimension": "data",
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "suppression feed includes advisory records without target_id",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "A nullable suppression target cannot participate in a NOT IN anti-set because one NULL poisons every candidate under SQL three-valued logic. Batch selection uses a scope-preserving correlated NOT EXISTS match on the concrete target id, so advisory NULL rows do not suppress anything, duplicate targeted rows remain idempotent, and review-feed visibility is unchanged."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "NULL target ids poison NOT IN clauses",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "verify suppression feed lacks NULL target_ids",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-4"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "code uses NOT IN instead of NOT EXISTS",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.36,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "check query uses correlated NOT EXISTS",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "test_harness misses NULL suppression scenarios",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.15,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0.75,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "run test with NULL target_ids",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-3"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "verify suppression feed lacks NULL target_ids",
+            "dimension": "data",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "check query uses correlated NOT EXISTS",
+            "dimension": "code",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "run test with NULL target_ids",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "NULL target ids poison NOT IN clauses",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "suppression feed includes advisory records without target_id",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "NULL target ids poison NOT IN clauses",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "suppression feed includes advisory records without target_id",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "suppression feed includes advisory records without target_id",
+            "status": "provisional"
+          },
+          "response_chars": 1222,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "NULL target ids poison NOT IN clauses",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "suppression feed includes advisory records without target_id",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "NULL target ids poison NOT IN clauses",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "suppression feed includes advisory records without target_id",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "suppression feed includes advisory records without target_id",
+            "status": "provisional"
+          },
+          "response_chars": 1222,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 90000,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 604,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_sql_suppression_batches-twq4uat7\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_feedback.py::test_email_batch_matches_the_imported_policy PASSED [ 20%]\ntests/test_feedback.py::test_webhook_batch_matches_the_imported_policy PASSED [ 40%]\ntests/test_public.py::test_email_batch_keeps_eligible_recipients_in_order PASSED [ 60%]\ntests/test_public.py::test_webhook_batch_keeps_ready_deliveries_in_order PASSED [ 80%]\ntests/test_public.py::test_suppression_review_lists_both_channels PASSED [100%]\n\n============================== 5 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "final_tests": {
+        "duration_ms": 609,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-wl6bn89o\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_email_scope_keeps_only_its_own_targeted_exclusions PASSED [ 16%]\ntests/test_final.py::test_webhook_scope_keeps_only_its_own_targeted_exclusions PASSED [ 33%]\ntests/test_final.py::test_review_retains_advisory_and_targeted_rows PASSED [ 50%]\ntests/test_public.py::test_email_batch_keeps_eligible_recipients_in_order PASSED [ 66%]\ntests/test_public.py::test_webhook_batch_keeps_ready_deliveries_in_order PASSED [ 83%]\ntests/test_public.py::test_suppression_review_lists_both_channels PASSED [100%]\n\n============================== 6 passed in 0.06s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "data",
+      "language": "sql",
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 16666733000,
+          "json_object_valid": true,
+          "latency_ms": 55849,
+          "load_duration_ns": 191963600,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 14188,
+          "prompt_eval_count": 3902,
+          "prompt_eval_duration_ns": 1385493000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"NULL target ids poison NOT IN clauses\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"verify suppression feed lacks NULL target_ids\"},{\"hypothesis_id\":\"h2\",\"claim\":\"code uses NOT IN instead of NOT EXISTS\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\",\"source-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"check query uses correlated NOT EXISTS\"},{\"hypothesis_id\":\"h3\",\"claim\":\"test_harness misses NULL suppression scenarios\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"source-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"run test with NULL target_ids\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"data\"],\"held_constant_dimensions\":[\"code\"],\"expected_if_true\":\"find NULL target_ids in suppression feed\",\"expected_if_false\":\"no NULL target_ids found\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"sql\"],\"query\":\"target_id IS NULL\",\"dimension\":\"data\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-4\"],\"reason\":\"suppression feed includes advisory records without target_id\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 2480,
+          "thinking_enabled": true,
+          "tokens_out": 291,
+          "wall_ms": 55849
+        },
+        {
+          "case_budget_remaining_before_sec": 424.1501629000413,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 16866935000,
+          "json_object_valid": true,
+          "latency_ms": 28093,
+          "load_duration_ns": 216440200,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 17412,
+          "prompt_eval_count": 4181,
+          "prompt_eval_duration_ns": 10552125000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"NULL target ids poison NOT IN clauses\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"verify suppression feed lacks NULL target_ids\"},{\"hypothesis_id\":\"h2\",\"claim\":\"code uses NOT IN instead of NOT EXISTS\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\",\"source-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"check query uses correlated NOT EXISTS\"},{\"hypothesis_id\":\"h3\",\"claim\":\"test_harness misses NULL suppression scenarios\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"source-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"run test with NULL target_ids\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"data\"],\"held_constant_dimensions\":[\"code\"],\"expected_if_true\":\"find NULL target_ids in suppression feed\",\"expected_if_false\":\"no NULL target_ids found\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"sql\"],\"query\":\"target_id IS NULL\",\"dimension\":\"data\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-4\"],\"reason\":\"suppression feed includes advisory records without target_id\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 291,
+          "wall_ms": 28093
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 607,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th14_sql_suppression_batches-twq4uat7\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_email_batch_keeps_eligible_recipients_in_order PASSED [ 33%]\ntests/test_public.py::test_webhook_batch_keeps_ready_deliveries_in_order PASSED [ 66%]\ntests/test_public.py::test_suppression_review_lists_both_channels PASSED [100%]\n\n============================== 3 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "data",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "sql/select_email_batch.sql",
+        "sql/select_webhook_batch.sql"
+      ],
+      "split": "disclosed_replay",
+      "test_runner": "pytest"
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 3,
+  "created_at": "2026-07-13T17:57:29.143989+00:00",
+  "development_regression_case_count": 3,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 3,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 6,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_passed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 3,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 3,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v5",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 3,
+  "total_model_calls": 6,
+  "verdict": "shadow_ready"
+}
