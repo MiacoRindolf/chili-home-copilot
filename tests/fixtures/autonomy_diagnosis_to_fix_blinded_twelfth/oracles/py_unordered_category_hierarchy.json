@@ -1,0 +1,10 @@
+{
+  "expected_dimension": "data",
+  "expected_files": [
+    "category_loader.py",
+    "category_paths.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "from category_loader import load_category_rows\nfrom category_paths import build_category_paths\n\n\ndef test_loader_preserves_parent_reference_when_parent_appears_later():\n    rows = load_category_rows(\n        [\n            {\"id\": \"mugs\", \"name\": \"Mugs\", \"parent_id\": \"kitchen\"},\n            {\"id\": \"kitchen\", \"name\": \"Kitchen\", \"parent_id\": None},\n        ]\n    )\n\n    assert rows[0][\"parent_id\"] == \"kitchen\"\n\n\ndef test_path_builder_is_independent_of_row_order():\n    rows = [\n        {\"id\": \"mugs\", \"name\": \"Mugs\", \"parent_id\": \"kitchen\"},\n        {\"id\": \"kitchen\", \"name\": \"Kitchen\", \"parent_id\": None},\n    ]\n\n    assert build_category_paths(rows) == {\n        \"mugs\": \"Kitchen/Mugs\",\n        \"kitchen\": \"Kitchen\",\n    }\n\n\ndef test_scrambled_three_level_hierarchy_resolves_all_ancestors():\n    rows = [\n        {\"id\": \"pendants\", \"name\": \"Pendants\", \"parent_id\": \"ceiling\"},\n        {\"id\": \"ceiling\", \"name\": \"Ceiling\", \"parent_id\": \"lighting\"},\n        {\"id\": \"lighting\", \"name\": \"Lighting\", \"parent_id\": None},\n    ]\n\n    paths = build_category_paths(rows)\n\n    assert paths[\"pendants\"] == \"Lighting/Ceiling/Pendants\"\n    assert paths[\"ceiling\"] == \"Lighting/Ceiling\"\n"
+  }
+}

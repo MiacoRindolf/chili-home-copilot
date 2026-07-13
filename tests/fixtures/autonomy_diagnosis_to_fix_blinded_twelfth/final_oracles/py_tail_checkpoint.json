@@ -1,0 +1,6 @@
+{
+    "case_id":  "py_tail_checkpoint",
+    "final_files":  {
+                        "tests/test_final.py":  "from file_tailer import FileTailer\n\n\ndef test_in_place_truncation_resets_an_offset_past_end(tmp_path):\n    source = tmp_path / \"active.log\"\n    checkpoint = tmp_path / \"active.cursor\"\n    source.write_text(\"a-long-original-line\\nsecond-line\\n\", encoding=\"utf-8\")\n    assert FileTailer(source, checkpoint).read_new() == [\n        \"a-long-original-line\",\n        \"second-line\",\n    ]\n\n    source.write_text(\"fresh\\n\", encoding=\"utf-8\")\n\n    assert FileTailer(source, checkpoint).read_new() == [\"fresh\"]\n\n\ndef test_reader_continues_normally_after_truncation_recovery(tmp_path):\n    source = tmp_path / \"active.log\"\n    checkpoint = tmp_path / \"active.cursor\"\n    source.write_text(\"0123456789\\n\", encoding=\"utf-8\")\n    FileTailer(source, checkpoint).read_new()\n    source.write_text(\"new\\n\", encoding=\"utf-8\")\n    assert FileTailer(source, checkpoint).read_new() == [\"new\"]\n\n    with source.open(\"a\", encoding=\"utf-8\") as handle:\n        handle.write(\"later\\n\")\n\n    assert FileTailer(source, checkpoint).read_new() == [\"later\"]\n"
+                    }
+}

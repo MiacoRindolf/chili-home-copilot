@@ -1,0 +1,10 @@
+{
+  "expected_dimension": "data",
+  "expected_files": [
+    "sql/inventory_catalog.sql",
+    "sql/availability_view.sql"
+  ],
+  "feedback_files": {
+    "tests/test_tenant_ownership_feedback.py": "import sqlite3\nfrom pathlib import Path\n\nimport pytest\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef database():\n    connection = sqlite3.connect(\":memory:\")\n    for name in (\"inventory_catalog.sql\", \"availability_view.sql\"):\n        connection.executescript((ROOT / \"sql\" / name).read_text(encoding=\"utf-8\"))\n    return connection\n\n\ndef test_stock_cannot_borrow_a_product_from_another_merchant():\n    db = database()\n    db.executemany(\"INSERT INTO merchant VALUES (?, ?)\", [(1, 'North Shop'), (2, 'South Shop')])\n    db.execute(\"INSERT INTO product VALUES (1, 'MUG-12', 'Stoneware mug')\")\n\n    with pytest.raises(sqlite3.IntegrityError):\n        db.execute(\"INSERT INTO stock VALUES (2, 'MUG-12', 3)\")\n\n\ndef test_shared_sku_text_does_not_cross_product_descriptions():\n    db = database()\n    db.executemany(\"INSERT INTO merchant VALUES (?, ?)\", [(1, 'North Shop'), (2, 'South Shop')])\n    db.executemany(\"INSERT INTO product VALUES (?, ?, ?)\", [(1, 'BASIC', 'North basic'), (2, 'BASIC', 'South basic')])\n    db.executemany(\"INSERT INTO stock VALUES (?, ?, ?)\", [(1, 'BASIC', 4), (2, 'BASIC', 9)])\n\n    rows = db.execute(\"SELECT merchant_id, product_name, on_hand FROM available_stock ORDER BY merchant_id, product_name\").fetchall()\n    assert rows == [(1, 'North basic', 4), (2, 'South basic', 9)]\n"
+  }
+}

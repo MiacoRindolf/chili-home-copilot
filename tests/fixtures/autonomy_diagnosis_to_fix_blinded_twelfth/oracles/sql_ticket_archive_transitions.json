@@ -1,0 +1,10 @@
+{
+  "expected_dimension": "state",
+  "expected_files": [
+    "sql/ticket_lifecycle.sql",
+    "sql/project_dashboard.sql"
+  ],
+  "feedback_files": {
+    "tests/test_archive_feedback.py": "import sqlite3\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef database():\n    connection = sqlite3.connect(\":memory:\")\n    for name in (\"ticket_lifecycle.sql\", \"project_dashboard.sql\"):\n        connection.executescript((ROOT / \"sql\" / name).read_text(encoding=\"utf-8\"))\n    return connection\n\n\ndef test_archive_and_restore_adjust_the_stored_count():\n    db = database()\n    db.execute(\"INSERT INTO project VALUES (1, 'Renewals')\")\n    db.execute(\"INSERT INTO ticket VALUES (1, 1, 'Call customer', '2026-08-02', NULL)\")\n    db.execute(\"INSERT INTO ticket VALUES (2, 1, 'Prepare quote', '2026-08-04', NULL)\")\n\n    db.execute(\"UPDATE ticket SET archived_at = '2026-07-12T09:00:00Z' WHERE ticket_id = 1\")\n    assert db.execute(\"SELECT open_ticket_count FROM project_metrics WHERE project_id = 1\").fetchone()[0] == 1\n\n    db.execute(\"UPDATE ticket SET archived_at = NULL WHERE ticket_id = 1\")\n    assert db.execute(\"SELECT open_ticket_count FROM project_metrics WHERE project_id = 1\").fetchone()[0] == 2\n\n\ndef test_dashboard_ignores_due_dates_from_archived_tickets():\n    db = database()\n    db.execute(\"INSERT INTO project VALUES (1, 'Renewals')\")\n    db.execute(\"INSERT INTO ticket VALUES (1, 1, 'Old task', '2026-07-01', '2026-07-10T12:00:00Z')\")\n    db.execute(\"INSERT INTO ticket VALUES (2, 1, 'Live task', '2026-08-04', NULL)\")\n\n    row = db.execute(\"SELECT open_ticket_count, next_due_on FROM project_dashboard WHERE project_id = 1\").fetchone()\n    assert row == (1, '2026-08-04')\n"
+  }
+}

@@ -1,0 +1,10 @@
+{
+    "expected_dimension":  "data",
+    "expected_files":  [
+                           "src/base64url.mjs",
+                           "src/blob-locator.mjs"
+                       ],
+    "feedback_files":  {
+                           "tests/feedback.test.mjs":  "import test from \u0027node:test\u0027;\nimport assert from \u0027node:assert/strict\u0027;\nimport { decodeBase64Url } from \u0027../src/base64url.mjs\u0027;\nimport { parseBlobLocator } from \u0027../src/blob-locator.mjs\u0027;\n\ntest(\u0027the shared decoder rejects padding and the standard base64 alphabet\u0027, () =\u003e {\n  assert.throws(() =\u003e decodeBase64Url(\u0027AQ==\u0027), /canonical|base64url/i);\n  assert.throws(() =\u003e decodeBase64Url(\u0027A+E\u0027), /canonical|base64url/i);\n});\n\ntest(\u0027locators reject padded aliases of a 16-byte id\u0027, () =\u003e {\n  assert.throws(\n    () =\u003e parseBlobLocator(\u0027images:AAAAAAAAAAAAAAAAAAAAAA==\u0027),\n    /canonical|base64url/i,\n  );\n});\n"
+                       }
+}

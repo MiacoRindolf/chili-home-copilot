@@ -1,0 +1,6 @@
+{
+    "case_id":  "dart_decimal_apportionment",
+    "final_files":  {
+                        "tests/final_test.dart":  "import \u0027../lib/minor_units.dart\u0027;\nimport \u0027../lib/proportional_allocator.dart\u0027;\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  check(MinorUnits.parse(\u00279007199254740993.01\u0027) == 900719925474099301,\n      \u0027amounts beyond binary floating-point precision remain exact\u0027);\n  check(MinorUnits.parse(\u0027+0.0007\u0027, scale: 4) == 7,\n      \u0027an explicit sign and leading fractional zeroes are preserved\u0027);\n\n  final credit = ProportionalAllocator().allocate(-5, [1, 1, 1]);\n  check(credit[0] == -2 \u0026\u0026 credit[1] == -2 \u0026\u0026 credit[2] == -1,\n      \u0027negative totals distribute magnitude with the same stable ordering\u0027);\n  check(credit.reduce((left, right) =\u003e left + right) == -5,\n      \u0027a distributed credit exactly preserves its signed total\u0027);\n\n  final sparse = ProportionalAllocator().allocate(-7, [0, 2, 1]);\n  check(sparse[0] == 0 \u0026\u0026 sparse[1] == -5 \u0026\u0026 sparse[2] == -2,\n      \u0027zero-weight entries remain zero during negative allocation\u0027);\n}\n"
+                    }
+}

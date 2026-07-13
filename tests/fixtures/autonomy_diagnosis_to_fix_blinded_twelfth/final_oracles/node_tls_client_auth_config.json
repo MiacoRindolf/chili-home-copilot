@@ -1,0 +1,6 @@
+{
+    "case_id":  "node_tls_client_auth_config",
+    "final_files":  {
+                        "tests/final.test.mjs":  "import test from \u0027node:test\u0027;\nimport assert from \u0027node:assert/strict\u0027;\nimport { buildTlsOptions } from \u0027../src/tls-options.mjs\u0027;\n\ntest(\u0027optional mode requests a certificate without rejecting an absent client identity\u0027, () =\u003e {\n  assert.deepEqual(buildTlsOptions({\n    cert: \u0027server-cert\u0027,\n    key: \u0027server-key\u0027,\n    clientAuth: \u0027optional\u0027,\n  }), {\n    cert: \u0027server-cert\u0027,\n    key: \u0027server-key\u0027,\n    requestCert: true,\n    rejectUnauthorized: false,\n  });\n});\n"
+                    }
+}

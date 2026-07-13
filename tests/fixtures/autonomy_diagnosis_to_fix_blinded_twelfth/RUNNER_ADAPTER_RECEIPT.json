@@ -1,0 +1,303 @@
+{
+    "schema":  "chili.fixture-runner-adapter-receipt.v1",
+    "created_at":  "2026-07-13T01:26:26.2262275Z",
+    "reason":  "Runner requires final_oracle.case_id to equal public case_id",
+    "model_calls_before_adapter":  0,
+    "semantic_test_changes":  0,
+    "files":  [
+                  {
+                      "case_id":  "dart_decimal_apportionment",
+                      "path":  "final_oracles/dart_decimal_apportionment.json",
+                      "author_path":  "dart/final_oracles/dart_decimal_apportionment.json",
+                      "validator_sha256":  "3095f2742096a1f960ee41e1cc36c9da7044b4921ec5d64cf865423fbdc3f4c6",
+                      "pre_adapter_sha256":  "3095f2742096a1f960ee41e1cc36c9da7044b4921ec5d64cf865423fbdc3f4c6",
+                      "post_adapter_sha256":  "6518d1cbaa8e517ca04de653618995722b1a44dcedfe1402d6d4fcde992ea2ea",
+                      "semantic_fields_changed":  [
+                                                      "case_id added",
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_release_reader_lifecycle",
+                      "path":  "final_oracles/dart_release_reader_lifecycle.json",
+                      "author_path":  "dart/final_oracles/dart_release_reader_lifecycle.json",
+                      "validator_sha256":  "1e7f665ecbee9b80b1dbc5b062da685a8679825dc6e581b0a5c863123212cd1d",
+                      "pre_adapter_sha256":  "1e7f665ecbee9b80b1dbc5b062da685a8679825dc6e581b0a5c863123212cd1d",
+                      "post_adapter_sha256":  "99d24ec0c79a733829af73c5554d86437e4943f61d7bb9a92ca461437bbcbce3",
+                      "semantic_fields_changed":  [
+                                                      "case_id added",
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_trusted_proxy_chain",
+                      "path":  "final_oracles/dart_trusted_proxy_chain.json",
+                      "author_path":  "dart/final_oracles/dart_trusted_proxy_chain.json",
+                      "validator_sha256":  "54dadd8e29c9eb36ec26043a74a5f31f5c76f359559fc4b577fd2afc3fa84dc2",
+                      "pre_adapter_sha256":  "54dadd8e29c9eb36ec26043a74a5f31f5c76f359559fc4b577fd2afc3fa84dc2",
+                      "post_adapter_sha256":  "1548dd44c4775ea4d8987ea676924a1c7aabf57878baf387547ceef4b709f8bc",
+                      "semantic_fields_changed":  [
+                                                      "case_id added",
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_base64url_blob_ids",
+                      "path":  "final_oracles/node_base64url_blob_ids.json",
+                      "author_path":  "node/final_oracles/node_base64url_blob_ids.json",
+                      "validator_sha256":  "51140cc0b20c39578bce1ec95a45cfd0c4241987112f4a1904f8286b85926f5a",
+                      "pre_adapter_sha256":  "51140cc0b20c39578bce1ec95a45cfd0c4241987112f4a1904f8286b85926f5a",
+                      "post_adapter_sha256":  "d038888e9b973a918ffa53597d75eafe1db6714bf6f86a73c9945bf9d4a57e72",
+                      "semantic_fields_changed":  [
+                                                      "case_id added",
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_policy_reload_consistency",
+                      "path":  "final_oracles/node_policy_reload_consistency.json",
+                      "author_path":  "node/final_oracles/node_policy_reload_consistency.json",
+                      "validator_sha256":  "c65bb4eefa54b59377daa8170993c665bef70a041758e094cb2ac0deb88e460f",
+                      "pre_adapter_sha256":  "c65bb4eefa54b59377daa8170993c665bef70a041758e094cb2ac0deb88e460f",
+                      "post_adapter_sha256":  "bfa8e0785a50413b06e27589b1d457e533826a543ed006e140a0905af5f9e608",
+                      "semantic_fields_changed":  [
+                                                      "case_id added",
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_tls_client_auth_config",
+                      "path":  "final_oracles/node_tls_client_auth_config.json",
+                      "author_path":  "node/final_oracles/node_tls_client_auth_config.json",
+                      "validator_sha256":  "7a44c88e445a225fc467653b5d5fadd68773971df051bb35fdf0dd544d7ca843",
+                      "pre_adapter_sha256":  "7a44c88e445a225fc467653b5d5fadd68773971df051bb35fdf0dd544d7ca843",
+                      "post_adapter_sha256":  "2c23bd97eba4bb5752d2479a9a003fa662ca43b21187602ba8411327caaddea8",
+                      "semantic_fields_changed":  [
+                                                      "case_id added",
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "py_config_reload",
+                      "path":  "final_oracles/py_config_reload.json",
+                      "author_path":  "python/final_oracles/py_config_reload.json",
+                      "validator_sha256":  "aaf7c9ecca9addc7019d8cae8e7261b45088458e24dc3a6559edf4050cf5c051",
+                      "pre_adapter_sha256":  "aaf7c9ecca9addc7019d8cae8e7261b45088458e24dc3a6559edf4050cf5c051",
+                      "post_adapter_sha256":  "c5e505509420fcb509cd31798ee6984b44851294ece918dd18856166ae7083f2",
+                      "semantic_fields_changed":  [
+                                                      "case_id added"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "py_tail_checkpoint",
+                      "path":  "final_oracles/py_tail_checkpoint.json",
+                      "author_path":  "python/final_oracles/py_tail_checkpoint.json",
+                      "validator_sha256":  "990838d2c86b46c9de3556a1324e44b23e61f0bc5a25657a4bcff350ecfdb63a",
+                      "pre_adapter_sha256":  "990838d2c86b46c9de3556a1324e44b23e61f0bc5a25657a4bcff350ecfdb63a",
+                      "post_adapter_sha256":  "96414f4ed454c8720615f6cf0930d6d574aedbc2dc31de48b81506b0283fe59c",
+                      "semantic_fields_changed":  [
+                                                      "case_id added"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "py_unordered_category_hierarchy",
+                      "path":  "final_oracles/py_unordered_category_hierarchy.json",
+                      "author_path":  "python/final_oracles/py_unordered_category_hierarchy.json",
+                      "validator_sha256":  "e1edda077e21717963226f098281a7975d4d50ce15c07c2d19e11a4dd776e9c6",
+                      "pre_adapter_sha256":  "e1edda077e21717963226f098281a7975d4d50ce15c07c2d19e11a4dd776e9c6",
+                      "post_adapter_sha256":  "b42acfcba61550998d61d0eadd143d67237d840347597a0a965b10594c82fa35",
+                      "semantic_fields_changed":  [
+                                                      "case_id added"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "sql_notification_override_tristate",
+                      "path":  "final_oracles/sql_notification_override_tristate.json",
+                      "author_path":  "sql/final_oracles/sql_notification_override_tristate.json",
+                      "validator_sha256":  "5c3805272fc9d86a20f655c1e4fd8c84fad44c6f94f5b2eb44139b0e25dc8867",
+                      "pre_adapter_sha256":  "5c3805272fc9d86a20f655c1e4fd8c84fad44c6f94f5b2eb44139b0e25dc8867",
+                      "post_adapter_sha256":  "3e84a72fd632a16b24c443648ee0623c9e4941dbb4f461fd8e9bd7ce639f079c",
+                      "semantic_fields_changed":  [
+                                                      "case_id added"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "sql_tenant_stock_ownership",
+                      "path":  "final_oracles/sql_tenant_stock_ownership.json",
+                      "author_path":  "sql/final_oracles/sql_tenant_stock_ownership.json",
+                      "validator_sha256":  "0ddde2be64ef6639a9ed89ba609faaa6e1300d79eeb259c15e911edff95e97b2",
+                      "pre_adapter_sha256":  "0ddde2be64ef6639a9ed89ba609faaa6e1300d79eeb259c15e911edff95e97b2",
+                      "post_adapter_sha256":  "2ca556b2056b39d547cf79accc6567771e8b9760f67c45869d45e69f75fd8a50",
+                      "semantic_fields_changed":  [
+                                                      "case_id added"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "sql_ticket_archive_transitions",
+                      "path":  "final_oracles/sql_ticket_archive_transitions.json",
+                      "author_path":  "sql/final_oracles/sql_ticket_archive_transitions.json",
+                      "validator_sha256":  "d53b1a63031ad6f9aa39739137769a98dfb639792466f480521d749ae5671f64",
+                      "pre_adapter_sha256":  "d53b1a63031ad6f9aa39739137769a98dfb639792466f480521d749ae5671f64",
+                      "post_adapter_sha256":  "9e73e0293c6f1ed00cdc30d7dd9057a8de6d0ebdf7160f00ff1909bfd8168547",
+                      "semantic_fields_changed":  [
+                                                      "case_id added"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_decimal_apportionment",
+                      "path":  "cases/dart_decimal_apportionment.json",
+                      "author_path":  "dart/cases/dart_decimal_apportionment.json",
+                      "validator_sha256":  "266cc76ef29808a6783f0880decc1af65618ea5362bad45db2fb4d09c28dc8c9",
+                      "pre_adapter_sha256":  "266cc76ef29808a6783f0880decc1af65618ea5362bad45db2fb4d09c28dc8c9",
+                      "post_adapter_sha256":  "d17e1e35977a2306002cc3ad8a2c24f6d947f4f758e3a55d564197388f233dc3",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_release_reader_lifecycle",
+                      "path":  "cases/dart_release_reader_lifecycle.json",
+                      "author_path":  "dart/cases/dart_release_reader_lifecycle.json",
+                      "validator_sha256":  "e67aaecc0249f1a7cb0fb61b74d47dc10d2a5bc946a3478066d08d784b123277",
+                      "pre_adapter_sha256":  "e67aaecc0249f1a7cb0fb61b74d47dc10d2a5bc946a3478066d08d784b123277",
+                      "post_adapter_sha256":  "539099775805ffdf851449535f1803220a4c0cb7133b5d41fa509d60af2fe063",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_trusted_proxy_chain",
+                      "path":  "cases/dart_trusted_proxy_chain.json",
+                      "author_path":  "dart/cases/dart_trusted_proxy_chain.json",
+                      "validator_sha256":  "fe905d47bbd43b8a1bb86cd298cae29c217267e9b40e63ecc13910fcdd8090de",
+                      "pre_adapter_sha256":  "fe905d47bbd43b8a1bb86cd298cae29c217267e9b40e63ecc13910fcdd8090de",
+                      "post_adapter_sha256":  "ac08ba8c12e081f2b99d2a137f991d687b921b7b0894c3cd88bed4df56547f07",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_decimal_apportionment",
+                      "path":  "oracles/dart_decimal_apportionment.json",
+                      "author_path":  "dart/oracles/dart_decimal_apportionment.json",
+                      "validator_sha256":  "8d34e4cf11e1082490feb38e163dde2187c241c46fa492c88ab300c61a10018a",
+                      "pre_adapter_sha256":  "8d34e4cf11e1082490feb38e163dde2187c241c46fa492c88ab300c61a10018a",
+                      "post_adapter_sha256":  "f477619e76a25390b865bbc08966753355198bf8bfac1cb94516b589d1cfff07",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_release_reader_lifecycle",
+                      "path":  "oracles/dart_release_reader_lifecycle.json",
+                      "author_path":  "dart/oracles/dart_release_reader_lifecycle.json",
+                      "validator_sha256":  "74892d7b2d951c4691b5a7374c310f1d8495d33f38de5c7e01b7173ef68d6960",
+                      "pre_adapter_sha256":  "74892d7b2d951c4691b5a7374c310f1d8495d33f38de5c7e01b7173ef68d6960",
+                      "post_adapter_sha256":  "5638ffe63039039a3f0de6d00303089993d76ee5d1b8ef90da120047df66419c",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "dart_trusted_proxy_chain",
+                      "path":  "oracles/dart_trusted_proxy_chain.json",
+                      "author_path":  "dart/oracles/dart_trusted_proxy_chain.json",
+                      "validator_sha256":  "672feb1ce5b04633688021d4da251a77f6e5fb84ec8ae33525e14d307483ae01",
+                      "pre_adapter_sha256":  "672feb1ce5b04633688021d4da251a77f6e5fb84ec8ae33525e14d307483ae01",
+                      "post_adapter_sha256":  "ce95871a5d2df13e2e3a76d897bdca2303a3b8bf7b529dc048a03546fa2df2f8",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_base64url_blob_ids",
+                      "path":  "cases/node_base64url_blob_ids.json",
+                      "author_path":  "node/cases/node_base64url_blob_ids.json",
+                      "validator_sha256":  "578e815978b6ac510f1675673300c76199844d7179d51e267b4f2d107ae24c64",
+                      "pre_adapter_sha256":  "578e815978b6ac510f1675673300c76199844d7179d51e267b4f2d107ae24c64",
+                      "post_adapter_sha256":  "c1a9195cd51f429e71cfaf44a783f2922c210795d9225d1fbc41b399de5e8a2d",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_policy_reload_consistency",
+                      "path":  "cases/node_policy_reload_consistency.json",
+                      "author_path":  "node/cases/node_policy_reload_consistency.json",
+                      "validator_sha256":  "0a2552a5bc0ace443af09c431c48371795da2d5017cb55b31a35dcb71a769ff2",
+                      "pre_adapter_sha256":  "0a2552a5bc0ace443af09c431c48371795da2d5017cb55b31a35dcb71a769ff2",
+                      "post_adapter_sha256":  "9993d5f267a6a1e83380cf2a8410dc3575955c7a7d3de1603b608469e8e97481",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_tls_client_auth_config",
+                      "path":  "cases/node_tls_client_auth_config.json",
+                      "author_path":  "node/cases/node_tls_client_auth_config.json",
+                      "validator_sha256":  "87f681e5f4c46ea4833caf72ae4e9cf50bf2e77df0879d868b4b4deac4487b64",
+                      "pre_adapter_sha256":  "87f681e5f4c46ea4833caf72ae4e9cf50bf2e77df0879d868b4b4deac4487b64",
+                      "post_adapter_sha256":  "582376d46c4d2c79a1d437fdf0d128cbacebf474fe59e80da4fe9e2207064074",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_base64url_blob_ids",
+                      "path":  "oracles/node_base64url_blob_ids.json",
+                      "author_path":  "node/oracles/node_base64url_blob_ids.json",
+                      "validator_sha256":  "7a8228f98018ef0dbe67f747d03c6e84e7883975c69adb9a41d066b3e491c45b",
+                      "pre_adapter_sha256":  "7a8228f98018ef0dbe67f747d03c6e84e7883975c69adb9a41d066b3e491c45b",
+                      "post_adapter_sha256":  "0a6db04fa6eb1df414639fff268502cfb525f4956cbbe7314fb2f510969f4196",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_policy_reload_consistency",
+                      "path":  "oracles/node_policy_reload_consistency.json",
+                      "author_path":  "node/oracles/node_policy_reload_consistency.json",
+                      "validator_sha256":  "581c2dc23144047cba3667b4016c48f3a7738baf466b072463fac3a70252ea10",
+                      "pre_adapter_sha256":  "581c2dc23144047cba3667b4016c48f3a7738baf466b072463fac3a70252ea10",
+                      "post_adapter_sha256":  "682a29389ed66f1d5881b1858ecffca31f4b60b6c73f1d9c5cb8f6f1986bfa5e",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  },
+                  {
+                      "case_id":  "node_tls_client_auth_config",
+                      "path":  "oracles/node_tls_client_auth_config.json",
+                      "author_path":  "node/oracles/node_tls_client_auth_config.json",
+                      "validator_sha256":  "494566ca5c2506dd3258c884a527cbf55a38d9fe73d113001f4b93160241eff6",
+                      "pre_adapter_sha256":  "494566ca5c2506dd3258c884a527cbf55a38d9fe73d113001f4b93160241eff6",
+                      "post_adapter_sha256":  "2102b4b214ed52f1858aa5fae3378e215eeb8a1a5de668ddde8937dcb0dd8da2",
+                      "semantic_fields_changed":  [
+                                                      "test path prefix test/ changed to tests/"
+                                                  ],
+                      "test_body_changed":  false
+                  }
+              ]
+}

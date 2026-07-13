@@ -1,0 +1,16 @@
+{
+  "case_id": "sql_tenant_stock_ownership",
+  "prompt": "A multi-merchant inventory database identifies products by (merchant_id, sku). Stock rows should belong to a product in the same merchant, and the availability view should return exactly that merchant's product description. Single-merchant use works, but shared SKU text across merchants can admit orphaned stock and duplicate or mislabel availability rows. Repair the relational ownership and projection while preserving table and view names, nonnegative stock validation, and existing public behavior. Use only the candidate SQL files.",
+  "language": "sql",
+  "test_runner": "pytest",
+  "candidate_paths": [
+    "sql/inventory_catalog.sql",
+    "sql/availability_view.sql"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "sql/inventory_catalog.sql": "PRAGMA foreign_keys = ON;\n\nCREATE TABLE merchant (\n    merchant_id INTEGER PRIMARY KEY,\n    name TEXT NOT NULL\n);\n\nCREATE TABLE product (\n    merchant_id INTEGER NOT NULL REFERENCES merchant(merchant_id),\n    sku TEXT NOT NULL,\n    name TEXT NOT NULL,\n    PRIMARY KEY (merchant_id, sku)\n);\n\nCREATE TABLE stock (\n    merchant_id INTEGER NOT NULL REFERENCES merchant(merchant_id),\n    sku TEXT NOT NULL,\n    on_hand INTEGER NOT NULL CHECK (on_hand >= 0),\n    PRIMARY KEY (merchant_id, sku)\n);\n",
+    "sql/availability_view.sql": "CREATE VIEW available_stock AS\nSELECT s.merchant_id,\n       s.sku,\n       p.name AS product_name,\n       s.on_hand\n  FROM stock AS s\n  JOIN product AS p ON p.sku = s.sku\n WHERE s.on_hand > 0;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\nimport pytest\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef database():\n    connection = sqlite3.connect(\":memory:\")\n    connection.row_factory = sqlite3.Row\n    for name in (\"inventory_catalog.sql\", \"availability_view.sql\"):\n        connection.executescript((ROOT / \"sql\" / name).read_text(encoding=\"utf-8\"))\n    return connection\n\n\ndef test_single_merchant_availability():\n    db = database()\n    db.execute(\"INSERT INTO merchant VALUES (1, 'North Shop')\")\n    db.execute(\"INSERT INTO product VALUES (1, 'MUG-12', 'Stoneware mug')\")\n    db.execute(\"INSERT INTO stock VALUES (1, 'MUG-12', 14)\")\n\n    row = db.execute(\"SELECT * FROM available_stock\").fetchone()\n    assert dict(row) == {\n        \"merchant_id\": 1,\n        \"sku\": \"MUG-12\",\n        \"product_name\": \"Stoneware mug\",\n        \"on_hand\": 14,\n    }\n\n\ndef test_zero_stock_is_hidden_and_negative_stock_is_rejected():\n    db = database()\n    db.execute(\"INSERT INTO merchant VALUES (1, 'North Shop')\")\n    db.execute(\"INSERT INTO product VALUES (1, 'MUG-12', 'Stoneware mug')\")\n    db.execute(\"INSERT INTO stock VALUES (1, 'MUG-12', 0)\")\n    assert db.execute(\"SELECT COUNT(*) FROM available_stock\").fetchone()[0] == 0\n\n    with pytest.raises(sqlite3.IntegrityError):\n        db.execute(\"INSERT INTO stock VALUES (1, 'BAD', -1)\")\n"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "expected_dimension": "state",
+  "expected_files": [
+    "tail_checkpoint.py",
+    "file_tailer.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import os\n\nfrom file_tailer import FileTailer\nfrom tail_checkpoint import CheckpointStore\n\n\ndef test_checkpoint_round_trips_source_provenance(tmp_path):\n    store = CheckpointStore(tmp_path / \"reader.cursor\")\n\n    store.save(14, (7, 31))\n\n    saved = store.load()\n    assert saved.offset == 14\n    assert saved.source_id == (7, 31)\n\n\ndef test_replacement_file_is_read_from_start_after_process_restart(tmp_path):\n    source = tmp_path / \"worker.log\"\n    checkpoint = tmp_path / \"worker.cursor\"\n    source.write_text(\"old-one\\nold-two\\n\", encoding=\"utf-8\")\n    assert FileTailer(source, checkpoint).read_new() == [\"old-one\", \"old-two\"]\n\n    replacement = tmp_path / \"worker.next\"\n    replacement.write_text(\"new-one\\nnew-two\\n\", encoding=\"utf-8\")\n    os.replace(replacement, source)\n\n    restarted = FileTailer(source, checkpoint)\n    assert restarted.read_new() == [\"new-one\", \"new-two\"]\n\n\ndef test_longer_replacement_does_not_skip_its_prefix(tmp_path):\n    source = tmp_path / \"events.log\"\n    checkpoint = tmp_path / \"events.cursor\"\n    source.write_text(\"previous\\n\", encoding=\"utf-8\")\n    FileTailer(source, checkpoint).read_new()\n\n    replacement = tmp_path / \"events.replacement\"\n    replacement.write_text(\"replacement-a\\nreplacement-b\\n\", encoding=\"utf-8\")\n    os.replace(replacement, source)\n\n    assert FileTailer(source, checkpoint).read_new() == [\n        \"replacement-a\",\n        \"replacement-b\",\n    ]\n"
+  }
+}

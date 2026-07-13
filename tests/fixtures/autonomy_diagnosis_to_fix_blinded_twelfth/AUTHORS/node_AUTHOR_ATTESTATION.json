@@ -1,0 +1,35 @@
+{
+  "author_role": "independent holdout author",
+  "assigned_language": "Node ESM",
+  "artifact_language_value": "typescript",
+  "assigned_directory": "D:\\dev\\chili-twelfth-authors\\node",
+  "process_isolation": {
+    "worked_only_inside_assigned_directory": true,
+    "inspected_chili_home_copilot": false,
+    "inspected_git_repositories": false,
+    "inspected_prior_chili_fixtures_results_or_history": false,
+    "used_conversation_history_for_case_content": false,
+    "accessed_internet": false,
+    "ran_or_queried_chili_models": false,
+    "used_only_node_standard_runtime_apis": true
+  },
+  "authorship": "All cases and tests were authored from scratch for this isolated bundle; rejected triples were fully replaced with unrelated mechanisms.",
+  "validation_results": {
+    "baseline": "For all three current cases, public tests passed while feedback and final tests each failed when run separately.",
+    "intended_repairs": "Disposable repaired copies passed public, feedback, and final tests for all three current cases without test changes.",
+    "v2_replacement": "node_manifest_mass_precision was removed as a complete triple and replaced by node_base64url_blob_ids.",
+    "runner": "node --test"
+  },
+  "exact_files": [
+    "AUTHOR_ATTESTATION.json",
+    "cases/node_base64url_blob_ids.json",
+    "cases/node_policy_reload_consistency.json",
+    "cases/node_tls_client_auth_config.json",
+    "final_oracles/node_base64url_blob_ids.json",
+    "final_oracles/node_policy_reload_consistency.json",
+    "final_oracles/node_tls_client_auth_config.json",
+    "oracles/node_base64url_blob_ids.json",
+    "oracles/node_policy_reload_consistency.json",
+    "oracles/node_tls_client_auth_config.json"
+  ]
+}

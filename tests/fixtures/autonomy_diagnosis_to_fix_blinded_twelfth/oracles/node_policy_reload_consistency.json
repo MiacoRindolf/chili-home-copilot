@@ -1,0 +1,11 @@
+{
+    "expected_dimension":  "state",
+    "expected_files":  [
+                           "src/policy-store.mjs",
+                           "src/authorizer.mjs",
+                           "src/audit-log.mjs"
+                       ],
+    "feedback_files":  {
+                           "tests/feedback.test.mjs":  "import test from \u0027node:test\u0027;\nimport assert from \u0027node:assert/strict\u0027;\nimport { PolicyStore } from \u0027../src/policy-store.mjs\u0027;\nimport { AuditLog } from \u0027../src/audit-log.mjs\u0027;\nimport { Authorizer } from \u0027../src/authorizer.mjs\u0027;\n\ntest(\u0027a request keeps the policy that allowed it when a role is revoked mid-flight\u0027, async () =\u003e {\n  let releaseIdentity;\n  const identityReady = new Promise((resolve) =\u003e {\n    releaseIdentity = resolve;\n  });\n  const store = new PolicyStore({ \u0027/exports\u0027: [\u0027analyst\u0027] });\n  const audit = new AuditLog(store);\n  const authorizer = new Authorizer({\n    store,\n    audit,\n    resolveIdentity: () =\u003e identityReady,\n  });\n\n  const pending = authorizer.authorize({ token: \u0027slow\u0027, route: \u0027/exports\u0027 });\n  await Promise.resolve();\n  store.replace({ \u0027/exports\u0027: [\u0027admin\u0027] });\n  releaseIdentity({ subject: \u0027user-9\u0027, role: \u0027analyst\u0027 });\n\n  assert.deepEqual(await pending, {\n    subject: \u0027user-9\u0027,\n    route: \u0027/exports\u0027,\n    allowed: true,\n    policyVersion: 1,\n  });\n  assert.deepEqual(audit.entries(), [{\n    subject: \u0027user-9\u0027,\n    route: \u0027/exports\u0027,\n    allowed: true,\n    policyVersion: 1,\n  }]);\n});\n"
+                       }
+}

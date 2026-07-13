@@ -1,0 +1,16 @@
+{
+    "case_id":  "node_tls_client_auth_config",
+    "prompt":  "A service builds Node TLS listener options from a static startup configuration. Normal server-only TLS works, but required client authentication can be accepted without trust material and the resulting options do not consistently request and verify client certificates. Diagnose and repair policy validation and option mapping across the candidate files while preserving certificate/key passthrough and server-only behavior.",
+    "language":  "typescript",
+    "test_runner":  "node_test",
+    "candidate_paths":  [
+                            "src/tls-config.mjs",
+                            "src/tls-options.mjs"
+                        ],
+    "max_files":  2,
+    "repo_files":  {
+                       "src/tls-config.mjs":  "const CLIENT_AUTH_MODES = new Set([\u0027none\u0027, \u0027optional\u0027, \u0027required\u0027]);\n\nexport function validateTlsConfig(input) {\n  if (typeof input?.cert !== \u0027string\u0027 || input.cert.length === 0) {\n    throw new TypeError(\u0027cert is required\u0027);\n  }\n  if (typeof input?.key !== \u0027string\u0027 || input.key.length === 0) {\n    throw new TypeError(\u0027key is required\u0027);\n  }\n\n  const clientAuth = input.clientAuth ?? \u0027none\u0027;\n  if (!CLIENT_AUTH_MODES.has(clientAuth)) {\n    throw new TypeError(\u0027clientAuth must be none, optional, or required\u0027);\n  }\n\n  return {\n    cert: input.cert,\n    key: input.key,\n    clientAuth,\n    ...(input.ca ? { ca: input.ca } : {}),\n  };\n}\n",
+                       "src/tls-options.mjs":  "import { validateTlsConfig } from \u0027./tls-config.mjs\u0027;\n\nexport function buildTlsOptions(input) {\n  const config = validateTlsConfig(input);\n  return {\n    cert: config.cert,\n    key: config.key,\n    ...(config.ca ? { ca: config.ca } : {}),\n    requestCert: false,\n    rejectUnauthorized: config.clientAuth !== \u0027none\u0027,\n  };\n}\n",
+                       "tests/public.test.mjs":  "import test from \u0027node:test\u0027;\nimport assert from \u0027node:assert/strict\u0027;\nimport { validateTlsConfig } from \u0027../src/tls-config.mjs\u0027;\nimport { buildTlsOptions } from \u0027../src/tls-options.mjs\u0027;\n\ntest(\u0027defaults to server-only TLS and preserves credentials\u0027, () =\u003e {\n  assert.deepEqual(validateTlsConfig({ cert: \u0027server-cert\u0027, key: \u0027server-key\u0027 }), {\n    cert: \u0027server-cert\u0027,\n    key: \u0027server-key\u0027,\n    clientAuth: \u0027none\u0027,\n  });\n  assert.deepEqual(buildTlsOptions({ cert: \u0027server-cert\u0027, key: \u0027server-key\u0027 }), {\n    cert: \u0027server-cert\u0027,\n    key: \u0027server-key\u0027,\n    requestCert: false,\n    rejectUnauthorized: false,\n  });\n});\n\ntest(\u0027rejects missing credentials and unknown modes\u0027, () =\u003e {\n  assert.throws(() =\u003e validateTlsConfig({ key: \u0027server-key\u0027 }), /cert is required/);\n  assert.throws(\n    () =\u003e validateTlsConfig({ cert: \u0027server-cert\u0027, key: \u0027server-key\u0027, clientAuth: \u0027sometimes\u0027 }),\n    /clientAuth/,\n  );\n});\n"
+                   }
+}

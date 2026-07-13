@@ -1,0 +1,10 @@
+{
+    "expected_dimension":  "config",
+    "expected_files":  [
+                           "lib/proxy_policy.dart",
+                           "lib/request_origin.dart"
+                       ],
+    "feedback_files":  {
+                           "tests/feedback_test.dart":  "import \u0027../lib/proxy_policy.dart\u0027;\nimport \u0027../lib/request_origin.dart\u0027;\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final cidrPolicy = TrustedProxyPolicy([\u002710.42.16.0/20\u0027]);\n  check(cidrPolicy.trusts(\u002710.42.31.254\u0027), \u0027an address inside the configured range is trusted\u0027);\n  check(!cidrPolicy.trusts(\u002710.42.32.1\u0027), \u0027an address outside the configured range is rejected\u0027);\n\n  final resolver = ExternalOriginResolver(\n    TrustedProxyPolicy([\u002710.0.0.9\u0027, \u002710.0.1.4\u0027]),\n  );\n  final result = resolver.resolve(const RequestMetadata(\n    remoteAddress: \u002710.0.0.9\u0027,\n    scheme: \u0027http\u0027,\n    host: \u0027service.internal\u0027,\n    headers: {\n      \u0027x-forwarded-for\u0027: \u0027192.0.2.66, 203.0.113.40, 10.0.1.4\u0027,\n      \u0027x-forwarded-proto\u0027: \u0027http, https, http\u0027,\n      \u0027x-forwarded-host\u0027: \u0027spoof.invalid, api.example.test, edge.internal\u0027,\n    },\n  ));\n  check(result.clientAddress == \u0027203.0.113.40\u0027, \u0027the first untrusted hop is the client\u0027);\n  check(result.scheme == \u0027https\u0027, \u0027scheme is selected from the same trusted boundary\u0027);\n  check(result.host == \u0027api.example.test\u0027, \u0027host is selected from the same trusted boundary\u0027);\n}\n"
+                       }
+}

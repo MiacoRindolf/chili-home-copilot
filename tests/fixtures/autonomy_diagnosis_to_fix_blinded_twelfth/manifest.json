@@ -1,0 +1,90 @@
+{
+  "schema": "chili.diagnosis-to-fix-manifest.v3",
+  "reference_family": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/dart_decimal_apportionment.json",
+      "oracle": "oracles/dart_decimal_apportionment.json",
+      "final_oracle": "final_oracles/dart_decimal_apportionment.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/dart_release_reader_lifecycle.json",
+      "oracle": "oracles/dart_release_reader_lifecycle.json",
+      "final_oracle": "final_oracles/dart_release_reader_lifecycle.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/dart_trusted_proxy_chain.json",
+      "oracle": "oracles/dart_trusted_proxy_chain.json",
+      "final_oracle": "final_oracles/dart_trusted_proxy_chain.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/node_base64url_blob_ids.json",
+      "oracle": "oracles/node_base64url_blob_ids.json",
+      "final_oracle": "final_oracles/node_base64url_blob_ids.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/node_policy_reload_consistency.json",
+      "oracle": "oracles/node_policy_reload_consistency.json",
+      "final_oracle": "final_oracles/node_policy_reload_consistency.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/node_tls_client_auth_config.json",
+      "oracle": "oracles/node_tls_client_auth_config.json",
+      "final_oracle": "final_oracles/node_tls_client_auth_config.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/py_config_reload.json",
+      "oracle": "oracles/py_config_reload.json",
+      "final_oracle": "final_oracles/py_config_reload.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/py_tail_checkpoint.json",
+      "oracle": "oracles/py_tail_checkpoint.json",
+      "final_oracle": "final_oracles/py_tail_checkpoint.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/py_unordered_category_hierarchy.json",
+      "oracle": "oracles/py_unordered_category_hierarchy.json",
+      "final_oracle": "final_oracles/py_unordered_category_hierarchy.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/sql_notification_override_tristate.json",
+      "oracle": "oracles/sql_notification_override_tristate.json",
+      "final_oracle": "final_oracles/sql_notification_override_tristate.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/sql_tenant_stock_ownership.json",
+      "oracle": "oracles/sql_tenant_stock_ownership.json",
+      "final_oracle": "final_oracles/sql_tenant_stock_ownership.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/sql_ticket_archive_transitions.json",
+      "oracle": "oracles/sql_ticket_archive_transitions.json",
+      "final_oracle": "final_oracles/sql_ticket_archive_transitions.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    }
+  ]
+}

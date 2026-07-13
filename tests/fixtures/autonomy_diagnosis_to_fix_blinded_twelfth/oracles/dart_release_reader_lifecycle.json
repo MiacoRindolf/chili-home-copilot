@@ -1,0 +1,10 @@
+{
+    "expected_dimension":  "state",
+    "expected_files":  [
+                           "lib/release_handle.dart",
+                           "lib/release_manager.dart"
+                       ],
+    "feedback_files":  {
+                           "tests/feedback_test.dart":  "import \u0027../lib/release_manager.dart\u0027;\nimport \u0027../lib/release_store.dart\u0027;\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final store = ReleaseStore()\n    ..add(\u0027blue\u0027, {\u0027asset.txt\u0027: \u0027blue asset\u0027})\n    ..add(\u0027green\u0027, {\u0027asset.txt\u0027: \u0027green asset\u0027});\n  final manager = ReleaseManager(store)..activate(\u0027blue\u0027);\n  final inFlight = manager.openActive();\n\n  manager.activate(\u0027green\u0027);\n  check(store.contains(\u0027blue\u0027), \u0027a retired release remains while a reader uses it\u0027);\n  check(inFlight.read(\u0027asset.txt\u0027) == \u0027blue asset\u0027,\n      \u0027the existing reader keeps a stable release snapshot\u0027);\n\n  inFlight.close();\n  check(!store.contains(\u0027blue\u0027), \u0027the retired release is removed after its reader closes\u0027);\n  check(store.contains(\u0027green\u0027), \u0027closing an old reader does not remove the active release\u0027);\n}\n"
+                       }
+}

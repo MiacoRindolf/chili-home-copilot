@@ -1,0 +1,34 @@
+{
+  "author_role": "independent holdout author",
+  "assigned_language": "SQLite SQL",
+  "assigned_directory": "D:\\dev\\chili-twelfth-authors\\sql",
+  "process_isolation": {
+    "worked_only_in_assigned_directory": true,
+    "inspected_chili_home_copilot": false,
+    "inspected_any_git_repository": false,
+    "inspected_prior_chili_fixtures_results_or_history": false,
+    "used_prior_conversation_history": false,
+    "used_internet": false,
+    "ran_or_queried_chili_models": false,
+    "used_only_local_standard_sqlite_and_python_validation": true
+  },
+  "case_ids": [
+    "sql_ticket_archive_transitions",
+    "sql_tenant_stock_ownership",
+    "sql_notification_override_tristate"
+  ],
+  "exact_files": [
+    "AUTHOR_ATTESTATION.json",
+    "cases/sql_notification_override_tristate.json",
+    "cases/sql_tenant_stock_ownership.json",
+    "cases/sql_ticket_archive_transitions.json",
+    "final_oracles/sql_notification_override_tristate.json",
+    "final_oracles/sql_tenant_stock_ownership.json",
+    "final_oracles/sql_ticket_archive_transitions.json",
+    "oracles/sql_notification_override_tristate.json",
+    "oracles/sql_tenant_stock_ownership.json",
+    "oracles/sql_ticket_archive_transitions.json"
+  ],
+  "authored_case_count": 3,
+  "statement": "All three cases were designed from scratch for this assignment. Each embedded baseline repository is offline, uses Python's standard sqlite3 module for SQL execution, has two SQL-only candidate files, passes its public tests, and fails its disjoint feedback and final tests before repair."
+}

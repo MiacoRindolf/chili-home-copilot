@@ -1,0 +1,323 @@
+{
+  "receipt_schema": "chili_frozen_blinded_holdout_validator_receipt_v1",
+  "validation_date": "2026-07-12",
+  "verdict": "REJECT",
+  "scope": {
+    "read_directories": [
+      "D:\\dev\\chili-twelfth-authors\\python",
+      "D:\\dev\\chili-twelfth-authors\\node",
+      "D:\\dev\\chili-twelfth-authors\\dart",
+      "D:\\dev\\chili-twelfth-authors\\sql"
+    ],
+    "write_directory": "D:\\dev\\chili-twelfth-validation",
+    "author_artifacts_modified": false,
+    "git_repositories_inspected": false,
+    "prior_fixtures_results_or_history_inspected": false,
+    "conversation_history_used_for_validation": false,
+    "internet_accessed": false,
+    "chili_models_called": false,
+    "disposable_runs_removed": true
+  },
+  "summary": {
+    "case_count": 12,
+    "language_counts": {
+      "python": 3,
+      "node_esm": 3,
+      "dart": 3,
+      "sqlite_sql": 3
+    },
+    "authored_file_count": 40,
+    "schema_check": "PASS",
+    "author_attestation_check": "PASS",
+    "baseline_pattern_check": "PASS",
+    "test_path_disjointness_check": "PASS",
+    "candidate_ownership_check": "PASS",
+    "final_boundary_check": "PASS",
+    "safety_and_dependency_check": "PASS",
+    "disclosed_family_novelty_check": "REJECT",
+    "cross_suite_diversity_check": "REJECT",
+    "accepted_cases": 8,
+    "rejected_cases": 4
+  },
+  "rejection_reasons": [
+    {
+      "code": "DISCLOSED_FAMILY_REPLAY",
+      "cases": [
+        "py_stream_records",
+        "node_ndjson_chunk_ingest",
+        "dart_stream_record_framing"
+      ],
+      "finding": "All three center on incremental UTF-8 decoding plus logical record framing across arbitrary byte chunks. The Python and Node cases are direct NDJSON/JSON-sequence replays, and the Dart case is the same transport/framing mechanism with quoted delimited records. This is expressly excluded and is also a three-language semantic duplicate."
+    },
+    {
+      "code": "CROSS_SUITE_NEAR_DUPLICATE",
+      "cases": [
+        "py_config_reload",
+        "node_worker_env_reconfigure"
+      ],
+      "finding": "Both repairs require invalidating stale derived configuration after a live update and correctly distinguishing removal/inheritance from an ordinary override. Retain py_config_reload and replace node_worker_env_reconfigure to remove the cross-language mechanism replay."
+    }
+  ],
+  "structural_checks": {
+    "case_oracle_final_schema": {
+      "verdict": "PASS",
+      "case_keys": [
+        "case_id",
+        "prompt",
+        "language",
+        "test_runner",
+        "candidate_paths",
+        "max_files",
+        "repo_files"
+      ],
+      "oracle_keys": [
+        "expected_dimension",
+        "expected_files",
+        "feedback_files"
+      ],
+      "final_keys": [
+        "final_files"
+      ],
+      "finding": "Every artifact has the exact authored top-level schema, matching case/file identifiers, and exactly one test file in each tier."
+    },
+    "ownership": {
+      "verdict": "PASS",
+      "finding": "Every case has 2-3 unique candidate source owners; every candidate exists in repo_files; expected_files equals candidate_paths; and expected_files count is within max_files."
+    },
+    "tier_isolation": {
+      "verdict": "PASS",
+      "finding": "Public, feedback, and final test paths are pairwise disjoint in every case. Each final tier exercises an additional boundary beyond feedback."
+    },
+    "safety_dependencies": {
+      "verdict": "PASS",
+      "finding": "No case requires network access, premium services, unsafe operations, package installation, or non-runtime production dependencies. Pytest is used only as the declared test harness."
+    },
+    "author_attestations": {
+      "verdict": "PASS",
+      "finding": "All four authors attest assigned-directory-only work, no repository/history/prior-result access, no conversation-history use for case content, no internet access, and no CHILI model calls."
+    }
+  },
+  "baseline_execution": {
+    "method": "Each case-tier combination was materialized and invoked independently in a fresh directory beneath D:\\dev\\chili-twelfth-validation\\_runs. Only the selected tier test was invoked. The entire disposable run tree was removed before receipt creation.",
+    "totals": {
+      "public_pass": 12,
+      "public_fail": 0,
+      "feedback_fail": 12,
+      "feedback_pass": 0,
+      "final_fail": 12,
+      "final_pass": 0
+    },
+    "outcomes": [
+      {"case_id":"py_config_reload","public":{"exit_code":0,"detail":"3 passed in 0.04s"},"feedback":{"exit_code":1,"detail":"2 failed in 0.09s"},"final":{"exit_code":1,"detail":"3 failed in 0.09s"}},
+      {"case_id":"py_stream_records","public":{"exit_code":0,"detail":"3 passed in 0.01s"},"feedback":{"exit_code":1,"detail":"3 failed in 0.11s"},"final":{"exit_code":1,"detail":"2 failed, 1 passed in 0.09s"}},
+      {"case_id":"py_tail_checkpoint","public":{"exit_code":0,"detail":"2 passed in 0.03s"},"feedback":{"exit_code":1,"detail":"3 failed in 0.09s"},"final":{"exit_code":1,"detail":"2 failed in 0.49s"}},
+      {"case_id":"node_ndjson_chunk_ingest","public":{"exit_code":0,"detail":"node --test passed"},"feedback":{"exit_code":1,"detail":"node --test failed"},"final":{"exit_code":1,"detail":"node --test failed"}},
+      {"case_id":"node_policy_reload_consistency","public":{"exit_code":0,"detail":"node --test passed"},"feedback":{"exit_code":1,"detail":"node --test failed"},"final":{"exit_code":1,"detail":"node --test failed"}},
+      {"case_id":"node_worker_env_reconfigure","public":{"exit_code":0,"detail":"node --test passed"},"feedback":{"exit_code":1,"detail":"node --test failed"},"final":{"exit_code":1,"detail":"node --test failed"}},
+      {"case_id":"dart_release_reader_lifecycle","public":{"exit_code":0,"detail":"dart process passed"},"feedback":{"exit_code":255,"detail":"dart process failed at retired-release reader retention"},"final":{"exit_code":255,"detail":"dart process failed at independent retired-generation retention"}},
+      {"case_id":"dart_stream_record_framing","public":{"exit_code":0,"detail":"dart process passed"},"feedback":{"exit_code":255,"detail":"dart process failed at split UTF-8 code point"},"final":{"exit_code":255,"detail":"dart process failed at quoted embedded newline framing"}},
+      {"case_id":"dart_trusted_proxy_chain","public":{"exit_code":0,"detail":"dart process passed"},"feedback":{"exit_code":255,"detail":"dart process failed at IPv4 CIDR membership"},"final":{"exit_code":255,"detail":"dart process failed at IPv6 CIDR membership"}},
+      {"case_id":"sql_notification_override_tristate","public":{"exit_code":0,"detail":"3 passed in 0.05s"},"feedback":{"exit_code":1,"detail":"2 failed in 0.15s"},"final":{"exit_code":1,"detail":"2 failed in 0.41s"}},
+      {"case_id":"sql_tenant_stock_ownership","public":{"exit_code":0,"detail":"2 passed in 0.08s"},"feedback":{"exit_code":1,"detail":"2 failed in 0.22s"},"final":{"exit_code":1,"detail":"2 failed in 0.20s"}},
+      {"case_id":"sql_ticket_archive_transitions","public":{"exit_code":0,"detail":"2 passed in 0.19s"},"feedback":{"exit_code":1,"detail":"2 failed in 0.82s"},"final":{"exit_code":1,"detail":"2 failed in 0.49s"}}
+    ]
+  },
+  "case_findings": [
+    {
+      "case_id": "py_config_reload",
+      "language": "python",
+      "verdict": "PASS",
+      "expected_dimension": "config",
+      "mechanism": "Live configuration replacement, derived endpoint rebinding, and default restoration for omitted overrides.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Removal of prior overrides and empty replacement reset defaults, beyond feedback's changed-prefix rebinding."},
+      "overlap_novelty": {"classification":"RETAINED_CANONICAL_IN_NEAR_DUPLICATE_PAIR","related_cases":["node_worker_env_reconfigure"],"verdict":"PASS"},
+      "correction_request": null
+    },
+    {
+      "case_id": "py_stream_records",
+      "language": "python",
+      "verdict": "REJECT",
+      "expected_dimension": "data",
+      "mechanism": "Incremental NDJSON parsing across arbitrary chunks, split UTF-8 sequences, and terminal flushing.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Valid unterminated final record and idempotent terminal flush."},
+      "overlap_novelty": {"classification":"DISCLOSED_FAMILY_REPLAY_AND_CROSS_SUITE_NEAR_DUPLICATE","related_cases":["node_ndjson_chunk_ingest","dart_stream_record_framing"],"verdict":"REJECT"},
+      "correction_request": "Replace the complete case/oracle/final triple with a new Python data case unrelated to byte-chunk decoding, UTF-8 carryover, delimiter or record framing, JSON sequences, or terminal stream flushing. Keep the authored schemas, 2-4 candidate owners, feasible expected_files/max_files, disjoint tiers, the required baseline pattern, and a materially new final boundary. Update the Python attestation and exact_files list."
+    },
+    {
+      "case_id": "py_tail_checkpoint",
+      "language": "python",
+      "verdict": "PASS",
+      "expected_dimension": "state",
+      "mechanism": "Checkpoint provenance tied to file identity with replacement and in-place truncation reconciliation.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Same-identity truncation with an offset beyond EOF, distinct from replacement-file provenance."},
+      "overlap_novelty": {"classification":"NOVEL","related_cases":[],"verdict":"PASS"},
+      "correction_request": null
+    },
+    {
+      "case_id": "node_ndjson_chunk_ingest",
+      "language": "node_esm",
+      "verdict": "REJECT",
+      "expected_dimension": "data",
+      "mechanism": "Incremental NDJSON ingestion across arbitrary byte chunks, split UTF-8 sequences, and terminal decoder flush/error handling.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Malformed terminal UTF-8 rejection beyond split-scalar and unterminated-record feedback."},
+      "overlap_novelty": {"classification":"DISCLOSED_FAMILY_REPLAY_AND_CROSS_SUITE_NEAR_DUPLICATE","related_cases":["py_stream_records","dart_stream_record_framing"],"verdict":"REJECT"},
+      "correction_request": "Replace the complete case/oracle/final triple with a new Node ESM data case unrelated to byte-chunk decoding, UTF-8 carryover, delimiter or record framing, NDJSON or JSON sequences, or terminal stream flushing. Keep the authored schemas, 2-4 candidate owners, feasible expected_files/max_files, disjoint tiers, the required baseline pattern, and a materially new final boundary. Update the Node attestation and exact_files list."
+    },
+    {
+      "case_id": "node_policy_reload_consistency",
+      "language": "node_esm",
+      "verdict": "PASS",
+      "expected_dimension": "state",
+      "mechanism": "Request-scoped immutable policy generation across an asynchronous identity lookup, with matching audit provenance.",
+      "ownership": {"candidate_count":3,"expected_file_count":3,"max_files":3,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Absent-route insertion during lookup exercises the missing-rule branch and opposite transition direction from role revocation."},
+      "overlap_novelty": {"classification":"NOVEL","related_cases":[],"verdict":"PASS"},
+      "correction_request": null
+    },
+    {
+      "case_id": "node_worker_env_reconfigure",
+      "language": "node_esm",
+      "verdict": "REJECT",
+      "expected_dimension": "config",
+      "mechanism": "Live layered environment reconfiguration, stale prepared-state invalidation, and null/undefined removal versus inheritance semantics.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Per-launch suppression with null, inheritance with undefined, and empty-string preservation."},
+      "overlap_novelty": {"classification":"CROSS_SUITE_NEAR_DUPLICATE","related_cases":["py_config_reload"],"verdict":"REJECT"},
+      "correction_request": "Replace the complete case/oracle/final triple with a new Node ESM config case that does not use runtime reload or reconfigure, cached or derived configuration invalidation, override omission/removal/inheritance, or layered environment semantics. Keep the authored schemas, 2-4 candidate owners, feasible expected_files/max_files, disjoint tiers, the required baseline pattern, and a materially new final boundary. Update the Node attestation and exact_files list."
+    },
+    {
+      "case_id": "dart_release_reader_lifecycle",
+      "language": "dart",
+      "verdict": "PASS",
+      "expected_dimension": "state",
+      "mechanism": "Generation-specific reader accounting with deferred reclamation of retired immutable releases and idempotent handle closure.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Multiple readers across multiple retired generations plus repeated closure accounting."},
+      "overlap_novelty": {"classification":"NOVEL","related_cases":[],"verdict":"PASS"},
+      "correction_request": null
+    },
+    {
+      "case_id": "dart_stream_record_framing",
+      "language": "dart",
+      "verdict": "REJECT",
+      "expected_dimension": "data",
+      "mechanism": "Incremental UTF-8 byte decoding and quoted delimited-record framing across arbitrary chunks and CRLF boundaries.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Quoted embedded newlines, split CRLF, and malformed terminal UTF-8."},
+      "overlap_novelty": {"classification":"DISCLOSED_FAMILY_REPLAY_AND_CROSS_SUITE_NEAR_DUPLICATE","related_cases":["py_stream_records","node_ndjson_chunk_ingest"],"verdict":"REJECT"},
+      "correction_request": "Replace the complete case/oracle/final triple with a new Dart data case unrelated to byte-chunk decoding, UTF-8 carryover, delimiter or record framing, quoted multiline records, JSON sequences, CRLF chunk boundaries, or terminal stream flushing. Keep the authored schemas, 2-4 candidate owners, feasible expected_files/max_files, disjoint tiers, the required baseline pattern, and a materially new final boundary. Update the Dart attestation and exact_files list."
+    },
+    {
+      "case_id": "dart_trusted_proxy_chain",
+      "language": "dart",
+      "verdict": "PASS",
+      "expected_dimension": "config",
+      "mechanism": "IPv4/IPv6 CIDR trust matching and hop-aligned forwarded-origin selection at the first untrusted boundary.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"IPv6 CIDR membership and IPv6 forwarded chain alignment beyond IPv4 feedback."},
+      "overlap_novelty": {"classification":"NOVEL","related_cases":[],"verdict":"PASS"},
+      "correction_request": null
+    },
+    {
+      "case_id": "sql_notification_override_tristate",
+      "language": "sqlite_sql",
+      "verdict": "PASS",
+      "expected_dimension": "config",
+      "mechanism": "Tri-state hierarchical configuration with retained NULL provenance and explicit false precedence.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Workspace-to-system inheritance edge beyond member-to-workspace feedback."},
+      "overlap_novelty": {"classification":"NOVEL","related_cases":[],"verdict":"PASS"},
+      "correction_request": null
+    },
+    {
+      "case_id": "sql_tenant_stock_ownership",
+      "language": "sqlite_sql",
+      "verdict": "PASS",
+      "expected_dimension": "data",
+      "mechanism": "Composite tenant ownership enforced by relational identity and tenant-aligned projection joins.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Parent deletion and identity mutation under existing child stock beyond child insertion and projection feedback."},
+      "overlap_novelty": {"classification":"NOVEL","related_cases":[],"verdict":"PASS"},
+      "correction_request": null
+    },
+    {
+      "case_id": "sql_ticket_archive_transitions",
+      "language": "sqlite_sql",
+      "verdict": "PASS",
+      "expected_dimension": "state",
+      "mechanism": "Stored active-count trigger maintenance across archive/restore/project transitions with matching active-only dashboard projection.",
+      "ownership": {"candidate_count":2,"expected_file_count":2,"max_files":2,"verdict":"PASS"},
+      "tier_fairness": {"verdict":"PASS","final_boundary":"Archived moves and combined restore-plus-reassignment transition composition."},
+      "overlap_novelty": {"classification":"NOVEL","related_cases":[],"verdict":"PASS"},
+      "correction_request": null
+    }
+  ],
+  "correction_requests": [
+    {
+      "author_directory": "python",
+      "case_id": "py_stream_records",
+      "action": "Replace the entire case/oracle/final triple with a mechanism outside all disclosed families and outside streaming byte/UTF-8/record framing. Re-run all three baseline tiers independently and update AUTHOR_ATTESTATION.json."
+    },
+    {
+      "author_directory": "node",
+      "case_id": "node_ndjson_chunk_ingest",
+      "action": "Replace the entire case/oracle/final triple with a mechanism outside all disclosed families and outside streaming byte/UTF-8/record framing. Re-run all three baseline tiers independently and update AUTHOR_ATTESTATION.json."
+    },
+    {
+      "author_directory": "node",
+      "case_id": "node_worker_env_reconfigure",
+      "action": "Replace the entire case/oracle/final triple with a config mechanism unrelated to live reload, stale derived configuration, and omission/removal/inheritance layering. Re-run all three baseline tiers independently and update AUTHOR_ATTESTATION.json."
+    },
+    {
+      "author_directory": "dart",
+      "case_id": "dart_stream_record_framing",
+      "action": "Replace the entire case/oracle/final triple with a mechanism outside all disclosed families and outside streaming byte/UTF-8/record framing. Re-run all three baseline tiers independently and update AUTHOR_ATTESTATION.json."
+    }
+  ],
+  "input_file_hashes": [
+    {"path":"dart/AUTHOR_ATTESTATION.json","sha256":"fa983ecd1e07a0adbd697f5789c179ab1a3598f1321f64e7bbd4bf5dcc65662f","bytes":1864},
+    {"path":"dart/cases/dart_release_reader_lifecycle.json","sha256":"e67aaecc0249f1a7cb0fb61b74d47dc10d2a5bc946a3478066d08d784b123277","bytes":3681},
+    {"path":"dart/cases/dart_stream_record_framing.json","sha256":"da23abad1ec6d02f50677f6cb45d8d3acdf73a5d5ffc88f034a1cf1158b82553","bytes":2436},
+    {"path":"dart/cases/dart_trusted_proxy_chain.json","sha256":"fe905d47bbd43b8a1bb86cd298cae29c217267e9b40e63ecc13910fcdd8090de","bytes":4439},
+    {"path":"dart/final_oracles/dart_release_reader_lifecycle.json","sha256":"1e7f665ecbee9b80b1dbc5b062da685a8679825dc6e581b0a5c863123212cd1d","bytes":1555},
+    {"path":"dart/final_oracles/dart_stream_record_framing.json","sha256":"7dce88c2cc20cff362ee050aeed05d127785fcc823546e1a2c439e2e08e7a640","bytes":1349},
+    {"path":"dart/final_oracles/dart_trusted_proxy_chain.json","sha256":"54dadd8e29c9eb36ec26043a74a5f31f5c76f359559fc4b577fd2afc3fa84dc2","bytes":1130},
+    {"path":"dart/oracles/dart_release_reader_lifecycle.json","sha256":"74892d7b2d951c4691b5a7374c310f1d8495d33f38de5c7e01b7173ef68d6960","bytes":1057},
+    {"path":"dart/oracles/dart_stream_record_framing.json","sha256":"a47b838b163ce873357133970d303f54077cdb2cd85ea3a84b9af2bcd20c122b","bytes":1339},
+    {"path":"dart/oracles/dart_trusted_proxy_chain.json","sha256":"672feb1ce5b04633688021d4da251a77f6e5fb84ec8ae33525e14d307483ae01","bytes":1375},
+    {"path":"node/AUTHOR_ATTESTATION.json","sha256":"bda29b8eff543b1658a08ad471ffafbaf2d8f2190dae95ac910461741c18a45a","bytes":1517},
+    {"path":"node/cases/node_ndjson_chunk_ingest.json","sha256":"0af2c964a416b9bd4927d98fe91d8b2d40af43b24498d9c98d2425b0dc97686f","bytes":3128},
+    {"path":"node/cases/node_policy_reload_consistency.json","sha256":"0a2552a5bc0ace443af09c431c48371795da2d5017cb55b31a35dcb71a769ff2","bytes":3520},
+    {"path":"node/cases/node_worker_env_reconfigure.json","sha256":"a841e078565b7b9e2643ee44447e326c3f3e16efb1eed5187a8d2b86841187e4","bytes":2970},
+    {"path":"node/final_oracles/node_ndjson_chunk_ingest.json","sha256":"d6b940d1a3e1db56c7caad705a9c406fcec219b150ecf79fd1ebf75b1ac14e78","bytes":547},
+    {"path":"node/final_oracles/node_policy_reload_consistency.json","sha256":"c65bb4eefa54b59377daa8170993c665bef70a041758e094cb2ac0deb88e460f","bytes":1239},
+    {"path":"node/final_oracles/node_worker_env_reconfigure.json","sha256":"136111cfaf910db25e44210ee60297f0880c20a0f5cebfb693ce15a9c1ae3311","bytes":853},
+    {"path":"node/oracles/node_ndjson_chunk_ingest.json","sha256":"7929eceb5d532325cf1f63dcdc25d63283e32f7a895e692744421ffa2ddc59e5","bytes":1180},
+    {"path":"node/oracles/node_policy_reload_consistency.json","sha256":"581c2dc23144047cba3667b4016c48f3a7738baf466b072463fac3a70252ea10","bytes":1359},
+    {"path":"node/oracles/node_worker_env_reconfigure.json","sha256":"a52ef5dbd855474574fbe308fb78adbd567352fa1aaa819cd246415b418ae63a","bytes":914},
+    {"path":"python/AUTHOR_ATTESTATION.json","sha256":"8d151cefc3d33940820d9fdbaddce62205196d821b6fe5fae3ab59989f2107a5","bytes":1893},
+    {"path":"python/cases/py_config_reload.json","sha256":"581a889150674816b9e6148e3a98298835374f5db6760eea4e0e3b7c0cd2fbd4","bytes":3661},
+    {"path":"python/cases/py_stream_records.json","sha256":"e00b11ea85be0e5190c38d036057a5d7f761148cf8f906d6a3bfe533962f3dfd","bytes":1952},
+    {"path":"python/cases/py_tail_checkpoint.json","sha256":"aa87a5f6f5054bc82cb78352af380baf9f5372a2ce430063e5ce1fe19c68a8e7","bytes":2692},
+    {"path":"python/final_oracles/py_config_reload.json","sha256":"aaf7c9ecca9addc7019d8cae8e7261b45088458e24dc3a6559edf4050cf5c051","bytes":1392},
+    {"path":"python/final_oracles/py_stream_records.json","sha256":"ff44985b7a516948d6bb4461ddffe19f2a8bf0f39d26aadff0dcd5f7a27095ee","bytes":711},
+    {"path":"python/final_oracles/py_tail_checkpoint.json","sha256":"990838d2c86b46c9de3556a1324e44b23e61f0bc5a25657a4bcff350ecfdb63a","bytes":1163},
+    {"path":"python/oracles/py_config_reload.json","sha256":"1aec36eb7c1d355fb4ca25f84ab7198ecec8ba6c0ffc62bba72f9d8ee2530cdc","bytes":1243},
+    {"path":"python/oracles/py_stream_records.json","sha256":"da9556f9ce34490699fe6697a5603728b7363b289d2542d651391648709bb16f","bytes":1182},
+    {"path":"python/oracles/py_tail_checkpoint.json","sha256":"5688fd799f98e208f0282cbb4bd5e9d4061f84a94f4a0219a63c53abe300b4d9","bytes":1688},
+    {"path":"sql/AUTHOR_ATTESTATION.json","sha256":"5a6fdb587eaa38cd870ff21eafcf8a4f60d5d91217136acad9a575e9803ab01b","bytes":1553},
+    {"path":"sql/cases/sql_notification_override_tristate.json","sha256":"95a26634fb377bd6b5d5dff7eaf0e3e500ed961809a4afc11a536234c6c05b7f","bytes":4172},
+    {"path":"sql/cases/sql_tenant_stock_ownership.json","sha256":"c80f89a027415009deae63b8c895412edcd9c4360b64f60c664d122bb52ceab3","bytes":3009},
+    {"path":"sql/cases/sql_ticket_archive_transitions.json","sha256":"3c546d29576940c92babc832b0aca0a9af317badf154f72afff63bf9b58ecc4d","bytes":4614},
+    {"path":"sql/final_oracles/sql_notification_override_tristate.json","sha256":"5c3805272fc9d86a20f655c1e4fd8c84fad44c6f94f5b2eb44139b0e25dc8867","bytes":1339},
+    {"path":"sql/final_oracles/sql_tenant_stock_ownership.json","sha256":"0ddde2be64ef6639a9ed89ba609faaa6e1300d79eeb259c15e911edff95e97b2","bytes":1369},
+    {"path":"sql/final_oracles/sql_ticket_archive_transitions.json","sha256":"d53b1a63031ad6f9aa39739137769a98dfb639792466f480521d749ae5671f64","bytes":1418},
+    {"path":"sql/oracles/sql_notification_override_tristate.json","sha256":"df2259e0c362a62ade10ad3aceb235dc1f908df190db866021e1f03ec1e2329e","bytes":1634},
+    {"path":"sql/oracles/sql_tenant_stock_ownership.json","sha256":"5d60aa370b80b4d4cc9a737c98e36091f14c6b19b3bc47b372ab13ca700f04d5","bytes":1564},
+    {"path":"sql/oracles/sql_ticket_archive_transitions.json","sha256":"b0b52631d45d820cff7a5e50c646d3017fa4214a2edb0b087f8005a5144e6d91","bytes":1772}
+  ]
+}

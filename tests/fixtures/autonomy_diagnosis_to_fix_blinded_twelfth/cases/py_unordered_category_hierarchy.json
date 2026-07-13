@@ -1,0 +1,16 @@
+{
+  "case_id": "py_unordered_category_hierarchy",
+  "prompt": "A category export may list children before their parents. The loader currently discards a parent reference unless that parent was seen earlier, and the path builder promotes unresolved children to roots. Repair loading and path construction so hierarchy is determined by category references rather than row order. Preserve the public API and edit only candidate source files.",
+  "language": "python",
+  "test_runner": "pytest",
+  "candidate_paths": [
+    "category_loader.py",
+    "category_paths.py"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "category_loader.py": "def load_category_rows(raw_rows):\n    loaded = []\n    seen_ids = set()\n\n    for raw in raw_rows:\n        category_id = raw[\"id\"]\n        name = raw[\"name\"].strip()\n        parent_id = raw.get(\"parent_id\")\n        if parent_id not in seen_ids:\n            parent_id = None\n\n        loaded.append(\n            {\n                \"id\": category_id,\n                \"name\": name,\n                \"parent_id\": parent_id,\n            }\n        )\n        seen_ids.add(category_id)\n\n    return loaded\n",
+    "category_paths.py": "def build_category_paths(rows):\n    paths = {}\n\n    for row in rows:\n        parent_id = row[\"parent_id\"]\n        if parent_id is not None and parent_id in paths:\n            paths[row[\"id\"]] = f\"{paths[parent_id]}/{row['name']}\"\n        else:\n            paths[row[\"id\"]] = row[\"name\"]\n\n    return paths\n",
+    "tests/test_public.py": "from category_loader import load_category_rows\nfrom category_paths import build_category_paths\n\n\ndef test_loader_normalizes_parent_first_rows():\n    rows = load_category_rows(\n        [\n            {\"id\": \"home\", \"name\": \" Home \", \"parent_id\": None},\n            {\"id\": \"lighting\", \"name\": \"Lighting\", \"parent_id\": \"home\"},\n        ]\n    )\n\n    assert rows == [\n        {\"id\": \"home\", \"name\": \"Home\", \"parent_id\": None},\n        {\"id\": \"lighting\", \"name\": \"Lighting\", \"parent_id\": \"home\"},\n    ]\n\n\ndef test_path_builder_handles_parent_before_child():\n    rows = [\n        {\"id\": \"home\", \"name\": \"Home\", \"parent_id\": None},\n        {\"id\": \"lighting\", \"name\": \"Lighting\", \"parent_id\": \"home\"},\n        {\"id\": \"lamps\", \"name\": \"Lamps\", \"parent_id\": \"lighting\"},\n    ]\n\n    assert build_category_paths(rows) == {\n        \"home\": \"Home\",\n        \"lighting\": \"Home/Lighting\",\n        \"lamps\": \"Home/Lighting/Lamps\",\n    }\n\n\ndef test_loaded_rows_can_be_used_to_build_paths():\n    rows = load_category_rows(\n        [\n            {\"id\": \"garden\", \"name\": \"Garden\", \"parent_id\": None},\n            {\"id\": \"tools\", \"name\": \"Tools\", \"parent_id\": \"garden\"},\n        ]\n    )\n\n    assert build_category_paths(rows)[\"tools\"] == \"Garden/Tools\"\n"
+  }
+}

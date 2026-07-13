@@ -1,0 +1,10 @@
+{
+  "expected_dimension": "config",
+  "expected_files": [
+    "settings_store.py",
+    "gateway_runtime.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "import json\n\nfrom gateway_runtime import GatewayRuntime\nfrom settings_store import SettingsStore\n\n\ndef write_config(path, payload):\n    path.write_text(json.dumps(payload), encoding=\"utf-8\")\n\n\ndef test_reload_rebinds_endpoint_policy_to_new_prefix(tmp_path):\n    path = tmp_path / \"gateway.json\"\n    write_config(path, {\"api_prefix\": \"/blue\"})\n    runtime = GatewayRuntime(SettingsStore(path))\n    assert runtime.endpoint_for(\"jobs\") == \"/blue/jobs\"\n\n    write_config(path, {\"api_prefix\": \"/green\"})\n    runtime.reload()\n\n    assert runtime.endpoint_for(\"jobs\") == \"/green/jobs\"\n\n\ndef test_multiple_reloads_do_not_leave_the_first_route_active(tmp_path):\n    path = tmp_path / \"gateway.json\"\n    write_config(path, {\"api_prefix\": \"/one\"})\n    runtime = GatewayRuntime(SettingsStore(path))\n\n    write_config(path, {\"api_prefix\": \"/two\"})\n    runtime.reload()\n    write_config(path, {\"api_prefix\": \"/three\"})\n    runtime.reload()\n\n    assert runtime.endpoint_for(\"status\") == \"/three/status\"\n"
+  }
+}

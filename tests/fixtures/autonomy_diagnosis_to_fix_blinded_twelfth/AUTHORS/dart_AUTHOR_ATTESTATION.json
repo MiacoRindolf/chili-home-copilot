@@ -1,0 +1,48 @@
+{
+  "author_role": "independent holdout author",
+  "assigned_language": "Dart",
+  "assigned_directory": "D:\\dev\\chili-twelfth-authors\\dart",
+  "process_isolation": {
+    "read_scope": "Only files created inside the assigned directory were read during authoring and validation.",
+    "excluded_workspace": "D:\\dev\\chili-home-copilot",
+    "git_repositories_inspected": false,
+    "prior_chili_fixtures_results_or_history_inspected": false,
+    "conversation_history_used": false,
+    "internet_used": false,
+    "chili_models_run_or_queried": false
+  },
+  "validation": {
+    "runtime": "Dart SDK 3.11.1",
+    "offline": true,
+    "plain_dart_scripts": true,
+    "pub_dependencies": false,
+    "baseline_public": {
+      "dart_trusted_proxy_chain": "pass",
+      "dart_decimal_apportionment": "pass",
+      "dart_release_reader_lifecycle": "pass"
+    },
+    "baseline_feedback": {
+      "dart_trusted_proxy_chain": "fail",
+      "dart_decimal_apportionment": "fail",
+      "dart_release_reader_lifecycle": "fail"
+    },
+    "baseline_final": {
+      "dart_trusted_proxy_chain": "fail",
+      "dart_decimal_apportionment": "fail",
+      "dart_release_reader_lifecycle": "fail"
+    },
+    "reference_repairs": "Applied only in disposable validation copies; all public, feedback, and final scripts passed for all three cases. Disposable repairs were not retained."
+  },
+  "exact_files": [
+    "AUTHOR_ATTESTATION.json",
+    "cases/dart_release_reader_lifecycle.json",
+    "cases/dart_decimal_apportionment.json",
+    "cases/dart_trusted_proxy_chain.json",
+    "oracles/dart_release_reader_lifecycle.json",
+    "oracles/dart_decimal_apportionment.json",
+    "oracles/dart_trusted_proxy_chain.json",
+    "final_oracles/dart_release_reader_lifecycle.json",
+    "final_oracles/dart_decimal_apportionment.json",
+    "final_oracles/dart_trusted_proxy_chain.json"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "case_id": "py_tail_checkpoint",
+  "prompt": "A file tailer persists a JSON checkpoint so a new process can resume reading. When the active path is replaced, the restarted reader applies the previous byte offset to unrelated file contents and skips data. Repair checkpoint provenance and seek reconciliation while preserving normal append/resume behavior and existing callers. Edit only candidate source files.",
+  "language": "python",
+  "test_runner": "pytest",
+  "candidate_paths": [
+    "tail_checkpoint.py",
+    "file_tailer.py"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "tail_checkpoint.py": "import json\nfrom dataclasses import dataclass\nfrom pathlib import Path\n\n\n@dataclass(frozen=True)\nclass TailCheckpoint:\n    offset: int\n\n\nclass CheckpointStore:\n    def __init__(self, path):\n        self.path = Path(path)\n\n    def load(self):\n        if not self.path.exists():\n            return TailCheckpoint(offset=0)\n        payload = json.loads(self.path.read_text(encoding=\"utf-8\"))\n        return TailCheckpoint(offset=payload[\"offset\"])\n\n    def save(self, offset):\n        self.path.write_text(json.dumps({\"offset\": offset}), encoding=\"utf-8\")\n",
+    "file_tailer.py": "from tail_checkpoint import CheckpointStore\n\n\nclass FileTailer:\n    def __init__(self, source_path, checkpoint_path):\n        self.source_path = source_path\n        self.checkpoints = CheckpointStore(checkpoint_path)\n\n    def read_new(self):\n        checkpoint = self.checkpoints.load()\n        with open(self.source_path, \"r\", encoding=\"utf-8\") as source:\n            source.seek(checkpoint.offset)\n            lines = [line.rstrip(\"\\n\") for line in source]\n            self.checkpoints.save(source.tell())\n        return lines\n",
+    "tests/test_public.py": "from file_tailer import FileTailer\n\n\ndef test_first_read_returns_existing_lines(tmp_path):\n    source = tmp_path / \"service.log\"\n    checkpoint = tmp_path / \"service.cursor\"\n    source.write_text(\"ready\\nserving\\n\", encoding=\"utf-8\")\n\n    assert FileTailer(source, checkpoint).read_new() == [\"ready\", \"serving\"]\n\n\ndef test_subsequent_reader_resumes_after_saved_offset(tmp_path):\n    source = tmp_path / \"service.log\"\n    checkpoint = tmp_path / \"service.cursor\"\n    source.write_text(\"first\\n\", encoding=\"utf-8\")\n    assert FileTailer(source, checkpoint).read_new() == [\"first\"]\n\n    with source.open(\"a\", encoding=\"utf-8\") as handle:\n        handle.write(\"second\\nthird\\n\")\n\n    assert FileTailer(source, checkpoint).read_new() == [\"second\", \"third\"]\n    assert FileTailer(source, checkpoint).read_new() == []\n"
+  }
+}

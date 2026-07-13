@@ -1,0 +1,6 @@
+{
+    "case_id":  "node_base64url_blob_ids",
+    "final_files":  {
+                        "tests/final.test.mjs":  "import test from \u0027node:test\u0027;\nimport assert from \u0027node:assert/strict\u0027;\nimport { decodeBase64Url } from \u0027../src/base64url.mjs\u0027;\nimport { parseBlobLocator } from \u0027../src/blob-locator.mjs\u0027;\n\ntest(\u0027rejects aliases with nonzero unused bits in the last character\u0027, () =\u003e {\n  const canonical = \u0027AAAAAAAAAAAAAAAAAAAAAA\u0027;\n  const alias = \u0027AAAAAAAAAAAAAAAAAAAAAB\u0027;\n  assert.deepEqual(Buffer.from(alias, \u0027base64url\u0027), Buffer.from(canonical, \u0027base64url\u0027));\n\n  assert.throws(() =\u003e decodeBase64Url(alias), /canonical|base64url/i);\n  assert.throws(() =\u003e parseBlobLocator(\u0027images:\u0027 + alias), /canonical|base64url/i);\n});\n"
+                    }
+}

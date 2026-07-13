@@ -1,0 +1,10 @@
+{
+    "expected_dimension":  "config",
+    "expected_files":  [
+                           "src/tls-config.mjs",
+                           "src/tls-options.mjs"
+                       ],
+    "feedback_files":  {
+                           "tests/feedback.test.mjs":  "import test from \u0027node:test\u0027;\nimport assert from \u0027node:assert/strict\u0027;\nimport { validateTlsConfig } from \u0027../src/tls-config.mjs\u0027;\nimport { buildTlsOptions } from \u0027../src/tls-options.mjs\u0027;\n\ntest(\u0027required client authentication needs explicit trust material\u0027, () =\u003e {\n  assert.throws(\n    () =\u003e validateTlsConfig({\n      cert: \u0027server-cert\u0027,\n      key: \u0027server-key\u0027,\n      clientAuth: \u0027required\u0027,\n    }),\n    /ca|trust/i,\n  );\n});\n\ntest(\u0027required mode requests a certificate and rejects untrusted peers\u0027, () =\u003e {\n  assert.deepEqual(buildTlsOptions({\n    cert: \u0027server-cert\u0027,\n    key: \u0027server-key\u0027,\n    ca: \u0027client-ca\u0027,\n    clientAuth: \u0027required\u0027,\n  }), {\n    cert: \u0027server-cert\u0027,\n    key: \u0027server-key\u0027,\n    ca: \u0027client-ca\u0027,\n    requestCert: true,\n    rejectUnauthorized: true,\n  });\n});\n"
+                       }
+}

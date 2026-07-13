@@ -1,0 +1,56 @@
+{
+  "assigned_language": "python",
+  "assigned_directory": "D:\\dev\\chili-twelfth-authors\\python",
+  "case_ids": [
+    "py_config_reload",
+    "py_unordered_category_hierarchy",
+    "py_tail_checkpoint"
+  ],
+  "process_isolation": {
+    "files_or_directories_outside_assigned_directory_read": false,
+    "initial_directory_creation": "The assigned directory was created at its exact requested path; no surrounding directory contents were listed or read.",
+    "git_repositories_inspected": false,
+    "prior_chili_fixtures_results_or_history_inspected": false,
+    "prior_conversation_history_inspected": false,
+    "internet_accessed": false,
+    "chili_models_run_or_queried": false,
+    "standard_runtime_only": true
+  },
+  "validation": {
+    "baseline": {
+      "py_config_reload": {
+        "public": "3 passed",
+        "feedback": "suite failed (2 failing tests)",
+        "final": "suite failed (3 failing tests)"
+      },
+      "py_unordered_category_hierarchy": {
+        "public": "3 passed",
+        "feedback": "suite failed (3 failing tests)",
+        "final": "suite failed (2 failing tests)"
+      },
+      "py_tail_checkpoint": {
+        "public": "2 passed",
+        "feedback": "suite failed (3 failing tests)",
+        "final": "suite failed (2 failing tests)"
+      }
+    },
+    "intended_repairs": {
+      "py_config_reload": "8 passed",
+      "py_unordered_category_hierarchy": "8 passed",
+      "py_tail_checkpoint": "7 passed"
+    }
+  },
+  "exact_files": [
+    "cases/py_config_reload.json",
+    "cases/py_unordered_category_hierarchy.json",
+    "cases/py_tail_checkpoint.json",
+    "oracles/py_config_reload.json",
+    "oracles/py_unordered_category_hierarchy.json",
+    "oracles/py_tail_checkpoint.json",
+    "final_oracles/py_config_reload.json",
+    "final_oracles/py_unordered_category_hierarchy.json",
+    "final_oracles/py_tail_checkpoint.json",
+    "AUTHOR_ATTESTATION.json"
+  ],
+  "revision_note": "The rejected py_sparse_catalog_updates case, oracle, and final oracle were removed and replaced by the unrelated unordered category hierarchy DATA case."
+}

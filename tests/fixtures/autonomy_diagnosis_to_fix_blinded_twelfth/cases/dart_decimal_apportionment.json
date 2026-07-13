@@ -1,0 +1,16 @@
+{
+    "case_id":  "dart_decimal_apportionment",
+    "prompt":  "A billing import converts fixed-point decimal adjustments into minor units, then apportions each signed total across weighted invoice lines. Exact-share examples pass, but some decimal values are silently rounded and indivisible remainders can change the total. Repair the data path without floating-point arithmetic. Accept an optional sign and decimal point, allow redundant trailing zeroes, reject non-zero precision beyond the configured scale, and support values of arbitrary integer size. Allocation must preserve the signed total, assign remainders by descending fractional share with stable input order for ties, and leave zero-weight entries at zero.",
+    "language":  "dart",
+    "test_runner":  "dart",
+    "candidate_paths":  [
+                            "lib/minor_units.dart",
+                            "lib/proportional_allocator.dart"
+                        ],
+    "max_files":  2,
+    "repo_files":  {
+                       "lib/minor_units.dart":  "import \u0027dart:math\u0027 as math;\n\nclass MinorUnits {\n  static int parse(String text, {int scale = 2}) {\n    if (scale \u003c 0) throw ArgumentError.value(scale, \u0027scale\u0027);\n    final factor = math.pow(10, scale).toDouble();\n    return (double.parse(text) * factor).round();\n  }\n}\n",
+                       "lib/proportional_allocator.dart":  "class ProportionalAllocator {\n  List\u003cint\u003e allocate(int total, List\u003cint\u003e weights) {\n    if (weights.isEmpty) return const \u003cint\u003e[];\n    if (weights.any((weight) =\u003e weight \u003c 0)) {\n      throw ArgumentError(\u0027Weights cannot be negative\u0027);\n    }\n    final weightTotal = weights.reduce((left, right) =\u003e left + right);\n    if (weightTotal == 0) throw ArgumentError(\u0027At least one weight is required\u0027);\n    return weights\n        .map((weight) =\u003e (total * weight / weightTotal).round())\n        .toList();\n  }\n}\n",
+                       "tests/public_test.dart":  "import \u0027../lib/minor_units.dart\u0027;\nimport \u0027../lib/proportional_allocator.dart\u0027;\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  check(MinorUnits.parse(\u002719.95\u0027) == 1995,\n      \u0027ordinary decimal amounts convert to cents\u0027);\n  check(MinorUnits.parse(\u0027-3.50\u0027) == -350,\n      \u0027ordinary negative amounts retain their sign\u0027);\n  check(MinorUnits.parse(\u002742\u0027, scale: 0) == 42,\n      \u0027whole-unit currencies use a zero scale\u0027);\n\n  final allocation = ProportionalAllocator().allocate(1200, [1, 2, 3]);\n  check(allocation.length == 3, \u0027one result is returned for each weight\u0027);\n  check(allocation[0] == 200, \u0027the first exact share is preserved\u0027);\n  check(allocation[1] == 400, \u0027the second exact share is preserved\u0027);\n  check(allocation[2] == 600, \u0027the third exact share is preserved\u0027);\n  check(allocation.reduce((left, right) =\u003e left + right) == 1200,\n      \u0027exact shares retain the original total\u0027);\n}\n"
+                   }
+}

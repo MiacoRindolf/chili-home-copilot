@@ -1,0 +1,10 @@
+{
+  "expected_dimension": "config",
+  "expected_files": [
+    "sql/notification_config.sql",
+    "sql/notification_resolution.sql"
+  ],
+  "feedback_files": {
+    "tests/test_member_override_feedback.py": "import sqlite3\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef database():\n    connection = sqlite3.connect(\":memory:\")\n    for name in (\"notification_config.sql\", \"notification_resolution.sql\"):\n        connection.executescript((ROOT / \"sql\" / name).read_text(encoding=\"utf-8\"))\n    connection.execute(\"INSERT INTO system_channel VALUES ('email', 1)\")\n    connection.execute(\"INSERT INTO workspace VALUES (10, 'Operations')\")\n    connection.execute(\"INSERT INTO member VALUES (10, 7, 'Ari')\")\n    return connection\n\n\ndef resolved(db):\n    return db.execute(\"SELECT enabled FROM resolved_member_channel WHERE workspace_id = 10 AND member_id = 7 AND channel = 'email'\").fetchone()[0]\n\n\ndef test_explicit_member_disable_wins_over_enabled_workspace():\n    db = database()\n    db.execute(\"INSERT INTO workspace_channel_override VALUES (10, 'email', 1)\")\n    db.execute(\"INSERT INTO member_channel_override VALUES (10, 7, 'email', 0)\")\n    assert resolved(db) == 0\n\n\ndef test_null_member_override_is_retained_and_inherits_workspace():\n    db = database()\n    db.execute(\"INSERT INTO workspace_channel_override VALUES (10, 'email', 0)\")\n    db.execute(\"INSERT INTO member_channel_override VALUES (10, 7, 'email', NULL)\")\n    assert db.execute(\"SELECT COUNT(*) FROM member_channel_override\").fetchone()[0] == 1\n    assert resolved(db) == 0\n"
+  }
+}

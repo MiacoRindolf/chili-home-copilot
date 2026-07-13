@@ -1,0 +1,6 @@
+{
+    "case_id":  "py_unordered_category_hierarchy",
+    "final_files":  {
+                        "tests/test_final.py":  "import pytest\n\nfrom category_loader import load_category_rows\nfrom category_paths import build_category_paths\n\n\ndef test_loader_rejects_parent_id_absent_from_complete_export():\n    raw_rows = [\n        {\"id\": \"rugs\", \"name\": \"Rugs\", \"parent_id\": \"missing-flooring\"},\n        {\"id\": \"decor\", \"name\": \"Decor\", \"parent_id\": None},\n    ]\n\n    with pytest.raises(ValueError, match=\"unknown parent\"):\n        load_category_rows(raw_rows)\n\n\ndef test_path_builder_rejects_parent_cycle():\n    rows = [\n        {\"id\": \"seasonal\", \"name\": \"Seasonal\", \"parent_id\": \"holiday\"},\n        {\"id\": \"holiday\", \"name\": \"Holiday\", \"parent_id\": \"seasonal\"},\n    ]\n\n    with pytest.raises(ValueError, match=\"cycle\"):\n        build_category_paths(rows)\n"
+                    }
+}
