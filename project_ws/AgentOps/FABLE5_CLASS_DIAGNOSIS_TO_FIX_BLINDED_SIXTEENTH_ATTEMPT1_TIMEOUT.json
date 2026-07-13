@@ -1,0 +1,55 @@
+{
+  "schema": "chili.diagnosis-to-fix-incomplete-run-receipt.v1",
+  "recorded_at": "2026-07-13T23:01:41.2607900Z",
+  "classification": "untouched_protocol_attempt_operationally_incomplete",
+  "score_valid": false,
+  "score": null,
+  "reason": "The controller's 3600-second outer shell timeout elapsed before the runner wrote its final report or results JSON.",
+  "contestant": {
+    "clone": "D:/dev/chili-home-copilot-fable5-sixteenth-contestant-f1ad1c",
+    "head": "f1ad1ca312ee57b3f510307d658b9128f73f18b1",
+    "worktree_clean_before": true,
+    "worktree_clean_after": true,
+    "author_object_present": false,
+    "author_commit_in_history": false
+  },
+  "frozen_inputs": {
+    "implementation_commit": "674684602d0524c025e883466bd67e871bc154bb",
+    "fixture_commit": "73f5200bc3a577f420c6691ed3700759c5380c22",
+    "policy_commit": "f1ad1ca312ee57b3f510307d658b9128f73f18b1",
+    "fixture_digest": "b81dae7c6e6408ceddfef10300ad32036faf4d3c4b55ccabe0c1be845ff61a52",
+    "run_policy": "project_ws/AgentOps/fable5_class_diagnosis_to_fix_blinded_sixteenth_run_policy.json"
+  },
+  "local_route": {
+    "reasoning_model": "qwen3:8b",
+    "editing_model": "qwen2.5-coder:7b",
+    "escalation_model": null,
+    "max_base_repairs": 2,
+    "per_call_timeout_sec": 150,
+    "case_model_time_budget_sec": 480,
+    "premium_calls_allowed": 0
+  },
+  "termination": {
+    "wrapper_exit_code": 124,
+    "wrapper_wall_seconds": 3604.046,
+    "child_process_survived_wrapper_timeout": true,
+    "child_pid": 56148,
+    "child_terminated_to_enforce_outer_bound": true,
+    "child_alive_after_termination": false,
+    "remaining_direct_children": 0
+  },
+  "durable_outputs": {
+    "report_exists": false,
+    "results_json_exists": false,
+    "checkpoint_exists": false,
+    "completed_case_count_recoverable": 0,
+    "integrity_audit_recoverable": false
+  },
+  "interpretation": [
+    "This attempt has no valid benchmark score and cannot support a Fable 5 readiness claim.",
+    "No model or oracle output was inspected or used to edit the implementation before termination.",
+    "The absence of an atomic per-case checkpoint is an operational durability defect in this runner.",
+    "Any post-fix replay on the same fixture is disclosed recovery evidence, not a pristine untouched score.",
+    "A fresh independently authored post-fix holdout is required for the next readiness score."
+  ]
+}
