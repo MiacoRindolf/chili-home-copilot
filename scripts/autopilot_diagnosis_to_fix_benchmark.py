@@ -2380,7 +2380,8 @@ def _markdown(results: Mapping[str, Any]) -> str:
         f"- Functional sealed-final solve rate: **{results['functional_solve_rate']:.1f}%**",
         f"- Causal-diagnosis accuracy: **{results['diagnosis_accuracy']:.1f}%**",
         f"- Exact changed-file-set accuracy: **{results['exact_file_set_accuracy']:.1f}%**",
-        f"- JSON-valid diagnostic stages: **{results['diagnostic_stage_acceptance_rate']:.1f}%**",
+        f"- JSON-parsed diagnostic stages: **{results['diagnostic_stage_json_parse_rate']:.1f}%**",
+        f"- Accepted diagnostic stages: **{results['diagnostic_stage_acceptance_rate']:.1f}%**",
         f"- Causally accepted diagnoses: **{results['causal_diagnosis_acceptance_rate']:.1f}%**",
         f"- Live-reasoning-qualified cases: **{results.get('live_reasoning_qualified_case_rate', 0.0):.1f}%**",
         f"- Deterministic-only cases: **{results.get('deterministic_only_case_rate', 0.0):.1f}%**",
@@ -2640,7 +2641,10 @@ def _diagnostic_json_call(
     valid = diagnostic_reasoning.parse_json_object(response) is not None
     if calls:
         calls[-1]["json_object_valid"] = valid
-    if valid or not response:
+    thinking_budget_exhausted = bool(
+        calls and calls[-1].get("thinking_budget_exhausted")
+    )
+    if valid or (not response and not thinking_budget_exhausted):
         return response
 
     retry = _local_call(
@@ -2656,7 +2660,8 @@ def _diagnostic_json_call(
             {
                 "role": "user",
                 "content": (
-                    f"The previous {stage} response was truncated or invalid. Re-answer this exact diagnostic "
+                    f"The previous {stage} response exhausted its thinking budget, was truncated, or was invalid. "
+                    "Do not emit hidden reasoning. Re-answer this exact diagnostic "
                     f"request in the compact schema:\n\n{stage_prompt}"
                 ),
             },

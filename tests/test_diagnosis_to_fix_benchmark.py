@@ -289,6 +289,72 @@ def test_invalid_diagnostic_json_gets_one_compact_retry(monkeypatch):
     assert calls[1]["json_object_valid"] is True
 
 
+def test_thinking_budget_exhaustion_gets_one_compact_non_thinking_retry(monkeypatch):
+    responses = iter(
+        [
+            "",
+            '{"hypotheses":[],"experiments":[],"conclusion":{}}',
+        ]
+    )
+    calls = []
+
+    def fake_local_call(*_args, stage, calls, **_kwargs):
+        response = next(responses)
+        calls.append(
+            {
+                "stage": stage,
+                "response": response,
+                "thinking_budget_exhausted": stage == "diagnosis_investigator",
+            }
+        )
+        return response
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_local_call)
+
+    response = benchmark._diagnostic_json_call(
+        "qwen3:8b",
+        "investigator",
+        "Diagnose this case.",
+        calls,
+        1.0,
+    )
+
+    assert json.loads(response)["hypotheses"] == []
+    assert [item["stage"] for item in calls] == [
+        "diagnosis_investigator",
+        "diagnosis_investigator_json_retry",
+    ]
+    assert calls[0]["json_object_valid"] is False
+    assert calls[1]["json_object_valid"] is True
+
+
+def test_empty_transport_failure_does_not_consume_a_json_retry(monkeypatch):
+    calls = []
+
+    def fake_local_call(*_args, stage, calls, **_kwargs):
+        calls.append(
+            {
+                "stage": stage,
+                "response": "",
+                "thinking_budget_exhausted": False,
+            }
+        )
+        return ""
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_local_call)
+
+    response = benchmark._diagnostic_json_call(
+        "local-model",
+        "judge",
+        "Diagnose this case.",
+        calls,
+        1.0,
+    )
+
+    assert response == ""
+    assert [item["stage"] for item in calls] == ["diagnosis_judge"]
+
+
 def test_local_call_uses_one_total_case_model_deadline(monkeypatch):
     calls = benchmark._ModelCallLedger(deadline=time.monotonic() - 1)
     invoked = False
