@@ -1,0 +1,11 @@
+{
+  "case_id": "th14_node_partition_commits",
+  "expected_dimension": "state",
+  "expected_files": [
+    "src/offset-tracker.mjs",
+    "src/batch-consumer.mjs"
+  ],
+  "feedback_files": {
+    "tests/feedback.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { OffsetTracker } from '../src/offset-tracker.mjs';\nimport { processBatch } from '../src/batch-consumer.mjs';\n\ntest('finishing later work first keeps the restart position recoverable', () => {\n  const tracker = new OffsetTracker({ 'orders:1': 20 });\n\n  assert.equal(tracker.complete('orders', 1, 22), 20);\n  assert.equal(tracker.committed('orders', 1), 20);\n  assert.equal(tracker.complete('orders', 1, 21), 22);\n  assert.equal(tracker.committed('orders', 1), 22);\n});\n\ntest('completed work is attributed to its source shard', async () => {\n  const calls = [];\n  const tracker = {\n    complete(...args) {\n      calls.push(args);\n      return args[2];\n    }\n  };\n\n  await processBatch(\n    [{ topic: 'payments', partition: 4, offset: 31, value: 'captured' }],\n    async (record) => record.value,\n    tracker\n  );\n\n  assert.deepEqual(calls, [['payments', 4, 31]]);\n});\n"
+  }
+}
