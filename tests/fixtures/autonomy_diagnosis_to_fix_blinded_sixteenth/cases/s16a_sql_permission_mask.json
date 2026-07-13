@@ -1,0 +1,18 @@
+{
+  "case_id": "s16a_sql_permission_mask",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "A permissions database reads back grants created by its own writer, but externally seeded canonical masks swap write and administrator privileges. Diagnose the persisted bit-layout contract while preserving the SQL parameter and result names. Public self-round-trip tests pass. Edit at most two candidate source files.",
+  "candidate_paths": [
+    "db/grant_permissions.sql",
+    "db/effective_permissions.sql",
+    "db/schema.sql"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "db/grant_permissions.sql": "INSERT INTO principals (id, permission_mask)\nVALUES (\n    :id,\n    (CASE WHEN :can_read THEN 1 ELSE 0 END) |\n    (CASE WHEN :can_write THEN 4 ELSE 0 END) |\n    (CASE WHEN :is_admin THEN 2 ELSE 0 END)\n);\n",
+    "db/effective_permissions.sql": "SELECT\n    id,\n    (permission_mask & 1) != 0 AS can_read,\n    (permission_mask & 4) != 0 AS can_write,\n    (permission_mask & 2) != 0 AS is_admin\nFROM principals\nWHERE id = :id;\n",
+    "db/schema.sql": "CREATE TABLE principals (\n    id TEXT PRIMARY KEY,\n    permission_mask INTEGER NOT NULL CHECK (permission_mask >= 0)\n);\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef open_database():\n    connection = sqlite3.connect(\":memory:\")\n    connection.row_factory = sqlite3.Row\n    connection.executescript((ROOT / \"db/schema.sql\").read_text(encoding=\"utf-8\"))\n    return connection\n\n\ndef test_locally_granted_write_permission_reads_back():\n    connection = open_database()\n    connection.execute(\n        (ROOT / \"db/grant_permissions.sql\").read_text(encoding=\"utf-8\"),\n        {\"id\": \"editor-1\", \"can_read\": 1, \"can_write\": 1, \"is_admin\": 0},\n    )\n    row = connection.execute(\n        (ROOT / \"db/effective_permissions.sql\").read_text(encoding=\"utf-8\"),\n        {\"id\": \"editor-1\"},\n    ).fetchone()\n    assert dict(row) == {\n        \"id\": \"editor-1\",\n        \"can_read\": 1,\n        \"can_write\": 1,\n        \"is_admin\": 0,\n    }\n"
+  }
+}

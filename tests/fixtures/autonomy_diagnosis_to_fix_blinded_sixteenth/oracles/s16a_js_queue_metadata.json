@@ -1,0 +1,11 @@
+{
+  "case_id": "s16a_js_queue_metadata",
+  "expected_dimension": "data",
+  "expected_files": [
+    "src/job_envelope.js",
+    "src/worker_context.js"
+  ],
+  "feedback_files": {
+    "tests/repair_feedback.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { buildEnvelope } = require('../src/job_envelope');\n\ntest('the envelope preserves explicit zero and false metadata', () => {\n  const envelope = buildEnvelope({ kind: 'sync', id: 's-1' }, {\n    attempt: 0,\n    traceSampled: false,\n  });\n  assert.equal(Object.hasOwn(envelope, 'attempt'), true);\n  assert.equal(Object.hasOwn(envelope, 'traceSampled'), true);\n  assert.equal(envelope.attempt, 0);\n  assert.equal(envelope.traceSampled, false);\n});\n"
+  }
+}

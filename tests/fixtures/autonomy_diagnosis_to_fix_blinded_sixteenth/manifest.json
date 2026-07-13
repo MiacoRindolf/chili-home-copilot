@@ -1,0 +1,62 @@
+{
+  "schema": "chili.diagnosis-to-fix-manifest.v3",
+  "reference_family": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/s16a_js_queue_metadata.json",
+      "oracle": "oracles/s16a_js_queue_metadata.json",
+      "final_oracle": "final_oracles/s16a_js_queue_metadata.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-javascript-multifile"
+    },
+    {
+      "case": "cases/s16a_js_redirect_credentials.json",
+      "oracle": "oracles/s16a_js_redirect_credentials.json",
+      "final_oracle": "final_oracles/s16a_js_redirect_credentials.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-javascript-multifile"
+    },
+    {
+      "case": "cases/s16a_py_decimal_wire.json",
+      "oracle": "oracles/s16a_py_decimal_wire.json",
+      "final_oracle": "final_oracles/s16a_py_decimal_wire.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/s16a_py_gzip_interop.json",
+      "oracle": "oracles/s16a_py_gzip_interop.json",
+      "final_oracle": "final_oracles/s16a_py_gzip_interop.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/s16a_dart_utf8_chunks.json",
+      "oracle": "oracles/s16a_dart_utf8_chunks.json",
+      "final_oracle": "final_oracles/s16a_dart_utf8_chunks.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/s16a_dart_form_codec.json",
+      "oracle": "oracles/s16a_dart_form_codec.json",
+      "final_oracle": "final_oracles/s16a_dart_form_codec.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/s16a_sql_tenant_identity.json",
+      "oracle": "oracles/s16a_sql_tenant_identity.json",
+      "final_oracle": "final_oracles/s16a_sql_tenant_identity.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/s16a_sql_permission_mask.json",
+      "oracle": "oracles/s16a_sql_permission_mask.json",
+      "final_oracle": "final_oracles/s16a_sql_permission_mask.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    }
+  ]
+}

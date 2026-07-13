@@ -1,0 +1,18 @@
+{
+  "case_id": "s16a_dart_utf8_chunks",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "A text streaming bridge works for ASCII but corrupts or rejects Unicode when transport chunks land inside a character. Diagnose both sides of the chunk interface while preserving the synchronous public APIs. Public tests pass for ordinary text. Edit at most two candidate source files.",
+  "candidate_paths": [
+    "lib/text_chunker.dart",
+    "lib/text_collector.dart",
+    "lib/chunk_limits.dart"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "lib/text_chunker.dart": "import 'dart:convert';\n\nList<List<int>> chunkText(String text, int maxCodeUnits) {\n  if (maxCodeUnits < 1) {\n    throw ArgumentError.value(maxCodeUnits, 'maxCodeUnits');\n  }\n  final chunks = <List<int>>[];\n  for (var offset = 0; offset < text.length; offset += maxCodeUnits) {\n    final candidateEnd = offset + maxCodeUnits;\n    final end = candidateEnd < text.length ? candidateEnd : text.length;\n    chunks.add(utf8.encode(text.substring(offset, end)));\n  }\n  return chunks;\n}\n",
+    "lib/text_collector.dart": "import 'dart:convert';\n\nString collectText(List<List<int>> chunks) {\n  return chunks.map((chunk) => utf8.decode(chunk)).join();\n}\n",
+    "lib/chunk_limits.dart": "int normalizedChunkLimit(int requested) {\n  if (requested < 1) {\n    throw ArgumentError.value(requested, 'requested');\n  }\n  const maximum = 64 * 1024;\n  return requested > maximum ? maximum : requested;\n}\n",
+    "tests/public_test.dart": "import '../lib/chunk_limits.dart';\nimport '../lib/text_chunker.dart';\nimport '../lib/text_collector.dart';\n\nvoid expectEqual(Object? actual, Object? expected) {\n  if (actual != expected) {\n    throw StateError('Expected $expected, got $actual');\n  }\n}\n\nvoid main() {\n  final chunks = chunkText('plain ascii payload', 5);\n  expectEqual(collectText(chunks), 'plain ascii payload');\n  expectEqual(normalizedChunkLimit(128), 128);\n  expectEqual(normalizedChunkLimit(100000), 64 * 1024);\n}\n"
+  }
+}

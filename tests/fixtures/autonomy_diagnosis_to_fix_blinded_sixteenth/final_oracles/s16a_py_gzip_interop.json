@@ -1,0 +1,6 @@
+{
+  "case_id": "s16a_py_gzip_interop",
+  "final_files": {
+    "tests/test_sealed_gzip_contract.py": "import gzip\n\nfrom transport.decoder import decode_body\nfrom transport.encoder import encode_body\n\n\ndef test_emitted_gzip_is_readable_by_the_standard_library():\n    body = b\"outbound interoperability\"\n    assert gzip.decompress(encode_body(body)[\"body\"]) == body\n\n\ndef test_standard_gzip_is_readable_by_the_transport_decoder():\n    body = b\"inbound interoperability\"\n    message = {\n        \"content_encoding\": \"gzip\",\n        \"body\": gzip.compress(body, mtime=0),\n    }\n    assert decode_body(message) == body\n"
+  }
+}

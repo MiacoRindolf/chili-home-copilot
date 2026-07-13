@@ -1,0 +1,6 @@
+{
+  "case_id": "s16a_js_queue_metadata",
+  "final_files": {
+    "tests/sealed_contract.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { buildEnvelope } = require('../src/job_envelope');\nconst { contextFromEnvelope } = require('../src/worker_context');\n\ntest('an external zero-based delivery remains unsampled', () => {\n  assert.deepEqual(\n    contextFromEnvelope({ job: { kind: 'sync', id: 's-2' }, attempt: 0, traceSampled: false }),\n    { attempt: 0, traceSampled: false },\n  );\n});\n\ntest('local envelope and worker agree on falsy metadata', () => {\n  const envelope = buildEnvelope({ kind: 'sync', id: 's-3' }, {\n    attempt: 0,\n    traceSampled: false,\n  });\n  assert.deepEqual(contextFromEnvelope(envelope), {\n    attempt: 0,\n    traceSampled: false,\n  });\n});\n"
+  }
+}

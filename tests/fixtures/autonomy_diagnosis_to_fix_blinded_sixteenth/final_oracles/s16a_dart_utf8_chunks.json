@@ -1,0 +1,6 @@
+{
+  "case_id": "s16a_dart_utf8_chunks",
+  "final_files": {
+    "tests/sealed_stream_contract_test.dart": "import 'dart:convert';\n\nimport '../lib/text_chunker.dart';\nimport '../lib/text_collector.dart';\n\nvoid expectEqual(Object? actual, Object? expected) {\n  if (actual != expected) {\n    throw StateError('Expected $expected, got $actual');\n  }\n}\n\nvoid main() {\n  final externallySplit = <List<int>>[\n    <int>[0x41, 0xE2],\n    <int>[0x82],\n    <int>[0xAC, 0x42],\n  ];\n  expectEqual(collectText(externallySplit), 'A\\u{20AC}B');\n\n  const original = 'left \\u{1F642} right';\n  final locallyChunked = chunkText(original, 6);\n  for (final chunk in locallyChunked) {\n    utf8.decode(chunk);\n  }\n  expectEqual(collectText(locallyChunked), original);\n}\n"
+  }
+}

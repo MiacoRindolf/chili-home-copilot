@@ -1,0 +1,11 @@
+{
+  "case_id": "s16a_dart_utf8_chunks",
+  "expected_dimension": "runtime",
+  "expected_files": [
+    "lib/text_chunker.dart",
+    "lib/text_collector.dart"
+  ],
+  "feedback_files": {
+    "tests/repair_feedback_test.dart": "import 'dart:convert';\n\nimport '../lib/text_chunker.dart';\n\nvoid expectEqual(Object? actual, Object? expected) {\n  if (actual != expected) {\n    throw StateError('Expected $expected, got $actual');\n  }\n}\n\nvoid main() {\n  const original = 'A\\u{1F642}B';\n  final chunks = chunkText(original, 2);\n  final joinedBytes = <int>[];\n  for (final chunk in chunks) {\n    utf8.decode(chunk);\n    joinedBytes.addAll(chunk);\n  }\n  expectEqual(utf8.decode(joinedBytes), original);\n}\n"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "case_id": "s16a_dart_form_codec",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "A form client interoperates for simple alphanumeric values, but spaces and literal plus signs disagree with external application/x-www-form-urlencoded producers and consumers. Diagnose the encoder/decoder boundary without changing the public APIs. Edit at most two candidate source files.",
+  "candidate_paths": [
+    "lib/form_encoder.dart",
+    "lib/form_decoder.dart",
+    "lib/query_fields.dart"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "lib/form_encoder.dart": "String encodeForm(Map<String, String> fields) {\n  return fields.entries\n      .map((entry) =>\n          '${Uri.encodeComponent(entry.key)}=${Uri.encodeComponent(entry.value)}')\n      .join('&');\n}\n",
+    "lib/form_decoder.dart": "Map<String, String> decodeForm(String body) {\n  final result = <String, String>{};\n  if (body.isEmpty) {\n    return result;\n  }\n  for (final field in body.split('&')) {\n    final equals = field.indexOf('=');\n    if (equals < 0) {\n      throw FormatException('form field is missing =');\n    }\n    final key = Uri.decodeComponent(field.substring(0, equals));\n    final value = Uri.decodeComponent(field.substring(equals + 1));\n    result[key] = value;\n  }\n  return result;\n}\n",
+    "lib/query_fields.dart": "bool isSupportedFieldName(String name) {\n  return RegExp(r'^[A-Za-z][A-Za-z0-9_]*$').hasMatch(name);\n}\n",
+    "tests/public_test.dart": "import '../lib/form_decoder.dart';\nimport '../lib/form_encoder.dart';\nimport '../lib/query_fields.dart';\n\nvoid expectEqual(Object? actual, Object? expected) {\n  if (actual != expected) {\n    throw StateError('Expected $expected, got $actual');\n  }\n}\n\nvoid main() {\n  final encoded = encodeForm(<String, String>{'city': 'Oslo', 'page': '2'});\n  expectEqual(encoded, 'city=Oslo&page=2');\n  expectEqual(decodeForm(encoded).toString(), '{city: Oslo, page: 2}');\n  expectEqual(isSupportedFieldName('account_id'), true);\n  expectEqual(isSupportedFieldName('9account'), false);\n}\n"
+  }
+}

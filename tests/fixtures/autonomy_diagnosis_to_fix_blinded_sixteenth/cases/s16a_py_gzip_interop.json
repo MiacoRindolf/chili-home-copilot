@@ -1,0 +1,18 @@
+{
+  "case_id": "s16a_py_gzip_interop",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "A transport layer can decode its own compressed payloads, but standard clients reject bodies labeled as gzip and standard gzip bodies fail on receipt. Diagnose the encoder/decoder interoperability contract while keeping the current APIs. Public internal round trips pass. Edit at most two candidate source files.",
+  "candidate_paths": [
+    "transport/encoder.py",
+    "transport/decoder.py",
+    "transport/headers.py"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "transport/encoder.py": "import zlib\n\n\ndef encode_body(body):\n    return {\n        \"content_encoding\": \"gzip\",\n        \"body\": zlib.compress(body),\n    }\n",
+    "transport/decoder.py": "import zlib\n\n\ndef decode_body(message):\n    if message.get(\"content_encoding\") == \"gzip\":\n        return zlib.decompress(message[\"body\"])\n    return message[\"body\"]\n",
+    "transport/headers.py": "def normalize_encoding(value):\n    return value.strip().lower() if value else \"identity\"\n",
+    "tests/test_public.py": "from transport.decoder import decode_body\nfrom transport.encoder import encode_body\nfrom transport.headers import normalize_encoding\n\n\ndef test_internal_compressed_round_trip():\n    body = b\"invoice=17&status=ready\"\n    assert decode_body(encode_body(body)) == body\n\n\ndef test_encoding_header_normalization():\n    assert normalize_encoding(\" GZip \") == \"gzip\"\n    assert normalize_encoding(None) == \"identity\"\n"
+  }
+}

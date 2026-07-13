@@ -1,0 +1,11 @@
+{
+  "case_id": "s16a_py_gzip_interop",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "transport/encoder.py",
+    "transport/decoder.py"
+  ],
+  "feedback_files": {
+    "tests/test_repair_feedback.py": "import gzip\n\nfrom transport.encoder import encode_body\n\n\ndef test_standard_gzip_client_can_decode_the_emitted_body():\n    body = b\"report payload for a standards-compatible client\"\n    message = encode_body(body)\n    assert message[\"content_encoding\"] == \"gzip\"\n    assert gzip.decompress(message[\"body\"]) == body\n"
+  }
+}

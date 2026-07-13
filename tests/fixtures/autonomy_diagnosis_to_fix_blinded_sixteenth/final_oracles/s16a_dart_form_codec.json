@@ -1,0 +1,6 @@
+{
+  "case_id": "s16a_dart_form_codec",
+  "final_files": {
+    "tests/sealed_form_contract_test.dart": "import '../lib/form_decoder.dart';\nimport '../lib/form_encoder.dart';\n\nvoid expectEqual(Object? actual, Object? expected) {\n  if (actual != expected) {\n    throw StateError('Expected $expected, got $actual');\n  }\n}\n\nvoid main() {\n  final external = decodeForm('query=red+blue&tag=a%2Bb');\n  expectEqual(external['query'], 'red blue');\n  expectEqual(external['tag'], 'a+b');\n\n  final emitted = encodeForm(<String, String>{\n    'query': 'two words',\n    'literal': 'x+y',\n  });\n  expectEqual(emitted, 'query=two+words&literal=x%2By');\n}\n"
+  }
+}

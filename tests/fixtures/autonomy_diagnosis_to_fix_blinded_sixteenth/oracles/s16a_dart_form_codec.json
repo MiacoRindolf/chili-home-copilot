@@ -1,0 +1,11 @@
+{
+  "case_id": "s16a_dart_form_codec",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "lib/form_encoder.dart",
+    "lib/form_decoder.dart"
+  ],
+  "feedback_files": {
+    "tests/repair_feedback_test.dart": "import '../lib/form_encoder.dart';\n\nvoid expectEqual(Object? actual, Object? expected) {\n  if (actual != expected) {\n    throw StateError('Expected $expected, got $actual');\n  }\n}\n\nvoid main() {\n  expectEqual(encodeForm(<String, String>{'query': 'red blue'}), 'query=red+blue');\n  expectEqual(encodeForm(<String, String>{'tag': 'a+b'}), 'tag=a%2Bb');\n}\n"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "case_id": "s16a_py_decimal_wire",
+  "expected_dimension": "data",
+  "expected_files": [
+    "billing/wire.py",
+    "billing/ledger.py"
+  ],
+  "feedback_files": {
+    "tests/test_repair_feedback.py": "from decimal import Decimal\n\nfrom billing.ledger import decode_charge\nfrom billing.wire import encode_charge\n\n\ndef test_partner_amount_keeps_all_significant_digits():\n    amount = Decimal(\"9007199254740993.125000000000000001\")\n    restored = decode_charge(encode_charge(\"ch_precise\", amount))\n    assert restored[\"amount\"] == amount\n"
+  }
+}

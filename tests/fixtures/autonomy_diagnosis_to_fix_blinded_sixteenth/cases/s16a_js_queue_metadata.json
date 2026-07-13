@@ -1,0 +1,18 @@
+{
+  "case_id": "s16a_js_queue_metadata",
+  "language": "javascript",
+  "test_runner": "node_test",
+  "prompt": "A queue worker occasionally turns an explicitly unsampled first delivery into a sampled retry after it crosses the envelope boundary. Diagnose and repair the contract while preserving the existing exported APIs. The public tests pass; edge-case repair and sealed tests exercise interoperability. Edit at most two candidate source files.",
+  "candidate_paths": [
+    "src/job_envelope.js",
+    "src/worker_context.js",
+    "src/job_labels.js"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "src/job_envelope.js": "'use strict';\n\nfunction buildEnvelope(job, metadata = {}) {\n  const envelope = { job };\n  if (metadata.attempt) {\n    envelope.attempt = metadata.attempt;\n  }\n  if (metadata.traceSampled) {\n    envelope.traceSampled = metadata.traceSampled;\n  }\n  return envelope;\n}\n\nmodule.exports = { buildEnvelope };\n",
+    "src/worker_context.js": "'use strict';\n\nfunction contextFromEnvelope(envelope) {\n  return {\n    attempt: envelope.attempt || 1,\n    traceSampled: envelope.traceSampled || true,\n  };\n}\n\nmodule.exports = { contextFromEnvelope };\n",
+    "src/job_labels.js": "'use strict';\n\nfunction labelForJob(job) {\n  return `${job.kind}:${job.id}`;\n}\n\nmodule.exports = { labelForJob };\n",
+    "tests/public.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { buildEnvelope } = require('../src/job_envelope');\nconst { contextFromEnvelope } = require('../src/worker_context');\nconst { labelForJob } = require('../src/job_labels');\n\ntest('ordinary delivery metadata survives the queue boundary', () => {\n  const envelope = buildEnvelope({ kind: 'email', id: 'm-17' }, {\n    attempt: 3,\n    traceSampled: true,\n  });\n  assert.deepEqual(contextFromEnvelope(envelope), {\n    attempt: 3,\n    traceSampled: true,\n  });\n});\n\ntest('job labels remain stable', () => {\n  assert.equal(labelForJob({ kind: 'email', id: 'm-17' }), 'email:m-17');\n});\n"
+  }
+}

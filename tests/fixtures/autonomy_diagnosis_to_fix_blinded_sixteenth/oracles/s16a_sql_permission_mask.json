@@ -1,0 +1,11 @@
+{
+  "case_id": "s16a_sql_permission_mask",
+  "expected_dimension": "state",
+  "expected_files": [
+    "db/grant_permissions.sql",
+    "db/effective_permissions.sql"
+  ],
+  "feedback_files": {
+    "tests/test_repair_feedback.py": "import sqlite3\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef test_writer_uses_the_canonical_permission_bits():\n    connection = sqlite3.connect(\":memory:\")\n    connection.executescript((ROOT / \"db/schema.sql\").read_text(encoding=\"utf-8\"))\n    grant_sql = (ROOT / \"db/grant_permissions.sql\").read_text(encoding=\"utf-8\")\n    connection.execute(\n        grant_sql,\n        {\"id\": \"writer\", \"can_read\": 0, \"can_write\": 1, \"is_admin\": 0},\n    )\n    connection.execute(\n        grant_sql,\n        {\"id\": \"admin\", \"can_read\": 0, \"can_write\": 0, \"is_admin\": 1},\n    )\n    masks = dict(connection.execute(\"SELECT id, permission_mask FROM principals\"))\n    assert masks == {\"writer\": 2, \"admin\": 4}\n"
+  }
+}

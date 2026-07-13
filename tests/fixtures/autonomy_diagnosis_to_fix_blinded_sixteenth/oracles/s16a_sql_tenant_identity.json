@@ -1,0 +1,11 @@
+{
+  "case_id": "s16a_sql_tenant_identity",
+  "expected_dimension": "data",
+  "expected_files": [
+    "db/schema.sql",
+    "db/order_summary.sql"
+  ],
+  "feedback_files": {
+    "tests/test_repair_feedback.py": "import sqlite3\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef test_summary_does_not_join_a_customer_from_another_tenant():\n    connection = sqlite3.connect(\":memory:\")\n    connection.row_factory = sqlite3.Row\n    connection.executescript((ROOT / \"db/schema.sql\").read_text(encoding=\"utf-8\"))\n    connection.executemany(\n        \"INSERT INTO customers (tenant_id, id, name) VALUES (?, ?, ?)\",\n        [\n            (\"tenant-a\", 7, \"Ada\"),\n            (\"tenant-b\", 7, \"Byron\"),\n        ],\n    )\n    connection.execute(\n        \"INSERT INTO orders (tenant_id, id, customer_id, total_cents) VALUES (?, ?, ?, ?)\",\n        (\"tenant-a\", 11, 7, 4200),\n    )\n    rows = connection.execute(\n        (ROOT / \"db/order_summary.sql\").read_text(encoding=\"utf-8\"),\n        {\"tenant_id\": \"tenant-a\"},\n    ).fetchall()\n    assert [dict(row) for row in rows] == [\n        {\"order_id\": 11, \"customer_name\": \"Ada\", \"total_cents\": 4200}\n    ]\n"
+  }
+}

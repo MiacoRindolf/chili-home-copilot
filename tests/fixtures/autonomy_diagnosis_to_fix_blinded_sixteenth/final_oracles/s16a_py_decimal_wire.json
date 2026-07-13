@@ -1,0 +1,6 @@
+{
+  "case_id": "s16a_py_decimal_wire",
+  "final_files": {
+    "tests/test_sealed_decimal_contract.py": "import json\nfrom decimal import Decimal\n\nfrom billing.ledger import decode_charge\nfrom billing.wire import encode_charge\n\n\ndef test_encoder_emits_an_exact_interoperable_decimal_token():\n    amount = Decimal(\"12345678901234567890.000000000000000009\")\n    document = json.loads(encode_charge(\"ch_out\", amount))\n    assert document[\"amount\"] == str(amount)\n\n\ndef test_ledger_accepts_an_exact_partner_decimal_token():\n    payload = json.dumps(\n        {\"charge_id\": \"ch_in\", \"amount\": \"0.1000000000000000001\"}\n    )\n    restored = decode_charge(payload)\n    assert restored[\"amount\"] == Decimal(\"0.1000000000000000001\")\n"
+  }
+}

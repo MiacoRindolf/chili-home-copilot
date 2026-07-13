@@ -1,0 +1,18 @@
+{
+  "case_id": "s16a_py_decimal_wire",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "A billing service reconciles ordinary charge amounts correctly, but high-precision partner charges drift after JSON transport. Diagnose the wire/ledger boundary and preserve exact decimal values without changing the public function signatures. Public tests pass for common values. Edit at most two candidate source files.",
+  "candidate_paths": [
+    "billing/wire.py",
+    "billing/ledger.py",
+    "billing/currency.py"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "billing/wire.py": "import json\n\n\ndef encode_charge(charge_id, amount):\n    return json.dumps(\n        {\"charge_id\": charge_id, \"amount\": float(amount)},\n        separators=(\",\", \":\"),\n        sort_keys=True,\n    )\n",
+    "billing/ledger.py": "import json\nfrom decimal import Decimal\n\n\ndef decode_charge(payload):\n    document = json.loads(payload)\n    return {\n        \"charge_id\": document[\"charge_id\"],\n        \"amount\": Decimal(str(float(document[\"amount\"]))),\n    }\n",
+    "billing/currency.py": "def normalize_currency(code):\n    normalized = code.strip().upper()\n    if len(normalized) != 3 or not normalized.isalpha():\n        raise ValueError(\"currency codes must contain three letters\")\n    return normalized\n",
+    "tests/test_public.py": "from decimal import Decimal\n\nfrom billing.currency import normalize_currency\nfrom billing.ledger import decode_charge\nfrom billing.wire import encode_charge\n\n\ndef test_common_decimal_amount_round_trips():\n    payload = encode_charge(\"ch_17\", Decimal(\"19.5\"))\n    assert decode_charge(payload) == {\n        \"charge_id\": \"ch_17\",\n        \"amount\": Decimal(\"19.5\"),\n    }\n\n\ndef test_currency_codes_are_normalized():\n    assert normalize_currency(\" usd \") == \"USD\"\n"
+  }
+}

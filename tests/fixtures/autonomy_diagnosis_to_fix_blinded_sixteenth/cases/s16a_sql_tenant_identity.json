@@ -1,0 +1,18 @@
+{
+  "case_id": "s16a_sql_tenant_identity",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "A multi-tenant order database works when customer IDs are globally distinct, but repeated customer IDs can leak names across tenant reports and permit cross-tenant references. Diagnose the relational contract and repair both read and write integrity. Public single-tenant tests pass. Edit at most two candidate source files.",
+  "candidate_paths": [
+    "db/schema.sql",
+    "db/order_summary.sql",
+    "db/order_totals.sql"
+  ],
+  "max_files": 2,
+  "repo_files": {
+    "db/schema.sql": "PRAGMA foreign_keys = ON;\n\nCREATE TABLE customers (\n    tenant_id TEXT NOT NULL,\n    id INTEGER NOT NULL,\n    name TEXT NOT NULL,\n    PRIMARY KEY (tenant_id, id)\n);\n\nCREATE TABLE orders (\n    tenant_id TEXT NOT NULL,\n    id INTEGER NOT NULL,\n    customer_id INTEGER NOT NULL,\n    total_cents INTEGER NOT NULL CHECK (total_cents >= 0),\n    PRIMARY KEY (tenant_id, id)\n);\n",
+    "db/order_summary.sql": "SELECT\n    o.id AS order_id,\n    c.name AS customer_name,\n    o.total_cents\nFROM orders AS o\nJOIN customers AS c\n    ON c.id = o.customer_id\nWHERE o.tenant_id = :tenant_id\nORDER BY o.id, c.name;\n",
+    "db/order_totals.sql": "SELECT\n    COUNT(*) AS order_count,\n    COALESCE(SUM(total_cents), 0) AS total_cents\nFROM orders\nWHERE tenant_id = :tenant_id;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef open_database():\n    connection = sqlite3.connect(\":memory:\")\n    connection.row_factory = sqlite3.Row\n    connection.executescript((ROOT / \"db/schema.sql\").read_text(encoding=\"utf-8\"))\n    return connection\n\n\ndef test_single_tenant_order_summary():\n    connection = open_database()\n    connection.execute(\n        \"INSERT INTO customers (tenant_id, id, name) VALUES (?, ?, ?)\",\n        (\"tenant-a\", 7, \"Ada\"),\n    )\n    connection.execute(\n        \"INSERT INTO orders (tenant_id, id, customer_id, total_cents) VALUES (?, ?, ?, ?)\",\n        (\"tenant-a\", 11, 7, 4200),\n    )\n    rows = connection.execute(\n        (ROOT / \"db/order_summary.sql\").read_text(encoding=\"utf-8\"),\n        {\"tenant_id\": \"tenant-a\"},\n    ).fetchall()\n    assert [dict(row) for row in rows] == [\n        {\"order_id\": 11, \"customer_name\": \"Ada\", \"total_cents\": 4200}\n    ]\n\n\ndef test_tenant_totals_are_filtered():\n    connection = open_database()\n    connection.execute(\n        \"INSERT INTO customers (tenant_id, id, name) VALUES (?, ?, ?)\",\n        (\"tenant-a\", 99, \"Totals Customer\"),\n    )\n    connection.execute(\n        \"INSERT INTO orders (tenant_id, id, customer_id, total_cents) VALUES (?, ?, ?, ?)\",\n        (\"tenant-a\", 1, 99, 1200),\n    )\n    row = connection.execute(\n        (ROOT / \"db/order_totals.sql\").read_text(encoding=\"utf-8\"),\n        {\"tenant_id\": \"tenant-a\"},\n    ).fetchone()\n    assert dict(row) == {\"order_count\": 1, \"total_cents\": 1200}\n"
+  }
+}
