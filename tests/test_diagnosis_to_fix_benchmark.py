@@ -1381,6 +1381,9 @@ def test_initial_plan_receives_deterministic_mechanism_invariants():
     assert "evicted by the state owner" in prompt
     assert '"dimension":"state"' not in prompt
     assert "contract_coverage" in prompt
+    assert "required_primitives" in prompt
+    assert "forbidden_shortcuts" in prompt
+    assert "executable ordered algorithm" in prompt
 
 
 def test_repair_prompt_source_has_no_state_anchored_schema_or_owner_language():
@@ -1636,6 +1639,51 @@ def test_contract_owner_mapping_replaces_unowned_draft_file_selection():
             "description": "Implement the owned validation contracts: The owner returns the required value.",
         }
     ]
+
+
+def test_contract_alignment_preserves_executable_editor_handoff_fields():
+    draft = {
+        "files": [
+            {
+                "path": "owner.py",
+                "action": "modify",
+                "description": "Repair the owner.",
+                "algorithm": "Normalize once, then publish the validated value.",
+                "required_primitives": ["normalize_value"],
+                "forbidden_shortcuts": ["normalizing only at the caller"],
+            }
+        ],
+        "contract_coverage": [
+            {
+                "contract": "tests/test_owner.py::test_value",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The normalized value is published once.",
+            }
+        ],
+    }
+
+    aligned = benchmark._align_plan_files_to_contract_coverage(
+        draft,
+        ["owner.py"],
+        1,
+    )
+    changed_algorithm = {
+        **aligned,
+        "files": [
+            {
+                **aligned["files"][0],
+                "algorithm": "Publish first, then normalize the visible value.",
+            }
+        ],
+    }
+
+    assert aligned["files"][0]["required_primitives"] == ["normalize_value"]
+    assert aligned["files"][0]["forbidden_shortcuts"] == [
+        "normalizing only at the caller"
+    ]
+    assert benchmark._repair_plan_fingerprint(aligned) != benchmark._repair_plan_fingerprint(
+        changed_algorithm
+    )
 
 
 def test_complete_contract_repair_plan_skips_redundant_model_review(

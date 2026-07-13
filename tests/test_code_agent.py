@@ -93,6 +93,9 @@ class TestBuildEditorHandoff:
                     "path": "src/writer.py",
                     "action": "modify",
                     "description": "Publish the state only after validation.",
+                    "algorithm": "Validate a candidate, then atomically publish it.",
+                    "required_primitives": ["existing atomic swap helper"],
+                    "forbidden_shortcuts": ["mutating the visible state before validation"],
                 },
                 {
                     "path": "src/reader.py",
@@ -124,6 +127,13 @@ class TestBuildEditorHandoff:
         assert handoff["notes"] == plan["notes"]
         assert [item["responsibility"] for item in handoff["files"]] == [
             item["description"] for item in plan["files"]
+        ]
+        assert handoff["files"][0]["algorithm"] == plan["files"][0]["algorithm"]
+        assert handoff["files"][0]["required_primitives"] == [
+            "existing atomic swap helper"
+        ]
+        assert handoff["files"][0]["forbidden_shortcuts"] == [
+            "mutating the visible state before validation"
         ]
         assert handoff["contract_coverage"] == plan["contract_coverage"]
 

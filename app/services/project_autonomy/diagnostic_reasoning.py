@@ -1431,6 +1431,34 @@ def derive_contract_invariants(statement: str) -> list[str]:
     """Extract reusable mechanism contracts without asking the local model."""
     lowered = str(statement or "").lower()
     invariants: list[str] = []
+    conditional_exports = bool(
+        any(
+            token in lowered
+            for token in ("conditional export", "export condition", "exports conditions")
+        )
+        or (
+            "export" in lowered
+            and all(token in lowered for token in ("browser", "node", "default"))
+        )
+    )
+    if conditional_exports:
+        invariants.append(
+            "Node conditional-export resolution walks the caller's declared condition order and then the default "
+            "branch, recursively resolving the selected target. It must not choose object insertion order, infer "
+            "a condition from filenames, or return the condition key instead of its target."
+        )
+    if (
+        any(token in lowered for token in ("esm", "node import", "file url", "file://"))
+        and any(
+            token in lowered
+            for token in ("literal #", "literal %", "vendor cache", "special character")
+        )
+    ):
+        invariants.append(
+            "An ESM import built from a filesystem path uses the platform path-to-file-URL primitive so fragment, "
+            "percent, space, drive, and separator characters are encoded exactly once. Manual file:// assembly, "
+            "whole-path encodeURIComponent, and changing the filesystem path are not equivalent."
+        )
     if any(token in lowered for token in ("base64url", "canonical decoder", "canonical text")):
         invariants.append(
             "A canonical text decoder validates the complete alphabet and padding policy, decodes once, and "

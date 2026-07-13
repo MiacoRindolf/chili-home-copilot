@@ -261,6 +261,21 @@ def _build_editor_handoff(
             optional = raw_file.get("optional")
             if isinstance(optional, bool):
                 item["optional"] = optional
+            algorithm = raw_file.get("algorithm")
+            if isinstance(algorithm, str) and algorithm.strip():
+                item["algorithm"] = algorithm[:2_000]
+            for field in ("required_primitives", "forbidden_shortcuts"):
+                values = raw_file.get(field)
+                if not isinstance(values, (list, tuple)):
+                    continue
+                normalized_values = [
+                    value[:500]
+                    for raw_value in values
+                    if isinstance(raw_value, str)
+                    and (value := raw_value.strip())
+                ][:8]
+                if normalized_values:
+                    item[field] = normalized_values
             files_with_priority.append((item, bool(target and path == target)))
 
     contracts_with_priority: List[tuple[Dict[str, Any], bool]] = []
@@ -375,6 +390,11 @@ def _build_editor_handoff(
             files[index], "responsibility"
         ):
             return render()
+    for index in reversed(range(len(files))):
+        if not file_target_flags[index] and shrink_text(
+            files[index], "algorithm"
+        ):
+            return render()
     for index in reversed(range(len(contracts))):
         if not contract_target_flags[index] and shrink_text(
             contracts[index], "postcondition"
@@ -385,6 +405,11 @@ def _build_editor_handoff(
     for index in reversed(range(len(files))):
         if file_target_flags[index] and shrink_text(
             files[index], "responsibility"
+        ):
+            return render()
+    for index in reversed(range(len(files))):
+        if file_target_flags[index] and shrink_text(
+            files[index], "algorithm"
         ):
             return render()
     for index in reversed(range(len(contracts))):

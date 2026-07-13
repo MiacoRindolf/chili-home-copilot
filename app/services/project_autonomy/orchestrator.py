@@ -6374,16 +6374,24 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
             (
                 '{"analysis":"causal mechanism and rejected alternatives, <=120 words",'
                 '"files":[{"path":"candidate/path","action":"modify",'
-                '"description":"owned behavior, algorithm, and compatibility constraints, <=80 words"}],'
+                '"description":"owned behavior and compatibility boundary, <=60 words",'
+                '"algorithm":"ordered implementation steps, <=100 words",'
+                '"required_primitives":["existing platform API or project helper"],'
+                '"forbidden_shortcuts":["plausible but incorrect shortcut"]}],'
                 '"contract_coverage":[{"contract":"independent behavior","owner_paths":["candidate/path"],'
                 '"postcondition":"observable result"}],"notes":"risks and proof, <=80 words"}'
                 if diagnostic_context
                 else '{"analysis":"implementation mechanism, <=120 words",'
                 '"files":[{"path":"candidate/path","action":"modify",'
-                '"description":"owned behavior, algorithm, and compatibility constraints, <=80 words"}],'
+                '"description":"owned behavior and compatibility boundary, <=60 words",'
+                '"algorithm":"ordered implementation steps, <=100 words",'
+                '"required_primitives":["existing platform API or project helper"],'
+                '"forbidden_shortcuts":["plausible but incorrect shortcut"]}],'
                 '"notes":"risks and proof, <=80 words"}'
             ),
-            f"Rules: max {max_files} files, prefer existing candidate files exactly, include only repo-relative paths.",
+            f"Rules: max {max_files} files, prefer existing candidate files exactly, include only repo-relative paths. "
+            "For every file, state the executable algorithm, exact existing primitives to reuse, and shortcuts that "
+            "would satisfy the symptom while violating the mechanism.",
         ]
     )
     if diagnostic_context:

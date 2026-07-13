@@ -3448,6 +3448,17 @@ def test_realworld_boundary_language_yields_mechanical_contract_invariants():
     assert any("tombstones win" in value for value in convergence)
 
 
+def test_node_esm_contract_family_names_order_and_url_primitives():
+    invariants = reasoning.derive_contract_invariants(
+        "A Node ESM host resolves browser, node, and default export conditions, "
+        "then imports a package from a vendor cache path containing a literal #."
+    )
+
+    assert any("caller's declared condition order" in value for value in invariants)
+    assert any("path-to-file-URL primitive" in value for value in invariants)
+    assert any("Manual file:// assembly" in value for value in invariants)
+
+
 def test_retry_contract_operator_transfers_across_field_and_local_names():
     prompt = (
         "Numeric Retry-After exceeds the remaining allowance; an explicit zero delay is "

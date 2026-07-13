@@ -65,8 +65,26 @@ REPAIR_PLAN_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["path", "action", "description"],
-                "properties": {"action": {"enum": ["modify"]}},
+                "required": [
+                    "path",
+                    "action",
+                    "description",
+                    "algorithm",
+                    "required_primitives",
+                    "forbidden_shortcuts",
+                ],
+                "properties": {
+                    "action": {"enum": ["modify"]},
+                    "algorithm": {"type": "string"},
+                    "required_primitives": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "forbidden_shortcuts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
             },
         },
         "contract_coverage": {
@@ -1483,6 +1501,7 @@ def _align_plan_files_to_contract_coverage(
             )
         aligned.append(
             {
+                **existing,
                 "path": relative,
                 "action": "modify",
                 "description": description,
@@ -1499,6 +1518,17 @@ def _repair_plan_fingerprint(plan: Mapping[str, Any]) -> str:
                 _safe_rel(item.get("path")) or "",
                 str(item.get("action") or "").strip().casefold(),
                 str(item.get("description") or "").strip().casefold(),
+                str(item.get("algorithm") or "").strip().casefold(),
+                tuple(
+                    str(value).strip().casefold()
+                    for value in item.get("required_primitives") or []
+                    if str(value).strip()
+                ),
+                tuple(
+                    str(value).strip().casefold()
+                    for value in item.get("forbidden_shortcuts") or []
+                    if str(value).strip()
+                ),
             )
             for item in plan.get("files") or []
             if isinstance(item, Mapping)
@@ -1537,7 +1567,9 @@ def _plan_prompt(
         "Return one JSON object only. Classify the causal owner with the supplied dimension rubric, then select "
         "only the owning source files required for the diagnosed bug. "
         f"Use at most {max_files} files; use more than one only when the behavior crosses an interface. "
-        "Do not select tests or invent paths. Give each file a specific coordinated responsibility. List every "
+        "Do not select tests or invent paths. Give each file a specific coordinated responsibility. For each file, "
+        "state an executable ordered algorithm, name the exact existing platform/project primitives it must use, "
+        "and reject plausible shortcuts that only mask the symptom. List every "
         "independent contract with its owning path(s) and a concrete postcondition; omit a file when it is only "
         "context and needs no mutation. Required JSON schema:\n"
         f"{json.dumps(REPAIR_PLAN_SCHEMA, indent=2)}\n\n"
@@ -3230,6 +3262,8 @@ def _repair_after_failure(
         "Map every independent failing contract to its causal source owner and a concrete postcondition. Files "
         "imported by a test are read-only context unless the evidence shows they must change. Never select a test. "
         "Every contract_coverage.owner_paths value must be an allowed source candidate, never a test path. "
+        "For every selected file, specify the executable algorithm, exact existing platform/project primitives, "
+        "and forbidden shortcuts contradicted by the failure delta or public contracts. "
         "Required JSON schema:\n"
         f"{json.dumps(REPAIR_PLAN_SCHEMA, indent=2)}\n\n"
         f"Original request:\n{case.get('prompt')}\n\n"
