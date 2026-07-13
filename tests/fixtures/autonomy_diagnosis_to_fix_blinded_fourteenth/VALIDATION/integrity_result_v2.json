@@ -1,0 +1,180 @@
+{
+  "validator": "codex-independent-integrity-validator/v2",
+  "target_commit": "86d328b7f136ebfbc6f3ace508dd53b401a04939",
+  "verdict": "REJECT",
+  "checks": {
+    "target_commit_anchor": {
+      "status": "PASS",
+      "evidence": "Branch codex/fourteenth-holdout-v2-integrity was created directly from 86d328b7f136ebfbc6f3ace508dd53b401a04939; that commit is on codex/fable5-diagnostic-reasoning and has parent 3de05be7f077de78d26034ae8e82563f3097a232."
+    },
+    "active_v2_inventory_and_manifest": {
+      "status": "PASS",
+      "evidence": "The target contains 12 active case/oracle/final triplets (36 payloads), five author receipts, one manifest, and eight preserved V1 validation files: 50 target-input files total. The manifest has 12 ASCII-sorted entries, references each active triplet exactly once, and contains no missing or extra active payload path."
+    },
+    "json_schema_and_identity": {
+      "status": "PASS",
+      "evidence": "All 37 active JSON inputs parse as top-level objects without duplicate keys. The manifest and every case, repair oracle, and final oracle have the exact ordered v3 key sets. Filename, case_id, language, runner, sealed split, and manifest identity agree for all 12 cases; language counts are dart=3, typescript=3, python=3, and sql=3."
+    },
+    "path_containment_partitions_and_collisions": {
+      "status": "PASS",
+      "evidence": "All filesystem, manifest, candidate, repo, expected-owner, feedback, and final paths are normalized relative ASCII paths. There are no case-insensitive collisions. For every case, the seeded, feedback, and final path sets are pairwise disjoint; each case has three candidates, two expected owners, max_files=2, a non-owner distractor, and a discoverable test in every partition."
+    },
+    "symlinks_special_files_and_ascii": {
+      "status": "PASS",
+      "evidence": "git ls-tree reports all 50 target entries as mode 100644. The checkout contains no symlink, junction, or reparse-point entry. All 50 target-input files are 7-bit ASCII and contain no BOM or NUL byte."
+    },
+    "hidden_leakage": {
+      "status": "PASS",
+      "evidence": "Public case surfaces contain no oracle field labels, hidden paths, complete hidden payloads, or hidden test labels. Repair-oracle surfaces contain no final_files field, final path, complete final payload, or final test label. An independent label scan covered 33 feedback labels and 29 final labels with no earlier-surface match."
+    },
+    "individual_receipt_claims_and_authority": {
+      "status": "PASS",
+      "evidence": "All 39 payload SHA-256 claims across the five receipts match authoritative bytes, and all 30 receipts that state byte counts match. Active coverage is exactly 36/36: Node 9, Python 9, SQL 9, original Dart 6, and replacement Dart 3. The original Dart receipt is historical V1 evidence for its rejected three paths, whose hashes also match Git bytes at the source, import, integrated-V1, and pre-activation commits."
+    },
+    "replacement_receipt_triple_aggregate": {
+      "status": "FAIL",
+      "evidence": "AUTHORS/dart_replacement_AUTHOR_RECEIPT.md declares 66aec0bb2a036a271590f710c6bbfa227fe5e02412dc660ab100cb315957c0fd for sorted relative-path + NUL + lowercase(file SHA-256) + LF records. Python and PowerShell independently compute 769c2ede2a2c29d35bb83f5badc2602820e4b0d5eb50c123a1d3d976eaf20caa from the three receipt-claimed payloads."
+    },
+    "authored_byte_preservation": {
+      "status": "PASS",
+      "evidence": "The 33 retained V1 payloads and four original receipts (37 files) are byte-identical between integrated V1 commit 64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3 and the target. The replacement triple and replacement receipt (four files) are byte-identical between author commit 3de05be7f077de78d26034ae8e82563f3097a232 and the target."
+    },
+    "v1_reports_preserved": {
+      "status": "PASS",
+      "evidence": "All eight V1 validation files are byte-identical between completed V1 validation tip 83906c4cde8bf4a1e0f99223f6ed3347baa29b04 and the target. Their canonical aggregate is 138e35069458d8ede63de606d5e08a05584f00946b59f2abc8f5adc89baf0579 over 141129 bytes."
+    },
+    "rejected_triple_absent_but_preserved": {
+      "status": "PASS",
+      "evidence": "The th14_dart_keyset_pagination case, oracle, and final-oracle paths are absent from the target payload directories and active manifest. All three remain reachable with identical bytes at original Dart source commit e96d620b4980ded143d2a53f3f6878a294337ca4, Dart import commit 096cb1ea9480f106fb7636c5cabed5542ea2a48a, integrated V1 commit 64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3, and pre-activation commit 3de05be7f077de78d26034ae8e82563f3097a232."
+    },
+    "commit_scope_and_provenance": {
+      "status": "PASS",
+      "evidence": "Each original lane source/import commit adds exactly nine lane payloads plus its receipt with exact source/import byte identity. Commit 3de05be7 adds exactly the replacement triple and receipt. Target 86d328b7 deletes exactly the rejected triple and changes only manifest.json otherwise. The manifest semantic delta is exactly the three triplet references in entry zero."
+    },
+    "canonical_aggregates": {
+      "status": "PASS",
+      "evidence": "Independent Python and PowerShell implementations agree on the active-36, authored-41, V2-core-42, preserved-V1-8, full-target-50, and 50-record inventory digests recorded below."
+    },
+    "validation_only_preflight": {
+      "status": "PASS",
+      "evidence": "With PYTHONDONTWRITEBYTECODE=1, scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures exited 0 and printed fixtures_valid=True cases=12. No CHILI evaluation mode, Ollama, Claude, Fable 5, or other coding model was invoked."
+    }
+  },
+  "findings": [
+    {
+      "id": "INT-V2-001",
+      "severity": "blocking",
+      "status": "OPEN",
+      "path": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth/AUTHORS/dart_replacement_AUTHOR_RECEIPT.md",
+      "lines": [279, 283],
+      "title": "Replacement receipt records an incorrect triple aggregate",
+      "description": "The receipt's three individual payload hashes and byte counts are correct, but its aggregate attestation is not the SHA-256 produced by the formula the receipt declares.",
+      "declared_sha256": "66aec0bb2a036a271590f710c6bbfa227fe5e02412dc660ab100cb315957c0fd",
+      "recomputed_sha256": "769c2ede2a2c29d35bb83f5badc2602820e4b0d5eb50c123a1d3d976eaf20caa",
+      "reproduction": "Sort the three fixture-relative payload paths in ordinal ASCII order, then hash each UTF-8 path, one NUL byte, its lowercase raw-file SHA-256 hex string, and one LF byte in a single SHA-256 state.",
+      "disposition": "REJECT and preserve; no authored receipt or payload byte was changed."
+    }
+  ],
+  "authored_files_unchanged": true,
+  "evidence": {
+    "target_parent": "3de05be7f077de78d26034ae8e82563f3097a232",
+    "fixture_git_tree_oid_sha1": "9423b9188a1c3ea0b1fd53b3fe45475d808b700e",
+    "target_input_inventory": {
+      "file_count": 50,
+      "total_file_bytes": 283995,
+      "record_format": "ASCII-sorted fixture-relative path<TAB>decimal byte count<TAB>lowercase SHA-256<LF>",
+      "record_bytes": 5431,
+      "sha256": "5c4c7ebc1b046cc66e7cb028a5e87074fab9e60c01356d96b6573e6152694a97"
+    },
+    "canonical_aggregate_algorithm": "For each selected fixture-relative path in ascending ordinal ASCII order, feed UTF-8(path), one NUL byte, raw file bytes, and one NUL byte into one SHA-256 state.",
+    "canonical_aggregates": {
+      "active_payloads_36": {
+        "files": 36,
+        "bytes": 95745,
+        "sha256": "c8f15eec805346a2e5dcbd07bd0e5bf74a83e7797bb6119d5e238876150eb9cc"
+      },
+      "authored_41_including_five_receipts": {
+        "files": 41,
+        "bytes": 139264,
+        "sha256": "13782a442fd36bad49f80be4d00f55b231975740162adc57543a4e8cf302b9cf"
+      },
+      "v2_core_42_including_manifest": {
+        "files": 42,
+        "bytes": 142866,
+        "sha256": "b81e37ebe4ee5fa7c619ad771770d34aa7c36aa5a0302ffa8bb1996090715f6d"
+      },
+      "preserved_v1_reports_8": {
+        "files": 8,
+        "bytes": 141129,
+        "sha256": "138e35069458d8ede63de606d5e08a05584f00946b59f2abc8f5adc89baf0579"
+      },
+      "full_target_fixture_50": {
+        "files": 50,
+        "bytes": 283995,
+        "sha256": "8e90ff21662f0bbf3c1138136eccf73ce199322e4d2cd6139489b5a67181adb6"
+      }
+    },
+    "important_input_sha256": {
+      "manifest.json": "899570e965437b3b028c73a5ddf5f30f52850e7556f3d00d27c418ce6dcab12f",
+      "AUTHORS/dart_AUTHOR_RECEIPT.md": "1bc87fa434b822a2cae468510296e926e52ada671b76f2f1cc9de541bd42bd5d",
+      "AUTHORS/dart_replacement_AUTHOR_RECEIPT.md": "ff01987f1d48c28a6bf40bb101a1ea98ac8523c7be245929b455951f098e7d01",
+      "AUTHORS/node_AUTHOR_RECEIPT.md": "5bb963e94908df8c2632c9ff626ccafe5a5dd539a1ee396bb2bdecb35c448558",
+      "AUTHORS/python_AUTHOR_RECEIPT.md": "14b85e4c433f81e02c290e3f94db03aa9d78c35f115b40ac0ba67f587c288267",
+      "AUTHORS/sql_AUTHOR_RECEIPT.md": "c1fe5d079f17ea455ec71e0fd790c5c414b518f58d3eb218061361913bff6c68"
+    },
+    "receipt_authority": {
+      "active_payload_hash_claims_verified": 36,
+      "historical_rejected_hash_claims_verified": 3,
+      "total_hash_claims_verified": 39,
+      "byte_count_claims_verified": 30,
+      "original_dart_receipt_role": "historical V1; six claims cover retained active Dart payloads and three claims cover the rejected triple in Git history",
+      "replacement_dart_receipt_role": "authoritative for the three active th14_dart_redirect_handoffs payloads"
+    },
+    "replacement_receipt_aggregate": {
+      "algorithm": "ascending ordinal ASCII path + NUL + lowercase(raw-file SHA-256 hex) + LF",
+      "declared_sha256": "66aec0bb2a036a271590f710c6bbfa227fe5e02412dc660ab100cb315957c0fd",
+      "recomputed_sha256": "769c2ede2a2c29d35bb83f5badc2602820e4b0d5eb50c123a1d3d976eaf20caa",
+      "python_powershell_agree": true
+    },
+    "historical_rejected_triple": {
+      "canonical_raw_aggregate_sha256": "bb2fc062c3d7bf76a4e9f277c3c5108045d616303929b5406a4d2a367f50d7a9",
+      "files": {
+        "cases/th14_dart_keyset_pagination.json": "071e74f9c2aafe82c2ac1bf54617066a744c14681bc7bdbd863867a1c41b58bf",
+        "oracles/th14_dart_keyset_pagination.json": "c8da9865fdc600415e1bdf20957133f948572a42d200d4477b1077f05d1d8025",
+        "final_oracles/th14_dart_keyset_pagination.json": "3bf46fcb5970976de5c4c8fcecef0b66d430811b418fbcfe39df40aa6e694d30"
+      }
+    },
+    "provenance": {
+      "original_lanes": {
+        "python": {
+          "source_commit": "ad882553038a0515517856d5005cea46db4456b3",
+          "import_commit": "f396496cfd7cf62f0f386bbfdcacabce409ccc90",
+          "files_each": 10,
+          "source_import_bytes_identical": true
+        },
+        "sql": {
+          "source_commit": "5539dd61f547e9ecc9e8e105879b35aff6e142a3",
+          "import_commit": "07a79b78042dac6543a7ea36b98e0854fd1b18e2",
+          "files_each": 10,
+          "source_import_bytes_identical": true
+        },
+        "node": {
+          "source_commit": "b3558518aae27bad283d4925494b07ca145fcb93",
+          "import_commit": "fcf907b86c1c63e7ca5cda2713675d123ea81a4f",
+          "files_each": 10,
+          "source_import_bytes_identical": true
+        },
+        "dart_v1": {
+          "source_commit": "e96d620b4980ded143d2a53f3f6878a294337ca4",
+          "import_commit": "096cb1ea9480f106fb7636c5cabed5542ea2a48a",
+          "files_each": 10,
+          "source_import_bytes_identical": true
+        }
+      },
+      "integrated_v1_commit": "64b32b8e81f6fa3cbd3c5c509aa65940e2d18be3",
+      "completed_v1_validation_tip": "83906c4cde8bf4a1e0f99223f6ed3347baa29b04",
+      "replacement_author_commit": "3de05be7f077de78d26034ae8e82563f3097a232",
+      "replacement_activation_commit": "86d328b7f136ebfbc6f3ace508dd53b401a04939"
+    }
+  }
+}
