@@ -1,0 +1,270 @@
+{
+  "schema": "chili.adversarial-validation-result.v2",
+  "validator": "Codex independent adversarial_v2 validator",
+  "target_commit": "86d328b7f136ebfbc6f3ace508dd53b401a04939",
+  "verdict": "REJECT",
+  "checks": [
+    {
+      "id": "target_provenance",
+      "status": "PASS",
+      "evidence": {
+        "validation_branch": "codex/fourteenth-holdout-v2-adversarial",
+        "branch_base": "86d328b7f136ebfbc6f3ace508dd53b401a04939",
+        "head_before_authored_outputs": "86d328b7f136ebfbc6f3ace508dd53b401a04939",
+        "merge_base": "86d328b7f136ebfbc6f3ace508dd53b401a04939"
+      }
+    },
+    {
+      "id": "validation_only_preflight",
+      "status": "PASS",
+      "evidence": {
+        "command": "python -B scripts/autopilot_diagnosis_to_fix_benchmark.py --fixture-root tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth --validate-fixtures --json",
+        "mode": "validation_only",
+        "exit_code": 0,
+        "schema": "chili.diagnosis-to-fix-fixture-validation.v3",
+        "valid": true,
+        "case_count": 12,
+        "public_passed": 12,
+        "feedback_failed_as_required": 12,
+        "sealed_final_failed_as_required": 12,
+        "sealed_final_adjudication": 12,
+        "external_final_oracles": 12,
+        "model_calls": 0
+      }
+    },
+    {
+      "id": "manifest_and_triple_structure",
+      "status": "PASS",
+      "evidence": {
+        "case_count": 12,
+        "unique_case_ids": 12,
+        "language_counts": {
+          "dart": 3,
+          "typescript": 3,
+          "python": 3,
+          "sql": 3
+        },
+        "dimension_counts": {
+          "data": 3,
+          "dependency": 5,
+          "runtime": 1,
+          "state": 3
+        },
+        "candidate_paths_per_case": 3,
+        "max_files_per_case": 2,
+        "expected_files_per_case": 2,
+        "expected_files_within_candidates": 12,
+        "public_feedback_final_path_overlap": 0,
+        "ascii_or_bom_errors": 0
+      }
+    },
+    {
+      "id": "v1_keyset_collision_removed",
+      "status": "PASS",
+      "evidence": {
+        "removed_case_id": "th14_dart_keyset_pagination",
+        "prior_collision_case_id": "dart-equal-time-event-order",
+        "active_manifest_references_to_removed_case": 0,
+        "active_case_oracle_final_files_for_removed_case": 0,
+        "replacement_case_id": "th14_dart_redirect_handoffs",
+        "replacement_manifest_entries": 1,
+        "historical_mentions_confined_to_authors_and_v1_validation": true,
+        "collision_removed": true
+      }
+    },
+    {
+      "id": "full_prior_corpus_duplicate_scan",
+      "status": "PASS",
+      "evidence": {
+        "manifest_roots": 17,
+        "manifest_cases_total": 151,
+        "active_v2_cases": 12,
+        "all_prior_cases": 139,
+        "prior_reference_cases": 129,
+        "prior_base_or_runtime_calibration_cases": 10,
+        "source_bearing_diagnosis_cases_total": 77,
+        "source_bearing_prior_cases": 65,
+        "active_intraset_case_pairs": 66,
+        "active_to_all_prior_case_pairs": 1668,
+        "active_to_source_bearing_prior_case_pairs": 780,
+        "active_embedded_payloads": 81,
+        "prior_embedded_payloads": 359,
+        "exact_normalized_prompt_duplicates": 0,
+        "exact_cross_fixture_embedded_payload_duplicates": 0,
+        "exact_cross_prior_canonical_candidate_skeleton_duplicates": 0,
+        "exact_active_cross_case_canonical_candidate_skeleton_duplicates": 0,
+        "material_mechanism_duplicates": 0,
+        "material_assertion_family_duplicates": 0
+      }
+    },
+    {
+      "id": "redirect_handoffs_collision_check",
+      "status": "PASS",
+      "evidence": {
+        "case_id": "th14_dart_redirect_handoffs",
+        "introduces_new_collision": false,
+        "closest_prior_surfaces": [
+          {
+            "case_id": "bh4-405",
+            "distinction": "A browser login redirect is evidence of test-harness contamination; it does not derive HTTP redirect requests."
+          },
+          {
+            "case_id": "dart_trusted_proxy_chain",
+            "distinction": "It validates inbound trusted-proxy hops and selects an external origin; it does not apply status-specific outbound method, entity, or credential rules."
+          },
+          {
+            "case_id": "ts_http_vary_isolation",
+            "distinction": "It normalizes response-cache variant metadata; it does not compare redirect origins or derive a follow-up request."
+          }
+        ],
+        "active_peer_distinctions": {
+          "th14_node_http_preconditions": "Entity-tag grammar and weak/strong validators, not redirects.",
+          "th14_py_link_pagination": "Link-field parsing and relative next-page resolution, not status or credential handoff semantics."
+        },
+        "v1_collision_reintroduced": false
+      }
+    },
+    {
+      "id": "weak_final_partition_independence",
+      "status": "PASS",
+      "evidence": {
+        "disjoint_test_paths": true,
+        "byte_identical_weak_final_payloads": 0,
+        "materially_strengthened_finals": 12,
+        "replacement_final_additions": [
+          "303 followed by relative 308",
+          "derived state retained across hops",
+          "mixed-case credential and entity headers",
+          "explicit default-port same-origin comparison",
+          "HEAD under 303"
+        ]
+      }
+    },
+    {
+      "id": "public_prompt_and_source_leakage",
+      "status": "PASS",
+      "evidence": {
+        "forbidden_oracle_keys_in_public_cases": 0,
+        "feedback_or_final_test_name_hits_in_public_payloads": 0,
+        "final_assertion_payloads_in_public_cases": 0,
+        "public_tests_cover_healthy_baselines": true,
+        "repair_recipe_leaks": 0
+      }
+    },
+    {
+      "id": "two_owner_and_nontrivial_repair_scope",
+      "status": "REJECT",
+      "evidence": {
+        "cases_reviewed": 12,
+        "cases_requiring_both_expected_owners": 11,
+        "cases_with_one_file_end_to_end_solution": [
+          "th14_dart_redirect_handoffs"
+        ],
+        "case_id": "th14_dart_redirect_handoffs",
+        "single_required_file": "lib/redirect_request.dart",
+        "unnecessary_expected_file": "lib/redirect_follower.dart",
+        "reason": "RedirectPolicy.derive already receives the current request, status code, and target URI. It can perform both 303 method/entity derivation and normalized cross-origin sensitive-header removal before returning copyWith; RedirectFollower already delegates every hop to that method.",
+        "literal_constant_end_to_end_repairs": 0
+      }
+    },
+    {
+      "id": "current_deterministic_operator_direct_solvability",
+      "status": "PASS",
+      "evidence": {
+        "cases_scanned": 12,
+        "cases_with_derived_invariants": 0,
+        "cases_with_known_dimensions": 0,
+        "cases_with_repair_proposals": 0,
+        "cases_with_invariant_warnings": 0,
+        "operator_api": "derive_contract_invariants + contract_repair_dimension + contract_repair_proposals + contract_invariant_warnings"
+      }
+    },
+    {
+      "id": "case_level_review",
+      "status": "REJECT",
+      "evidence": {
+        "REJECT": [
+          "th14_dart_redirect_handoffs"
+        ],
+        "PASS": [
+          "th14_dart_semver_selection",
+          "th14_dart_websocket_fragments",
+          "th14_node_esm_plugin_loading",
+          "th14_node_http_preconditions",
+          "th14_node_partition_commits",
+          "th14_py_context_offload",
+          "th14_py_decorated_handlers",
+          "th14_py_link_pagination",
+          "th14_sql_partner_search",
+          "th14_sql_registry_refresh",
+          "th14_sql_suppression_batches"
+        ]
+      }
+    },
+    {
+      "id": "authored_input_integrity",
+      "status": "PASS",
+      "evidence": {
+        "authored_input_file_count": 42,
+        "authored_input_bytes": 142866,
+        "aggregate_sha256": "3d9fb68d966221c108811605f41b170fbebf0189492c491590ed076a8eb1f23b",
+        "digest_definition": "SHA-256 over sorted UTF-8 records of relative-path, NUL, lowercase file SHA-256, LF; VALIDATION excluded.",
+        "changed_paths_outside_validation": 0
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "ADV2-001",
+      "severity": "high",
+      "category": "single_owner_end_to_end_solution",
+      "case_id": "th14_dart_redirect_handoffs",
+      "disposition": "REJECT",
+      "summary": "The replacement case declares two required owners, but all public, feedback, and sealed-final behavior can be repaired in lib/redirect_request.dart alone.",
+      "evidence": [
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth/cases/th14_dart_redirect_handoffs.json",
+          "sha256": "341e60251684055963e94b350f4d08a387dbbafb310196921322183b95011418",
+          "fact": "RedirectPolicy.derive is defined in lib/redirect_request.dart and receives current, statusCode, and target; these inputs fully determine method, body, entity headers, origin, and sensitive-header forwarding."
+        },
+        {
+          "artifact": "lib/redirect_request.dart embedded in the case",
+          "sha256": "ba0a6796be512551a6bcdab9dad663eb986e810bb5f95b018202e0ff27a6f3ba",
+          "fact": "The same file owns RedirectRequest.copyWith and RedirectPolicy.derive, so it can build the complete redirected request without an API change or a second source edit."
+        },
+        {
+          "artifact": "lib/redirect_follower.dart embedded in the case",
+          "sha256": "43385e4f4736ebb113a4be38aee6e88af37d840700cd7d1284e25bbd00a06e72",
+          "fact": "The follower already resolves each Location from current.uri and calls policy.derive(current, statusCode, target) on every hop; no hidden assertion requires additional follower behavior."
+        },
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth/oracles/th14_dart_redirect_handoffs.json",
+          "sha256": "895add9c4ee93bb1ffe914b47ee9a9ec092815c80d97c5e40fe92bd86ce1e48a",
+          "fact": "The direct 303 policy assertions and the cross-authority follower assertions are both satisfied when derive rewrites 303 state and strips sensitive headers after comparing current.uri with target."
+        },
+        {
+          "artifact": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_fourteenth/final_oracles/th14_dart_redirect_handoffs.json",
+          "sha256": "08df7e56fe05393631b6927e81ccd7bbf40912f44265a1244bb79780e95a7e84",
+          "fact": "The multi-hop final remains covered because the unchanged follower feeds each derived request back into the same policy; removed entity and credential state therefore stays removed across the 308 hop."
+        }
+      ],
+      "one_file_counterexample": {
+        "changed_file": "lib/redirect_request.dart",
+        "unchanged_files": [
+          "lib/redirect_follower.dart",
+          "lib/redirect_response.dart"
+        ],
+        "required_operations": [
+          "For 303, preserve HEAD and otherwise derive GET, clear the body, and remove entity headers case-insensitively.",
+          "Compare current and target scheme, host, and effective default port, then remove Authorization, Cookie, and Proxy-Authorization case-insensitively when the origin changes.",
+          "Return current.copyWith using the target and derived method, headers, and body."
+        ],
+        "api_changes_required": false,
+        "new_dependencies_required": false,
+        "follower_edit_required": false
+      },
+      "benchmark_impact": "The oracle's exact two-file selection check penalizes a minimal behaviorally complete repair and can be gamed by adding a no-op edit to the unnecessary expected owner."
+    }
+  ],
+  "authored_files_unchanged": true
+}
