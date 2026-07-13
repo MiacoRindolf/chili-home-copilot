@@ -4603,8 +4603,12 @@ def _validate_run_policy(
                 "Run-policy fixture commit changes files outside the sealed fixture root."
             )
 
+    try:
+        policy_display_path = path.relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        policy_display_path = f"<injected-policy>/{path.name}"
     binding = {
-        "path": path.relative_to(ROOT.resolve()).as_posix(),
+        "path": policy_display_path,
         "sha256": _sha256_bytes(payload),
         "size_bytes": len(payload),
         "implementation_commit": implementation_commit,
