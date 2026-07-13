@@ -1,0 +1,1952 @@
+{
+  "accepted_diagnosis_count": 2,
+  "average_case_duration_ms": 140095.5,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "dependency",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 806,
+        "exit_code": 255,
+        "output": "[tests/feedback_test.dart]\nUnhandled exception:\nBad state: multi-byte varint encoding\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-5kxyospk/repo/tests/feedback_test.dart:6:19)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-5kxyospk/repo/tests/feedback_test.dart:10:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": false,
+        "runner": "dart",
+        "seeded_file_integrity_verified": true,
+        "test_contract_status": {
+          "tests/feedback_test.dart::multi-byte varint encoding": "failed",
+          "tests/public_test.dart::one small envelope": "passed",
+          "tests/public_test.dart::small message round trip": "passed",
+          "tests/public_test.dart::small varint encoding": "passed"
+        },
+        "test_contracts_complete": false,
+        "test_files": [
+          "tests/feedback_test.dart",
+          "tests/public_test.dart"
+        ],
+        "test_process_count": 2
+      },
+      "baseline_final_tests": {
+        "duration_ms": 881,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/final_test.dart]\nUnhandled exception:\nFormatException: Unterminated string (at character 37)\n{\"id\":\"first\",\"text\":\"zzzzzzzzzzzzzz\n                                    ^\n\n#0      _ChunkedJsonParser.fail (dart:convert-patch/convert_patch.dart:1467:5)\n#1      _ChunkedJsonParser.close (dart:convert-patch/convert_patch.dart:490:9)\n#2      _parseJson (dart:convert-patch/convert_patch.dart:36:10)\n#3      JsonDecoder.convert (dart:convert/json.dart:641:36)\n#4      JsonCodec.decode (dart:convert/json.dart:223:41)\n#5      jsonDecode (dart:convert/json.dart:160:12)\n#6      decodeEnvelopes (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-_kdevnvi/repo/lib/envelope_codec.dart:19:22)\n#7      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-_kdevnvi/repo/tests/final_test.dart:24:19)\n#8      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#9      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": false,
+        "runner": "dart",
+        "seeded_file_integrity_verified": true,
+        "test_contract_status": {
+          "tests/public_test.dart::one small envelope": "passed",
+          "tests/public_test.dart::small message round trip": "passed",
+          "tests/public_test.dart::small varint encoding": "passed"
+        },
+        "test_contracts_complete": false,
+        "test_files": [
+          "tests/final_test.dart",
+          "tests/public_test.dart"
+        ],
+        "test_process_count": 2
+      },
+      "baseline_public_tests": {
+        "duration_ms": 427,
+        "exit_code": 0,
+        "output": "[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "seeded_file_integrity_verified": true,
+        "test_contract_status": {
+          "tests/public_test.dart::one small envelope": "passed",
+          "tests/public_test.dart::small message round trip": "passed",
+          "tests/public_test.dart::small varint encoding": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/public_test.dart"
+        ],
+        "test_process_count": 1
+      },
+      "case_id": "th15_d01",
+      "changed_files": [
+        "lib/envelope_codec.dart",
+        "lib/varint.dart"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "dependency",
+        "selected_files": [
+          "lib/envelope_codec.dart",
+          "lib/varint.dart"
+        ],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "dependency",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "runtime",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "dependency",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Truncated envelopes suggest offset miscalculation",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "throw FormatException",
+            "expected_if_true": "decode 1MB varint",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "runtime",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "varint.dart"
+              ],
+              "probe_id": "p1",
+              "query": "decodeVarint",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Varint decoding fails for large payloads",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Check varint decoding of 1MB payload",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "EncodeVarint uses fixed-width encoding",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Verify encodeVarint handles 1MB input",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-1"
+            ]
+          },
+          {
+            "claim": "Test harness lacks large payload coverage",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Check test cases for 1MB payloads",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 112,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "runtime",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "throw FormatException",
+            "expected_if_true": "decode 1MB varint",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-13T20:44:15.680456+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.9,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: .\\lib\\envelope_codec.dart:15:    final length = decodeVarint(bytes, cursor);\n.\\lib\\varint.dart:13:VarintResult decodeVarint(List<int> bytes, [int offset = 0]) {"
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "dimension": "runtime",
+            "duration_ms": 107,
+            "exit_code": 0,
+            "expected_if_false": "throw FormatException",
+            "expected_if_true": "decode 1MB varint",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-13T20:44:15.680456+00:00",
+            "output": ".\\lib\\envelope_codec.dart:15:    final length = decodeVarint(bytes, cursor);\n.\\lib\\varint.dart:13:VarintResult decodeVarint(List<int> bytes, [int offset = 0]) {",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th15_d01",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Varint decoding fails for large payloads",
+          "confidence": 0.3939,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Truncated envelopes suggest offset miscalculation",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [
+          "Canonical unsigned variable-length framing encodes the shortest base-128 representation, checks input bounds before every continuation-byte read, rejects unterminated and overlong prefixes with the declared parse error, reports the exact consumed width, and advances every framing consumer by that width rather than a fixed byte count."
+        ],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "state_reconciliation"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [
+              "operator-2"
+            ],
+            "causal_support_weight": 0.65,
+            "claim": "Varint decoding fails for large payloads",
+            "coarse_reset_support": false,
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Check varint decoding of 1MB payload",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0.65,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "EncodeVarint uses fixed-width encoding",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify encodeVarint handles 1MB input",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-1"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Test harness lacks large payload coverage",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Check test cases for 1MB payloads",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Check varint decoding of 1MB payload",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify encodeVarint handles 1MB input",
+            "dimension": "code",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Check test cases for 1MB payloads",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Varint decoding fails for large payloads",
+            "confidence": 0.3939,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Truncated envelopes suggest offset miscalculation",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Varint decoding fails for large payloads",
+            "confidence": 0.3939,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Truncated envelopes suggest offset miscalculation",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Truncated envelopes suggest offset miscalculation",
+            "status": "provisional"
+          },
+          "response_chars": 1199,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Varint decoding fails for large payloads",
+            "confidence": 0.3939,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Truncated envelopes suggest offset miscalculation",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Varint decoding fails for large payloads",
+            "confidence": 0.3939,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Truncated envelopes suggest offset miscalculation",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Truncated envelopes suggest offset miscalculation",
+            "status": "provisional"
+          },
+          "response_chars": 1206,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 137928,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": true,
+      "feedback_tests": {
+        "duration_ms": 975,
+        "exit_code": 0,
+        "output": "[tests/feedback_test.dart]\nfeedback tests passed\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "seeded_file_integrity_verified": true,
+        "test_contract_status": {
+          "tests/feedback_test.dart::envelope consumes the full length prefix": "passed",
+          "tests/feedback_test.dart::multi-byte varint decoding": "passed",
+          "tests/feedback_test.dart::multi-byte varint encoding": "passed",
+          "tests/public_test.dart::one small envelope": "passed",
+          "tests/public_test.dart::small message round trip": "passed",
+          "tests/public_test.dart::small varint encoding": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/feedback_test.dart",
+          "tests/public_test.dart"
+        ],
+        "test_process_count": 2
+      },
+      "final_tests": {
+        "duration_ms": 668,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "[tests/final_test.dart]\nfinal tests passed\n\n[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "seeded_file_integrity_verified": true,
+        "test_contract_status": {
+          "tests/final_test.dart::concatenated mixed-size envelopes": "passed",
+          "tests/final_test.dart::cursor follows prefix width": "passed",
+          "tests/final_test.dart::non-canonical prefix rejection": "passed",
+          "tests/final_test.dart::truncated prefix rejection": "passed",
+          "tests/public_test.dart::one small envelope": "passed",
+          "tests/public_test.dart::small message round trip": "passed",
+          "tests/public_test.dart::small varint encoding": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/final_test.dart",
+          "tests/public_test.dart"
+        ],
+        "test_process_count": 2
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:th15_d01",
+          "path": "cases/th15_d01.json",
+          "sha256": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+          "size_bytes": 2860
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:th15_d01",
+          "path": "oracles/th15_d01.json",
+          "sha256": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+          "size_bytes": 914
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:th15_d01",
+          "path": "final_oracles/th15_d01.json",
+          "sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+          "size_bytes": 1067
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "runtime",
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+          "artifact": "case:th15_d01",
+          "case_id": "th15_d01",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+          "path": "cases/th15_d01.json",
+          "phase": "case_load",
+          "sequence": 9,
+          "timestamp_utc": "2026-07-13T20:42:06.610322+00:00"
+        },
+        {
+          "actual_sha256": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+          "artifact": "feedback_oracle:th15_d01",
+          "case_id": "th15_d01",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+          "path": "oracles/th15_d01.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-13T20:44:16.079729+00:00"
+        },
+        {
+          "case_id": "th15_d01",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 2,
+          "sequence": 11,
+          "timestamp_utc": "2026-07-13T20:44:21.082621+00:00"
+        },
+        {
+          "actual_sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+          "artifact": "final_oracle:th15_d01",
+          "case_id": "th15_d01",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+          "path": "final_oracles/th15_d01.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-13T20:44:21.082951+00:00"
+        },
+        {
+          "case_id": "th15_d01",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/th15_d01.json",
+          "sequence": 13,
+          "sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+          "timestamp_utc": "2026-07-13T20:44:21.083007+00:00"
+        },
+        {
+          "case_id": "th15_d01",
+          "event": "final_adjudication_started",
+          "sequence": 14,
+          "timestamp_utc": "2026-07-13T20:44:21.084011+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "th15_d01",
+          "event": "final_adjudication_completed",
+          "sequence": 15,
+          "timestamp_utc": "2026-07-13T20:44:24.536801+00:00"
+        },
+        {
+          "actual_count": 2,
+          "case_id": "th15_d01",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 2,
+          "ledger_frozen": true,
+          "sequence": 16,
+          "timestamp_utc": "2026-07-13T20:44:24.536831+00:00"
+        }
+      ],
+      "language": "dart",
+      "live_reasoning_qualified": true,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 26530185000,
+          "json_object_valid": true,
+          "latency_ms": 83728,
+          "load_duration_ns": 177157100,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 14999,
+          "prompt_eval_count": 4039,
+          "prompt_eval_duration_ns": 2054960999,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Varint decoding fails for large payloads\",\"dimension\":\"runtime\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check varint decoding of 1MB payload\"},{\"hypothesis_id\":\"h2\",\"claim\":\"EncodeVarint uses fixed-width encoding\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify encodeVarint handles 1MB input\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Test harness lacks large payload coverage\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"baseline-public-contracts\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check test cases for 1MB payloads\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"runtime\"],\"held_constant_dimensions\":[\"code\"],\"expected_if_true\":\"decode 1MB varint\",\"expected_if_false\":\"throw FormatException\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"varint.dart\"],\"query\":\"decodeVarint\",\"dimension\":\"runtime\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"operator-2\"],\"reason\":\"Truncated envelopes suggest offset miscalculation\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 2416,
+          "thinking_enabled": true,
+          "tokens_out": 291,
+          "wall_ms": 83728
+        },
+        {
+          "case_budget_remaining_before_sec": 396.2714796999935,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 27009481000,
+          "json_object_valid": true,
+          "latency_ms": 44402,
+          "load_duration_ns": 192199700,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 18211,
+          "prompt_eval_count": 4358,
+          "prompt_eval_duration_ns": 16798005000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Varint decoding fails for large payloads\",\"dimension\":\"runtime\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check varint decoding of 1MB payload\"},{\"hypothesis_id\":\"h2\",\"claim\":\"EncodeVarint uses fixed-width encoding\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify encodeVarint handles 1MB input\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Test harness lacks large payload coverage\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"baseline-public-contracts\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check test cases for 1MB payloads\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"runtime\"],\"held_constant_dimensions\":[\"code\",\"data\"],\"expected_if_true\":\"decode 1MB varint\",\"expected_if_false\":\"throw FormatException\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"varint.dart\"],\"query\":\"decodeVarint\",\"dimension\":\"runtime\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"operator-2\"],\"reason\":\"Truncated envelopes suggest offset miscalculation\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 293,
+          "wall_ms": 44403
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 336,
+        "exit_code": 0,
+        "output": "[tests/public_test.dart]\npublic tests passed",
+        "passed": true,
+        "runner": "dart",
+        "seeded_file_integrity_verified": true,
+        "test_contract_status": {
+          "tests/public_test.dart::one small envelope": "passed",
+          "tests/public_test.dart::small message round trip": "passed",
+          "tests/public_test.dart::small varint encoding": "passed"
+        },
+        "test_contracts_complete": true,
+        "test_files": [
+          "tests/public_test.dart"
+        ],
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "dependency",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "lib/envelope_codec.dart",
+        "lib/varint.dart"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 2,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 2,
+      "test_runner": "dart",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    },
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "data",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 876,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-kwp55jaj\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_member_paths_reject_escape_forms[../outside.txt] FAILED [ 16%]\ntests/test_feedback.py::test_member_paths_reject_escape_forms[logs\\\\..\\\\outside.txt] FAILED [ 33%]\ntests/test_feedback.py::test_member_paths_reject_escape_forms[/root.txt] FAILED [ 50%]\ntests/test_feedback.py::test_member_paths_reject_escape_forms[C:\\\\drive.txt] FAILED [ 66%]\ntests/test_feedback.py::test_symbolic_link_entries_are_not_materialized FAILED [ 83%]\ntests/test_public.py::test_normal_nested_bundle_extracts_and_lists PASSED [100%]\n\n================================== FAILURES ===================================\n____________ test_member_paths_reject_escape_forms[../outside.txt] ____________\ntests\\test_feedback.py:13: in test_member_paths_reject_escape_forms\n    with pytest.raises(ValueError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'ValueError'>\n________ test_member_paths_reject_escape_forms[logs\\\\..\\\\outside.txt] _________\ntests\\test_feedback.py:13: in test_member_paths_reject_escape_forms\n    with pytest.raises(ValueError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'ValueError'>\n______________ test_member_paths_reject_escape_forms[/root.txt] _______________\ntests\\test_feedback.py:13: in test_member_paths_reject_escape_forms\n    with pytest.raises(ValueError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'ValueError'>\n____________ test_member_paths_reject_escape_forms[C:\\\\drive.txt] _____________\ntests\\test_feedback.py:13: in test_member_paths_reject_escape_forms\n    with pytest.raises(ValueError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'ValueError'>\n_______________ test_symbolic_link_entries_are_not_materialized _______________\ntests\\test_feedback.py:25: in test_symbolic_link_entries_are_not_materialized\n    with ZipFile(payload) as archive, pytest.raises(ValueError):\n                                      ^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'ValueError'>\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_member_paths_reject_escape_forms[../outside.txt] - Failed: DID NOT RAISE <class 'ValueError'>\nFAILED tests/test_feedback.py::test_member_paths_reject_escape_forms[logs\\\\..\\\\outside.txt] - Failed: DID NOT RAISE <class 'ValueError'>\nFAILED tests/test_feedback.py::test_member_paths_reject_escape_forms[/root.txt] - Failed: DID NOT RAISE <class 'ValueError'>\nFAILED tests/test_feedback.py::test_member_paths_reject_escape_forms[C:\\\\drive.txt] - Failed: DID NOT RAISE <class 'ValueError'>\nFAILED tests/test_feedback.py::test_symbolic_link_entries_are_not_materialized - Failed: DID NOT RAISE <class 'ValueError'>\n========================= 5 failed, 1 passed in 0.18s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 739,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-b2h2kis8\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_final.py::test_mixed_separator_escape_and_nested_link_are_both_confined FAILED [ 50%]\ntests/test_public.py::test_normal_nested_bundle_extracts_and_lists PASSED [100%]\n\n================================== FAILURES ===================================\n________ test_mixed_separator_escape_and_nested_link_are_both_confined ________\ntests\\test_final.py:12: in test_mixed_separator_escape_and_nested_link_are_both_confined\n    with pytest.raises(ValueError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'ValueError'>\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_mixed_separator_escape_and_nested_link_are_both_confined - Failed: DID NOT RAISE <class 'ValueError'>\n========================= 1 failed, 1 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 652,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-kwp55jaj\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_normal_nested_bundle_extracts_and_lists PASSED [100%]\n\n============================== 1 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "th15_p01",
+      "changed_files": [
+        "archive_extract.py",
+        "archive_paths.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "data",
+        "selected_files": [
+          "archive_extract.py",
+          "archive_paths.py"
+        ],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "code",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "data",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Alternate separators bypass path validation",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "alternate separators bypass validation",
+            "expected_if_true": "normalized paths block parent access",
+            "experiment_id": "falsify-h1",
+            "held_constant_dimensions": [
+              "data",
+              "config"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "code",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "archive_paths.py"
+              ],
+              "probe_id": "p1",
+              "query": "normalized_member_path",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Path normalization fails on alternate separators",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Check normalized_member_path handles \\ /",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Manifest lacks symbolic link metadata",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Verify infolist includes symlink flags",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Extraction policy lacks path validation",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Confirm config enforces path whitelisting",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "operator-3"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 24,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "code"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "code",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "alternate separators bypass validation",
+            "expected_if_true": "normalized paths block parent access",
+            "experiment_id": "falsify-h1",
+            "held_constant_dimensions": [
+              "data",
+              "config"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-13T20:46:40.090793+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.9,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: archive_paths.py:4:def normalized_member_path(name: str) -> str:"
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "code"
+            ],
+            "dimension": "code",
+            "duration_ms": 18,
+            "exit_code": 0,
+            "expected_if_false": "alternate separators bypass validation",
+            "expected_if_true": "normalized paths block parent access",
+            "experiment_id": "falsify-h1",
+            "held_constant_dimensions": [
+              "data",
+              "config"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-13T20:46:40.090793+00:00",
+            "output": "archive_paths.py:4:def normalized_member_path(name: str) -> str:",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "th15_p01",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Path normalization fails on alternate separators",
+          "confidence": 0.0,
+          "dimension": "code",
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Alternate separators bypass path validation",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "Archive member names are untrusted cross-platform path data: normalize separator dialects before rejecting roots, drives, UNC names, and every parent component, then prove the resolved destination stays below the extraction root. ZIP Unix mode metadata is inspected before materialization and symbolic-link entries are rejected without creating partial output."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Path normalization fails on alternate separators",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Check normalized_member_path handles \\ /",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Manifest lacks symbolic link metadata",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify infolist includes symlink flags",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Extraction policy lacks path validation",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Confirm config enforces path whitelisting",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-3"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Check normalized_member_path handles \\ /",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify infolist includes symlink flags",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Confirm config enforces path whitelisting",
+            "dimension": "config",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Path normalization fails on alternate separators",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Alternate separators bypass path validation",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Path normalization fails on alternate separators",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Alternate separators bypass path validation",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Alternate separators bypass path validation",
+            "status": "provisional"
+          },
+          "response_chars": 1244,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Path normalization fails on alternate separators",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Alternate separators bypass path validation",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Path normalization fails on alternate separators",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Alternate separators bypass path validation",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Alternate separators bypass path validation",
+            "status": "provisional"
+          },
+          "response_chars": 1252,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 142263,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": true,
+      "feedback_tests": {
+        "duration_ms": 817,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th15_p01-f4lhu8yy\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_member_paths_reject_escape_forms[../outside.txt] PASSED [ 16%]\ntests/test_feedback.py::test_member_paths_reject_escape_forms[logs\\\\..\\\\outside.txt] PASSED [ 33%]\ntests/test_feedback.py::test_member_paths_reject_escape_forms[/root.txt] PASSED [ 50%]\ntests/test_feedback.py::test_member_paths_reject_escape_forms[C:\\\\drive.txt] PASSED [ 66%]\ntests/test_feedback.py::test_symbolic_link_entries_are_not_materialized PASSED [ 83%]\ntests/test_public.py::test_normal_nested_bundle_extracts_and_lists PASSED [100%]\n\n============================== 6 passed in 0.07s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 772,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-xyat4qgn\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_final.py::test_mixed_separator_escape_and_nested_link_are_both_confined PASSED [ 50%]\ntests/test_public.py::test_normal_nested_bundle_extracts_and_lists PASSED [100%]\n\n============================== 2 passed in 0.07s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:th15_p01",
+          "path": "cases/th15_p01.json",
+          "sha256": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+          "size_bytes": 2763
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:th15_p01",
+          "path": "oracles/th15_p01.json",
+          "sha256": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+          "size_bytes": 1091
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:th15_p01",
+          "path": "final_oracles/th15_p01.json",
+          "sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+          "size_bytes": 1259
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "code",
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+          "artifact": "case:th15_p01",
+          "case_id": "th15_p01",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+          "path": "cases/th15_p01.json",
+          "phase": "case_load",
+          "sequence": 17,
+          "timestamp_utc": "2026-07-13T20:44:24.559271+00:00"
+        },
+        {
+          "actual_sha256": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+          "artifact": "feedback_oracle:th15_p01",
+          "case_id": "th15_p01",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+          "path": "oracles/th15_p01.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 18,
+          "timestamp_utc": "2026-07-13T20:46:40.978838+00:00"
+        },
+        {
+          "case_id": "th15_p01",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 2,
+          "sequence": 19,
+          "timestamp_utc": "2026-07-13T20:46:44.518493+00:00"
+        },
+        {
+          "actual_sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+          "artifact": "final_oracle:th15_p01",
+          "case_id": "th15_p01",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+          "path": "final_oracles/th15_p01.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 20,
+          "timestamp_utc": "2026-07-13T20:46:44.518802+00:00"
+        },
+        {
+          "case_id": "th15_p01",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/th15_p01.json",
+          "sequence": 21,
+          "sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+          "timestamp_utc": "2026-07-13T20:46:44.518863+00:00"
+        },
+        {
+          "case_id": "th15_p01",
+          "event": "final_adjudication_started",
+          "sequence": 22,
+          "timestamp_utc": "2026-07-13T20:46:44.522430+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "th15_p01",
+          "event": "final_adjudication_completed",
+          "sequence": 23,
+          "timestamp_utc": "2026-07-13T20:46:46.821085+00:00"
+        },
+        {
+          "actual_count": 2,
+          "case_id": "th15_p01",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 2,
+          "ledger_frozen": true,
+          "sequence": 24,
+          "timestamp_utc": "2026-07-13T20:46:46.821113+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": true,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 25875781000,
+          "json_object_valid": true,
+          "latency_ms": 104318,
+          "load_duration_ns": 199966400,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 12853,
+          "prompt_eval_count": 3757,
+          "prompt_eval_duration_ns": 3535648000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Path normalization fails on alternate separators\",\"dimension\":\"code\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check normalized_member_path handles \\\\ /\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Manifest lacks symbolic link metadata\",\"dimension\":\"data\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify infolist includes symlink flags\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Extraction policy lacks path validation\",\"dimension\":\"config\",\"support_evidence_ids\":[\"operator-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm config enforces path whitelisting\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"config\"],\"expected_if_true\":\"normalized paths block parent access\",\"expected_if_false\":\"alternate separators bypass validation\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"archive_paths.py\"],\"query\":\"normalized_member_path\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"operator-2\"],\"reason\":\"Alternate separators bypass path validation\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 4587,
+          "thinking_enabled": true,
+          "tokens_out": 280,
+          "wall_ms": 104318
+        },
+        {
+          "case_budget_remaining_before_sec": 375.6810907999752,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 26025562000,
+          "json_object_valid": true,
+          "latency_ms": 29949,
+          "load_duration_ns": 183387500,
+          "model": "qwen3:8b",
+          "ok": true,
+          "prompt_chars": 16080,
+          "prompt_eval_count": 3690,
+          "prompt_eval_duration_ns": 3002911000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Path normalization fails on alternate separators\",\"dimension\":\"code\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check normalized_member_path handles \\\\ /\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Manifest lacks symbolic link metadata\",\"dimension\":\"data\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify infolist includes symlink flags\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Extraction policy lacks path validation\",\"dimension\":\"config\",\"support_evidence_ids\":[\"operator-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm config enforces path whitelisting\"}],\"experiments\":[{\"experiment_id\":\"falsify-h1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"config\"],\"expected_if_true\":\"normalized paths block parent access\",\"expected_if_false\":\"alternate separators bypass validation\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"archive_paths.py\"],\"query\":\"normalized_member_path\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"operator-2\"],\"reason\":\"Alternate separators bypass path validation\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 281,
+          "wall_ms": 29949
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 736,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-th15_p01-f4lhu8yy\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_normal_nested_bundle_extracts_and_lists PASSED [100%]\n\n============================== 1 passed in 0.05s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "data",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "archive_extract.py",
+        "archive_paths.py"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 2,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 2,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 2,
+  "created_at": "2026-07-13T20:46:46.844885+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 2,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 2,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 4,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_passed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 2,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:th15_d01",
+          "path": "cases/th15_d01.json",
+          "sha256": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+          "size_bytes": 2860
+        },
+        "case_id": "th15_d01",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:th15_d01",
+          "path": "oracles/th15_d01.json",
+          "sha256": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+          "size_bytes": 914
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:th15_d01",
+          "path": "final_oracles/th15_d01.json",
+          "sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+          "size_bytes": 1067
+        }
+      },
+      {
+        "case": {
+          "artifact": "case:th15_p01",
+          "path": "cases/th15_p01.json",
+          "sha256": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+          "size_bytes": 2763
+        },
+        "case_id": "th15_p01",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:th15_p01",
+          "path": "oracles/th15_p01.json",
+          "sha256": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+          "size_bytes": 1091
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:th15_p01",
+          "path": "final_oracles/th15_p01.json",
+          "sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+          "size_bytes": 1259
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "373b5f7518626e19faaec4556c613aef80b0cb618ef28a5e8d26d14568b50f28",
+      "size_bytes": 2004
+    }
+  },
+  "functional_solve_count": 2,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "373b5f7518626e19faaec4556c613aef80b0cb618ef28a5e8d26d14568b50f28",
+      "size_bytes": 2004,
+      "timestamp_utc": "2026-07-13T20:42:03.873868+00:00"
+    },
+    {
+      "artifact": "case:th15_d01",
+      "event": "fixture_digest_verified",
+      "path": "cases/th15_d01.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+      "size_bytes": 2860,
+      "timestamp_utc": "2026-07-13T20:42:03.876511+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:th15_d01",
+      "event": "fixture_digest_verified",
+      "path": "oracles/th15_d01.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+      "size_bytes": 914,
+      "timestamp_utc": "2026-07-13T20:42:03.876924+00:00"
+    },
+    {
+      "artifact": "final_oracle:th15_d01",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/th15_d01.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+      "size_bytes": 1067,
+      "timestamp_utc": "2026-07-13T20:42:03.877327+00:00"
+    },
+    {
+      "artifact": "case:th15_p01",
+      "event": "fixture_digest_verified",
+      "path": "cases/th15_p01.json",
+      "phase": "preflight_binding",
+      "sequence": 5,
+      "sha256": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+      "size_bytes": 2763,
+      "timestamp_utc": "2026-07-13T20:42:03.883454+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:th15_p01",
+      "event": "fixture_digest_verified",
+      "path": "oracles/th15_p01.json",
+      "phase": "preflight_binding",
+      "sequence": 6,
+      "sha256": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+      "size_bytes": 1091,
+      "timestamp_utc": "2026-07-13T20:42:03.883945+00:00"
+    },
+    {
+      "artifact": "final_oracle:th15_p01",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/th15_p01.json",
+      "phase": "preflight_binding",
+      "sequence": 7,
+      "sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+      "size_bytes": 1259,
+      "timestamp_utc": "2026-07-13T20:42:03.884367+00:00"
+    },
+    {
+      "actual_sha256": "373b5f7518626e19faaec4556c613aef80b0cb618ef28a5e8d26d14568b50f28",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "373b5f7518626e19faaec4556c613aef80b0cb618ef28a5e8d26d14568b50f28",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-13T20:42:03.886859+00:00"
+    },
+    {
+      "actual_sha256": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+      "artifact": "case:th15_d01",
+      "case_id": "th15_d01",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "77e6653293410faa6cc92ff980447d4ed0361cc4d6d4baacf122c1cfbd739345",
+      "path": "cases/th15_d01.json",
+      "phase": "case_load",
+      "sequence": 9,
+      "timestamp_utc": "2026-07-13T20:42:06.610322+00:00"
+    },
+    {
+      "actual_sha256": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+      "artifact": "feedback_oracle:th15_d01",
+      "case_id": "th15_d01",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "d156ea284c3d77d5fc0f420aad1326d1c934e0d2a44a7d3faa4c5f0613b79587",
+      "path": "oracles/th15_d01.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-13T20:44:16.079729+00:00"
+    },
+    {
+      "case_id": "th15_d01",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 2,
+      "sequence": 11,
+      "timestamp_utc": "2026-07-13T20:44:21.082621+00:00"
+    },
+    {
+      "actual_sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+      "artifact": "final_oracle:th15_d01",
+      "case_id": "th15_d01",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+      "path": "final_oracles/th15_d01.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-13T20:44:21.082951+00:00"
+    },
+    {
+      "case_id": "th15_d01",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/th15_d01.json",
+      "sequence": 13,
+      "sha256": "b1ef264c194508d2a60390b11087b61fcf45c80eac841d1dfdd3607cf8a81b56",
+      "timestamp_utc": "2026-07-13T20:44:21.083007+00:00"
+    },
+    {
+      "case_id": "th15_d01",
+      "event": "final_adjudication_started",
+      "sequence": 14,
+      "timestamp_utc": "2026-07-13T20:44:21.084011+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "th15_d01",
+      "event": "final_adjudication_completed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-13T20:44:24.536801+00:00"
+    },
+    {
+      "actual_count": 2,
+      "case_id": "th15_d01",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 2,
+      "ledger_frozen": true,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-13T20:44:24.536831+00:00"
+    },
+    {
+      "actual_sha256": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+      "artifact": "case:th15_p01",
+      "case_id": "th15_p01",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "57b7fbeabf5e1e343d24eec6128b134be944da1b80a0f1e2437e7deecc720e4e",
+      "path": "cases/th15_p01.json",
+      "phase": "case_load",
+      "sequence": 17,
+      "timestamp_utc": "2026-07-13T20:44:24.559271+00:00"
+    },
+    {
+      "actual_sha256": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+      "artifact": "feedback_oracle:th15_p01",
+      "case_id": "th15_p01",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "d8dc472347dfed79c89357f48bd768d6fa875b0b9b2334d0203c16792f08c50e",
+      "path": "oracles/th15_p01.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 18,
+      "timestamp_utc": "2026-07-13T20:46:40.978838+00:00"
+    },
+    {
+      "case_id": "th15_p01",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 2,
+      "sequence": 19,
+      "timestamp_utc": "2026-07-13T20:46:44.518493+00:00"
+    },
+    {
+      "actual_sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+      "artifact": "final_oracle:th15_p01",
+      "case_id": "th15_p01",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+      "path": "final_oracles/th15_p01.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 20,
+      "timestamp_utc": "2026-07-13T20:46:44.518802+00:00"
+    },
+    {
+      "case_id": "th15_p01",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/th15_p01.json",
+      "sequence": 21,
+      "sha256": "0352d18344abc6ef632657477d52f88e6be175601732f82be1f79bf932d09cb3",
+      "timestamp_utc": "2026-07-13T20:46:44.518863+00:00"
+    },
+    {
+      "case_id": "th15_p01",
+      "event": "final_adjudication_started",
+      "sequence": 22,
+      "timestamp_utc": "2026-07-13T20:46:44.522430+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "th15_p01",
+      "event": "final_adjudication_completed",
+      "sequence": 23,
+      "timestamp_utc": "2026-07-13T20:46:46.821085+00:00"
+    },
+    {
+      "actual_count": 2,
+      "case_id": "th15_p01",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 2,
+      "ledger_frozen": true,
+      "sequence": 24,
+      "timestamp_utc": "2026-07-13T20:46:46.821113+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 2,
+  "live_reasoning_qualified_case_rate": 100.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 2,
+  "successful_accepted_causal_reasoning_stage_count": 4,
+  "successful_causal_reasoning_call_count": 4,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 4,
+  "verdict": "shadow_ready"
+}
