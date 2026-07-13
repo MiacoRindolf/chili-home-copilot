@@ -53,6 +53,15 @@ TEST_SOURCE_SUFFIXES = frozenset(
     {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".dart"}
 )
 CAUSAL_REASONING_STAGES = frozenset({"investigator", "skeptic", "judge"})
+RUN_POLICY_SOURCE_PATHS = (
+    "app/services/code_brain/agent.py",
+    "app/services/coding_task/envelope.py",
+    "app/services/coding_task/validation_contracts.py",
+    "app/services/coding_task/validator_runner.py",
+    "app/services/project_autonomy/diagnostic_probes.py",
+    "app/services/project_autonomy/diagnostic_reasoning.py",
+    "scripts/autopilot_diagnosis_to_fix_benchmark.py",
+)
 TEST_SUBPROCESS_ASSURANCE = {
     "mode": "static_safety_scan_plus_seeded_sha256_guard",
     "os_process_isolation": False,
@@ -4359,6 +4368,7 @@ def _preflight_fixture_integrity(
                 "entry": entry,
                 "bindings": bindings,
                 "case_id": case_id,
+                "language": str(case.get("language") or "unknown"),
                 "test_source_safety": safety,
             }
         )
@@ -4385,6 +4395,249 @@ def _preflight_fixture_integrity(
         "cases": digest_cases,
     }
     return manifest, prepared, inventory
+
+
+def _policy_language(value: object) -> str:
+    normalized = str(value or "unknown").strip().lower()
+    if normalized in {"javascript", "js", "node", "nodejs", "typescript", "ts"}:
+        return "node"
+    if normalized in {"py", "python"}:
+        return "python"
+    return normalized
+
+
+def _git_result(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        timeout=30,
+    )
+
+
+def _require_git_success(*arguments: str, label: str) -> str:
+    completed = _git_result(*arguments)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "git check failed").strip()
+        raise FixtureIntegrityError(f"{label}: {detail[-1000:]}")
+    return (completed.stdout or "").strip()
+
+
+def _run_policy_path(value: object) -> Path:
+    raw = str(value or "").strip()
+    if not raw:
+        raise FixtureIntegrityError("Run policy path is missing.")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = ROOT / path
+    path = path.resolve()
+    try:
+        path.relative_to(ROOT.resolve())
+    except ValueError as exc:
+        raise FixtureIntegrityError("Run policy must stay inside the repository.") from exc
+    if not path.is_file():
+        raise FixtureIntegrityError(f"Run policy does not exist: {path}")
+    return path
+
+
+def _validate_run_policy(
+    policy_value: object,
+    *,
+    args: argparse.Namespace,
+    fixture_root: Path,
+    prepared_entries: Sequence[Mapping[str, Any]],
+    evaluation_context: str,
+    reasoning_model: str,
+    repair_schedule: Sequence[str],
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    path = _run_policy_path(policy_value)
+    payload = path.read_bytes()
+    policy = _json_from_bytes(payload, path)
+    if policy.get("schema") != "chili.diagnosis-to-fix-run-policy.v1":
+        raise FixtureIntegrityError("Unsupported diagnosis-to-fix run policy schema.")
+
+    raw_fixture_root = Path(str(policy.get("fixture_root") or ""))
+    expected_fixture_root = (
+        raw_fixture_root
+        if raw_fixture_root.is_absolute()
+        else ROOT / raw_fixture_root
+    ).resolve()
+    if expected_fixture_root != fixture_root.resolve():
+        raise FixtureIntegrityError("Run policy fixture_root does not match --fixture-root.")
+
+    actual_escalation = str(getattr(args, "escalation_model", "") or "").strip()
+    expected_escalation = str(policy.get("escalation_model") or "").strip()
+    if expected_escalation == "disabled":
+        expected_escalation = ""
+    expected_values = {
+        "primary_model": str(args.model),
+        "reasoning_model": reasoning_model,
+        "escalation_model": actual_escalation,
+        "evaluation_context": evaluation_context,
+    }
+    for key, actual in expected_values.items():
+        expected = str(policy.get(key) or "").strip()
+        if key == "escalation_model" and expected == "disabled":
+            expected = ""
+        if expected != actual:
+            raise FixtureIntegrityError(
+                f"Run policy {key} mismatch: expected {expected!r}, received {actual!r}."
+            )
+
+    base_repairs = max(0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs)))
+    escalation_repairs = max(0, len(repair_schedule) - base_repairs)
+    numeric_values = {
+        "max_base_repairs": base_repairs,
+        "max_escalation_repairs": escalation_repairs,
+        "per_call_timeout_sec": float(args.timeout),
+        "case_model_time_budget_sec": float(args.case_model_time_budget),
+        "premium_calls_allowed": 0,
+        "expected_case_count": len(prepared_entries),
+    }
+    for key, actual in numeric_values.items():
+        expected = policy.get(key)
+        if isinstance(actual, float):
+            matches = isinstance(expected, (int, float)) and float(expected) == actual
+        else:
+            matches = isinstance(expected, int) and not isinstance(expected, bool) and expected == actual
+        if not matches:
+            raise FixtureIntegrityError(
+                f"Run policy {key} mismatch: expected {expected!r}, received {actual!r}."
+            )
+
+    language_counts: dict[str, int] = {}
+    for entry in prepared_entries:
+        language = _policy_language(entry.get("language"))
+        language_counts[language] = language_counts.get(language, 0) + 1
+    raw_expected_counts = policy.get("expected_language_counts")
+    if not isinstance(raw_expected_counts, Mapping):
+        raise FixtureIntegrityError("Run policy expected_language_counts must be an object.")
+    expected_counts = {
+        _policy_language(key): int(value)
+        for key, value in raw_expected_counts.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    if expected_counts != language_counts:
+        raise FixtureIntegrityError(
+            "Run policy language distribution mismatch: "
+            f"expected {expected_counts}, received {language_counts}."
+        )
+
+    required_true = (
+        "sealed_final_required",
+        "external_final_oracle_required",
+        "mechanism_disjoint_from_training_regressions",
+        "independent_fixture_author_required",
+        "independent_fixture_validator_required",
+    )
+    for key in required_true:
+        if policy.get(key) is not True:
+            raise FixtureIntegrityError(f"Run policy requires {key}=true.")
+    if policy.get("source_edits_after_fixture_freeze_allowed") is not False:
+        raise FixtureIntegrityError(
+            "Run policy must forbid source edits after fixture freeze."
+        )
+
+    implementation_commit = str(policy.get("implementation_commit") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", implementation_commit):
+        raise FixtureIntegrityError("Run policy implementation_commit must be a full SHA-1.")
+    implementation_tree = _require_git_success(
+        "rev-parse",
+        f"{implementation_commit}^{{tree}}",
+        label="Cannot resolve run-policy implementation tree",
+    )
+    if implementation_tree != str(policy.get("implementation_tree") or "").strip():
+        raise FixtureIntegrityError("Run policy implementation_tree does not match its commit.")
+    _require_git_success(
+        "merge-base",
+        "--is-ancestor",
+        implementation_commit,
+        "HEAD",
+        label="Run-policy implementation commit is not an ancestor of HEAD",
+    )
+    if _git_result("diff", "--quiet", implementation_commit, "--", *RUN_POLICY_SOURCE_PATHS).returncode != 0:
+        raise FixtureIntegrityError(
+            "Audited autonomy source differs from the frozen implementation commit."
+        )
+    if _git_result("diff", "--quiet", "--", *RUN_POLICY_SOURCE_PATHS).returncode != 0 or _git_result(
+        "diff", "--cached", "--quiet", "--", *RUN_POLICY_SOURCE_PATHS
+    ).returncode != 0:
+        raise FixtureIntegrityError("Audited autonomy source has uncommitted changes.")
+
+    runner_sha = _sha256_bytes((ROOT / RUN_POLICY_SOURCE_PATHS[-1]).read_bytes())
+    diagnostic_sha = _sha256_bytes(
+        (ROOT / "app/services/project_autonomy/diagnostic_reasoning.py").read_bytes()
+    )
+    if runner_sha != str(policy.get("runner_sha256") or ""):
+        raise FixtureIntegrityError("Run policy runner_sha256 mismatch.")
+    if diagnostic_sha != str(policy.get("diagnostic_reasoning_sha256") or ""):
+        raise FixtureIntegrityError("Run policy diagnostic_reasoning_sha256 mismatch.")
+
+    fixture_commit = str(policy.get("fixture_commit") or "").strip()
+    if fixture_commit:
+        if not re.fullmatch(r"[0-9a-f]{40}", fixture_commit):
+            raise FixtureIntegrityError("Run policy fixture_commit must be a full SHA-1.")
+        _require_git_success(
+            "merge-base",
+            "--is-ancestor",
+            fixture_commit,
+            "HEAD",
+            label="Run-policy fixture commit is not an ancestor of HEAD",
+        )
+        changed = _require_git_success(
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            fixture_commit,
+            label="Cannot inspect run-policy fixture commit",
+        ).splitlines()
+        fixture_prefix = fixture_root.resolve().relative_to(ROOT.resolve()).as_posix() + "/"
+        if not changed or any(not item.replace("\\", "/").startswith(fixture_prefix) for item in changed):
+            raise FixtureIntegrityError(
+                "Run-policy fixture commit changes files outside the sealed fixture root."
+            )
+
+    binding = {
+        "path": path.relative_to(ROOT.resolve()).as_posix(),
+        "sha256": _sha256_bytes(payload),
+        "size_bytes": len(payload),
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "fixture_commit": fixture_commit or None,
+        "language_counts": language_counts,
+        "enforced": True,
+        "_absolute_path": str(path),
+    }
+    _record_audit_event(
+        events,
+        "run_policy_verified",
+        **{key: value for key, value in binding.items() if not key.startswith("_")},
+    )
+    return binding
+
+
+def _verify_run_policy_unchanged(
+    binding: Mapping[str, Any],
+    *,
+    events: list[dict[str, Any]],
+) -> None:
+    path = Path(str(binding.get("_absolute_path") or ""))
+    actual = _sha256_bytes(path.read_bytes())
+    expected = str(binding.get("sha256") or "")
+    if actual != expected:
+        raise FixtureIntegrityError("Run policy changed during benchmark execution.")
+    _record_audit_event(
+        events,
+        "run_policy_digest_reverified",
+        path=str(binding.get("path") or ""),
+        sha256=actual,
+    )
 
 
 def validate_fixture(
@@ -4477,6 +4730,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         evaluation_context=evaluation_context,
         events=integrity_events,
     )
+    run_policy_binding: dict[str, Any] | None = None
     if args.validate_fixtures:
         validations = [
             validate_fixture(
@@ -4499,6 +4753,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     repair_schedule = _repair_model_schedule(args)
     reasoning_model = str(getattr(args, "reasoning_model", "") or "").strip()
     reasoning_model = reasoning_model or str(args.model)
+    if str(getattr(args, "run_policy", "") or "").strip():
+        run_policy_binding = _validate_run_policy(
+            args.run_policy,
+            args=args,
+            fixture_root=fixture_root,
+            prepared_entries=prepared_entries,
+            evaluation_context=evaluation_context,
+            reasoning_model=reasoning_model,
+            repair_schedule=repair_schedule,
+            events=integrity_events,
+        )
     required_models = {str(args.model), reasoning_model, *repair_schedule}
     missing_models = sorted(model for model in required_models if model not in installed)
     if missing_models:
@@ -5297,6 +5562,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         int(item.get("successful_accepted_causal_reasoning_stage_count") or 0)
         for item in case_results
     )
+    if run_policy_binding is not None:
+        _verify_run_policy_unchanged(
+            run_policy_binding,
+            events=integrity_events,
+        )
     results = {
         "schema": "chili.diagnosis-to-fix-results.v6",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -5305,6 +5575,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "reasoning_model": reasoning_model,
         "escalation_model": str(getattr(args, "escalation_model", "") or ""),
         "reference_family": manifest.get("reference_family") or "claude-fable-5",
+        "run_policy": (
+            {
+                key: value
+                for key, value in run_policy_binding.items()
+                if not key.startswith("_")
+            }
+            if run_policy_binding is not None
+            else {"enforced": False}
+        ),
         "overall_score": round(average, 2),
         "holdout_score": round(holdout_score, 2),
         "multifile_holdout_score": round(multifile_holdout_score, 2),
@@ -5400,6 +5679,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "fable5_class_reasoning_claim_blockers": [
             "No authenticated same-task Fable 5 head-to-head was run.",
             *(
+                ["No executable run policy was supplied and enforced."]
+                if run_policy_binding is None
+                else []
+            ),
+            *(
                 [
                     "At least one functionally scored case had no successful accepted "
                     "live causal-reasoning stage."
@@ -5437,6 +5721,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-repairs", type=int, default=5)
     parser.add_argument("--escalation-model", default="")
     parser.add_argument("--max-escalation-repairs", type=int, default=0)
+    parser.add_argument("--run-policy", default="")
     parser.add_argument("--validate-fixtures", action="store_true")
     parser.add_argument(
         "--evaluation-context",

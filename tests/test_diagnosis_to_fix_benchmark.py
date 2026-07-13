@@ -3699,3 +3699,136 @@ def test_benchmark_model_path_imports_no_cloud_client():
     assert "openai_client" not in source
     assert "gateway_chat" not in source
     assert '"premium_calls": 0' in source
+
+
+def _current_run_policy(
+    tmp_path: Path,
+    *,
+    fixture_root: Path,
+    implementation_commit: str,
+    languages: dict[str, int],
+) -> Path:
+    implementation_tree = benchmark._require_git_success(
+        "rev-parse",
+        f"{implementation_commit}^{{tree}}",
+        label="test implementation tree",
+    )
+    policy = {
+        "schema": "chili.diagnosis-to-fix-run-policy.v1",
+        "fixture_root": str(fixture_root),
+        "implementation_commit": implementation_commit,
+        "implementation_tree": implementation_tree,
+        "primary_model": "qwen2.5-coder:7b",
+        "reasoning_model": "qwen3:8b",
+        "escalation_model": "disabled",
+        "max_base_repairs": 2,
+        "max_escalation_repairs": 0,
+        "per_call_timeout_sec": 150,
+        "case_model_time_budget_sec": 480,
+        "premium_calls_allowed": 0,
+        "evaluation_context": "protocol",
+        "expected_case_count": sum(languages.values()),
+        "expected_language_counts": languages,
+        "sealed_final_required": True,
+        "external_final_oracle_required": True,
+        "mechanism_disjoint_from_training_regressions": True,
+        "independent_fixture_author_required": True,
+        "independent_fixture_validator_required": True,
+        "source_edits_after_fixture_freeze_allowed": False,
+        "runner_sha256": benchmark._sha256_bytes(
+            Path(benchmark.__file__).read_bytes()
+        ),
+        "diagnostic_reasoning_sha256": benchmark._sha256_bytes(
+            Path(benchmark.diagnostic_reasoning.__file__).read_bytes()
+        ),
+    }
+    path = tmp_path / "run-policy.json"
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    return path
+
+
+def test_run_policy_enforces_models_budgets_case_mix_and_source_freeze(
+    tmp_path,
+    monkeypatch,
+):
+    implementation_commit = benchmark._require_git_success(
+        "rev-parse", "HEAD", label="test HEAD"
+    )
+    policy = _current_run_policy(
+        tmp_path,
+        fixture_root=FIXTURE_ROOT,
+        implementation_commit=implementation_commit,
+        languages={"node": 1, "python": 1},
+    )
+    args = SimpleNamespace(
+        model="qwen2.5-coder:7b",
+        reasoning_model="qwen3:8b",
+        escalation_model="",
+        max_repairs=2,
+        max_escalation_repairs=0,
+        timeout=150.0,
+        case_model_time_budget=480.0,
+    )
+    events = []
+    monkeypatch.setattr(benchmark, "_run_policy_path", lambda _value: policy)
+
+    binding = benchmark._validate_run_policy(
+        policy,
+        args=args,
+        fixture_root=FIXTURE_ROOT,
+        prepared_entries=[
+            {"language": "typescript"},
+            {"language": "python"},
+        ],
+        evaluation_context="protocol",
+        reasoning_model="qwen3:8b",
+        repair_schedule=["qwen2.5-coder:7b", "qwen2.5-coder:7b"],
+        events=events,
+    )
+    benchmark._verify_run_policy_unchanged(binding, events=events)
+
+    assert binding["enforced"] is True
+    assert binding["language_counts"] == {"node": 1, "python": 1}
+    assert [item["event"] for item in events] == [
+        "run_policy_verified",
+        "run_policy_digest_reverified",
+    ]
+
+
+def test_run_policy_rejects_model_and_language_drift(tmp_path, monkeypatch):
+    implementation_commit = benchmark._require_git_success(
+        "rev-parse", "HEAD", label="test HEAD"
+    )
+    policy = _current_run_policy(
+        tmp_path,
+        fixture_root=FIXTURE_ROOT,
+        implementation_commit=implementation_commit,
+        languages={"node": 1},
+    )
+    args = SimpleNamespace(
+        model="qwen2.5-coder:7b",
+        escalation_model="",
+        max_repairs=2,
+        max_escalation_repairs=0,
+        timeout=150.0,
+        case_model_time_budget=480.0,
+    )
+    common = {
+        "args": args,
+        "fixture_root": FIXTURE_ROOT,
+        "prepared_entries": [{"language": "python"}],
+        "evaluation_context": "protocol",
+        "reasoning_model": "qwen3:8b",
+        "repair_schedule": ["qwen2.5-coder:7b", "qwen2.5-coder:7b"],
+        "events": [],
+    }
+    monkeypatch.setattr(benchmark, "_run_policy_path", lambda _value: policy)
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="language distribution"):
+        benchmark._validate_run_policy(policy, **common)
+
+    value = json.loads(policy.read_text(encoding="utf-8"))
+    value["primary_model"] = "another-model"
+    policy.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(benchmark.FixtureIntegrityError, match="primary_model mismatch"):
+        benchmark._validate_run_policy(policy, **common)
