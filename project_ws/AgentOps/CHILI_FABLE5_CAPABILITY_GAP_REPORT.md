@@ -505,6 +505,32 @@ and 7.7 minutes wall time**. Broad affected validation passed **277 tests**. The
 This does not overwrite the untouched 49.17 score or prove Fable 5 parity. It proves disclosed mechanism capture;
 the next independently authored untouched suite is the transfer gate.
 
+### Thirteenth Through Sixteenth Diagnosis-To-Fix Evidence
+
+Three later frozen, independently authored suites remained decisively below the requested replacement bar:
+
+- Thirteenth untouched: **40.83/100**, **2/12** sealed-final solves, **3/12** correct diagnosis families, **3/12** exact owner sets, and zero premium calls.
+- Fourteenth untouched: **27.92/100**, **0/12** sealed-final solves, **1/12** correct diagnosis families, **1/12** exact owner sets, and zero premium calls.
+- Fifteenth untouched: **41.88/100**, **1/8** sealed-final solves, **2/8** correct diagnosis families, **4/8** exact owner sets, **78/78** successful local calls, and zero premium calls.
+
+The fifteenth failures disclosed seven new cross-language mechanism families plus obligation-polarity, owner-plan,
+partial-patch, SQLite-validation, and local reasoning-exhaustion gaps. After those cases were disclosed, the full
+development replay reached **100/100 with 8/8 final solves**, and a targeted two-case recovery replay reached
+**100/100 with 4/4 successful local calls and fully qualified live reasoning**. Those are useful regression
+results, not unseen transfer evidence, and they do not replace the untouched 41.88 score.
+
+The independently authored sixteenth suite passed model-independent fixture validation, but its first full run
+hit the one-hour outer process limit before producing a report, result, or checkpoint. It therefore has **no valid
+score** and cannot be counted as a failed or successful evaluation. The incident exposed that the diagnosis-to-fix
+runner's prior durability claim was not implemented. Commit `19de897466158027d65742f06d5e562e4597d2f1`
+added atomic per-case checkpoints bound to the exact fixture inventory, ordered cases, models, budgets, run policy,
+implementation commit, and audited source hashes. Resume rejects digest, binding, order, sealing, post-final-call,
+premium-call, malformed-payload, and output-path collisions. A real two-case interruption/resume integration test
+proved that the completed sealed case is not sent to the model again; the relevant suite passed **301 tests**.
+
+The authoritative current unseen diagnosis-to-fix result remains the fifteenth **41.88/100**. A fresh post-fix
+holdout is required before making any new readiness statement.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -532,13 +558,13 @@ the next independently authored untouched suite is the transfer gate.
 
 ## Remaining Gaps
 
-1. The repair evidence now includes 13 small feedback-guided development repositories, two independently authored eight-case sealed suites, two full disclosed tenth-suite replays, and two twelve-case transfer suites. The eleventh scored 32.92/100 with 0/12 finals; the twelfth improved to 49.17/100 with 2/12 finals. The disclosed twelfth replay now solves 12/12 recognized mechanisms, but large-repository, mixed-stack, Go, and Rust superiority remain untested.
+1. The latest valid frozen diagnosis-to-fix suites scored 40.83/100, 27.92/100, and 41.88/100, with only 3/32 sealed-final solves in aggregate. Disclosed replays solve recognized mechanisms, but unknown-mechanism transfer, large repositories, mixed stacks, Go, and Rust superiority remain unproven.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The fourth through eighth untouched diagnostic slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The untouched twelfth suite accepted 36/36 JSON stages and completed 126/126 7B calls, yet failed 10/12 finals. The disclosed structural lane later reached 12/12, but unknown-mechanism reasoning remains a separate capability.
+5. Local output remains stochastic, and structural usability is not diagnostic quality. The untouched fifteenth suite completed 78/78 local calls with all eight cases live-reasoning-qualified, yet solved only 1/8 finals. The disclosed lane later reached 8/8, but unknown-mechanism reasoning remains a separate capability.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. The final twelfth disclosed structural replay averaged about 38.5 seconds/case end to end and used two diagnostic calls per case. Adaptive routing and a real host-loss recovery proof remain open, and unknown mechanisms can still take the full slow path.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
