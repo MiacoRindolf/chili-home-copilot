@@ -3602,6 +3602,59 @@ def test_python_awaitable_handler_contract_repairs_wrapper_and_dispatch():
     assert reasoning.contract_repair_dimension(prompt, files) == "runtime"
 
 
+def test_sql_nullable_suppression_contract_repairs_only_batch_anti_joins():
+    prompt = (
+        "A suppression feed added scope-level advisory records without a target id, "
+        "and notification batches became empty while targeted suppressions must remain active."
+    )
+    email_query = (
+        "SELECT c.customer_id, c.address\n"
+        "FROM campaign_customer AS c\n"
+        "WHERE c.campaign_key = :campaign_key\n"
+        "  AND c.customer_id NOT IN (\n"
+        "      SELECT s.customer_id\n"
+        "      FROM campaign_suppression AS s\n"
+        "      WHERE s.campaign_key = :campaign_key\n"
+        "  )\n"
+        "ORDER BY c.customer_id;\n"
+    )
+    webhook_query = (
+        "SELECT d.destination_id, d.url\n"
+        "FROM webhook_destination AS d\n"
+        "WHERE d.topic_key = :topic_key\n"
+        "  AND d.destination_id NOT IN (\n"
+        "      SELECT x.destination_id\n"
+        "      FROM webhook_suppression AS x\n"
+        "      WHERE x.topic_key = :topic_key\n"
+        "  )\n"
+        "ORDER BY d.destination_id;\n"
+    )
+    files = {
+        "sql/email.sql": email_query,
+        "sql/webhook.sql": webhook_query,
+        "sql/review.sql": (
+            "SELECT scope_key, target_id, reason FROM suppression_feed "
+            "WHERE scope_key = :scope_key ORDER BY target_id;\n"
+        ),
+    }
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {**files, **proposals}
+
+    assert any("three-valued logic" in value for value in invariants)
+    assert len([value for value in rejected if "NOT IN" in value]) == 2
+    assert set(proposals) == {"sql/email.sql", "sql/webhook.sql"}
+    assert "NOT EXISTS" in proposals["sql/email.sql"]
+    assert "s.customer_id = c.customer_id" in proposals["sql/email.sql"]
+    assert "x.destination_id = d.destination_id" in proposals["sql/webhook.sql"]
+    assert ":campaign_key" in proposals["sql/email.sql"]
+    assert "ORDER BY c.customer_id" in proposals["sql/email.sql"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_dimension(prompt, files) == "data"
+
+
 def test_retry_contract_operator_transfers_across_field_and_local_names():
     prompt = (
         "Numeric Retry-After exceeds the remaining allowance; an explicit zero delay is "

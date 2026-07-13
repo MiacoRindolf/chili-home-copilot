@@ -1523,6 +1523,26 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "with async __call__ without relying on inspect.iscoroutinefunction identity."
         )
     if (
+        "suppression" in lowered
+        and "batch" in lowered
+        and any(
+            token in lowered
+            for token in (
+                "without a target id",
+                "null target",
+                "nullable target",
+                "advisory record",
+                "advisory records",
+            )
+        )
+    ):
+        invariants.append(
+            "A nullable suppression target cannot participate in a NOT IN anti-set because one NULL poisons every "
+            "candidate under SQL three-valued logic. Batch selection uses a scope-preserving correlated NOT EXISTS "
+            "match on the concrete target id, so advisory NULL rows do not suppress anything, duplicate targeted "
+            "rows remain idempotent, and review-feed visibility is unchanged."
+        )
+    if (
         any(token in lowered for token in ("client authentication", "client certificate", "clientauth"))
         and any(token in lowered for token in ("tls", "trust material", "request", "verify"))
     ):
@@ -2944,6 +2964,31 @@ def contract_invariant_warnings(
                     warnings.append(
                         f"{path} does not await an awaitable returned by a wrapped or object handler"
                     )
+    if any("A nullable suppression target cannot participate" in value for value in invariants):
+        for path, content in lowered_files.items():
+            batch_selection = bool(
+                "suppression" in content
+                and re.search(r"\bwhere\b.*?\bnot\s+(?:in|exists)\b", content, re.DOTALL)
+            )
+            if not batch_selection:
+                continue
+            if re.search(r"\bnot\s+in\s*\(", content):
+                warnings.append(
+                    f"{path} uses NOT IN against a nullable suppression target"
+                )
+            if not re.search(r"\bnot\s+exists\s*\(", content):
+                warnings.append(
+                    f"{path} does not use a correlated suppression anti-join"
+                )
+                continue
+            if not re.search(
+                r"\b([a-z_]\w*)\.([a-z_]\w*_id)\s*=\s*"
+                r"([a-z_]\w*)\.\2\b",
+                content,
+            ):
+                warnings.append(
+                    f"{path} does not correlate the concrete suppression target id"
+                )
     if any("configured field delimiter is one policy input" in value for value in invariants):
         delimiter_sources = [
             content
@@ -4704,6 +4749,51 @@ def _repair_package_unit_sql(content: str) -> str:
     return updated[: source_after.end()] + join + updated[source_after.end() :]
 
 
+_NULLABLE_SUPPRESSION_NOT_IN = re.compile(
+    r"(?P<outer_alias>[A-Za-z_]\w*)\.(?P<outer_target>[A-Za-z_]\w*)\s+"
+    r"NOT\s+IN\s*\(\s*"
+    r"SELECT\s+(?P<inner_alias>[A-Za-z_]\w*)\."
+    r"(?P<inner_target>[A-Za-z_]\w*)\s+"
+    r"FROM\s+(?P<table>[A-Za-z_]\w*suppression\w*)\s+"
+    r"(?:AS\s+)?(?P<table_alias>[A-Za-z_]\w*)\s+"
+    r"WHERE\s+(?P<scope_alias>[A-Za-z_]\w*)\."
+    r"(?P<scope_column>[A-Za-z_]\w*)\s*=\s*:"
+    r"(?P<scope_parameter>[A-Za-z_]\w*)\s*\)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _repair_nullable_suppression_anti_join(content: str) -> str:
+    matches = list(_NULLABLE_SUPPRESSION_NOT_IN.finditer(content))
+    if len(matches) != 1:
+        return content
+    match = matches[0]
+    if not (
+        match.group("inner_alias").casefold()
+        == match.group("table_alias").casefold()
+        == match.group("scope_alias").casefold()
+        and match.group("inner_target").casefold()
+        == match.group("outer_target").casefold()
+    ):
+        return content
+    line_start = content.rfind("\n", 0, match.start()) + 1
+    indent_match = re.match(r"[ \t]*", content[line_start:match.start()])
+    indent = indent_match.group(0) if indent_match else ""
+    inner_indent = indent + "    "
+    alias = match.group("table_alias")
+    replacement = (
+        "NOT EXISTS (\n"
+        f"{inner_indent}SELECT 1\n"
+        f"{inner_indent}FROM {match.group('table')} AS {alias}\n"
+        f"{inner_indent}WHERE {alias}.{match.group('scope_column')} "
+        f"= :{match.group('scope_parameter')}\n"
+        f"{inner_indent}  AND {alias}.{match.group('inner_target')} "
+        f"= {match.group('outer_alias')}.{match.group('outer_target')}\n"
+        f"{indent})"
+    )
+    return content[: match.start()] + replacement + content[match.end() :]
+
+
 def _repair_python_factory_bindings(content: str) -> str:
     updated = content
     if (
@@ -5803,6 +5893,8 @@ def contract_repair_proposals(
             updated = _repair_export_job_state_sql(updated)
         if any("Normalize every physical length" in value for value in invariants):
             updated = _repair_package_unit_sql(updated)
+        if any("A nullable suppression target cannot participate" in value for value in invariants):
+            updated = _repair_nullable_suppression_anti_join(updated)
         if metadata := bindings.get("async_rejection_slot"):
             updated = _repair_async_rejection_slot(updated, metadata)
         if metadata := bindings.get("ordered_sequence_identity"):
@@ -6080,6 +6172,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("configured field delimiter is one policy input", "config"),
     ("state transition matches exactly its allowed predecessor", "state"),
     ("Normalize every physical length", "data"),
+    ("A nullable suppression target cannot participate", "data"),
     ("Required factory parameters retain their invocation binding", "dependency"),
     ("Handler completion follows the value returned", "runtime"),
     ("Monthly local-wall-clock scheduling first converts", "clock"),
@@ -6138,6 +6231,7 @@ def contract_repair_dimension(
         ("A claimed job attempt is a fencing token", "state", _repair_job_attempt_fencing),
         ("state transition matches exactly its allowed predecessor", "state", _repair_export_job_state_sql),
         ("Normalize every physical length", "data", _repair_package_unit_sql),
+        ("A nullable suppression target cannot participate", "data", _repair_nullable_suppression_anti_join),
     )
     active_dimensions: set[str] = set()
     for invariant_marker, dimension, operator in operators:
