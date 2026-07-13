@@ -1,0 +1,174 @@
+{
+  "schema": "chili.semantic-validation-result.v2",
+  "validator": "codex-independent-semantic-validator-v2",
+  "target_commit": "86d328b7f136ebfbc6f3ace508dd53b401a04939",
+  "verdict": "REJECT",
+  "checks": {
+    "target_provenance": {
+      "status": "PASS",
+      "validation_branch": "codex/fourteenth-v2-semantic-validation",
+      "branch_base": "86d328b7f136ebfbc6f3ace508dd53b401a04939",
+      "observed_head_before_validation_artifacts": "86d328b7f136ebfbc6f3ace508dd53b401a04939"
+    },
+    "validation_only_preflight": {
+      "status": "PASS",
+      "mode": "validate_fixtures_only",
+      "case_count": 12,
+      "public_passed": 12,
+      "feedback_failed_as_required": 12,
+      "sealed_final_failed_as_required": 12,
+      "external_final_oracles": 12,
+      "models_invoked": []
+    },
+    "active_v2_structure": {
+      "status": "PASS",
+      "case_count": 12,
+      "unique_case_ids": 12,
+      "language_counts": {
+        "dart": 3,
+        "python": 3,
+        "sql": 3,
+        "typescript": 3
+      },
+      "dimension_counts": {
+        "data": 3,
+        "dependency": 5,
+        "runtime": 1,
+        "state": 3
+      },
+      "all_cases_have_three_candidates": true,
+      "all_cases_declare_two_expected_files": true,
+      "all_cases_have_one_declared_distractor": true,
+      "all_cases_have_max_files_two": true,
+      "retired_keyset_case_active": false
+    },
+    "dimension_fit": {
+      "status": "PASS",
+      "rubric_source": "app/services/project_autonomy/diagnostic_reasoning.py::CAUSAL_DIMENSION_RUBRIC",
+      "cases_passing": 12,
+      "cases_failing": []
+    },
+    "prior_generation_novelty": {
+      "status": "PASS",
+      "generations_reviewed": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ],
+      "prior_case_count": 116,
+      "active_to_prior_pairwise_comparisons": 1392,
+      "referenced_file_count": 297,
+      "referenced_inventory_sha256": "e6f092655378299436257b85ffd038609f52b211b00324a444e80c9b74f4805b",
+      "exact_normalized_prompt_matches": [],
+      "exact_candidate_bundle_matches": [],
+      "material_mechanism_matches": []
+    },
+    "additional_development_corpus_novelty": {
+      "status": "PASS",
+      "fixture": "tests/fixtures/autonomy_diagnosis_to_fix",
+      "reference_case_count": 13,
+      "active_to_reference_pairwise_comparisons": 156,
+      "referenced_file_count": 27,
+      "referenced_inventory_sha256": "76fb7002513cbeb99b0d90614b13898c74cea1f8dd46bfe4e595ee1dd8cbcd76",
+      "material_mechanism_matches": []
+    },
+    "internal_v2_novelty": {
+      "status": "PASS",
+      "pairwise_comparisons": 66,
+      "exact_candidate_bundle_matches": [],
+      "material_mechanism_matches": []
+    },
+    "deterministic_family_novelty": {
+      "status": "PASS",
+      "source": "app/services/project_autonomy/diagnostic_reasoning.py",
+      "source_sha256": "6a081ca2d5d8b4775f299c3c54743c22d83d2bb77f8177c62f2e899069e0d8a7",
+      "invariant_template_count": 44,
+      "concrete_repair_operator_count": 36,
+      "prompt_derived_invariant_matches": 0,
+      "manual_material_mechanism_matches": []
+    },
+    "causal_ownership": {
+      "status": "REJECT",
+      "cases_with_exactly_two_necessary_owners": 11,
+      "cases_failing": [
+        "th14_dart_redirect_handoffs"
+      ],
+      "finding": "RedirectPolicy.derive in lib/redirect_request.dart receives the current request, redirect status, and target URI and returns the complete derived request. A change confined to that file can therefore implement both status-specific method/entity handling and cross-origin credential filtering, while RedirectFollower already invokes the policy for every hop. lib/redirect_follower.dart is not a necessary second owner."
+    },
+    "distractor_non_necessity": {
+      "status": "PASS",
+      "plausible_and_unnecessary_count": 12,
+      "cases_failing": []
+    },
+    "materially_stronger_finals": {
+      "status": "PASS",
+      "materially_stronger_count": 12,
+      "cases_failing": []
+    },
+    "prompt_and_source_leakage": {
+      "status": "PASS",
+      "cases_scanned": 12,
+      "forbidden_public_key_hits": 0,
+      "hidden_test_name_hits": 0,
+      "solution_comment_hits": 0,
+      "repair_recipe_hits": 0
+    },
+    "redirect_handoff_novelty": {
+      "status": "PASS",
+      "prior_generation_cases_compared": 116,
+      "additional_development_cases_compared": 13,
+      "other_active_v2_cases_compared": 11,
+      "retired_rejected_case_compared": "th14_dart_keyset_pagination",
+      "closest_prior_cases": [
+        "bh4-405",
+        "ts_http_vary_isolation",
+        "py_relay_rotation_window",
+        "dart_trusted_proxy_chain",
+        "node_tls_client_auth_config",
+        "th13_node_response_compression"
+      ],
+      "closest_active_v2_cases": [
+        "th14_node_http_preconditions",
+        "th14_py_link_pagination"
+      ],
+      "finding": "No prior case owns HTTP 3xx method/body derivation together with cross-origin redirect credential forwarding. The browser redirect case is test-harness contamination; trusted-proxy handling resolves inbound forwarded hops; Vary, Link, ETag, retry, TLS, signature, and compression cases own different protocol contracts. Relative Location resolution is already healthy in the redirect response distractor."
+    },
+    "frozen_authored_inventory": {
+      "status": "PASS",
+      "scope": "fourteenth fixture files excluding VALIDATION",
+      "file_count": 42,
+      "byte_count": 142866,
+      "sha256": "42e5876fab439824af5951ecc6ede33df9e003a01866929a9474a218a0ad2920",
+      "manifest_sha256": "899570e965437b3b028c73a5ddf5f30f52850e7556f3d00d27c418ce6dcab12f"
+    }
+  },
+  "findings": [
+    {
+      "id": "SEM-V2-001",
+      "severity": "high",
+      "category": "single_owner_sufficiency",
+      "case_id": "th14_dart_redirect_handoffs",
+      "verdict": "REJECT",
+      "summary": "The redirect case declares two expected files, but all failed contracts can be repaired through RedirectPolicy.derive in lib/redirect_request.dart alone.",
+      "evidence": [
+        "RedirectPolicy.derive receives current, statusCode, and target, including the current URI, method, headers, and body, and returns the complete RedirectRequest for the next hop.",
+        "The direct 303 feedback makes lib/redirect_request.dart necessary.",
+        "RedirectFollower already resolves each Location and calls policy.derive for every response, so origin comparison and credential filtering performed by the policy are automatically applied on one-hop and multi-hop follower paths.",
+        "Neither feedback nor final replaces or spies on RedirectPolicy, asserts a follower-owned callback, or exposes information available only inside lib/redirect_follower.dart.",
+        "The injectable follower policy does not create a second necessity boundary because the sealed tests use the default policy and the policy API already carries every required input."
+      ],
+      "preserved_without_repair": true
+    }
+  ],
+  "authored_files_unchanged": true
+}
