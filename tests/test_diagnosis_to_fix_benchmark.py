@@ -2697,6 +2697,40 @@ def test_disclosed_fourteenth_dart_semver_operator_passes_feedback_and_final(
     assert final["passed"] is True, final["output"]
 
 
+def test_disclosed_fourteenth_python_handler_operator_passes_feedback_and_final(
+    tmp_path,
+):
+    case_id = "th14_py_decorated_handlers"
+    case = benchmark._read_json(
+        FOURTEENTH_FIXTURE_ROOT / "cases" / f"{case_id}.json"
+    )
+    oracle = benchmark._read_json(
+        FOURTEENTH_FIXTURE_ROOT / "oracles" / f"{case_id}.json"
+    )
+    final_oracle = benchmark._read_json(
+        FOURTEENTH_FIXTURE_ROOT / "final_oracles" / f"{case_id}.json"
+    )
+    repo = tmp_path / case_id
+    benchmark._init_repo(repo, case["repo_files"])
+
+    repair = benchmark._apply_deterministic_contract_repair(repo, case)
+    benchmark._write_files(repo, oracle["feedback_files"])
+    public = benchmark._run_case_tests(repo, case, public_only=True)
+    feedback = benchmark._run_case_tests(repo, case, public_only=False)
+    final = benchmark._run_final_adjudication(
+        case,
+        final_oracle["final_files"],
+        candidate_repo=repo,
+    )
+
+    assert repair["patch_applied"] is True, repair
+    assert set(repair["selected_files"]) == set(oracle["expected_files"])
+    assert repair["proposed_dimension"] == oracle["expected_dimension"]
+    assert public["passed"] is True, public["output"]
+    assert feedback["passed"] is True, feedback["output"]
+    assert final["passed"] is True, final["output"]
+
+
 @pytest.mark.parametrize(
     "case_id",
     [

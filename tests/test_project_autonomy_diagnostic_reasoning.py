@@ -3558,6 +3558,50 @@ def test_dart_semver_contract_family_repairs_precedence_and_bounded_selection():
     assert reasoning.contract_repair_dimension(prompt, files) == "dependency"
 
 
+def test_python_awaitable_handler_contract_repairs_wrapper_and_dispatch():
+    prompt = (
+        "An async handler returns before completion when wrapped for tracing or used as a "
+        "callable object through dispatch, while synchronous handler behavior must remain immediate."
+    )
+    files = {
+        "trace.py": (
+            "from functools import wraps\n\n"
+            "def traced(handler, events):\n"
+            "    @wraps(handler)\n"
+            "    def wrapper(message):\n"
+            "        events.append((\"started\", message))\n"
+            "        result = handler(message)\n"
+            "        events.append((\"finished\", message))\n"
+            "        return result\n"
+            "    return wrapper\n"
+        ),
+        "dispatch.py": (
+            "from inspect import iscoroutinefunction\n\n"
+            "async def dispatch(handler: object, message: str):\n"
+            "    if iscoroutinefunction(handler):\n"
+            "        return await handler(message)\n"
+            "    return handler(message)\n"
+        ),
+        "registry.py": "class HandlerRegistry:\n    pass\n",
+    }
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {**files, **proposals}
+
+    assert any("one invocation" in value for value in invariants)
+    assert any("callable identity" in value for value in rejected)
+    assert any("awaitable handler result" in value for value in rejected)
+    assert set(proposals) == {"trace.py", "dispatch.py"}
+    assert "if not isawaitable(result)" in proposals["trace.py"]
+    assert "completed = await result" in proposals["trace.py"]
+    assert "result = handler(message)" in proposals["dispatch.py"]
+    assert "return await result" in proposals["dispatch.py"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_dimension(prompt, files) == "runtime"
+
+
 def test_retry_contract_operator_transfers_across_field_and_local_names():
     prompt = (
         "Numeric Retry-After exceeds the remaining allowance; an explicit zero delay is "

@@ -1512,6 +1512,17 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "remain excluded."
         )
     if (
+        any(token in lowered for token in ("asynchronous handler", "async handler", "coroutine"))
+        and any(token in lowered for token in ("wrapped", "decorated", "tracing", "callable object"))
+        and any(token in lowered for token in ("handler", "dispatch", "delivery"))
+    ):
+        invariants.append(
+            "Handler completion follows the value returned by one invocation: a synchronous tracing wrapper keeps "
+            "synchronous results immediate but defers its finished event until an awaitable result settles, and "
+            "dispatch awaits inspect.isawaitable results. This covers decorated async handlers and callable objects "
+            "with async __call__ without relying on inspect.iscoroutinefunction identity."
+        )
+    if (
         any(token in lowered for token in ("client authentication", "client certificate", "clientauth"))
         and any(token in lowered for token in ("tls", "trust material", "request", "verify"))
     ):
@@ -2903,6 +2914,35 @@ def contract_invariant_warnings(
                 ):
                     warnings.append(
                         f"{path} does not require every package constraint clause to match"
+                    )
+    if any("Handler completion follows the value returned" in value for value in invariants):
+        for path, content in lowered_files.items():
+            if "def traced(" in content and "@wraps(" in content:
+                if re.search(r"\basync\s+def\s+wrapper\s*\(", content):
+                    warnings.append(
+                        f"{path} makes synchronous traced handlers return an awaitable"
+                    )
+                async_completion = re.search(
+                    r"\basync\s+def\s+[a-z_]\w*\s*\([^)]*\)\s*"
+                    r"(?:->\s*[^:]+)?\s*:.*?\bawait\s+[a-z_]\w*.*?"
+                    r"events\.append\s*\(\s*\(\s*['\"]finished['\"]",
+                    content,
+                    re.DOTALL,
+                )
+                if "isawaitable" not in content or not async_completion:
+                    warnings.append(
+                        f"{path} records traced completion without following an awaitable handler result"
+                    )
+            if re.search(r"\basync\s+def\s+dispatch\s*\(", content):
+                if "iscoroutinefunction" in content:
+                    warnings.append(
+                        f"{path} dispatches by callable identity instead of the returned value"
+                    )
+                if "isawaitable" not in content or not re.search(
+                    r"\bawait\s+result\b", content
+                ):
+                    warnings.append(
+                        f"{path} does not await an awaitable returned by a wrapped or object handler"
                     )
     if any("configured field delimiter is one policy input" in value for value in invariants):
         delimiter_sources = [
@@ -4721,6 +4761,63 @@ def _repair_python_factory_bindings(content: str) -> str:
     return updated
 
 
+def _repair_python_awaitable_handler_lifecycle(content: str) -> str:
+    updated = content
+    if (
+        "def traced(" in updated
+        and "@wraps(handler)" in updated
+        and 'events.append(("finished", message))' in updated
+        and "isawaitable" not in updated
+    ):
+        updated = _insert_python_import(updated, "from inspect import isawaitable")
+        replaced = _replace_python_module_function(
+            updated,
+            "traced",
+            "def traced(\n"
+            "    handler: Callable[[str], Any],\n"
+            "    events: list[tuple[str, str]],\n"
+            ") -> Callable[[str], Any]:\n"
+            "    @wraps(handler)\n"
+            "    def wrapper(message: str) -> Any:\n"
+            "        events.append((\"started\", message))\n"
+            "        result = handler(message)\n"
+            "        if not isawaitable(result):\n"
+            "            events.append((\"finished\", message))\n"
+            "            return result\n\n"
+            "        async def finish_after_await() -> Any:\n"
+            "            completed = await result\n"
+            "            events.append((\"finished\", message))\n"
+            "            return completed\n\n"
+            "        return finish_after_await()\n\n"
+            "    return wrapper",
+        )
+        if replaced:
+            updated = replaced
+    if (
+        "async def dispatch(" in updated
+        and "iscoroutinefunction" in updated
+        and re.search(r"\bhandler\s*\(\s*message\s*\)", updated)
+    ):
+        updated = re.sub(
+            r"from\s+inspect\s+import\s+iscoroutinefunction",
+            "from inspect import isawaitable",
+            updated,
+            count=1,
+        )
+        replaced = _replace_python_module_function(
+            updated,
+            "dispatch",
+            "async def dispatch(handler: object, message: str) -> Any:\n"
+            "    result = handler(message)\n"
+            "    if isawaitable(result):\n"
+            "        return await result\n"
+            "    return result",
+        )
+        if replaced:
+            updated = replaced
+    return updated
+
+
 def _repair_python_monthly_schedule(content: str) -> str:
     updated = content
     if "def next_monthly_run(" in updated and "billing_day" in updated:
@@ -5682,6 +5779,8 @@ def contract_repair_proposals(
             updated = _repair_configured_delimiter_sql(updated)
         if any("Required factory parameters retain their invocation binding" in value for value in invariants):
             updated = _repair_python_factory_bindings(updated)
+        if any("Handler completion follows the value returned" in value for value in invariants):
+            updated = _repair_python_awaitable_handler_lifecycle(updated)
         if any("Monthly local-wall-clock scheduling first converts" in value for value in invariants):
             updated = _repair_python_monthly_schedule(updated)
         if any("Task teardown covers BaseException-class process termination" in value for value in invariants):
@@ -5982,6 +6081,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("state transition matches exactly its allowed predecessor", "state"),
     ("Normalize every physical length", "data"),
     ("Required factory parameters retain their invocation binding", "dependency"),
+    ("Handler completion follows the value returned", "runtime"),
     ("Monthly local-wall-clock scheduling first converts", "clock"),
     ("Task teardown covers BaseException-class process termination", "runtime"),
     ("Dependency report integration accepts both legacy component records", "dependency"),
@@ -6026,6 +6126,7 @@ def contract_repair_dimension(
         ("Trusted proxy resolution validates", "config", _repair_dart_trusted_proxy_chain),
         ("configured field delimiter is one policy input", "config", _repair_configured_delimiter_sql),
         ("Required factory parameters retain their invocation binding", "dependency", _repair_python_factory_bindings),
+        ("Handler completion follows the value returned", "runtime", _repair_python_awaitable_handler_lifecycle),
         ("Monthly local-wall-clock scheduling first converts", "clock", _repair_python_monthly_schedule),
         ("Task teardown covers BaseException-class process termination", "runtime", _repair_python_teardown_lifecycle),
         ("Dependency report integration accepts both legacy component records", "dependency", _repair_dart_dependency_report),
