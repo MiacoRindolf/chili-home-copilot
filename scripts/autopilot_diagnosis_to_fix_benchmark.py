@@ -3000,6 +3000,7 @@ def _diagnose(
         diagnostic_case,
         judge,
         stages_to_run=("investigator", "judge"),
+        stop_after_unusable_investigator_with_boundary_fallback=True,
     )
     report = initial["report"]
     probes = diagnostic_probes.probes_from_packet(initial["packet"], max_probes=3)

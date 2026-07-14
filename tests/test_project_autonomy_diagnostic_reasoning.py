@@ -6942,3 +6942,78 @@ def test_evidence_gate_challenges_primitive_owner_when_policy_caller_selects_mod
     assert fallback["hypotheses"][0]["context_paths"] == [
         "trading/query_store.py"
     ]
+
+
+def test_unusable_investigator_early_stops_on_grounded_boundary_fallback():
+    case = {
+        "case_id": "early-stop-boundary",
+        "problem_statement": "Split caller-selected data scopes.",
+        "constraints": {
+            "candidate_paths": ["caller.py", "store.py"],
+            "boundary_owner_hints": [
+                {
+                    "candidate_owner_path": "caller.py",
+                    "context_primitive_path": "store.py",
+                    "shared_decision_literals": ["combined"],
+                    "confidence": "structural_hypothesis",
+                    "reason": "Caller selects one of the primitive modes.",
+                }
+            ],
+            "minimum_hypothesis_dimensions": 1,
+        },
+        "observations": [
+            {
+                "evidence_id": "caller-source",
+                "statement": "Caller chooses combined mode.",
+                "dimension": "data",
+                "dimension_origin": "inferred",
+                "kind": "artifact",
+                "causal_role": "context",
+                "provenance": "caller.py:1",
+                "source_path": "caller.py",
+            },
+            {
+                "evidence_id": "store-source",
+                "statement": "Store exposes combined, left, and right modes.",
+                "dimension": "data",
+                "dimension_origin": "inferred",
+                "kind": "artifact",
+                "causal_role": "context",
+                "provenance": "store.py:1",
+                "source_path": "store.py",
+            },
+        ],
+    }
+    stages = []
+
+    debate = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda stage, _prompt: stages.append(stage) or "",
+        stages_to_run=("investigator", "judge"),
+        stop_after_unusable_investigator_with_boundary_fallback=True,
+    )
+
+    assert stages == ["investigator"]
+    assert debate["stages"][0]["early_stop_reason"] == (
+        "unusable_investigator_with_grounded_boundary_fallback"
+    )
+    assert debate["packet"]["hypotheses"][0]["owner_paths"] == ["caller.py"]
+    assert debate["report"]["conclusion"]["owner_paths"] == ["caller.py"]
+
+
+def test_unusable_investigator_without_boundary_fallback_still_runs_judge():
+    stages = []
+
+    reasoning.run_local_diagnostic_debate(
+        {
+            "case_id": "no-boundary-fallback",
+            "problem_statement": "Diagnose an unknown runtime failure.",
+            "constraints": {"minimum_hypothesis_dimensions": 1},
+            "observations": [],
+        },
+        lambda stage, _prompt: stages.append(stage) or "",
+        stages_to_run=("investigator", "judge"),
+        stop_after_unusable_investigator_with_boundary_fallback=True,
+    )
+
+    assert stages == ["investigator", "judge"]

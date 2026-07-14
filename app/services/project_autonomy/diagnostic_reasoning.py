@@ -13601,6 +13601,7 @@ def run_local_diagnostic_debate(
     *,
     stages_to_run: Sequence[str] = ("investigator", "skeptic", "judge"),
     previous_report: Mapping[str, Any] | None = None,
+    stop_after_unusable_investigator_with_boundary_fallback: bool = False,
 ) -> dict[str, Any]:
     case = normalize_case(raw_case)
     packet = heuristic_packet(case)
@@ -13731,6 +13732,18 @@ def run_local_diagnostic_debate(
         all_retractions.extend(next_report.get("retractions") or [])
         packet = candidate
         report = next_report
+        if (
+            stage == "investigator"
+            and stop_after_unusable_investigator_with_boundary_fallback
+            and not json_parsed
+            and bool(
+                (case.get("constraints") or {}).get("boundary_owner_hints")
+            )
+        ):
+            stages[-1]["early_stop_reason"] = (
+                "unusable_investigator_with_grounded_boundary_fallback"
+            )
+            break
 
     report = {**report, "retractions": all_retractions}
     effective_conclusion = dict(report.get("conclusion") or {})
