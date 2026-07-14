@@ -27,8 +27,8 @@ evidence, not provider-authenticated same-task Fable 5 output.
 - Wall time: **488.1 seconds**
 - Premium calls: **0**
 - Verdict: `needs_improvement`
-- Markdown SHA-256: `e3ceb438d3c6a27167a7b61e0171e90f1b3b82f80a5c8661d79c7821ad2e3909`
-- Results SHA-256: `8dc98a76f5db0ce26d9aa3dd2aded2bae04750081fea67c27951688051050574`
+- Git-normalized Markdown SHA-256: `fe5b33a36201514bf792feec10c2cb2f93de14b4166b147ccfedc9e1b3261a4e`
+- Git-normalized results SHA-256: `b68b79d7c379898f64771d000e441c961d2b975fdb1989c0d7e1f217fe4bb1c6`
 - Checkpoint: removed only after atomic report/result writes
 
 ## Failure Chain

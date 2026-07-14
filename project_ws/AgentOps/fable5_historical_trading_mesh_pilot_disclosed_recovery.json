@@ -1,0 +1,563 @@
+{
+  "accepted_diagnosis_count": 1,
+  "average_case_duration_ms": 5191.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 0,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "config",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 528,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-7u6g2lqh\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_bounded_teacher_policy_defaults_are_exposed FAILED [ 16%]\ntests/test_feedback.py::test_queue_at_threshold_sheds_teacher_but_keeps_bootstrap_mechanical_state FAILED [ 33%]\ntests/test_feedback.py::test_queue_pressure_sheds_shadow_observation_without_losing_mechanical_result FAILED [ 50%]\ntests/test_public.py::test_low_pressure_bootstrap_uses_teacher_and_updates_state PASSED [ 66%]\ntests/test_public.py::test_gateway_miss_preserves_mechanical_decision PASSED [ 83%]\ntests/test_public.py::test_explicit_daily_cap_still_bounds_teacher_calls PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_bounded_teacher_policy_defaults_are_exposed _______________\ntests\\test_feedback.py:12: in test_bounded_teacher_policy_defaults_are_exposed\n    assert settings_module.settings.mesh_daily_llm_cap == 50\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   AttributeError: 'Settings' object has no attribute 'mesh_daily_llm_cap'\n_ test_queue_at_threshold_sheds_teacher_but_keeps_bootstrap_mechanical_state __\ntests\\test_feedback.py:27: in test_queue_at_threshold_sheds_teacher_but_keeps_bootstrap_mechanical_state\n    assert calls == []\nE   AssertionError: assert [{'stop_eval': {'action': 'hold'}}] == []\nE     \nE     Left contains one more item: {'stop_eval': {'action': 'hold'}}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'stop_eval': {\nE     +             'action': 'hold',\nE     +         },\nE     +     },\nE     + ]\n_ test_queue_pressure_sheds_shadow_observation_without_losing_mechanical_result _\ntests\\test_feedback.py:43: in test_queue_pressure_sheds_shadow_observation_without_losing_mechanical_result\n    assert calls == []\nE   AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\nE     \nE     Left contains one more item: {'stop_eval': {'action': 'exit'}}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'stop_eval': {\nE     +             'action': 'exit',\nE     +         },\nE     +     },\nE     + ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_bounded_teacher_policy_defaults_are_exposed - AttributeError: 'Settings' object has no attribute 'mesh_daily_llm_cap'\nFAILED tests/test_feedback.py::test_queue_at_threshold_sheds_teacher_but_keeps_bootstrap_mechanical_state - AssertionError: assert [{'stop_eval': {'action': 'hold'}}] == []\n  \n  Left contains one more item: {'stop_eval': {'action': 'hold'}}\n  \n  Full diff:\n  - []\n  + [\n  +     {\n  +         'stop_eval': {\n  +             'action': 'hold',\n  +         },\n  +     },\n  + ]\nFAILED tests/test_feedback.py::test_queue_pressure_sheds_shadow_observation_without_losing_mechanical_result - AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\n  \n  Left contains one more item: {'stop_eval': {'action': 'exit'}}\n  \n  Full diff:\n  - []\n  + [\n  +     {\n  +         'stop_eval': {\n  +             'action': 'exit',\n  +         },\n  +     },\n  + ]\n========================= 3 failed, 3 passed in 0.09s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 574,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-7j30udl2\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 12 items\n\ntests/test_final.py::test_below_pressure_threshold_keeps_teacher_path PASSED [  8%]\ntests/test_final.py::test_zero_pressure_threshold_is_explicit_shedding_override FAILED [ 16%]\ntests/test_final.py::test_missing_database_does_not_block_teacher PASSED [ 25%]\ntests/test_final.py::test_queue_probe_failure_fails_open_for_teacher PASSED [ 33%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[bootstrap] FAILED [ 41%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[demoted] FAILED [ 50%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[shadow] FAILED [ 58%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[graduated] FAILED [ 66%]\ntests/test_final.py::test_daily_cap_remains_effective_below_queue_threshold FAILED [ 75%]\ntests/test_public.py::test_low_pressure_bootstrap_uses_teacher_and_updates_state PASSED [ 83%]\ntests/test_public.py::test_gateway_miss_preserves_mechanical_decision PASSED [ 91%]\ntests/test_public.py::test_explicit_daily_cap_still_bounds_teacher_calls PASSED [100%]\n\n================================== FAILURES ===================================\n_________ test_zero_pressure_threshold_is_explicit_shedding_override __________\ntests\\test_final.py:29: in test_zero_pressure_threshold_is_explicit_shedding_override\n    monkeypatch.setattr(settings_module.settings, \"mesh_teacher_queue_pressure_block_fraction\", 0.0)\nE   AttributeError: Settings(mesh_interval_seconds=30) has no attribute 'mesh_teacher_queue_pressure_block_fraction'\n__ test_every_stage_preserves_mechanical_decision_under_pressure[bootstrap] ___\ntests\\test_final.py:72: in test_every_stage_preserves_mechanical_decision_under_pressure\n    assert calls == []\nE   AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\nE     \nE     Left contains one more item: {'stop_eval': {'action': 'exit'}}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'stop_eval': {\nE     +             'action': 'exit',\nE     +         },\nE     +     },\nE     + ]\n___ test_every_stage_preserves_mechanical_decision_under_pressure[demoted] ____\ntests\\test_final.py:72: in test_every_stage_preserves_mechanical_decision_under_pressure\n    assert calls == []\nE   AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\nE     \nE     Left contains one more item: {'stop_eval': {'action': 'exit'}}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'stop_eval': {\nE     +             'action': 'exit',\nE     +         },\nE     +     },\nE     + ]\n____ test_every_stage_preserves_mechanical_decision_under_pressure[shadow] ____\ntests\\test_final.py:72: in test_every_stage_preserves_mechanical_decision_under_pressure\n    assert calls == []\nE   AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\nE     \nE     Left contains one more item: {'stop_eval': {'action': 'exit'}}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'stop_eval': {\nE     +             'action': 'exit',\nE     +         },\nE     +     },\nE     + ]\n__ test_every_stage_preserves_mechanical_decision_under_pressure[graduated] ___\ntests\\test_final.py:72: in test_every_stage_preserves_mechanical_decision_under_pressure\n    assert calls == []\nE   AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\nE     \nE     Left contains one more item: {'stop_eval': {'action': 'exit'}}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'stop_eval': {\nE     +             'action': 'exit',\nE     +         },\nE     +     },\nE     + ]\n___________ test_daily_cap_remains_effective_below_queue_threshold ____________\ntests\\test_final.py:80: in test_daily_cap_remains_effective_below_queue_threshold\n    monkeypatch.setattr(settings_module.settings, \"mesh_daily_llm_cap\", 1)\nE   AttributeError: Settings(mesh_interval_seconds=30) has no attribute 'mesh_daily_llm_cap'\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_zero_pressure_threshold_is_explicit_shedding_override - AttributeError: Settings(mesh_interval_seconds=30) has no attribute 'mesh_teacher_queue_pressure_block_fraction'\nFAILED tests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[bootstrap] - AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\n  \n  Left contains one more item: {'stop_eval': {'action': 'exit'}}\n  \n  Full diff:\n  - []\n  + [\n  +     {\n  +         'stop_eval': {\n  +             'action': 'exit',\n  +         },\n  +     },\n  + ]\nFAILED tests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[demoted] - AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\n  \n  Left contains one more item: {'stop_eval': {'action': 'exit'}}\n  \n  Full diff:\n  - []\n  + [\n  +     {\n  +         'stop_eval': {\n  +             'action': 'exit',\n  +         },\n  +     },\n  + ]\nFAILED tests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[shadow] - AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\n  \n  Left contains one more item: {'stop_eval': {'action': 'exit'}}\n  \n  Full diff:\n  - []\n  + [\n  +     {\n  +         'stop_eval': {\n  +             'action': 'exit',\n  +         },\n  +     },\n  + ]\nFAILED tests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[graduated] - AssertionError: assert [{'stop_eval': {'action': 'exit'}}] == []\n  \n  Left contains one more item: {'stop_eval': {'action': 'exit'}}\n  \n  Full diff:\n  - []\n  + [\n  +     {\n  +         'stop_eval': {\n  +             'action': 'exit',\n  +         },\n  +     },\n  + ]\nFAILED tests/test_final.py::test_daily_cap_remains_effective_below_queue_threshold - AttributeError: Settings(mesh_interval_seconds=30) has no attribute 'mesh_daily_llm_cap'\n========================= 6 failed, 6 passed in 0.12s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 477,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-7u6g2lqh\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_low_pressure_bootstrap_uses_teacher_and_updates_state PASSED [ 33%]\ntests/test_public.py::test_gateway_miss_preserves_mechanical_decision PASSED [ 66%]\ntests/test_public.py::test_explicit_daily_cap_still_bounds_teacher_calls PASSED [100%]\n\n============================== 3 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "changed_files": [
+        "mesh/aggregator.py",
+        "mesh/settings.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "config",
+        "selected_files": [
+          "mesh/aggregator.py",
+          "mesh/settings.py"
+        ],
+        "warnings": []
+      },
+      "deterministic_diagnosis_fast_path": true,
+      "deterministic_only": true,
+      "diagnosis_dimension": "config",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "config",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "config",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [],
+          "hypothesis_id": "recognized-config-contract",
+          "reason": "Prompt invariants and candidate source shape activate a guarded repair; validation remains authoritative.",
+          "status": "provisional"
+        },
+        "experiments": [],
+        "hypotheses": [
+          {
+            "claim": "Bounded optional teacher work is governed by effective settings and live queue state: settings own the finite default daily budget and configurable pressure threshold, the repository only measures queue depth, and the consumer admits teacher work only below that threshold while mechanical aggregation and state persistence always continue. Queue depth exactly at the threshold sheds optional work. Zero-valued budget and pressure overrides preserve explicit unlimited and disabled semantics, while absent telemetry or a bounded pressure-probe failure fails open.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Apply only the guarded owner repair and rerun pinned contracts.",
+            "hypothesis_id": "recognized-config-contract",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {},
+      "diagnosis_report": {
+        "conclusion": {
+          "blockers": [
+            "No source intervention has been validated yet."
+          ],
+          "causal_sufficiency": "direct_artifact",
+          "claim": "Bounded optional teacher work is governed by effective settings and live queue state: settings own the finite default daily budget and configurable pressure threshold, the repository only measures queue depth, and the consumer admits teacher work only below that threshold while mechanical aggregation and state persistence always continue. Queue depth exactly at the threshold sheds optional work. Zero-valued budget and pressure overrides preserve explicit unlimited and disabled semantics, while absent telemetry or a bounded pressure-probe failure fails open.",
+          "confidence": 0.0,
+          "dimension": "config",
+          "evidence_ids": [],
+          "hypothesis_id": "recognized-config-contract",
+          "reason": "Prompt invariants and candidate source shape activate a guarded repair; validation remains authoritative.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [
+          "Bounded optional teacher work is governed by effective settings and live queue state: settings own the finite default daily budget and configurable pressure threshold, the repository only measures queue depth, and the consumer admits teacher work only below that threshold while mechanical aggregation and state persistence always continue. Queue depth exactly at the threshold sheds optional work. Zero-valued budget and pressure overrides preserve explicit unlimited and disabled semantics, while absent telemetry or a bounded pressure-probe failure fails open."
+        ],
+        "decision": "instrument_first",
+        "errors": [],
+        "hypothesis_results": [],
+        "valid": true
+      },
+      "diagnosis_stages": [],
+      "diagnosis_status": "provisional",
+      "duration_ms": 5191,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 491,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_mesh_teacher_queue_pressure-u_mglg1y\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_bounded_teacher_policy_defaults_are_exposed PASSED [ 16%]\ntests/test_feedback.py::test_queue_at_threshold_sheds_teacher_but_keeps_bootstrap_mechanical_state PASSED [ 33%]\ntests/test_feedback.py::test_queue_pressure_sheds_shadow_observation_without_losing_mechanical_result PASSED [ 50%]\ntests/test_public.py::test_low_pressure_bootstrap_uses_teacher_and_updates_state PASSED [ 66%]\ntests/test_public.py::test_gateway_miss_preserves_mechanical_decision PASSED [ 83%]\ntests/test_public.py::test_explicit_daily_cap_still_bounds_teacher_calls PASSED [100%]\n\n============================== 6 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 502,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-_5qglmao\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 12 items\n\ntests/test_final.py::test_below_pressure_threshold_keeps_teacher_path PASSED [  8%]\ntests/test_final.py::test_zero_pressure_threshold_is_explicit_shedding_override PASSED [ 16%]\ntests/test_final.py::test_missing_database_does_not_block_teacher PASSED [ 25%]\ntests/test_final.py::test_queue_probe_failure_fails_open_for_teacher PASSED [ 33%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[bootstrap] PASSED [ 41%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[demoted] PASSED [ 50%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[shadow] PASSED [ 58%]\ntests/test_final.py::test_every_stage_preserves_mechanical_decision_under_pressure[graduated] PASSED [ 66%]\ntests/test_final.py::test_daily_cap_remains_effective_below_queue_threshold PASSED [ 75%]\ntests/test_public.py::test_low_pressure_bootstrap_uses_teacher_and_updates_state PASSED [ 83%]\ntests/test_public.py::test_gateway_miss_preserves_mechanical_decision PASSED [ 91%]\ntests/test_public.py::test_explicit_daily_cap_still_bounds_teacher_calls PASSED [100%]\n\n============================= 12 passed in 0.05s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_mesh_teacher_queue_pressure",
+          "path": "cases/python_mesh_teacher_queue_pressure.json",
+          "sha256": "c6a0f72aa57bda151fe634c519b19b22247f970ef218d17d1a7b77c2b5380b64",
+          "size_bytes": 4850
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_mesh_teacher_queue_pressure",
+          "path": "oracles/python_mesh_teacher_queue_pressure.json",
+          "sha256": "8d2f055230a687ada8021f35761e640ebd44f1eb8abe1b213524eafe5efddc24",
+          "size_bytes": 2013
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_mesh_teacher_queue_pressure",
+          "path": "final_oracles/python_mesh_teacher_queue_pressure.json",
+          "sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+          "size_bytes": 3063
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "config",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "c6a0f72aa57bda151fe634c519b19b22247f970ef218d17d1a7b77c2b5380b64",
+          "artifact": "case:python_mesh_teacher_queue_pressure",
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "c6a0f72aa57bda151fe634c519b19b22247f970ef218d17d1a7b77c2b5380b64",
+          "path": "cases/python_mesh_teacher_queue_pressure.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T05:45:57.307477+00:00"
+        },
+        {
+          "actual_sha256": "8d2f055230a687ada8021f35761e640ebd44f1eb8abe1b213524eafe5efddc24",
+          "artifact": "feedback_oracle:python_mesh_teacher_queue_pressure",
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "8d2f055230a687ada8021f35761e640ebd44f1eb8abe1b213524eafe5efddc24",
+          "path": "oracles/python_mesh_teacher_queue_pressure.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T05:45:58.753343+00:00"
+        },
+        {
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 0,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T05:46:00.650002+00:00"
+        },
+        {
+          "actual_sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+          "artifact": "final_oracle:python_mesh_teacher_queue_pressure",
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+          "path": "final_oracles/python_mesh_teacher_queue_pressure.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T05:46:00.650241+00:00"
+        },
+        {
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_mesh_teacher_queue_pressure.json",
+          "sequence": 11,
+          "sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+          "timestamp_utc": "2026-07-14T05:46:00.650289+00:00"
+        },
+        {
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T05:46:00.653706+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T05:46:02.403477+00:00"
+        },
+        {
+          "actual_count": 0,
+          "case_id": "python_mesh_teacher_queue_pressure",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 0,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T05:46:02.403494+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 0,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 485,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_mesh_teacher_queue_pressure-u_mglg1y\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_low_pressure_bootstrap_uses_teacher_and_updates_state PASSED [ 33%]\ntests/test_public.py::test_gateway_miss_preserves_mechanical_decision PASSED [ 66%]\ntests/test_public.py::test_explicit_daily_cap_still_bounds_teacher_calls PASSED [100%]\n\n============================== 3 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "config",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "mesh/aggregator.py",
+        "mesh/settings.py"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 0,
+      "successful_live_model_call_count": 0,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-14T05:46:02.527739+00:00",
+  "deterministic_only_case_count": 1,
+  "deterministic_only_case_rate": 100.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 0.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 0,
+  "diagnostic_stage_json_parse_rate": 0.0,
+  "diagnostic_stage_schema_acceptance_rate": 0.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_mesh_teacher_queue_pressure",
+          "path": "cases/python_mesh_teacher_queue_pressure.json",
+          "sha256": "c6a0f72aa57bda151fe634c519b19b22247f970ef218d17d1a7b77c2b5380b64",
+          "size_bytes": 4850
+        },
+        "case_id": "python_mesh_teacher_queue_pressure",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_mesh_teacher_queue_pressure",
+          "path": "oracles/python_mesh_teacher_queue_pressure.json",
+          "sha256": "8d2f055230a687ada8021f35761e640ebd44f1eb8abe1b213524eafe5efddc24",
+          "size_bytes": 2013
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_mesh_teacher_queue_pressure",
+          "path": "final_oracles/python_mesh_teacher_queue_pressure.json",
+          "sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+          "size_bytes": 3063
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "a4db543b60dd62a5fb6365edfbcfdac5a63330fefb7daf9f0a881795f2459573",
+      "size_bytes": 542
+    }
+  },
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "a4db543b60dd62a5fb6365edfbcfdac5a63330fefb7daf9f0a881795f2459573",
+      "size_bytes": 542,
+      "timestamp_utc": "2026-07-14T05:45:54.553069+00:00"
+    },
+    {
+      "artifact": "case:python_mesh_teacher_queue_pressure",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_mesh_teacher_queue_pressure.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "c6a0f72aa57bda151fe634c519b19b22247f970ef218d17d1a7b77c2b5380b64",
+      "size_bytes": 4850,
+      "timestamp_utc": "2026-07-14T05:45:54.555373+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_mesh_teacher_queue_pressure",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_mesh_teacher_queue_pressure.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "8d2f055230a687ada8021f35761e640ebd44f1eb8abe1b213524eafe5efddc24",
+      "size_bytes": 2013,
+      "timestamp_utc": "2026-07-14T05:45:54.555785+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_mesh_teacher_queue_pressure",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_mesh_teacher_queue_pressure.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+      "size_bytes": 3063,
+      "timestamp_utc": "2026-07-14T05:45:54.556214+00:00"
+    },
+    {
+      "actual_sha256": "a4db543b60dd62a5fb6365edfbcfdac5a63330fefb7daf9f0a881795f2459573",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "a4db543b60dd62a5fb6365edfbcfdac5a63330fefb7daf9f0a881795f2459573",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T05:45:54.560651+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_MESH_PILOT_DISCLOSED_RECOVERY_CHECKPOINT.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T05:45:57.306282+00:00"
+    },
+    {
+      "actual_sha256": "c6a0f72aa57bda151fe634c519b19b22247f970ef218d17d1a7b77c2b5380b64",
+      "artifact": "case:python_mesh_teacher_queue_pressure",
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "c6a0f72aa57bda151fe634c519b19b22247f970ef218d17d1a7b77c2b5380b64",
+      "path": "cases/python_mesh_teacher_queue_pressure.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T05:45:57.307477+00:00"
+    },
+    {
+      "actual_sha256": "8d2f055230a687ada8021f35761e640ebd44f1eb8abe1b213524eafe5efddc24",
+      "artifact": "feedback_oracle:python_mesh_teacher_queue_pressure",
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "8d2f055230a687ada8021f35761e640ebd44f1eb8abe1b213524eafe5efddc24",
+      "path": "oracles/python_mesh_teacher_queue_pressure.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T05:45:58.753343+00:00"
+    },
+    {
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 0,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T05:46:00.650002+00:00"
+    },
+    {
+      "actual_sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+      "artifact": "final_oracle:python_mesh_teacher_queue_pressure",
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+      "path": "final_oracles/python_mesh_teacher_queue_pressure.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T05:46:00.650241+00:00"
+    },
+    {
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_mesh_teacher_queue_pressure.json",
+      "sequence": 11,
+      "sha256": "3213cd663b0fa6e4af50e93a0b1921b32f65b07f8f7e427fa3b217da972a567b",
+      "timestamp_utc": "2026-07-14T05:46:00.650289+00:00"
+    },
+    {
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T05:46:00.653706+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T05:46:02.403477+00:00"
+    },
+    {
+      "actual_count": 0,
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 0,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T05:46:02.403494+00:00"
+    },
+    {
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T05:46:02.498668+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T05:46:02.527682+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "f963e97fe621d8a520b14c0c3581f9e826a8feed65003837d8f9fb2d47352522",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_MESH_PILOT_DISCLOSED_RECOVERY_CHECKPOINT.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 0,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 0,
+  "verdict": "needs_improvement"
+}

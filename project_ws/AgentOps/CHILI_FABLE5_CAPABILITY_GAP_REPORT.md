@@ -659,6 +659,19 @@ settings/consumer/provider ownership, AST-grounded dataclass and consumer repair
 still preserves zero overrides and fail-open telemetry. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_MESH_PILOT_UNTOUCHED_RECEIPT.md`.
 
+After disclosure, commit `42ed0615` added that generic capability. The implementation recognizes settings,
+queue-state provider, and optional-work consumer as distinct structural roles; modifies only settings and the
+consumer; supports dataclass and Pydantic policy shapes plus single-call and multi-stage teacher gates; and fails
+closed on ambiguous providers. It preserves the daily cap, exact pressure boundary, zero-value overrides,
+absent/failing telemetry behavior, and mechanical state continuity. The operator also produced valid exact-owner
+repairs against the complete historical parent sources in a read-only probe.
+
+The disclosed recovery scored **100/100** in **5.2 seconds**, selected the exact two owners, passed all public,
+feedback, and fresh-final checks, and used **zero model calls and zero premium calls**. Full affected validation
+passed **325 tests**. This is strong non-wrapper system evidence for a recognized family, but it is deliberately
+`deterministic_only`, earns no live-reasoning credit, and does not replace the untouched 40/100. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_MESH_PILOT_DISCLOSED_RECOVERY_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -695,7 +708,7 @@ still preserves zero overrides and fail-open telemetry. Full details:
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
-10. The two historical Fable 5 trading pilots scored 25/100 and 40/100 untouched. The first inverted short-stop polarity; the second identified the broad configuration family but misassigned queue-policy ownership and could not serialize a valid settings-plus-consumer repair. Both exhausted nearly the full local budget and retained no patch.
+10. The two historical Fable 5 trading pilots scored 25/100 and 40/100 untouched. Disclosed deterministic recovery now solves both recognized families at 100/100 and zero premium calls, but the first encounter still shows weak unknown-mechanism reasoning: both exhausted nearly the full local budget and retained no patch.
 
 ## Promotion Gate
 
