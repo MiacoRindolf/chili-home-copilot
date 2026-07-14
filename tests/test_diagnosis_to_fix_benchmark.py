@@ -2837,6 +2837,88 @@ def test_complete_contract_repair_plan_skips_redundant_model_review(
     assert '"owner.py"' in prompts[0]
 
 
+def test_incomplete_plan_defers_review_to_preserve_future_plan_and_edit_budget(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "context.py").write_text("OTHER = 1\n", encoding="utf-8")
+    stages: list[str] = []
+    plan = {
+        "dimension": "code",
+        "analysis": "The draft assigns two owners under a one-file budget.",
+        "files": [
+            {"path": "owner.py", "action": "modify", "description": "Fix alpha."},
+            {
+                "path": "context.py",
+                "action": "modify",
+                "description": "Fix beta.",
+            },
+        ],
+        "contract_coverage": [
+            {
+                "contract": "tests/test_contract.py::test_alpha",
+                "owner_paths": ["owner.py"],
+                "postcondition": "Alpha is repaired by its owner.",
+            },
+            {
+                "contract": "tests/test_contract.py::test_beta",
+                "owner_paths": ["context.py"],
+                "postcondition": "Beta is repaired by its owner.",
+            },
+        ],
+    }
+
+    def fake_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        return json.dumps(plan)
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_planned_edits",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an incomplete plan must not consume the reserved editor budget"
+        ),
+    )
+    calls = benchmark._ModelCallLedger(model_time_budget=160.0)
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {
+            "prompt": "Repair alpha and beta at the correct boundary.",
+            "candidate_paths": ["owner.py", "context.py"],
+            "max_files": 1,
+        },
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "two contracts remain red",
+        "local-model",
+        calls,
+        150.0,
+        1,
+        feedback_context="from owner import VALUE\nfrom context import OTHER",
+        contract_evidence={
+            "failed_ids": [
+                "tests/test_contract.py::test_alpha",
+                "tests/test_contract.py::test_beta",
+            ]
+        },
+        attempted_plan_fingerprints=set(),
+        future_round_available=True,
+    )
+
+    assert stages == ["repair_plan_1"]
+    assert result["patch_applied"] is False
+    assert result["review_deferred_for_budget"] == {
+        "remaining_sec": 160.0,
+        "reserved_sec": 165.0,
+    }
+    assert "fresh plan and edit" in result["warnings"][0]
+
+
 def test_empty_repair_plan_stops_before_review_and_cannot_gain_feedback_edit_authority(
     tmp_path,
     monkeypatch,

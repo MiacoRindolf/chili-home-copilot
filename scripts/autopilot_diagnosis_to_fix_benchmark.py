@@ -2671,6 +2671,9 @@ def _markdown(results: Mapping[str, Any]) -> str:
 
 QWEN3_THINKING_MIN_TIMEOUT_SEC = 180.0
 QWEN3_THINKING_MAX_PROMPT_CHARS = 12_000
+REPAIR_REVIEW_MIN_USEFUL_SEC = 30.0
+REPAIR_FUTURE_PLAN_RESERVE_SEC = 75.0
+REPAIR_EDITOR_RESERVE_SEC = 60.0
 
 
 def _thinking_policy(
@@ -2880,6 +2883,46 @@ class _ModelCallLedger(list[dict[str, Any]]):
             and self.model_time_used >= self.model_time_budget
         )
         return deadline_exhausted or model_budget_exhausted
+
+
+def _remaining_local_model_budget_sec(calls: Sequence[Mapping[str, Any]]) -> float | None:
+    remaining: list[float] = []
+    model_budget = getattr(calls, "model_time_budget", None)
+    if isinstance(model_budget, (int, float)):
+        used = float(getattr(calls, "model_time_used", 0.0) or 0.0)
+        remaining.append(max(0.0, float(model_budget) - used))
+    deadline = getattr(calls, "deadline", None)
+    if isinstance(deadline, (int, float)):
+        remaining.append(max(0.0, float(deadline) - time.monotonic()))
+    return min(remaining) if remaining else None
+
+
+def _incomplete_review_budget_deferral(
+    calls: Sequence[Mapping[str, Any]],
+    timeout: float,
+    *,
+    future_round_available: bool,
+) -> dict[str, float] | None:
+    if not future_round_available:
+        return None
+    remaining = _remaining_local_model_budget_sec(calls)
+    if remaining is None:
+        return None
+    call_cap = max(0.0, float(timeout))
+    reserved = sum(
+        min(call_cap, value)
+        for value in (
+            REPAIR_REVIEW_MIN_USEFUL_SEC,
+            REPAIR_FUTURE_PLAN_RESERVE_SEC,
+            REPAIR_EDITOR_RESERVE_SEC,
+        )
+    )
+    if remaining > reserved:
+        return None
+    return {
+        "remaining_sec": round(remaining, 3),
+        "reserved_sec": round(reserved, 3),
+    }
 
 
 def _diagnostic_json_call(
@@ -4602,6 +4645,7 @@ def _repair_after_failure(
     attempted_plan_fingerprints: set[str] | None = None,
     planning_model: str = "",
     validated_progress: Mapping[str, Any] | None = None,
+    future_round_available: bool = False,
 ) -> dict[str, Any]:
     candidates = [
         rel
@@ -4736,6 +4780,33 @@ def _repair_after_failure(
         candidates,
         contract_evidence,
     )
+    review_budget_deferral = (
+        None
+        if skip_repair_review or compact_escalation
+        else _incomplete_review_budget_deferral(
+            calls,
+            timeout,
+            future_round_available=future_round_available,
+        )
+    )
+    if review_budget_deferral:
+        return {
+            "round": round_index,
+            "plan": plan,
+            "plan_fingerprint": plan_fingerprint,
+            "selected_file": "",
+            "selected_files": [],
+            "ownership_augmented_files": [],
+            "feedback_context_files": _feedback_exercised_candidates(
+                feedback_context,
+                candidates,
+            ),
+            "patch_applied": False,
+            "review_deferred_for_budget": review_budget_deferral,
+            "warnings": [
+                "Deferred incomplete-plan review to reserve local model budget for a fresh plan and edit in the next bounded round."
+            ],
+        }
     review_prompt = (
         "Return one corrected repair-plan JSON object only. Act as an adversarial validation judge: the draft "
         "may have misread an assertion or traded one contract for another. Derive every required input/output "
@@ -6188,6 +6259,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     attempted_plan_fingerprints=attempted_plan_fingerprints,
                     planning_model=reasoning_model,
                     validated_progress=validated_progress_context,
+                    future_round_available=repair_round < len(repair_schedule),
                 )
                 repair_attempts.append(repair)
                 repair["model"] = repair_model
