@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -29,6 +30,34 @@ def test_cli_boots_without_database_url():
 
     assert completed.returncode == 0, completed.stderr
     assert "--emit-prompt-pack" in completed.stdout
+
+
+def test_guarded_collector_is_fable_only_and_requires_execute():
+    collector = (
+        headtohead.ROOT / "scripts" / "run_fable5_diagnostic_headtohead.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "[switch]$Execute" in collector
+    assert "if (-not $Execute)" in collector
+    assert "--model claude-fable-5" in collector
+    assert "--fallback-model" not in collector
+    assert "--safe-mode" in collector
+    assert '--tools ""' in collector
+    assert "--no-write" in collector
+    assert "claude-opus" not in collector.lower()
+
+    prompt_path = (
+        headtohead.ROOT
+        / "project_ws"
+        / "AgentOps"
+        / "fable5_diagnostic_headtohead"
+        / "prompt_pack.md"
+    )
+    prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest().upper()
+    assert prompt_sha256 in collector
+    assert prompt_path.read_text(encoding="utf-8") == headtohead.render_prompt_pack(
+        headtohead.DEFAULT_FIXTURE_ROOT
+    )
 
 
 def _fixture(tmp_path):

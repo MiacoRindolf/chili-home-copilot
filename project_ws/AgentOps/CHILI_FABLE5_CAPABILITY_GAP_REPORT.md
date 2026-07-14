@@ -77,10 +77,10 @@ but 10/12 unseen final failures still decisively reject replacement readiness.
 | Cross-language syntax validation | Python AST, parser-only Node TypeScript/JavaScript validation, and Dart analysis with isolated analyzer state; exact changed-file coverage required | Proven by safety and orchestration tests |
 | Recognized contract repair | Prompt-derived invariants, repository-shape guards, and CHILI-owned mechanical repair operators | Eight disclosed mechanisms and two disclosed eleventh mechanisms pass development replay. Twelfth transfer recognized 0/12 deterministic repairs, so broad abstraction remains open |
 | Production validation repair | Project Autonomy reads full targeted test contracts, pins original selectors, maps bounded source-owner candidates, requires contract-owner coverage, snapshots every repair scope, retains measurable same-scope progress, and atomically rolls back incomplete/regressive groups | Twelfth transfer retained 7 patches, passed feedback in 5/12, exact owners in 6/12, and finals in 2/12. Better boundedness and ownership; synthesis remains unready |
-| Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
+| Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; eight-case same-task pack frozen, provider run pending |
 | Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Eight eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100; all below the 90 shadow threshold. The eighth oracle was dimension-lenient; strict primary-family scoring is 70.62/100 |
 | Durable local benchmark execution | Atomic per-case checkpoints bound to source, runner, public inputs, model, stages, and inference parameters; incompatible resumes fail closed | Proven by simulated interruption and compatible resume; real host-loss recovery remains untested |
-| Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
+| Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Collection-ready for one sealed eight-case comparison; provider run and human adjudication pending |
 | Broad language/repository coverage | Initial Python, TypeScript, Dart, and SQL repair coverage | Partial; large repositories, Go, Rust, and mixed stacks remain incomplete |
 | Universal superiority claim | Statistically defensible quality, safety, latency, and cost advantage across broad tasks | Not proven |
 
@@ -297,6 +297,16 @@ fully disclosed, so the result measures regression mastery rather than Fable 5-c
 - Frontier tournament provenance now binds the original response hash to the exact matching assistant event and its native model label. A stray Fable event cannot attest an Opus response, and recorder-declared labels remain unverified.
 - The fresh same-task Fable 5 comparison count therefore remains **0**
 - Full audit: `project_ws/AgentOps/CLAUDE_HISTORY_MODEL_AUDIT.md`
+
+### Authenticated Head-to-Head Collection Bridge
+
+- The independently authored eighth diagnostic slice now has a deterministic oracle-free Fable 5 prompt pack with eight cases and SHA-256 `c279126fb23319a30f9b440645062a54bff98acaf8b6e88252b83a476b307eec`.
+- Prompt generation reads manifest and public case inputs only; a sealed-term scan found zero oracle-path, primary-dimension, expected-decision/status, or safety-oracle leakage.
+- The evaluator requires an exact prompt-bound and response-bound provider-native `claude-fable-5` transcript. It rejects another Claude family, an unrelated Fable event, an altered case set, invented evidence grounding, or a changed prompt hash.
+- Reasoning quality is scored separately from premium cost, then compared case-by-case with the already sealed untouched CHILI eighth-slice result. Parity remains disabled until blind human adjudication and broader replication.
+- A guarded Windows collector is inert without explicit `-Execute`, uses no fallback model, disables tools, runs in safe mode, verifies first-party authentication, and performs a no-write provenance/scoring preflight before publication.
+- Preparation used **zero premium calls**. The one authenticated Fable 5 call remains pending explicit approval because it consumes the user's premium allowance.
+- Readiness artifact: `project_ws/AgentOps/fable5_diagnostic_headtohead/COLLECTION_READY.md`
 
 ### First Independent Post-Freeze Diagnostic Slice
 
@@ -801,7 +811,7 @@ isolating repair-budget scheduling as the next bottleneck. Full details:
 ## Remaining Gaps
 
 1. The latest valid frozen diagnosis-to-fix suites scored 40.83/100, 27.92/100, and 41.88/100, with only 3/32 sealed-final solves in aggregate. Disclosed replays solve recognized mechanisms, but unknown-mechanism transfer, large repositories, mixed stacks, Go, and Rust superiority remain unproven.
-2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
+2. Provider-attested Fable 5 history exists, and an oracle-free eight-case same-task collection pack plus exact-response attestation bridge is frozen. The provider run is still pending explicit credit approval, so no same-task Fable 5 score exists yet. Historical answers remain excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
 5. Local output remains stochastic, and structural usability is not diagnostic quality. The untouched fifteenth suite completed 78/78 local calls with all eight cases live-reasoning-qualified, yet solved only 1/8 finals. In the disclosed Node shared-state replay, the local reasoner reached the correct family and found both component mechanisms but still failed to synthesize the complete leading boundary. Disclosed functional solves therefore remain separate from unknown-mechanism reasoning quality.
