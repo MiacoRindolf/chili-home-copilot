@@ -672,6 +672,28 @@ passed **325 tests**. This is strong non-wrapper system evidence for a recognize
 `deterministic_only`, earns no live-reasoning credit, and does not replace the untouched 40/100. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_MESH_PILOT_DISCLOSED_RECOVERY_RECEIPT.md`.
 
+### Historical Fable 5 Queue-Priority Pilot
+
+A third post-source-freeze fixture reconstructed historical commit `b04ade06`, `fix: protect mesh refresh under
+queue pressure`. This mechanism is disjoint from direction propagation and teacher admission. It requires one
+auditable state replacement only at exact fixed capacity, with protected incoming and sheddable existing cause
+allowlists, a 30-minute age boundary, oldest/id ordering, locked-row exclusion, correlation rejection before
+mutation, over-cap rejection, and timezone-safe lifecycle metadata. CHILI source was frozen at `9d466377`; the
+fixture-only commit was `0cd0d05b`.
+
+The untouched protocol run scored **40/100**, solved **0/1** sealed finals, retained no patch, made **9 local calls**
+with three timeouts, took **491.2 seconds**, and used zero premium calls. It chose the correct `state` family and
+repository owner, but never established a causal conclusion. More seriously, `brain_market_snapshots` plus audit
+language falsely activated an unrelated immutable-request-snapshot invariant. The first edit shed any old pending
+cause for any incoming cause, used incompatible datetime forms, wrote an undefined audit field, and mutated before
+the correlation gate. Feedback repairs introduced different control-flow regressions, and rollback preserved the
+public contract.
+
+This result adds two concrete architecture gaps: semantic contract activation must reject identifier-substring
+collisions, and queue-priority repair needs a source-guarded state-transition operator that treats all eligibility
+and ordering clauses as one indivisible boundary. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_QUEUE_PRIORITY_PILOT_UNTOUCHED_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -708,7 +730,7 @@ passed **325 tests**. This is strong non-wrapper system evidence for a recognize
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
-10. The two historical Fable 5 trading pilots scored 25/100 and 40/100 untouched. Disclosed deterministic recovery now solves both recognized families at 100/100 and zero premium calls, but the first encounter still shows weak unknown-mechanism reasoning: both exhausted nearly the full local budget and retained no patch.
+10. Three historical Fable 5 trading pilots scored 25/100, 40/100, and 40/100 untouched. Disclosed deterministic recovery solves the first two recognized families at 100/100 and zero premium calls, but every first encounter exhausted nearly the full local budget and retained no patch; the third also exposed a false contract-family activation.
 
 ## Promotion Gate
 

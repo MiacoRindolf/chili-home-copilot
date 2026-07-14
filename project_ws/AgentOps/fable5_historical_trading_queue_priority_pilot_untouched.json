@@ -1,0 +1,1681 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 491203.0,
+  "blinded_holdout_case_count": 1,
+  "blinded_holdout_score": 40.0,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 1,
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "state",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 582,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-inm004ub\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] FAILED [ 16%]\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] FAILED [ 33%]\ntests/test_feedback.py::test_unprotected_incoming_cause_never_sheds PASSED [ 50%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 66%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 83%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - assert -1 == 4\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - assert -1 == 4\n========================= 2 failed, 4 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 533,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-26nc2_1b\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 8 items\n\ntests/test_final.py::test_fresh_imminent_rows_are_not_shed PASSED        [ 12%]\ntests/test_final.py::test_non_imminent_stale_rows_are_not_shed PASSED    [ 25%]\ntests/test_final.py::test_over_cap_queue_never_sheds PASSED              [ 37%]\ntests/test_final.py::test_exhausted_correlation_rejects_before_shedding PASSED [ 50%]\ntests/test_final.py::test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed FAILED [ 62%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 75%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 87%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_______ test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed _______\ntests\\test_final.py:80: in test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed\n    assert _enqueue(db, now=datetime(2026, 6, 4, 2, 0, tzinfo=timezone.utc)) == 4\nE   assert -1 == 4\nE    +  where -1 = _enqueue(<mesh_queue.repository.MemorySession object at 0x000002DA5D3A28B0>, now=datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc))\nE    +    where datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc) = datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc)\nE    +      where datetime.timezone.utc = timezone.utc\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed - assert -1 == 4\n +  where -1 = _enqueue(<mesh_queue.repository.MemorySession object at 0x000002DA5D3A28B0>, now=datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc))\n +    where datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc) = datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc)\n +      where datetime.timezone.utc = timezone.utc\n========================= 1 failed, 7 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 503,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-inm004ub\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 33%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 66%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n============================== 3 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_protected_refresh_queue_priority",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "deterministic_diagnosis_fast_path": false,
+      "deterministic_only": false,
+      "diagnosis_dimension": "state",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "state",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-4",
+            "source-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "State drift causes queue saturation.",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Queue behavior remains unchanged.",
+            "expected_if_true": "Queue behavior changes with state.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "clock",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "app"
+              ],
+              "probe_id": "p1",
+              "query": "fixed string",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          },
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "config"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Queue behavior remains unchanged.",
+            "expected_if_true": "Queue behavior changes with config.",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "clock",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "clock",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "app"
+              ],
+              "probe_id": "p2",
+              "query": "fixed string",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "State drift causes queue saturation.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Changing state does not alter queue behavior.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2"
+            ]
+          },
+          {
+            "claim": "Config limits enforce queue capacity.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Changing config does not alter queue behavior.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-9"
+            ]
+          },
+          {
+            "claim": "Test harness baseline is intact.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Changing test harness does not alter queue behavior.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 45,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "state"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Queue behavior remains unchanged.",
+            "expected_if_true": "Queue behavior changes with state.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T05:56:19.269173+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          },
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "config"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p2",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p2",
+            "expected_if_false": "Queue behavior remains unchanged.",
+            "expected_if_true": "Queue behavior changes with config.",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "clock",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "independence_key": "diagnostic_probe:p2",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T05:56:19.289996+00:00",
+            "provenance": "diagnostic_probe:p2",
+            "reliability": 0.6,
+            "sequence": 1,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "state"
+            ],
+            "dimension": "clock",
+            "duration_ms": 20,
+            "exit_code": 1,
+            "expected_if_false": "Queue behavior remains unchanged.",
+            "expected_if_true": "Queue behavior changes with state.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T05:56:19.269173+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "changed_dimensions": [
+              "config"
+            ],
+            "dimension": "clock",
+            "duration_ms": 15,
+            "exit_code": 1,
+            "expected_if_false": "Queue behavior remains unchanged.",
+            "expected_if_true": "Queue behavior changes with config.",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "clock",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T05:56:19.289996+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p2",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "python_protected_refresh_queue_priority",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "State drift causes queue saturation.",
+          "confidence": 0.0,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-4",
+            "source-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "State drift causes queue saturation.",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "producer_consumer_evidence_chain"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "State drift causes queue saturation.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.49,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 2.45,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Changing state does not alter queue behavior.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Config limits enforce queue capacity.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.33,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "dimension_alignment_weight": 1.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Changing config does not alter queue behavior.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-9"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Test harness baseline is intact.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Changing test harness does not alter queue behavior.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Changing state does not alter queue behavior.",
+            "dimension": "state",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Changing config does not alter queue behavior.",
+            "dimension": "config",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Changing test harness does not alter queue behavior.",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "operator-5",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h-state",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "operator-5",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h-state",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": false,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": false,
+          "json_parsed": false,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": false,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "operator-5",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h-state",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 0,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "State drift causes queue saturation.",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "State drift causes queue saturation.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "State drift causes queue saturation.",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "State drift causes queue saturation.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "State drift causes queue saturation.",
+            "status": "provisional"
+          },
+          "response_chars": 2381,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 491203,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 579,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-vpofp8ab\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] FAILED [ 16%]\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] FAILED [ 33%]\ntests/test_feedback.py::test_unprotected_incoming_cause_never_sheds PASSED [ 50%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 66%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 83%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - assert -1 == 4\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - assert -1 == 4\n========================= 2 failed, 4 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 543,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-bjhdduys\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 8 items\n\ntests/test_final.py::test_fresh_imminent_rows_are_not_shed PASSED        [ 12%]\ntests/test_final.py::test_non_imminent_stale_rows_are_not_shed PASSED    [ 25%]\ntests/test_final.py::test_over_cap_queue_never_sheds PASSED              [ 37%]\ntests/test_final.py::test_exhausted_correlation_rejects_before_shedding PASSED [ 50%]\ntests/test_final.py::test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed FAILED [ 62%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 75%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 87%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_______ test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed _______\ntests\\test_final.py:80: in test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed\n    assert _enqueue(db, now=datetime(2026, 6, 4, 2, 0, tzinfo=timezone.utc)) == 4\nE   assert -1 == 4\nE    +  where -1 = _enqueue(<mesh_queue.repository.MemorySession object at 0x000001E75F6928B0>, now=datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc))\nE    +    where datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc) = datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc)\nE    +      where datetime.timezone.utc = timezone.utc\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed - assert -1 == 4\n +  where -1 = _enqueue(<mesh_queue.repository.MemorySession object at 0x000001E75F6928B0>, now=datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc))\n +    where datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc) = datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc)\n +      where datetime.timezone.utc = timezone.utc\n========================= 1 failed, 7 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_protected_refresh_queue_priority",
+          "path": "cases/python_protected_refresh_queue_priority.json",
+          "sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "size_bytes": 5299
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+          "path": "oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "size_bytes": 2865
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_protected_refresh_queue_priority",
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "size_bytes": 3451
+        }
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "state",
+      "initial_public_regression_correction": {
+        "applied_files": [],
+        "attempted": false,
+        "eligible_paths": [],
+        "succeeded": false,
+        "warnings": []
+      },
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "artifact": "case:python_protected_refresh_queue_priority",
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "path": "cases/python_protected_refresh_queue_priority.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T05:52:38.554283+00:00"
+        },
+        {
+          "actual_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "path": "oracles/python_protected_refresh_queue_priority.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T05:57:49.253704+00:00"
+        },
+        {
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 9,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T06:00:48.114830+00:00"
+        },
+        {
+          "actual_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "artifact": "final_oracle:python_protected_refresh_queue_priority",
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T06:00:48.115115+00:00"
+        },
+        {
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "sequence": 11,
+          "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "timestamp_utc": "2026-07-14T06:00:48.115163+00:00"
+        },
+        {
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T06:00:48.120159+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": false,
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T06:00:49.757103+00:00"
+        },
+        {
+          "actual_count": 9,
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 9,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T06:00:49.757125+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 105010,
+          "load_duration_ns": 0,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 16742,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 105.0,
+          "response": "",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 105010
+        },
+        {
+          "case_budget_remaining_before_sec": 374.989711000002,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 44.98965790000511,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 45018,
+          "load_duration_ns": 0,
+          "logical_attempt": 2,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_remaining_before_sec": 44.98965790000511,
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 17026,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "recovery_trigger": "call_timeout",
+          "requested_timeout_sec": 44.98965790000511,
+          "response": "",
+          "retry_for_invalid_json": true,
+          "stage": "diagnosis_investigator_json_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 45018
+        },
+        {
+          "case_budget_remaining_before_sec": 329.9713793999981,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 49871315000,
+          "json_object_valid": true,
+          "latency_ms": 69636,
+          "load_duration_ns": 167363100,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:3",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 22010,
+          "prompt_eval_count": 5205,
+          "prompt_eval_duration_ns": 19267749000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"State drift causes queue saturation.\",\n      \"dimension\": \"state\",\n      \"support_evidence_ids\": [\"operator-1\", \"operator-2\", \"operator-4\", \"source-1\", \"source-2\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Changing state does not alter queue behavior.\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Config limits enforce queue capacity.\",\n      \"dimension\": \"config\",\n      \"support_evidence_ids\": [\"source-3\", \"source-4\", \"source-5\", \"source-7\", \"source-9\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Changing config does not alter queue behavior.\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"Test harness baseline is intact.\",\n      \"dimension\": \"test_harness\",\n      \"support_evidence_ids\": [\"baseline-public-contracts\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Changing test harness does not alter queue behavior.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"experiment_id\": \"x1\",\n      \"hypothesis_ids\": [\"h1\"],\n      \"changed_dimensions\": [\"state\"],\n      \"held_constant_dimensions\": [\"code\", \"data\", \"clock\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"expected_if_true\": \"Queue behavior changes with state.\",\n      \"expected_if_false\": \"Queue behavior remains unchanged.\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p1\",\n        \"kind\": \"search\",\n        \"paths\": [\"app\"],\n        \"query\": \"fixed string\",\n        \"dimension\": \"clock\"\n      }\n    },\n    {\n      \"experiment_id\": \"x2\",\n      \"hypothesis_ids\": [\"h2\"],\n      \"changed_dimensions\": [\"config\"],\n      \"held_constant_dimensions\": [\"code\", \"data\", \"state\", \"clock\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"expected_if_true\": \"Queue behavior changes with config.\",\n      \"expected_if_false\": \"Queue behavior remains unchanged.\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p2\",\n        \"kind\": \"search\",\n        \"paths\": [\"app\"],\n        \"query\": \"fixed string\",\n        \"dimension\": \"clock\"\n      }\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-1\", \"operator-2\", \"operator-4\", \"source-1\", \"source-2\"],\n    \"reason\": \"State drift causes queue saturation.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 638,
+          "wall_deadline_clamped": false,
+          "wall_ms": 69636
+        },
+        {
+          "case_budget_remaining_before_sec": 260.33443310001167,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 23498079000,
+          "latency_ms": 30391,
+          "load_duration_ns": 166989900,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 8464,
+          "prompt_eval_count": 1872,
+          "prompt_eval_duration_ns": 6222497000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"state\",\n  \"analysis\": \"The queue saturation is caused by stale pending events, and the state management in the repository is responsible for tracking event status and enforcing capacity limits. The refresh logic must be implemented in the repository to replace the oldest stale event when the queue is full.\",\n  \"files\": [\n    {\n      \"path\": \"mesh_queue/repository.py\",\n      \"action\": \"modify\",\n      \"description\": \"Implement the protected refresh logic to replace the oldest stale pending event when the queue is full.\",\n      \"algorithm\": \"Check if the queue is full. If so, find the oldest unlocked pending imminent_eval event that is at least 30 minutes old. Mark it as dead, preserve its payload, add audit metadata, and admit the refresh.\",\n      \"required_primitives\": [\"datetime\", \"uuid\", \"Event\", \"MemorySession\"],\n      \"forbidden_shortcuts\": [\"using time-based expiration without tracking event age\", \"modifying event status without audit metadata\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prompt_obligation::required::2eac5337e51f\",\n      \"owner_paths\": [\"mesh_queue/repository.py\"],\n      \"postcondition\": \"The immutable deep snapshot is preserved, and all operations use the same snapshot even when a reload commits concurrently.\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The telemetry file is not modified as it only provides summary data and does not affect the state or queue behavior.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 320,
+          "wall_deadline_clamped": false,
+          "wall_ms": 30391
+        },
+        {
+          "case_budget_remaining_before_sec": 229.94303790002596,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 33286114999,
+          "latency_ms": 58894,
+          "load_duration_ns": 22125643700,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 8836,
+          "prompt_eval_count": 1911,
+          "prompt_eval_duration_ns": 3438227000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\ndef enqueue_activation(\n    db,\n    *,\n    source_node_id,\n    cause,\n    payload=None,\n    correlation_id=None,\n    now=None,\n):\n    cid = correlation_id or str(uuid.uuid4())\n    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:\n        return -1\n    if correlation_event_count(db, cid) >= MAX_EVENTS_PER_CORRELATION:\n        return -1\n    created_at = now or datetime.now(timezone.utc)\n    if created_at.tzinfo is not None:\n        created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)\n    event = Event(\n        id=max((item.id for item in db.events), default=0) + 1,\n        source_node_id=source_node_id,\n        cause=cause,\n        payload=dict(payload or {}),\n        correlation_id=cid,\n        created_at=created_at,\n    )\n    db.add(event)\n    db.flush()\n    return event.id\n=======\ndef enqueue_activation(\n    db,\n    *,\n    source_node_id,\n    cause,\n    payload=None,\n    correlation_id=None,\n    now=None,\n):\n    cid = correlation_id or str(uuid.uuid4())\n    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:\n        stale_events = [\n            event for event in db.events\n            if event.status == \"pending\" and not event.locked and (now - event.created_at).total_seconds() >= 1800\n        ]\n        if stale_events:\n            oldest_stale_event = min(stale_events, key=lambda e: e.created_at)\n            oldest_stale_event.status = \"dead\"\n            oldest_stale_event.audit_metadata = {\"refreshed\": True}\n            db.flush()\n\n    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:\n        return -1\n    if correlation_event_count(db, cid) >= MAX_EVENTS_PER_CORRELATION:\n        return -1\n    created_at = now or datetime.now(timezone.utc)\n    if created_at.tzinfo is not None:\n        created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)\n    event = Event(\n        id=max((item.id for item in db.events), default=0) + 1,\n        source_node_id=source_node_id,\n        cause=cause,\n        payload=dict(payload or {}),\n        correlation_id=cid,\n        created_at=created_at,\n    )\n    db.add(event)\n    db.flush()\n    return event.id\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 519,
+          "wall_deadline_clamped": false,
+          "wall_ms": 58894
+        },
+        {
+          "case_budget_remaining_before_sec": 171.0486305000377,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 36615580000,
+          "latency_ms": 53201,
+          "load_duration_ns": 5226198300,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 15886,
+          "prompt_eval_count": 3715,
+          "prompt_eval_duration_ns": 11300436000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"state\",\n  \"analysis\": \"The validation failure indicates that the expected event_id is 4, but the actual value is -1. This suggests that the enqueue_activation function is not correctly assigning new event IDs when the queue is full. The issue likely stems from incorrect state management of event IDs and the logic for handling full queues.\",\n  \"files\": [\n    {\n      \"path\": \"mesh_queue/repository.py\",\n      \"action\": \"modify\",\n      \"description\": \"Fix the enqueue_activation function to correctly assign new event IDs when the queue is full and ensure the protected refresh logic properly replaces the oldest stale event.\",\n      \"algorithm\": \"Ensure that when the queue is full, the enqueue_activation function correctly identifies the oldest stale event, marks it as dead, and assigns a new event ID for the refresh.\",\n      \"required_primitives\": [\"datetime\", \"uuid\", \"Event\", \"MemorySession\"],\n      \"forbidden_shortcuts\": [\"direct ID assignment without validation\", \"skipping state transitions\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prompt_obligation::required::2eac5337e51f\",\n      \"owner_paths\": [\"mesh_queue/repository.py\"],\n      \"postcondition\": \"A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently.\",\n      \"polarity\": \"required\"\n    },\n    {\n      \"contract\": \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]\",\n      \"owner_paths\": [\"mesh_queue/repository.py\"],\n      \"postcondition\": \"assert event_id == 4\",\n      \"polarity\": \"forbidden\"\n    },\n    {\n      \"contract\": \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]\",\n      \"owner_paths\": [\"mesh_queue/repository.py\"],\n      \"postcondition\": \"assert event_id == 4\",\n      \"polarity\": \"forbidden\"\n    }\n  ],\n  \"notes\": \"The enqueue_activation function must be modified to ensure that when the queue is full, it correctly replaces the oldest stale event with a new one, preserving the required state and behavior.\"\n}",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 486,
+          "wall_deadline_clamped": false,
+          "wall_ms": 53201
+        },
+        {
+          "case_budget_remaining_before_sec": 117.84668520005653,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 117.84668520005653,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 29873507000,
+          "latency_ms": 44529,
+          "load_duration_ns": 4991095600,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 15840,
+          "prompt_eval_count": 3642,
+          "prompt_eval_duration_ns": 9605139000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:\n        return -1\n    if correlation_event_count(db, cid) >= MAX_EVENTS_PER_CORRELATION:\n        return -1\n    created_at = now or datetime.now(timezone.utc)\n    if created_at.tzinfo is not None:\n        created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)\n    event = Event(\n        id=max((item.id for item in db.events), default=0) + 1,\n        source_node_id=source_node_id,\n        cause=cause,\n        payload=dict(payload or {}),\n        correlation_id=cid,\n        created_at=created_at,\n    )\n    db.add(event)\n    db.flush()\n    return event.id\n=======\n    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:\n        oldest_stale_event = min(\n            (event for event in db.events if event.status == \"pending\" and not event.locked and (now - event.created_at).total_seconds() >= 1800),\n            key=lambda event: event.created_at,\n            default=None\n        )\n        if oldest_stale_event:\n            oldest_stale_event.status = \"dead\"\n            oldest_stale_event.processed_at = now.replace(tzinfo=None)\n            oldest_stale_event.payload[\"_queue_pressure_shed\"] = {\n                \"shed_for_cause\": cause,\n                \"age_seconds\": (now - oldest_stale_event.created_at).total_seconds()\n            }\n            db.flush()\n\n        event_id = max((item.id for item in db.events), default=0) + 1\n        created_at = now or datetime.now(timezone.utc)\n        if created_at.tzinfo is not None:\n            created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)\n        event = Event(\n            id=event_id,\n            source_node_id=source_node_id,\n            cause=cause,\n            payload=dict(payload or {}),\n            correlation_id=cid,\n            created_at=created_at,\n        )\n        db.add(event)\n        db.flush()\n        return event_id\n    else:\n        return -1\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 452,
+          "wall_deadline_clamped": false,
+          "wall_ms": 44529
+        },
+        {
+          "case_budget_remaining_before_sec": 73.31755670002894,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 73.31755670002894,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 38182173000,
+          "latency_ms": 64713,
+          "load_duration_ns": 5074145100,
+          "model": "qwen3:8b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 25885,
+          "prompt_eval_count": 6270,
+          "prompt_eval_duration_ns": 21396496000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"state\",\n  \"analysis\": \"The failure stems from state management issues in the queue depth calculation and event processing logic. The queue depth is computed using a naive approach that does not account for time zones, leading to incorrect comparisons and invalid event handling. The state of events must be preserved and managed correctly to ensure the queue behaves as expected under all conditions.\",\n  \"files\": [\n    {\n      \"path\": \"mesh_queue/repository.py\",\n      \"action\": \"modify\",\n      \"description\": \"Fix the queue depth calculation and event processing logic to handle time zones correctly and ensure the queue behaves as expected under all conditions.\",\n      \"algorithm\": \"Update the queue depth calculation to use timezone-aware datetime objects and ensure event processing respects the time zone context.\",\n      \"required_primitives\": [\n        \"datetime\",\n        \"timezone\",\n        \"uuid\"\n      ],\n      \"forbidden_shortcuts\": [\n        \"datetime.now(timezone.utc).replace(tzinfo=None)\"\n      ]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prompt_obligation::required::2eac5337e51f\",\n      \"owner_paths\": [\n        \"mesh_queue/repository.py\"\n      ],\n      \"postcondition\": \"A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently.\",\n      \"polarity\": \"required\"\n    },\n    {\n      \"contract\": \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]\",\n      \"owner_paths\": [\n        \"mesh_queue/repository.py\"\n      ],\n      \"postcondition\": \"assert event_id == 4\",\n      \"polarity\": \"required\"\n    },\n    {\n      \"contract\": \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]\",\n      \"owner_paths\": [\n        \"mesh_queue/repository.py\"\n      ],\n      \"postcondition\": \"assert event_id == 4\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The queue depth calculation and event processing logic must be updated to handle time zones correctly and ensure the queue behaves as expected under all conditions.\"\n}",
+          "stage": "repair_plan_2",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 481,
+          "wall_deadline_clamped": false,
+          "wall_ms": 64713
+        },
+        {
+          "case_budget_remaining_before_sec": 8.604384700010996,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 8.604384700010996,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "case_budget_timeout",
+          "eval_duration_ns": 0,
+          "latency_ms": 8621,
+          "load_duration_ns": 0,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": false,
+          "prompt_chars": 15714,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 150.0,
+          "response": "",
+          "stage": "repair_edit_2_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 8621
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 9,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": false,
+      "patch_warnings": [
+        "Rolled back initial patch because it regressed or made no validated progress.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Local edit call returned no usable response; adapter retries were skipped.",
+        "Rolled back multi-file edit group after mesh_queue/repository.py was rejected."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 481,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-vpofp8ab\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 33%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 66%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n============================== 3 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "afe2158731f5cf03a4ba72fb1a6a01d5a76b0157581e932b15bee60715778bfd",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]",
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]",
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity"
+            ],
+            "prompt_obligation_details": {
+              "prompt_obligation::required::2eac5337e51f": {
+                "polarity": "required",
+                "statement": "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+              }
+            }
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [\n      \"assertion: event_id == 2\",\n      \"assertion: -1 == 2\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior\"\n    ]\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: repo.enqueue_activation(\",\n      \"assertion: 3 == -1\",\n      \"assertion: event_id == 2\",\n      \"assertion: -1 == 2\",\n      \"assertion: event_id == -1\",\n      \"TypeError: can't subtract offset-naive and offset-aware datetimes\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]\",\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]\",\n      \"tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds\",\n      \"tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior\",\n      \"tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert event_id == 2\n- assert -1 == 2\n- assert repo.enqueue_activation(\n- assert 3 == -1\n- assert event_id == -1\n- observed: assert -1 == 2\n- observed: TypeError: can't subtract offset-naive and offset-aware datetimes\n- observed: AssertionError: assert 3 == -1\n- observed: E   AssertionError: assert 3 == -1\n- observed: assert 3 == -1\n- observed: FAILED tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds - AssertionError: assert 3 == -1\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-vpofp8ab\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior FAILED [ 33%]\n\n================================== FAILURES ===================================\n____________ test_enqueue_below_capacity_preserves_normal_behavior ____________\ntests\\test_public.py:28: in test_enqueue_below_capacity_preserves_normal_behavior\n    assert event_id == 2\nE   assert -1 == 2\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior - assert -1 == 2\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n============================== 1 failed in 0.08s ==============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\nation(\nmesh_queue\\repository.py:53: in enqueue_activation\n    oldest_stale_event = min(\nmesh_queue\\repository.py:54: in <genexpr>\n    (event for event in db.events if event.status == \"pending\" and not event.locked and (now - event.created_at).total_seconds() >= 1800),\n                                                                                         ^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: can't subtract offset-naive and offset-aware datetimes\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:30: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    event_id = repo.enqueue_activation(\nmesh_queue\\repository.py:53: in enqueue_activation\n    oldest_stale_event = min(\nmesh_queue\\repository.py:54: in <genexpr>\n    (event for event in db.events if event.status == \"pending\" and not event.locked and (now - event.created_at).total_seconds() >= 1800),\n                                                                                         ^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: can't subtract offset-naive and offset-aware datetimes\n_________________ test_unprotected_incoming_cause_never_sheds _________________\ntests\\test_feedback.py:54: in test_unprotected_incoming_cause_never_sheds\n    assert repo.enqueue_activation(\nE   AssertionError: assert 3 == -1\nE    +  where 3 = <function enqueue_activation at 0x000001F27BE644A0>(<mesh_queue.repository.MemorySession object at 0x000001F27BDCA0D0>, source_node_id='ordinary', cause='setup_vitals_change', correlation_id='ordinary', now=datetime.datetime(2026, 6, 4, 2, 0))\nE    +    where <function enqueue_activation at 0x000001F27BE644A0> = repo.enqueue_activation\nE    +    and   datetime.datetime(2026, 6, 4, 2, 0) = datetime(2026, 6, 4, 2, 0)\n____________ test_enqueue_below_capacity_preserves_normal_behavior ____________\ntests\\test_public.py:28: in test_enqueue_below_capacity_preserves_normal_behavior\n    assert event_id == 2\nE   assert -1 == 2\n___________ test_full_queue_rejects_without_deleting_existing_rows ____________\ntests\\test_public.py:44: in test_full_queue_rejects_without_deleting_existing_rows\n    assert event_id == -1\nE   assert 3 == -1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - TypeError: can't subtract offset-naive and offset-aware datetimes\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - TypeError: can't subtract offset-naive and offset-aware datetimes\nFAILED tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds - AssertionError: assert 3 == -1\n +  where 3 = <function enqueue_activation at 0x000001F27BE644A0>(<mesh_queue.repository.MemorySession object at 0x000001F27BDCA0D0>, source_node_id='ordinary', cause='setup_vitals_change', correlation_id='ordinary', now=datetime.datetime(2026, 6, 4, 2, 0))\n +    where <function enqueue_activation at 0x000001F27BE644A0> = repo.enqueue_activation\n +    and  ",
+          "applied_files": [
+            "mesh_queue/repository.py"
+          ],
+          "attempt_fingerprint": "36759269fc05dd20ae60986d3b7e072bdb9a9da7e69b2acaacfeeeda7241e116",
+          "attempted_diff": "--- a/mesh_queue/repository.py\n+++ b/mesh_queue/repository.py\n@@ -50,20 +50,34 @@\n ):\n     cid = correlation_id or str(uuid.uuid4())\n     if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:\n+        oldest_stale_event = min(\n+            (event for event in db.events if event.status == \"pending\" and not event.locked and (now - event.created_at).total_seconds() >= 1800),\n+            key=lambda event: event.created_at,\n+            default=None\n+        )\n+        if oldest_stale_event:\n+            oldest_stale_event.status = \"dead\"\n+            oldest_stale_event.processed_at = now.replace(tzinfo=None)\n+            oldest_stale_event.payload[\"_queue_pressure_shed\"] = {\n+                \"shed_for_cause\": cause,\n+                \"age_seconds\": (now - oldest_stale_event.created_at).total_seconds()\n+            }\n+            db.flush()\n+\n+        event_id = max((item.id for item in db.events), default=0) + 1\n+        created_at = now or datetime.now(timezone.utc)\n+        if created_at.tzinfo is not None:\n+            created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)\n+        event = Event(\n+            id=event_id,\n+            source_node_id=source_node_id,\n+            cause=cause,\n+            payload=dict(payload or {}),\n+            correlation_id=cid,\n+            created_at=created_at,\n+        )\n+        db.add(event)\n+        db.flush()\n+        return event_id\n+    else:\n         return -1\n-    if correlation_event_count(db, cid) >= MAX_EVENTS_PER_CORRELATION:\n-        return -1\n-    created_at = now or datetime.now(timezone.utc)\n-    if created_at.tzinfo is not None:\n-        created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)\n-    event = Event(\n-        id=max((item.id for item in db.events), default=0) + 1,\n-        source_node_id=source_node_id,\n-        cause=cause,\n-        payload=dict(payload or {}),\n-        correlation_id=cid,\n-        created_at=created_at,\n-    )\n-    db.add(event)\n-    db.flush()\n-    return event.id\n",
+          "before_failure_signature": "d0e0dee6cdb6859b7ee3fd92c6f965dda3fb2ce558b27113bc3aafecc92680a5",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]",
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "passed_ids": [
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "prompt_obligation_details": {
+              "prompt_obligation::required::2eac5337e51f": {
+                "polarity": "required",
+                "statement": "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+              }
+            }
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: event_id == 4\",\n      \"assertion: -1 == 4\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]\",\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert event_id == 4\n- assert -1 == 4\n- observed: assert -1 == 4\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-vpofp8ab\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] FAILED [ 16%]\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] FAILED [ 33%]\ntests/test_feedback.py::test_unprotected_incoming_cause_never_sheds PASSED [ 50%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 66%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 83%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - assert -1 == 4\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - assert -1 == 4\n========================= 2 failed, 4 passed in 0.11s =========================",
+          "escalated": false,
+          "feedback_context_files": [],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The validation failure indicates that the expected event_id is 4, but the actual value is -1. This suggests that the enqueue_activation function is not correctly assigning new event IDs when the queue is full. The issue likely stems from incorrect state management of event IDs and the logic for handling full queues.",
+            "contract_coverage": [
+              {
+                "contract": "prompt_obligation::required::2eac5337e51f",
+                "owner_paths": [
+                  "mesh_queue/repository.py"
+                ],
+                "polarity": "required",
+                "postcondition": "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+              },
+              {
+                "contract": "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+                "owner_paths": [
+                  "mesh_queue/repository.py"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "assert event_id == 4"
+              },
+              {
+                "contract": "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]",
+                "owner_paths": [
+                  "mesh_queue/repository.py"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "assert event_id == 4"
+              }
+            ],
+            "dimension": "state",
+            "files": [
+              {
+                "action": "modify",
+                "algorithm": "Ensure that when the queue is full, the enqueue_activation function correctly identifies the oldest stale event, marks it as dead, and assigns a new event ID for the refresh.",
+                "description": "Fix the enqueue_activation function to correctly assign new event IDs when the queue is full and ensure the protected refresh logic properly replaces the oldest stale event.",
+                "forbidden_shortcuts": [
+                  "direct ID assignment without validation",
+                  "skipping state transitions"
+                ],
+                "path": "mesh_queue/repository.py",
+                "required_primitives": [
+                  "datetime",
+                  "uuid",
+                  "Event",
+                  "MemorySession"
+                ]
+              }
+            ],
+            "notes": "The enqueue_activation function must be modified to ensure that when the queue is full, it correctly replaces the oldest stale event with a new one, preserving the required state and behavior.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "4e4dbb9e8bd0a2167ccf1afa40406bf56d0e0c6cb3a67353929bf4299547ac14",
+          "proposed_diagnosis_dimension": "state",
+          "public_regression_correction": {
+            "applied_files": [],
+            "attempted": false,
+            "eligible_paths": [],
+            "succeeded": false,
+            "warnings": []
+          },
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "mesh_queue/repository.py",
+          "selected_files": [
+            "mesh_queue/repository.py"
+          ],
+          "skipped_optional_files": [],
+          "validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [\n      \"assertion: event_id == 2\",\n      \"assertion: -1 == 2\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior\"\n    ]\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: repo.enqueue_activation(\",\n      \"assertion: 3 == -1\",\n      \"assertion: event_id == 2\",\n      \"assertion: -1 == 2\",\n      \"assertion: event_id == -1\",\n      \"TypeError: can't subtract offset-naive and offset-aware datetimes\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]\",\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]\",\n      \"tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds\",\n      \"tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior\",\n      \"tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert event_id == 2\n- assert -1 == 2\n- assert repo.enqueue_activation(\n- assert 3 == -1\n- assert event_id == -1\n- observed: assert -1 == 2\n- observed: TypeError: can't subtract offset-naive and offset-aware datetimes\n- observed: AssertionError: assert 3 == -1\n- observed: E   AssertionError: assert 3 == -1\n- observed: assert 3 == -1\n- observed: FAILED tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds - AssertionError: assert 3 == -1\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-vpofp8ab\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior FAILED [ 33%]\n\n================================== FAILURES ===================================\n____________ test_enqueue_below_capacity_preserves_normal_behavior ____________\ntests\\test_public.py:28: in test_enqueue_below_capacity_preserves_normal_behavior\n    assert event_id == 2\nE   assert -1 == 2\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior - assert -1 == 2\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n============================== 1 failed in 0.08s ==============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\nation(\nmesh_queue\\repository.py:53: in enqueue_activation\n    oldest_stale_event = min(\nmesh_queue\\repository.py:54: in <genexpr>\n    (event for event in db.events if event.status == \"pending\" and not event.locked and (now - event.created_at).total_seconds() >= 1800),\n                                                                                         ^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: can't subtract offset-naive and offset-aware datetimes\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:30: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    event_id = repo.enqueue_activation(\nmesh_queue\\repository.py:53: in enqueue_activation\n    oldest_stale_event = min(\nmesh_queue\\repository.py:54: in <genexpr>\n    (event for event in db.events if event.status == \"pending\" and not event.locked and (now - event.created_at).total_seconds() >= 1800),\n                                                                                         ^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: can't subtract offset-naive and offset-aware datetimes\n_________________ test_unprotected_incoming_cause_never_sheds _________________\ntests\\test_feedback.py:54: in test_unprotected_incoming_cause_never_sheds\n    assert repo.enqueue_activation(\nE   AssertionError: assert 3 == -1\nE    +  where 3 = <function enqueue_activation at 0x000001F27BE644A0>(<mesh_queue.repository.MemorySession object at 0x000001F27BDCA0D0>, source_node_id='ordinary', cause='setup_vitals_change', correlation_id='ordinary', now=datetime.datetime(2026, 6, 4, 2, 0))\nE    +    where <function enqueue_activation at 0x000001F27BE644A0> = repo.enqueue_activation\nE    +    and   datetime.datetime(2026, 6, 4, 2, 0) = datetime(2026, 6, 4, 2, 0)\n____________ test_enqueue_below_capacity_preserves_normal_behavior ____________\ntests\\test_public.py:28: in test_enqueue_below_capacity_preserves_normal_behavior\n    assert event_id == 2\nE   assert -1 == 2\n___________ test_full_queue_rejects_without_deleting_existing_rows ____________\ntests\\test_public.py:44: in test_full_queue_rejects_without_deleting_existing_rows\n    assert event_id == -1\nE   assert 3 == -1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - TypeError: can't subtract offset-naive and offset-aware datetimes\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - TypeError: can't subtract offset-naive and offset-aware datetimes\nFAILED tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds - AssertionError: assert 3 == -1\n +  where 3 = <function enqueue_activation at 0x000001F27BE644A0>(<mesh_queue.repository.MemorySession object at 0x000001F27BDCA0D0>, source_node_id='ordinary', cause='setup_vitals_change', correlation_id='ordinary', now=datetime.datetime(2026, 6, 4, 2, 0))\n +    where <function enqueue_activation at 0x000001F27BE644A0> = repo.enqueue_activation\n +    and  ",
+          "validation_regression": {
+            "after_failure_signature": "afe2158731f5cf03a4ba72fb1a6a01d5a76b0157581e932b15bee60715778bfd",
+            "after_quality": 0,
+            "before_failure_signature": "d0e0dee6cdb6859b7ee3fd92c6f965dda3fb2ce558b27113bc3aafecc92680a5",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "adapter_rejection": "CHILI adapter rejected the attempted edit:\nLocal edit call returned no usable response; adapter retries were skipped.\nRolled back multi-file edit group after mesh_queue/repository.py was rejected.",
+          "after_failure_signature": "d0e0dee6cdb6859b7ee3fd92c6f965dda3fb2ce558b27113bc3aafecc92680a5",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]",
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "passed_ids": [
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "prompt_obligation_details": {
+              "prompt_obligation::required::2eac5337e51f": {
+                "polarity": "required",
+                "statement": "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+              }
+            }
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: event_id == 4\",\n      \"assertion: -1 == 4\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]\",\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert event_id == 4\n- assert -1 == 4\n- observed: assert -1 == 4\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-vpofp8ab\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] FAILED [ 16%]\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] FAILED [ 33%]\ntests/test_feedback.py::test_unprotected_incoming_cause_never_sheds PASSED [ 50%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 66%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 83%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - assert -1 == 4\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - assert -1 == 4\n========================= 2 failed, 4 passed in 0.11s =========================",
+          "applied_files": [],
+          "attempted_diff": "",
+          "before_failure_signature": "d0e0dee6cdb6859b7ee3fd92c6f965dda3fb2ce558b27113bc3aafecc92680a5",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+              "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]",
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "passed_ids": [
+              "tests/test_feedback.py::test_unprotected_incoming_cause_never_sheds",
+              "tests/test_public.py::test_correlation_limit_rejects_below_global_capacity",
+              "tests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior",
+              "tests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows"
+            ],
+            "prompt_obligation_details": {
+              "prompt_obligation::required::2eac5337e51f": {
+                "polarity": "required",
+                "statement": "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+              }
+            }
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: event_id == 4\",\n      \"assertion: -1 == 4\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]\",\n      \"tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert event_id == 4\n- assert -1 == 4\n- observed: assert -1 == 4\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-vpofp8ab\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] FAILED [ 16%]\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] FAILED [ 33%]\ntests/test_feedback.py::test_unprotected_incoming_cause_never_sheds PASSED [ 50%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 66%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 83%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - assert -1 == 4\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - assert -1 == 4\n========================= 2 failed, 4 passed in 0.11s =========================",
+          "escalated": false,
+          "feedback_context_files": [],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The failure stems from state management issues in the queue depth calculation and event processing logic. The queue depth is computed using a naive approach that does not account for time zones, leading to incorrect comparisons and invalid event handling. The state of events must be preserved and managed correctly to ensure the queue behaves as expected under all conditions.",
+            "contract_coverage": [
+              {
+                "contract": "prompt_obligation::required::2eac5337e51f",
+                "owner_paths": [
+                  "mesh_queue/repository.py"
+                ],
+                "polarity": "required",
+                "postcondition": "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
+              },
+              {
+                "contract": "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots]",
+                "owner_paths": [
+                  "mesh_queue/repository.py"
+                ],
+                "polarity": "required",
+                "postcondition": "assert event_id == 4"
+              },
+              {
+                "contract": "tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh]",
+                "owner_paths": [
+                  "mesh_queue/repository.py"
+                ],
+                "polarity": "required",
+                "postcondition": "assert event_id == 4"
+              }
+            ],
+            "dimension": "state",
+            "files": [
+              {
+                "action": "modify",
+                "algorithm": "Update the queue depth calculation to use timezone-aware datetime objects and ensure event processing respects the time zone context.",
+                "description": "Fix the queue depth calculation and event processing logic to handle time zones correctly and ensure the queue behaves as expected under all conditions.",
+                "forbidden_shortcuts": [
+                  "datetime.now(timezone.utc).replace(tzinfo=None)"
+                ],
+                "path": "mesh_queue/repository.py",
+                "required_primitives": [
+                  "datetime",
+                  "timezone",
+                  "uuid"
+                ]
+              }
+            ],
+            "notes": "The queue depth calculation and event processing logic must be updated to handle time zones correctly and ensure the queue behaves as expected under all conditions.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "3357c62c4a2329f9c6727a3bcd71abc8ae59e9c02c1782bb86b284fbae8cad08",
+          "proposed_diagnosis_dimension": "state",
+          "round": 2,
+          "satisfied_files": [],
+          "selected_file": "mesh_queue/repository.py",
+          "selected_files": [
+            "mesh_queue/repository.py"
+          ],
+          "skipped_optional_files": [],
+          "warnings": [
+            "Local edit call returned no usable response; adapter retries were skipped.",
+            "Rolled back multi-file edit group after mesh_queue/repository.py was rejected."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "state",
+      "score": 40,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "mesh_queue/repository.py"
+      ],
+      "split": "holdout-sealed-fable5-trading-queue-priority-pilot",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 1,
+      "successful_live_model_call_count": 6,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-14T06:00:49.776668+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 0,
+  "development_regression_score": 0.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 50.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 50.0,
+  "diagnostic_stage_schema_acceptance_rate": 50.0,
+  "escalation_model": "",
+  "evaluation_context": "protocol",
+  "evaluation_verdict": "blinded_evaluation_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_protected_refresh_queue_priority",
+          "path": "cases/python_protected_refresh_queue_priority.json",
+          "sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "size_bytes": 5299
+        },
+        "case_id": "python_protected_refresh_queue_priority",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+          "path": "oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "size_bytes": 2865
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_protected_refresh_queue_priority",
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "size_bytes": 3451
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "size_bytes": 582
+    }
+  },
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 1,
+  "holdout_score": 40.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "size_bytes": 582,
+      "timestamp_utc": "2026-07-14T05:52:35.785219+00:00"
+    },
+    {
+      "artifact": "case:python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_protected_refresh_queue_priority.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+      "size_bytes": 5299,
+      "timestamp_utc": "2026-07-14T05:52:35.787537+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_protected_refresh_queue_priority.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+      "size_bytes": 2865,
+      "timestamp_utc": "2026-07-14T05:52:35.788091+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_protected_refresh_queue_priority.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "size_bytes": 3451,
+      "timestamp_utc": "2026-07-14T05:52:35.788603+00:00"
+    },
+    {
+      "actual_sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T05:52:35.794636+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_QUEUE_PRIORITY_PILOT_UNTOUCHED_CHECKPOINT.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T05:52:38.552931+00:00"
+    },
+    {
+      "actual_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+      "artifact": "case:python_protected_refresh_queue_priority",
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+      "path": "cases/python_protected_refresh_queue_priority.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T05:52:38.554283+00:00"
+    },
+    {
+      "actual_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+      "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+      "path": "oracles/python_protected_refresh_queue_priority.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T05:57:49.253704+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 9,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T06:00:48.114830+00:00"
+    },
+    {
+      "actual_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "artifact": "final_oracle:python_protected_refresh_queue_priority",
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "path": "final_oracles/python_protected_refresh_queue_priority.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T06:00:48.115115+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_protected_refresh_queue_priority.json",
+      "sequence": 11,
+      "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "timestamp_utc": "2026-07-14T06:00:48.115163+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T06:00:48.120159+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": false,
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T06:00:49.757103+00:00"
+    },
+    {
+      "actual_count": 9,
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 9,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T06:00:49.757125+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T06:00:49.758036+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T06:00:49.776571+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 3,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 40.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "8549f6247c07fb68d1095be363781188083ce68653e283fe589d05851b1230f0",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_QUEUE_PRIORITY_PILOT_UNTOUCHED_CHECKPOINT.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 1,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 9,
+  "verdict": "needs_improvement"
+}
