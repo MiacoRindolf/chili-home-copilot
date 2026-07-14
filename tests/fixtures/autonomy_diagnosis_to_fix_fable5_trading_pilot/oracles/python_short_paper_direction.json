@@ -1,0 +1,16 @@
+{
+  "case_id": "python_short_paper_direction",
+  "expected_dimension": "data",
+  "expected_contracts": [
+    "direction-aware fixed-fractional risk distance",
+    "normalized direction propagation through telemetry and persistence",
+    "side-correct default stop geometry"
+  ],
+  "expected_files": [
+    "trading/paper_trading.py",
+    "trading/portfolio_risk.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "from trading.paper_trading import PaperBook, auto_enter_from_signals\nfrom trading.portfolio_risk import RiskLimits, size_position\n\n\ndef test_short_position_sizing_uses_stop_above_entry():\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n    assert size_position(10_000.0, 100.0, 95.0, limits=RiskLimits(), direction=\"short\") == 0\n\n\ndef test_short_signal_preserves_direction_across_entry_and_telemetry():\n    book = PaperBook()\n    entered = auto_enter_from_signals(\n        book,\n        [{\n            \"ticker\": \"MRVL\",\n            \"entry_price\": 300.29,\n            \"stop_price\": 337.15,\n            \"target_price\": 291.70,\n            \"confidence\": 0.89,\n            \"direction\": \"short\",\n        }],\n        10_000.0,\n    )\n    assert entered == 1\n    assert len(book.trades) == 1\n    assert book.trades[0].direction == \"short\"\n    assert book.trades[0].stop_price > book.trades[0].entry_price\n    assert book.trades[0].target_price < book.trades[0].entry_price\n    assert book.trades[0].quantity > 0\n    assert book.emitted[0].direction == \"short\"\n"
+  }
+}
