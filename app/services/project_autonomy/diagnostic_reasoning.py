@@ -9605,6 +9605,27 @@ def _normalized_dimensions(value: object) -> list[str]:
     return dimensions[:12]
 
 
+def _normalized_source_paths(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    paths: list[str] = []
+    for item in value:
+        candidate = str(item or "").strip().replace("\\", "/")
+        candidate = re.sub(r"^\./+", "", candidate)
+        parts = [part for part in candidate.split("/") if part not in {"", "."}]
+        if (
+            not parts
+            or any(part == ".." for part in parts)
+            or candidate.startswith("/")
+            or re.match(r"^[a-zA-Z]:", candidate)
+        ):
+            continue
+        normalized = "/".join(parts)[:260]
+        if normalized and normalized not in paths:
+            paths.append(normalized)
+    return paths[:16]
+
+
 def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]:
     statement = _clip(raw.get("statement"), 900)
     structured_context = _bounded_metadata_summary(raw)
@@ -9725,6 +9746,7 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
     )
     expected_if_true = _clip(evidence_value("expected_if_true"), 500)
     expected_if_false = _clip(evidence_value("expected_if_false"), 500)
+    source_paths = _normalized_source_paths([evidence_value("source_path")])
     declared_contrastive_shape = bool(
         kind == "experiment"
         and changed_dimensions
@@ -9820,6 +9842,9 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         "held_constant_dimensions": held_constant_dimensions,
         "expected_if_true": expected_if_true,
         "expected_if_false": expected_if_false,
+        "source_path": source_paths[0] if source_paths else "",
+        "source_symbol": _clip(evidence_value("source_symbol"), 160),
+        "source_line": _optional_int(evidence_value("source_line", "line_number")),
         "comparison_key": _clip(evidence_value("comparison_key"), 160),
         "code_revision": _clip(evidence_value("code_revision"), 100),
         "input_fingerprint": _clip(evidence_value("input_fingerprint"), 160),
@@ -9898,6 +9923,9 @@ def normalize_case(raw: Mapping[str, Any]) -> dict[str, Any]:
         dict(raw.get("constraints"))
         if isinstance(raw.get("constraints"), Mapping)
         else {}
+    )
+    raw_constraints["candidate_paths"] = _normalized_source_paths(
+        raw_constraints.get("candidate_paths") or []
     )
     raw_constraints.setdefault(
         "diagnostic_lenses",
@@ -10380,6 +10408,30 @@ def _prompt_terms(prompt: str) -> list[str]:
     return ordered[:64]
 
 
+_SOURCE_SYMBOL_PATTERNS = (
+    re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\b"),
+    re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\b"),
+    re.compile(r"^\s*(?:export\s+)?(?:class|interface|enum|mixin)\s+([A-Za-z_$][\w$]*)\b"),
+    re.compile(r"^\s*class\s+([A-Za-z_]\w*)\b"),
+    re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=.*(?:=>|function\b)"),
+    re.compile(
+        r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|VIEW|TABLE)\s+([A-Za-z_][\w.]*)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _nearest_source_symbol(lines: Sequence[str], line_number: int) -> str:
+    start = max(0, int(line_number) - 80)
+    end = min(len(lines), int(line_number))
+    for offset in range(end - 1, start - 1, -1):
+        for pattern in _SOURCE_SYMBOL_PATTERNS:
+            match = pattern.search(lines[offset])
+            if match:
+                return _clip(match.group(1), 160)
+    return ""
+
+
 def collect_repo_evidence(
     repo_path: Path,
     prompt: str,
@@ -10429,7 +10481,7 @@ def collect_repo_evidence(
         seen.add(resolved)
         paths.append(resolved)
 
-    scored: list[tuple[int, str, int, str]] = []
+    scored: list[tuple[int, str, int, str, str]] = []
     for path in paths:
         try:
             if path.stat().st_size > 600_000:
@@ -10460,7 +10512,15 @@ def collect_repo_evidence(
                 for offset in range(context_start, context_end)
                 if lines[offset].strip()
             )
-            scored.append((score, rel, line_number, _clip(snippet, 700)))
+            scored.append(
+                (
+                    score,
+                    rel,
+                    line_number,
+                    _clip(snippet, 700),
+                    _nearest_source_symbol(lines, line_number),
+                )
+            )
             per_file += 1
             if per_file >= 120:
                 break
@@ -10468,7 +10528,7 @@ def collect_repo_evidence(
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     records: list[dict[str, Any]] = []
     selected_lines: dict[str, list[int]] = {}
-    for _score, rel, line_number, snippet in scored:
+    for _score, rel, line_number, snippet, source_symbol in scored:
         prior_lines = selected_lines.setdefault(rel, [])
         if len(prior_lines) >= 6 or any(
             abs(line_number - prior) <= 2 for prior in prior_lines
@@ -10487,6 +10547,9 @@ def collect_repo_evidence(
                     "kind": "artifact",
                     "provenance": provenance,
                     "independence_key": rel,
+                    "source_path": rel,
+                    "source_symbol": source_symbol,
+                    "source_line": line_number,
                     "reliability": 0.75 if rel.startswith("tests/") else 0.9,
                     "discriminating": any(
                         signal in snippet.lower() for signal in _DIRECT_SOURCE_SIGNALS
@@ -10558,6 +10621,7 @@ def collect_contract_source_evidence(
                     "kind": "artifact",
                     "provenance": f"{path}:contract-check",
                     "independence_key": path,
+                    "source_path": path,
                     "reliability": 0.94,
                     "discriminating": False,
                     "causal_role": "context",
@@ -10619,6 +10683,7 @@ def build_case_from_prompt(
             "constraints": {
                 "contract_invariants": derive_contract_invariants(prompt),
                 "diagnostic_lenses": derive_diagnostic_lenses(prompt),
+                "candidate_paths": _normalized_source_paths(candidate_paths),
             },
         }
     )
@@ -10685,9 +10750,16 @@ def validate_raw_packet_schema(raw: Mapping[str, Any]) -> list[str]:
             for field in (
                 "support_evidence_ids",
                 "contradict_evidence_ids",
+                "owner_paths",
+                "context_paths",
+                "causal_chain",
             ):
                 if field in item and not isinstance(item.get(field), list):
                     errors.append(f"{label}.{field} must be a JSON array.")
+                elif field in item and any(
+                    not isinstance(value, str) for value in item.get(field) or []
+                ):
+                    errors.append(f"{label}.{field} must contain only strings.")
             for field in ("hypothesis_id", "claim", "dimension", "falsification"):
                 if field in item and not isinstance(item.get(field), str):
                     errors.append(f"{label}.{field} must be a string.")
@@ -10768,6 +10840,13 @@ def _normalize_hypothesis(raw: Mapping[str, Any], index: int) -> dict[str, Any]:
         "contradict_evidence_ids": [
             _clean_id(value, "") for value in raw.get("contradict_evidence_ids") or [] if str(value).strip()
         ][:20],
+        "owner_paths": _normalized_source_paths(raw.get("owner_paths") or []),
+        "context_paths": _normalized_source_paths(raw.get("context_paths") or []),
+        "causal_chain": [
+            _clip(value, 260)
+            for value in raw.get("causal_chain") or []
+            if str(value).strip()
+        ][:5],
         "falsification": _clip(raw.get("falsification"), 700),
     }
 
@@ -11329,6 +11408,15 @@ def _validate_packet(case: Mapping[str, Any], packet: Mapping[str, Any]) -> list
         if isinstance(item, Mapping)
     }
     evidence_ids = set(evidence_by_id)
+    allowed_source_paths = set(
+        _normalized_source_paths(
+            (case.get("constraints") or {}).get("candidate_paths") or []
+        )
+    ) or {
+        str(item.get("source_path") or "")
+        for item in evidence_by_id.values()
+        if str(item.get("source_path") or "")
+    }
     hypothesis_ids: set[str] = set()
     if not packet.get("hypotheses"):
         errors.append("At least one falsifiable hypothesis is required.")
@@ -11373,6 +11461,22 @@ def _validate_packet(case: Mapping[str, Any], packet: Mapping[str, Any]) -> list
             errors.append(
                 f"{hypothesis_id} links contradiction evidence as support: "
                 + ", ".join(contradiction_as_support)
+            )
+        owner_paths = set(item.get("owner_paths") or [])
+        context_paths = set(item.get("context_paths") or [])
+        unknown_paths = sorted(
+            (owner_paths | context_paths) - allowed_source_paths
+        )
+        if unknown_paths:
+            errors.append(
+                f"{hypothesis_id} references unknown source paths: "
+                + ", ".join(unknown_paths)
+            )
+        overlap = sorted(owner_paths & context_paths)
+        if overlap:
+            errors.append(
+                f"{hypothesis_id} marks the same paths as owner and context: "
+                + ", ".join(overlap)
             )
     experiment_ids: set[str] = set()
     for item in packet.get("experiments") or []:
@@ -11611,6 +11715,32 @@ def evaluate_packet(
                 )
             )
         ]
+        owner_paths = list(item.get("owner_paths") or [])
+        context_paths = list(item.get("context_paths") or [])
+        owner_evidence_ids = {
+            path: [
+                str(record.get("evidence_id") or "")
+                for record in linked_support_records
+                if str(record.get("source_path") or "") == path
+                and str(record.get("evidence_id") or "")
+            ]
+            for path in owner_paths
+        }
+        grounded_owner_paths = [
+            path for path in owner_paths if owner_evidence_ids.get(path)
+        ]
+        ungrounded_owner_paths = [
+            path for path in owner_paths if path not in grounded_owner_paths
+        ]
+        ownership_grounding = (
+            "unspecified"
+            if not owner_paths
+            else "grounded"
+            if not ungrounded_owner_paths
+            else "partial"
+            if grounded_owner_paths
+            else "ungrounded"
+        )
         explicit_contradict_records = [
             evidence[value]
             for value in contradict_ids
@@ -11773,6 +11903,10 @@ def evaluate_packet(
         else:
             status = "untested"
         blockers: list[str] = []
+        if ownership_grounding == "ungrounded":
+            blockers.append(
+                "Claimed mutation owners lack linked source evidence."
+            )
         downstream_only = bool(linked_support_records) and not (
             causal_support_records or context_records or implicit_contradict_records
         )
@@ -11877,6 +12011,11 @@ def evaluate_packet(
                 "confirmatory_weight": confirmatory_weight,
                 "contradict_weight": contradict_weight,
                 "ownership_weight": ownership_weight,
+                "ownership_grounding": ownership_grounding,
+                "grounded_owner_paths": grounded_owner_paths,
+                "ungrounded_owner_paths": ungrounded_owner_paths,
+                "owner_evidence_ids": owner_evidence_ids,
+                "context_paths": context_paths,
                 "dimension_alignment_weight": dimension_alignment_weight,
                 "dimension_mismatch_weight": dimension_mismatch_weight,
                 "causal_dimension_alignment_weight": causal_dimension_alignment_weight,
@@ -12171,6 +12310,21 @@ def evaluate_packet(
             "causal_sufficiency": str(
                 chosen.get("causal_sufficiency") or "observational"
             ) if chosen else "observational",
+            "owner_paths": list(chosen.get("owner_paths") or []) if chosen else [],
+            "context_paths": list(chosen.get("context_paths") or []) if chosen else [],
+            "causal_chain": list(chosen.get("causal_chain") or []) if chosen else [],
+            "ownership_grounding": str(
+                chosen.get("ownership_grounding") or "unspecified"
+            ) if chosen else "unspecified",
+            "grounded_owner_paths": list(
+                chosen.get("grounded_owner_paths") or []
+            ) if chosen else [],
+            "ungrounded_owner_paths": list(
+                chosen.get("ungrounded_owner_paths") or []
+            ) if chosen else [],
+            "owner_evidence_ids": dict(
+                chosen.get("owner_evidence_ids") or {}
+            ) if chosen else {},
             "promotion_reason": promotion_reason,
             "blockers": list(chosen.get("blockers") or []) if chosen else [],
         },
@@ -12357,6 +12511,9 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "held_constant_dimensions",
         "expected_if_true",
         "expected_if_false",
+        "source_path",
+        "source_symbol",
+        "source_line",
         "comparison_key",
         "code_revision",
         "input_fingerprint",
@@ -12412,7 +12569,10 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
 def _packet_shape() -> str:
     return (
         '{"hypotheses":[{"hypothesis_id":"h1","claim":"<=12 words","dimension":"code|data|clock|state|config|dependency|runtime|test_harness|unknown",'
-        '"support_evidence_ids":["e1"],"contradict_evidence_ids":[],"falsification":"<=12 words"}],'
+        '"support_evidence_ids":["e1"],"contradict_evidence_ids":[],'
+        '"owner_paths":["owner.py"],"context_paths":["context.py"],'
+        '"causal_chain":["owner","first break","symptom"],'
+        '"falsification":"<=12 words"}],'
         '"experiments":[{"experiment_id":"x1","hypothesis_ids":["h1"],'
         '"changed_dimensions":["clock"],"held_constant_dimensions":["code","data"],'
         '"expected_if_true":"<=12 words","expected_if_false":"<=12 words",'
@@ -12428,9 +12588,11 @@ def _compact_output_rules(case: Mapping[str, Any]) -> str:
         (case.get("constraints") or {}).get("minimum_hypothesis_dimensions") or 1
     )
     return (
-        "Hard output budget: at most 700 tokens. Do not restate the case or evidence text. "
+        "Hard output budget: at most 850 tokens. Do not restate the case or evidence text. "
         f"Return {required} to 4 concise hypotheses across distinct dimensions. "
         "Every claim, falsification, and reason is at most 12 words. Use evidence ids only. "
+        "Source hypotheses use exact candidate owner_paths for mutation and context_paths for unchanged files; "
+        "never invent paths. causal_chain has two to four owner-to-break-to-symptom steps. "
         "Use experiments=[] unless one or two bounded typed probes are essential. "
         "Omit schema and problem_statement. Close every JSON array and object."
     )
@@ -12438,16 +12600,47 @@ def _compact_output_rules(case: Mapping[str, Any]) -> str:
 
 def _packet_prompt(packet: Mapping[str, Any]) -> str:
     normalized = normalize_packet(packet)
+    hypotheses = []
+    for item in list(normalized.get("hypotheses") or [])[:4]:
+        hypotheses.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "hypothesis_id",
+                    "claim",
+                    "dimension",
+                    "support_evidence_ids",
+                    "contradict_evidence_ids",
+                    "owner_paths",
+                    "context_paths",
+                    "causal_chain",
+                    "falsification",
+                )
+                if key in {"hypothesis_id", "claim", "dimension", "falsification"}
+                or _has_prompt_value(item.get(key))
+            }
+        )
+    conclusion = normalized.get("conclusion") or {}
     return _prompt_json(
         {
-            "hypotheses": list(normalized.get("hypotheses") or [])[:4],
+            "hypotheses": hypotheses,
             "experiments": list(normalized.get("experiments") or [])[:2],
-            "conclusion": normalized.get("conclusion") or {},
+            "conclusion": {
+                key: conclusion.get(key)
+                for key in ("hypothesis_id", "status", "evidence_ids", "reason")
+                if key in {"hypothesis_id", "status"}
+                or _has_prompt_value(conclusion.get(key))
+            },
         }
     )
 
 
 def _report_prompt(report: Mapping[str, Any]) -> str:
+    conclusion = (
+        report.get("conclusion")
+        if isinstance(report.get("conclusion"), Mapping)
+        else {}
+    )
     hypothesis_results = []
     for item in report.get("hypothesis_results") or []:
         if not isinstance(item, Mapping):
@@ -12461,9 +12654,16 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
                     "status",
                     "support_evidence_ids",
                     "contradict_evidence_ids",
+                    "owner_paths",
+                    "context_paths",
+                    "causal_chain",
                     "discriminating_evidence",
                     "causal_sufficiency",
                     "ownership_weight",
+                    "ownership_grounding",
+                    "grounded_owner_paths",
+                    "ungrounded_owner_paths",
+                    "owner_evidence_ids",
                     "attribution_gap_blocked",
                     "blockers",
                 )
@@ -12477,7 +12677,28 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
             "baseline_drift": list(report.get("baseline_drift") or [])[:2],
             "attribution_assessment": report.get("attribution_assessment") or {},
             "decision": report.get("decision"),
-            "conclusion": report.get("conclusion") or {},
+            "conclusion": {
+                key: conclusion.get(key)
+                for key in (
+                    "hypothesis_id",
+                    "status",
+                    "dimension",
+                    "claim",
+                    "confidence",
+                    "evidence_ids",
+                    "reason",
+                    "causal_sufficiency",
+                    "owner_paths",
+                    "context_paths",
+                    "causal_chain",
+                    "ownership_grounding",
+                    "grounded_owner_paths",
+                    "ungrounded_owner_paths",
+                    "owner_evidence_ids",
+                    "blockers",
+                )
+                if _has_prompt_value(conclusion.get(key))
+            },
             "hypothesis_results": hypothesis_results[:4],
             "next_experiments": list(report.get("next_experiments") or [])[:2],
             "causal_timeline": report.get("causal_timeline") or {},
@@ -12516,21 +12737,17 @@ def _schema_correction_prompt(
 def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
     case = normalize_case(raw_case)
     return (
-        "You are CHILI's local investigator. Return JSON only. "
-        "Generate competing hypotheses across dimensions. Cite evidence ids. "
-        "Trace expected/observed and the earliest causal break; separate cause from symptom. "
-        "Reject a leader missing any material symptom or invariant, or contradicting identity, scope, order, or "
-        "recovery facts. Prefer direct owner flow over peripheral name similarity. "
-        "Check requirements, externals, state, evidence, and source/runtime parity. "
-        "Give each hypothesis a falsification; probe only when essential. "
-        "Same code and input with different outcomes "
-        "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation. "
-        "When evidence is insufficient, you may set auto_execute=true only for a typed probe from the supplied "
-        "catalog. Raw shell commands do not exist. search is fixed-string; targeted_test must name one selector "
-        "under tests/. log_search is fixed-string over bounded log tails. db_schema and db_profile never accept "
-        "SQL; db_profile exposes only count/group/min/max/avg/sum aggregates and production use requires a "
-        "timestamp column plus bounded lookback. Use read_only for repo_state/search/file_excerpt/git_history/"
-        "git_diff/log_inventory/log_search/db_schema/db_profile and isolated for compile/targeted_test. "
+        "You are CHILI's investigator. Return JSON only. "
+        "Generate competing falsifiable hypotheses across dimensions and cite evidence ids. Trace expected versus "
+        "observed to the earliest causal break. Reject a leader missing any material symptom or invariant, or "
+        "contradicting identity, scope, order, or recovery. Prefer direct owner flow over peripheral name similarity. "
+        "Separate exact candidate mutation owners from context-only files. Cite source evidence per owner and "
+        "trace owner behavior through the first break to the symptom; leave owner_paths empty if ungrounded. "
+        "Check requirements, externals, state, evidence, and source/runtime parity. Same code and input with "
+        "different outcomes means baseline drift, not code proof. "
+        "Auto-execute only supplied typed probes, never shell/runtime/live mutation. read_only covers repo, fixed "
+        "search, bounded logs, and aggregate-only DB probes with no SQL or raw rows; isolated covers compile and "
+        "one targeted test selector under tests/. "
         f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}"
@@ -12545,6 +12762,8 @@ def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], repor
         "correlated evidence, and claims that survived no discriminating experiment. Add contradiction evidence links when justified. "
         "Challenge post-hoc metric optimization, replay leakage, source/runtime drift, producer-consumer starvation, "
         "broker/local-state divergence, external-condition confounding, and fixes aimed only at a downstream symptom. "
+        "Challenge every proposed owner path that lacks linked source evidence, and move inspected non-owners to "
+        "context_paths. Reject causal chains that skip the first broken boundary. "
         "Retract a conclusion rather than defending it when the evidence changed. Never request automatic runtime or live mutation. "
         f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
@@ -12566,6 +12785,8 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
         "Do not preserve the investigator's leader unless it closes every material symptom and required invariant. "
         "Treat explicit identity, scope, ordering, and recovery facts as hard contradiction checks, and rank direct "
         "owner control/data flow above peripheral name similarity. "
+        "Require exact candidate owner_paths, linked source evidence, context-only separation, and a complete "
+        "owner-to-boundary-to-symptom causal_chain before treating ownership as resolved. "
         "If baseline drift remains unexplained, reject code attribution and choose instrument-first. "
         "Preserve safe falsification experiments and never request automatic runtime or live mutation. "
         "If the evidence gate says instrument_first, choose at most two auto_execute typed probes from this "
@@ -12608,11 +12829,23 @@ def _repair_candidate_contract(
                 item.get("evidence_lifecycle") or "observed_result"
             ),
             "attribution_gap": bool(item.get("attribution_gap")),
+            "source_path": str(item.get("source_path") or ""),
             "qualified_causal_support": _is_qualified_causal_record(item),
         }
         for item in case.get("observations") or []
         if isinstance(item, Mapping) and str(item.get("evidence_id") or "")
     }
+    candidate_paths = set(
+        _normalized_source_paths(
+            (case.get("constraints") or {}).get("candidate_paths") or []
+        )
+    )
+    evidence_paths = {
+        str(item.get("source_path") or "")
+        for item in evidence_contracts.values()
+        if str(item.get("source_path") or "")
+    }
+    allowed_paths = candidate_paths or evidence_paths
 
     def support_is_compatible(evidence_id: str, dimension: str) -> bool:
         contract = evidence_contracts.get(evidence_id)
@@ -12683,6 +12916,11 @@ def _repair_candidate_contract(
         if not str(repaired.get("falsification") or "").strip() and prior:
             repaired["falsification"] = str(prior.get("falsification") or "")
             repairs.append(f"{hypothesis_id}:restored_falsification")
+        if not list(repaired.get("causal_chain") or []) and prior:
+            prior_chain = list(prior.get("causal_chain") or [])
+            if prior_chain:
+                repaired["causal_chain"] = prior_chain
+                repairs.append(f"{hypothesis_id}:restored_causal_chain")
 
         raw_support = list(repaired.get("support_evidence_ids") or [])
         aligned_support = [
@@ -12763,6 +13001,38 @@ def _repair_candidate_contract(
                     f"{hypothesis_id}:restored_qualified_causal_support"
                 )
         repaired["support_evidence_ids"] = aligned_support
+
+        raw_owner_paths = list(repaired.get("owner_paths") or [])
+        owner_paths = [path for path in raw_owner_paths if path in allowed_paths]
+        if owner_paths != raw_owner_paths:
+            repairs.append(f"{hypothesis_id}:dropped_unknown_owner_paths")
+        if not owner_paths and prior:
+            prior_owner_paths = [
+                path
+                for path in prior.get("owner_paths") or []
+                if path in allowed_paths
+            ]
+            prior_support_paths = {
+                str((evidence_contracts.get(str(evidence_id)) or {}).get("source_path") or "")
+                for evidence_id in prior_support
+            }
+            grounded_prior_paths = [
+                path for path in prior_owner_paths if path in prior_support_paths
+            ]
+            if grounded_prior_paths:
+                owner_paths = grounded_prior_paths
+                repairs.append(f"{hypothesis_id}:restored_grounded_owner_paths")
+        repaired["owner_paths"] = owner_paths
+
+        raw_context_paths = list(repaired.get("context_paths") or [])
+        context_paths = [
+            path
+            for path in raw_context_paths
+            if path in allowed_paths and path not in owner_paths
+        ]
+        if context_paths != raw_context_paths:
+            repairs.append(f"{hypothesis_id}:dropped_invalid_context_paths")
+        repaired["context_paths"] = context_paths
         if aligned_contradictions != raw_contradictions:
             repairs.append(f"{hypothesis_id}:dropped_unqualified_contradiction")
         repaired["contradict_evidence_ids"] = aligned_contradictions
@@ -13099,9 +13369,34 @@ def report_context(report: Mapping[str, Any]) -> str:
         f"- conclusion: {conclusion.get('status') or 'inconclusive'} / {conclusion.get('dimension') or 'unknown'}",
         f"- claim: {_clip(conclusion.get('claim'), 500)}",
         f"- confidence: {conclusion.get('confidence') or 0}",
+        f"- ownership grounding: {conclusion.get('ownership_grounding') or 'unspecified'}",
         f"- baseline drift findings: {len(report.get('baseline_drift') or [])}",
         f"- conclusion retractions: {len(report.get('retractions') or [])}",
     ]
+    for path in (conclusion.get("owner_paths") or [])[:6]:
+        evidence_ids = (
+            (conclusion.get("owner_evidence_ids") or {}).get(path) or []
+            if isinstance(conclusion.get("owner_evidence_ids"), Mapping)
+            else []
+        )
+        lines.append(
+            f"- causal owner file: {_clip(path, 260)}"
+            + (f" (evidence: {', '.join(str(value) for value in evidence_ids[:5])})" if evidence_ids else "")
+        )
+    for path in (conclusion.get("context_paths") or [])[:6]:
+        lines.append(f"- context-only file: {_clip(path, 260)}")
+    for index, step in enumerate((conclusion.get("causal_chain") or [])[:5], start=1):
+        lines.append(f"- causal chain {index}: {_clip(step, 300)}")
+    for blocker in (conclusion.get("blockers") or [])[:5]:
+        lines.append(f"- diagnosis blocker: {_clip(blocker, 300)}")
+    timeline = report.get("causal_timeline") if isinstance(report.get("causal_timeline"), Mapping) else {}
+    earliest_break = timeline.get("earliest_break") if isinstance(timeline.get("earliest_break"), Mapping) else {}
+    if earliest_break:
+        lines.append(
+            "- earliest causal break: "
+            f"{_clip(earliest_break.get('evidence_id'), 100)} / "
+            f"{_clip(earliest_break.get('dimension'), 40)}"
+        )
     for item in (report.get("next_experiments") or [])[:5]:
         if isinstance(item, Mapping):
             lines.append(f"- next experiment ({item.get('safety')}): {_clip(item.get('action'), 300)}")

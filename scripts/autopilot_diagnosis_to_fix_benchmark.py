@@ -2570,6 +2570,7 @@ def _markdown(results: Mapping[str, Any]) -> str:
         f"- Causally accepted diagnoses: **{results['causal_diagnosis_acceptance_rate']:.1f}%**",
         f"- Live-reasoning-qualified cases: **{results.get('live_reasoning_qualified_case_rate', 0.0):.1f}%**",
         f"- Deterministic-only cases: **{results.get('deterministic_only_case_rate', 0.0):.1f}%**",
+        f"- Deterministic contracts disabled: **{str(bool(results.get('deterministic_contracts_disabled'))).lower()}**",
         f"- Autonomy verdict: **{results['verdict']}**",
         f"- Comparison verdict: **{results['evaluation_verdict']}**",
         "- Premium calls: **0**",
@@ -2616,6 +2617,29 @@ def _markdown(results: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+QWEN3_THINKING_MIN_TIMEOUT_SEC = 180.0
+QWEN3_THINKING_MAX_PROMPT_CHARS = 12_000
+
+
+def _thinking_policy(
+    model: str,
+    stage: str,
+    *,
+    json_mode: bool,
+    effective_timeout_sec: float,
+    prompt_chars: int,
+) -> tuple[bool, str]:
+    if not json_mode or not str(model).lower().startswith("qwen3"):
+        return False, "unsupported_model_or_mode"
+    if str(stage) not in {"diagnosis_investigator", "diagnosis_skeptic"}:
+        return False, "non_hypothesis_stage"
+    if float(effective_timeout_sec) < QWEN3_THINKING_MIN_TIMEOUT_SEC:
+        return False, "insufficient_visible_answer_budget"
+    if int(prompt_chars) > QWEN3_THINKING_MAX_PROMPT_CHARS:
+        return False, "prompt_too_large_for_bounded_thinking"
+    return True, "sufficient_bounded_reasoning_budget"
+
+
 def _local_call(
     model: str,
     messages: list[dict[str, str]],
@@ -2631,6 +2655,9 @@ def _local_call(
             "Model-call ledger is frozen; model access is forbidden after final-oracle sealing."
         )
     requested_timeout = float(timeout)
+    prompt_chars = sum(
+        len(str(message.get("content") or "")) for message in messages
+    )
     deadline = getattr(calls, "deadline", None)
     remaining_before: float | None = None
     deadline_clamped = False
@@ -2654,9 +2681,7 @@ def _local_call(
                     "response": "",
                     "budget_exhausted": True,
                     "error_kind": "case_budget_exhausted",
-                    "prompt_chars": sum(
-                        len(str(message.get("content") or "")) for message in messages
-                    ),
+                    "prompt_chars": prompt_chars,
                 }
             )
             return ""
@@ -2683,9 +2708,7 @@ def _local_call(
                     "response": "",
                     "budget_exhausted": True,
                     "error_kind": "case_budget_exhausted",
-                    "prompt_chars": sum(
-                        len(str(message.get("content") or "")) for message in messages
-                    ),
+                    "prompt_chars": prompt_chars,
                 }
             )
             return ""
@@ -2700,10 +2723,12 @@ def _local_call(
     }
     if json_mode:
         options["format"] = "json"
-    use_thinking = bool(
-        json_mode
-        and str(model).lower().startswith("qwen3")
-        and str(stage) in {"diagnosis_investigator", "diagnosis_skeptic"}
+    use_thinking, thinking_policy_reason = _thinking_policy(
+        model,
+        stage,
+        json_mode=json_mode,
+        effective_timeout_sec=float(timeout),
+        prompt_chars=prompt_chars,
     )
     result = ollama_client.chat(
         messages,
@@ -2742,11 +2767,10 @@ def _local_call(
             "error": result.error,
             "error_kind": error_kind,
             "response": (result.text or "")[:6000],
-            "prompt_chars": sum(
-                len(str(message.get("content") or "")) for message in messages
-            ),
+            "prompt_chars": prompt_chars,
             "prompt_eval_count": int(raw.get("prompt_eval_count") or 0),
             "thinking_enabled": use_thinking,
+            "thinking_policy_reason": thinking_policy_reason,
             "thinking_chars": thinking_chars,
             "thinking_budget_exhausted": bool(
                 use_thinking
@@ -5472,6 +5496,9 @@ def _checkpoint_binding(
         "local_timeout_recovery_policy": LOCAL_TIMEOUT_RECOVERY_POLICY,
         "public_regression_recovery_policy": PUBLIC_REGRESSION_RECOVERY_POLICY,
         "validated_progress_refinement_policy": VALIDATED_PROGRESS_REFINEMENT_POLICY,
+        "deterministic_contracts_disabled": bool(
+            getattr(args, "disable_deterministic_contracts", False)
+        ),
         "run_policy_sha256": str((run_policy_binding or {}).get("sha256") or ""),
         "implementation_commit": str(
             (run_policy_binding or {}).get("implementation_commit") or ""
@@ -5737,7 +5764,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 initial_public.get("test_files") or [],
                 max_chars=12_000,
             )
-            diagnosis = _recognized_contract_diagnosis(repo, case) or _diagnose(
+            deterministic_contracts_disabled = bool(
+                getattr(args, "disable_deterministic_contracts", False)
+            )
+            diagnosis = (
+                None
+                if deterministic_contracts_disabled
+                else _recognized_contract_diagnosis(repo, case)
+            ) or _diagnose(
                 repo,
                 case,
                 reasoning_model,
@@ -5747,9 +5781,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 public_result=initial_public,
             )
             _initialize_accepted_diagnosis(diagnosis)
-            deterministic_contract_repair = _apply_deterministic_contract_repair(
-                repo,
-                case,
+            deterministic_contract_repair = (
+                {
+                    "attempted": False,
+                    "patch_applied": False,
+                    "selected_files": [],
+                    "warnings": [],
+                    "proposed_dimension": "unknown",
+                    "disabled_for_live_reasoning_ablation": True,
+                }
+                if deterministic_contracts_disabled
+                else _apply_deterministic_contract_repair(repo, case)
             )
             patch = (
                 _patch_from_deterministic_contract_repair(
@@ -6742,6 +6784,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if str(call.get("error_kind") or "") == "transport_error"
         ),
         "max_repair_rounds": len(repair_schedule),
+        "deterministic_contracts_disabled": bool(
+            getattr(args, "disable_deterministic_contracts", False)
+        ),
         "max_base_repair_rounds": max(
             0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs))
         ),
@@ -6812,6 +6857,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-repairs", type=int, default=5)
     parser.add_argument("--escalation-model", default="")
     parser.add_argument("--max-escalation-repairs", type=int, default=0)
+    parser.add_argument(
+        "--disable-deterministic-contracts",
+        action="store_true",
+        help=(
+            "Disable recognized-contract diagnosis and repair for disclosed live-reasoning ablations."
+        ),
+    )
     parser.add_argument("--run-policy", default="")
     parser.add_argument("--validate-fixtures", action="store_true")
     parser.add_argument(

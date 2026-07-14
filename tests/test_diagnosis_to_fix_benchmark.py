@@ -490,7 +490,7 @@ def test_local_call_records_prompt_timing_and_distinguishes_call_timeout(monkeyp
     assert calls[-1]["wall_deadline_clamped"] is False
 
 
-def test_qwen3_thinking_is_reserved_for_hypothesis_generation(monkeypatch):
+def test_qwen3_thinking_requires_hypothesis_stage_and_sufficient_visible_budget(monkeypatch):
     captured = []
 
     def fake_chat(*_args, **kwargs):
@@ -505,7 +505,7 @@ def test_qwen3_thinking_is_reserved_for_hypothesis_generation(monkeypatch):
         )
 
     monkeypatch.setattr(benchmark.ollama_client, "chat", fake_chat)
-    calls = benchmark._ModelCallLedger(model_time_budget=30.0)
+    calls = benchmark._ModelCallLedger(model_time_budget=600.0)
 
     benchmark._local_call(
         "qwen3:8b",
@@ -513,6 +513,15 @@ def test_qwen3_thinking_is_reserved_for_hypothesis_generation(monkeypatch):
         stage="diagnosis_investigator",
         calls=calls,
         timeout=10.0,
+        num_predict=100,
+        json_mode=True,
+    )
+    benchmark._local_call(
+        "qwen3:8b",
+        [{"role": "user", "content": "diagnose with enough answer budget"}],
+        stage="diagnosis_investigator",
+        calls=calls,
+        timeout=240.0,
         num_predict=100,
         json_mode=True,
     )
@@ -535,12 +544,22 @@ def test_qwen3_thinking_is_reserved_for_hypothesis_generation(monkeypatch):
         json_mode=True,
     )
 
-    assert captured[0]["think"] is True
-    assert captured[1]["think"] is False
+    assert captured[0]["think"] is False
+    assert captured[1]["think"] is True
     assert captured[2]["think"] is False
-    assert calls[0]["thinking_enabled"] is True
-    assert calls[0]["thinking_chars"] == len("bounded causal analysis")
-    assert calls[1]["thinking_enabled"] is False
+    assert captured[3]["think"] is False
+    assert calls[0]["thinking_policy_reason"] == "insufficient_visible_answer_budget"
+    assert calls[1]["thinking_enabled"] is True
+    assert calls[1]["thinking_chars"] == len("bounded causal analysis")
+    assert calls[1]["thinking_policy_reason"] == "sufficient_bounded_reasoning_budget"
+    assert calls[2]["thinking_enabled"] is False
+    assert benchmark._thinking_policy(
+        "qwen3:8b",
+        "diagnosis_investigator",
+        json_mode=True,
+        effective_timeout_sec=240.0,
+        prompt_chars=benchmark.QWEN3_THINKING_MAX_PROMPT_CHARS + 1,
+    ) == (False, "prompt_too_large_for_bounded_thinking")
 
 
 def test_local_call_labels_deadline_clamped_timeout_as_case_budget(monkeypatch):
@@ -5410,6 +5429,18 @@ def test_disclosed_fable5_trading_contract_bypasses_model_diagnosis_and_editing(
     assert case_result["live_reasoning_qualified"] is False
     assert result["verdict"] == "needs_improvement"
     assert result["fable5_class_reasoning_claim_supported"] is False
+
+
+def test_parser_exposes_explicit_live_reasoning_ablation(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["autopilot_diagnosis_to_fix_benchmark.py", "--disable-deterministic-contracts"],
+    )
+
+    args = benchmark._parser().parse_args()
+
+    assert args.disable_deterministic_contracts is True
 
 
 def test_disclosed_fable5_mesh_pressure_operator_passes_feedback_and_final(

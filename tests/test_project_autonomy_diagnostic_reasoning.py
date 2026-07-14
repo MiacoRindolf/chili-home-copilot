@@ -685,7 +685,7 @@ def test_dense_council_prompts_enforce_compact_closed_json_contract():
     investigator = reasoning.investigator_prompt(case)
     judge = reasoning.judge_prompt(case, packet, report)
 
-    assert "Hard output budget: at most 700 tokens" in investigator
+    assert "Hard output budget: at most 850 tokens" in investigator
     assert "Close every JSON array and object" in judge
     assert '"experiments":[{"experiment_id":"x1"' in investigator
     assert '"auto_execute":true,"probe":{' in investigator
@@ -6540,3 +6540,214 @@ def test_disclosed_fifteenth_contract_families_are_guarded_and_structurally_repa
         assert reasoning.contract_invariant_dimension(case["prompt"]) == expected_dimension
         assert reasoning.contract_repair_dimension(case["prompt"], files) == expected_dimension
         assert reasoning.contract_invariant_warnings(case["prompt"], projected) == []
+
+
+def test_source_backed_hypothesis_preserves_grounded_owner_chain_for_planner():
+    case = {
+        "case_id": "grounded-owner-chain",
+        "problem_statement": "Split candidate reads in the selector without changing the provider.",
+        "constraints": {
+            "candidate_paths": ["trading/selector.py", "trading/provider.py"],
+            "minimum_hypothesis_dimensions": 1,
+        },
+        "observations": [
+            {
+                "evidence_id": "selector-source",
+                "statement": "The selector combines user and system scope before applying one limit.",
+                "dimension": "data",
+                "dimension_origin": "inferred",
+                "kind": "artifact",
+                "causal_role": "context",
+                "provenance": "trading/selector.py:12",
+                "source_path": "trading/selector.py",
+                "source_symbol": "select_candidates",
+                "reliability": 0.95,
+            },
+            {
+                "evidence_id": "provider-source",
+                "statement": "The provider executes one requested scope and limit.",
+                "dimension": "data",
+                "dimension_origin": "inferred",
+                "kind": "artifact",
+                "causal_role": "context",
+                "provenance": "trading/provider.py:8",
+                "source_path": "trading/provider.py",
+                "source_symbol": "fetch_scope",
+                "reliability": 0.9,
+            },
+        ],
+    }
+    response = json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "scope-owner",
+                    "claim": "Selector owns the asymmetric scope policy.",
+                    "dimension": "data",
+                    "support_evidence_ids": ["selector-source", "provider-source"],
+                    "contradict_evidence_ids": [],
+                    "owner_paths": ["trading/selector.py"],
+                    "context_paths": ["trading/provider.py"],
+                    "causal_chain": [
+                        "Selector builds one mixed scope.",
+                        "Local lane limits never exist.",
+                        "Broad system rows dominate selection.",
+                    ],
+                    "falsification": "Split only provider internals and compare calls.",
+                }
+            ],
+            "experiments": [],
+            "conclusion": {
+                "hypothesis_id": "scope-owner",
+                "status": "provisional",
+                "evidence_ids": ["selector-source"],
+                "reason": "Selector controls cross-lane selection.",
+            },
+        }
+    )
+
+    debate = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda _stage, _prompt: response,
+        stages_to_run=("investigator",),
+    )
+
+    hypothesis = debate["packet"]["hypotheses"][0]
+    conclusion = debate["report"]["conclusion"]
+    context = reasoning.report_context(debate["report"])
+    assert hypothesis["owner_paths"] == ["trading/selector.py"]
+    assert hypothesis["context_paths"] == ["trading/provider.py"]
+    assert conclusion["ownership_grounding"] == "grounded"
+    assert conclusion["owner_evidence_ids"] == {
+        "trading/selector.py": ["selector-source"]
+    }
+    assert conclusion["causal_chain"][-1] == "Broad system rows dominate selection."
+    assert "causal owner file: trading/selector.py" in context
+    assert "context-only file: trading/provider.py" in context
+    assert "causal chain 3: Broad system rows dominate selection." in context
+
+
+def test_diagnostic_contract_drops_invented_owner_paths_and_owner_context_overlap():
+    case = {
+        "case_id": "owner-path-guard",
+        "problem_statement": "Diagnose selector ownership.",
+        "constraints": {
+            "candidate_paths": ["selector.py", "provider.py"],
+            "minimum_hypothesis_dimensions": 1,
+        },
+        "observations": [
+            {
+                "evidence_id": "selector-source",
+                "statement": "Selector owns the merge.",
+                "dimension": "data",
+                "dimension_origin": "inferred",
+                "kind": "artifact",
+                "causal_role": "context",
+                "provenance": "selector.py:1",
+                "source_path": "selector.py",
+            }
+        ],
+    }
+    response = json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "owner",
+                    "claim": "Selector owns merge policy.",
+                    "dimension": "data",
+                    "support_evidence_ids": ["selector-source"],
+                    "contradict_evidence_ids": [],
+                    "owner_paths": ["invented.py", "selector.py"],
+                    "context_paths": ["selector.py", "provider.py", "missing.py"],
+                    "causal_chain": ["Selector mixes scopes.", "Results lose lane isolation."],
+                    "falsification": "Move policy to provider.",
+                }
+            ],
+            "experiments": [],
+            "conclusion": {
+                "hypothesis_id": "owner",
+                "status": "provisional",
+                "evidence_ids": ["selector-source"],
+                "reason": "Source locates policy.",
+            },
+        }
+    )
+
+    debate = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda _stage, _prompt: response,
+        stages_to_run=("investigator",),
+    )
+
+    hypothesis = debate["packet"]["hypotheses"][0]
+    repairs = debate["stages"][0]["contract_repairs"]
+    assert hypothesis["owner_paths"] == ["selector.py"]
+    assert hypothesis["context_paths"] == ["provider.py"]
+    assert "owner:dropped_unknown_owner_paths" in repairs
+    assert "owner:dropped_invalid_context_paths" in repairs
+
+
+def test_raw_packet_schema_rejects_non_array_causal_ownership_fields():
+    errors = reasoning.validate_raw_packet_schema(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "claim": "Owner is wrong.",
+                    "dimension": "code",
+                    "support_evidence_ids": [],
+                    "contradict_evidence_ids": [],
+                    "owner_paths": "owner.py",
+                    "causal_chain": "owner to symptom",
+                    "falsification": "Change owner only.",
+                }
+            ],
+            "experiments": [],
+            "conclusion": {
+                "hypothesis_id": "h1",
+                "status": "provisional",
+                "evidence_ids": [],
+                "reason": "Needs proof.",
+            },
+        }
+    )
+
+    assert "hypotheses[0].owner_paths must be a JSON array." in errors
+    assert "hypotheses[0].causal_chain must be a JSON array." in errors
+
+
+def test_prompt_case_exposes_exact_candidate_paths_and_source_symbols(tmp_path: Path):
+    selector = tmp_path / "selector.py"
+    provider = tmp_path / "provider.py"
+    selector.write_text(
+        "def select_candidates(store):\n"
+        "    return store.query('mixed candidate scope')\n",
+        encoding="utf-8",
+    )
+    provider.write_text(
+        "def query(scope):\n"
+        "    return scope\n",
+        encoding="utf-8",
+    )
+
+    case = reasoning.build_case_from_prompt(
+        "Diagnose the mixed candidate scope in select_candidates.",
+        repo_path=tmp_path,
+        candidate_paths=["selector.py", "provider.py"],
+    )
+
+    source_records = [
+        item for item in case["observations"] if item.get("source_path")
+    ]
+    assert case["constraints"]["candidate_paths"] == [
+        "selector.py",
+        "provider.py",
+    ]
+    assert any(
+        item["source_path"] == "selector.py"
+        and item["source_symbol"] == "select_candidates"
+        for item in source_records
+    )
+    prompt = reasoning.investigator_prompt(case)
+    assert '"candidate_paths":["selector.py","provider.py"]' in prompt
+    assert '"source_symbol":"select_candidates"' in prompt
