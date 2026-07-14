@@ -893,6 +893,73 @@ def test_shadow_verdict_requires_every_case_check_not_only_high_average():
     assert benchmark._verdict([]) == "needs_improvement"
 
 
+def test_live_reasoning_rejects_inconclusive_model_saved_by_structural_intervention():
+    diagnosis = {
+        "accepted_conclusion": {
+            "accepted": True,
+            "dimension": "state",
+            "stage": "deterministic_contract_repair_validated",
+            "repair_progress_validated": True,
+        },
+        "stages": [
+            {
+                "stage": "investigator",
+                "accepted": True,
+                "conclusion": {
+                    "dimension": "code",
+                    "status": "inconclusive",
+                    "causal_sufficiency": "observational",
+                },
+            },
+            {
+                "stage": "judge",
+                "accepted": True,
+                "effective_conclusion": {
+                    "dimension": "code",
+                    "status": "inconclusive",
+                    "causal_sufficiency": "observational",
+                },
+            },
+        ],
+    }
+    calls = [
+        {"stage": "diagnosis_investigator", "ok": True},
+        {"stage": "diagnosis_judge", "ok": True},
+    ]
+
+    metrics = benchmark._live_reasoning_metrics(calls, diagnosis)
+
+    assert metrics["successful_causal_reasoning_call_count"] == 2
+    assert metrics["accepted_causal_reasoning_stage_count"] == 2
+    assert metrics["successful_accepted_causal_reasoning_stage_count"] == 0
+    assert metrics["live_reasoning_qualified"] is False
+    assert metrics["deterministic_only"] is False
+
+
+def test_live_reasoning_requires_confirmed_model_family_to_match_retained_family():
+    diagnosis = {
+        "accepted_conclusion": {"accepted": True, "dimension": "state"},
+        "stages": [
+            {
+                "stage": "investigator",
+                "accepted": True,
+                "conclusion": {
+                    "dimension": "code",
+                    "status": "confirmed",
+                    "causal_sufficiency": "isolated",
+                },
+            }
+        ],
+    }
+
+    metrics = benchmark._live_reasoning_metrics(
+        [{"stage": "diagnosis_investigator", "ok": True}],
+        diagnosis,
+    )
+
+    assert metrics["live_reasoning_qualified"] is False
+
+
 def test_multifile_scoring_requires_exact_changed_file_set():
     oracle = {
         "expected_dimension": "data",

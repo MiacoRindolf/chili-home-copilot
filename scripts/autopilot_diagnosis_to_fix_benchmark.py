@@ -4769,10 +4769,43 @@ def _live_reasoning_metrics(
             for item in successful_causal_calls
         )
     }
+    accepted_conclusion = (
+        diagnosis.get("accepted_conclusion")
+        if isinstance(diagnosis.get("accepted_conclusion"), Mapping)
+        else {}
+    )
+    accepted_dimension = str(
+        accepted_conclusion.get("dimension") or "unknown"
+    ).strip().lower()
+
+    def has_confirmed_causal_conclusion(stage: Mapping[str, Any]) -> bool:
+        conclusion = next(
+            (
+                value
+                for value in (
+                    stage.get("effective_conclusion"),
+                    stage.get("conclusion"),
+                    (stage.get("report") or {}).get("conclusion")
+                    if isinstance(stage.get("report"), Mapping)
+                    else None,
+                )
+                if isinstance(value, Mapping)
+            ),
+            {},
+        )
+        return bool(
+            str(conclusion.get("status") or "").strip().lower() == "confirmed"
+            and str(conclusion.get("causal_sufficiency") or "").strip().lower()
+            in {"graph_linked", "isolated"}
+            and str(conclusion.get("dimension") or "unknown").strip().lower()
+            == accepted_dimension
+        )
+
     qualified_stages = [
         item
         for item in accepted_stages
         if str(item.get("stage") or "") in successful_stage_names
+        and has_confirmed_causal_conclusion(item)
     ]
     return {
         "successful_live_model_call_count": len(successful_calls),
