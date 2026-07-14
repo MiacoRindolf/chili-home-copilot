@@ -733,6 +733,32 @@ _DIRECT_SOURCE_SIGNALS = (
     "queue depth",
     "pending depth",
 )
+_BEHAVIOR_SOURCE_SIGNALS = (
+    "abortcontroller",
+    "addeventlistener",
+    ".abort(",
+    "promise.resolve",
+    ".then(",
+    ".finally(",
+    ".catch(",
+    ".set(",
+    ".delete(",
+    " await ",
+    " async ",
+    "retry",
+    "timeout",
+    "cache",
+    "queue",
+    "clock",
+    "timestamp",
+    "decode",
+    "encode",
+    "select ",
+    "insert ",
+    "update ",
+    "commit",
+    "rollback",
+)
 _CAUSAL_SUPPORT_MARKERS = (
     "applying only",
     "changing only",
@@ -8121,17 +8147,22 @@ def _structured_provenance_graph(case: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_terms(prompt: str) -> list[str]:
-    identifiers = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{3,}\b", prompt or "")
-    words = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{4,}\b", prompt or "")
+    invariant_text = " ".join(derive_contract_invariants(prompt))
+
+    def terms(value: str) -> list[str]:
+        identifiers = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{3,}\b", value)
+        words = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{4,}\b", value)
+        return [*identifiers, *words]
+
     ordered: list[str] = []
     seen: set[str] = set()
-    for raw in [*identifiers, *words]:
+    for raw in [*terms(invariant_text), *terms(prompt or "")]:
         clean = raw.lower()
         if clean in _STOP_WORDS or clean in seen:
             continue
         seen.add(clean)
         ordered.append(clean)
-    return ordered[:20]
+    return ordered[:64]
 
 
 def collect_repo_evidence(
@@ -8150,6 +8181,7 @@ def collect_repo_evidence(
 
     paths: list[Path] = []
     seen: set[Path] = set()
+    candidate_rel_paths: set[str] = set()
     for raw in candidate_paths:
         candidate = (root / raw).resolve()
         try:
@@ -8159,6 +8191,7 @@ def collect_repo_evidence(
         if candidate.is_file() and candidate.suffix.lower() in _SOURCE_SUFFIXES and candidate not in seen:
             seen.add(candidate)
             paths.append(candidate)
+            candidate_rel_paths.add(candidate.relative_to(root).as_posix())
 
     for candidate in root.rglob("*"):
         if len(paths) >= max_files:
@@ -8196,7 +8229,15 @@ def collect_repo_evidence(
             matched = sum(1 for term in terms if term in lower)
             if not matched:
                 continue
-            score = matched * 10 + (4 if any(term in Path(rel).name.lower() for term in terms) else 0)
+            behavior_matches = sum(
+                1 for signal in _BEHAVIOR_SOURCE_SIGNALS if signal in lower
+            )
+            score = (
+                matched * 10
+                + behavior_matches * 4
+                + (6 if rel in candidate_rel_paths else 0)
+                + (4 if any(term in Path(rel).name.lower() for term in terms) else 0)
+            )
             context_start = max(0, line_number - 3)
             context_end = min(len(lines), line_number + 2)
             snippet = " | ".join(
@@ -8206,12 +8247,20 @@ def collect_repo_evidence(
             )
             scored.append((score, rel, line_number, _clip(snippet, 700)))
             per_file += 1
-            if per_file >= 3:
+            if per_file >= 120:
                 break
 
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     records: list[dict[str, Any]] = []
-    for index, (_score, rel, line_number, snippet) in enumerate(scored[:max_records]):
+    selected_lines: dict[str, list[int]] = {}
+    for _score, rel, line_number, snippet in scored:
+        prior_lines = selected_lines.setdefault(rel, [])
+        if len(prior_lines) >= 6 or any(
+            abs(line_number - prior) <= 2 for prior in prior_lines
+        ):
+            continue
+        prior_lines.append(line_number)
+        index = len(records)
         provenance = f"{rel}:{line_number}"
         records.append(
             normalize_evidence(
@@ -8231,6 +8280,8 @@ def collect_repo_evidence(
                 index,
             )
         )
+        if len(records) >= max_records:
+            break
     return records
 
 
@@ -10173,12 +10224,13 @@ def _schema_correction_prompt(
 def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
     case = normalize_case(raw_case)
     return (
-        "You are the investigator in a local-only diagnostic team. Return JSON only. "
+        "You are CHILI's local investigator. Return JSON only. "
         "Generate competing hypotheses across dimensions. Cite evidence ids. "
-        "Reconstruct expected and observed behavior; separate the earliest causal break from downstream symptoms. "
-        "Treat each diagnostic lens as a question. For incidents, separate requirements, external conditions, "
-        "state, evidence coverage, and source-versus-running-revision parity. "
-        "Every hypothesis needs a short falsification; create an experiment only when a typed probe is essential. "
+        "Trace expected/observed and the earliest causal break; separate cause from symptom. "
+        "Reject a leader missing any material symptom or invariant, or contradicting identity, scope, order, or "
+        "recovery facts. Prefer direct owner flow over peripheral name similarity. "
+        "Check requirements, externals, state, evidence, and source/runtime parity. "
+        "Give each hypothesis a falsification; probe only when essential. "
         "Same code and input with different outcomes "
         "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation. "
         "When evidence is insufficient, you may set auto_execute=true only for a typed probe from the supplied "
@@ -10219,6 +10271,9 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
         "the strategy contract separate from implementation correctness. A profitable counterfactual is not proof "
         "unless its inputs, clock, data coverage, and execution assumptions match. Include a bounded post-change "
         "proof or keep the conclusion provisional. "
+        "Do not preserve the investigator's leader unless it closes every material symptom and required invariant. "
+        "Treat explicit identity, scope, ordering, and recovery facts as hard contradiction checks, and rank direct "
+        "owner control/data flow above peripheral name similarity. "
         "If baseline drift remains unexplained, reject code attribution and choose instrument-first. "
         "Preserve safe falsification experiments and never request automatic runtime or live mutation. "
         "If the evidence gate says instrument_first, choose at most two auto_execute typed probes from this "

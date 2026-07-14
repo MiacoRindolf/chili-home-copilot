@@ -172,8 +172,11 @@ def test_normalized_case_and_prompts_preserve_deep_diagnostic_lenses():
     investigator = reasoning.investigator_prompt(case)
     judge = reasoning.judge_prompt(case, reasoning.heuristic_packet(case), {})
     assert "earliest causal break" in investigator
-    assert "source-versus-running-revision parity" in investigator
+    assert "missing any material symptom or invariant" in investigator
+    assert "peripheral name similarity" in investigator
+    assert "source/runtime parity" in investigator
     assert "profitable counterfactual is not proof" in judge
+    assert "explicit identity, scope, ordering, and recovery facts" in judge
 
 
 def test_reconstructs_earliest_break_from_shuffled_cross_service_events():
@@ -1684,6 +1687,68 @@ def test_repo_evidence_collection_supports_non_python_source(tmp_path):
     )
 
     assert any(item["provenance"].startswith("lib/replay_clock.dart:") for item in evidence)
+
+
+def test_repo_evidence_prioritizes_contract_relevant_stateful_owner_lines(tmp_path):
+    flight = tmp_path / "src/flightPool.js"
+    flight.parent.mkdir(parents=True)
+    flight.write_text(
+        "class FlightPool {\n"
+        "  constructor(loader) { this.loader = loader; this.inflight = new Map(); }\n"
+        "  load(key, signal) {\n"
+        "    let flight = this.inflight.get(key);\n"
+        "    if (!flight) {\n"
+        "      const controller = new AbortController();\n"
+        "      flight = { controller, promise: this.loader(key, controller.signal) };\n"
+        "      this.inflight.set(key, flight);\n"
+        "    }\n"
+        "    if (signal) signal.addEventListener('abort', () => flight.controller.abort());\n"
+        "    return flight.promise;\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    client = tmp_path / "src/resourceClient.js"
+    client.write_text(
+        "class ResourceClient {\n"
+        "  constructor(pool) { this.pool = pool; this.cache = new Map(); }\n"
+        "  get(key, signal) {\n"
+        "    if (!this.cache.has(key)) this.cache.set(key, this.pool.load(key, signal));\n"
+        "    return this.cache.get(key);\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    policy = tmp_path / "src/keyPolicy.js"
+    policy.write_text(
+        "const normalizeKey = (value) => String(value).trim().toLowerCase();\n",
+        encoding="utf-8",
+    )
+    prompt = (
+        "Cancelling one dashboard request makes an unrelated dashboard waiting on the same key fail, and the "
+        "key remains unusable after upstream recovery. Preserve coalescing and successful caching."
+    )
+
+    evidence = reasoning.collect_repo_evidence(
+        tmp_path,
+        prompt,
+        candidate_paths=[
+            "src/flightPool.js",
+            "src/resourceClient.js",
+            "src/keyPolicy.js",
+        ],
+        max_records=8,
+    )
+    statements = "\n".join(item["statement"] for item in evidence)
+
+    assert "signal.addEventListener('abort'" in statements
+    assert "this.cache.set(key, this.pool.load(key, signal))" in statements
+    assert any(
+        item["provenance"].startswith("src/flightPool.js:") for item in evidence
+    )
+    assert any(
+        item["provenance"].startswith("src/resourceClient.js:") for item in evidence
+    )
 
 
 def test_diagnostic_request_detection_is_specific_to_investigation_language():
