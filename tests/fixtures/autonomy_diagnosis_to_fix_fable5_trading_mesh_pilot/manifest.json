@@ -1,0 +1,15 @@
+{
+  "reference_family": "claude-fable-5",
+  "fixture_set": "autonomy_diagnosis_to_fix_fable5_trading_mesh_pilot_v1",
+  "cases": [
+    {
+      "case_id": "python_mesh_teacher_queue_pressure",
+      "language": "python",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-fable5-trading-mesh-pilot",
+      "case": "cases/python_mesh_teacher_queue_pressure.json",
+      "oracle": "oracles/python_mesh_teacher_queue_pressure.json",
+      "final_oracle": "final_oracles/python_mesh_teacher_queue_pressure.json"
+    }
+  ]
+}
