@@ -531,6 +531,25 @@ proved that the completed sealed case is not sent to the model again; the releva
 The authoritative current unseen diagnosis-to-fix result remains the fifteenth **41.88/100**. A fresh post-fix
 holdout is required before making any new readiness statement.
 
+### Seventeenth Post-Checkpoint Holdout
+
+The fresh seventeenth run completed all eight independently authored sealed cases in **3,906 seconds** under the
+frozen `qwen3:8b` reasoner and `qwen2.5-coder:7b` editor policy. It used zero premium calls, committed all eight
+cases through the new atomic checkpoint path, made no post-final model calls, reverified the policy digest, and
+cleaned up the checkpoint only after writing both outputs.
+
+The recorded result was **27.5/100**, **0/8 final repairs**, **2/8 exact owner sets**, **6/8 live-reasoning-qualified
+cases**, and **14 errors/timeouts across 57 local calls**. This is strong negative evidence against current Fable
+5-class replacement readiness.
+
+Post-seal review found a fixture schema defect: the repair oracles used plural mechanism labels in
+`expected_dimensions`, while the v6 scorer requires one canonical singular `expected_dimension`. The reported
+0/8 diagnosis matches are therefore not interpretable. Even granting the maximum 15 diagnosis points to every
+case yields only a **42.5/100 upper bound**, so the negative functional verdict is unchanged. The fifteenth
+41.88/100 remains the latest fully interpretable unseen composite score; the seventeenth contributes valid 0/8
+functional evidence and a requirement for fail-closed oracle-schema validation. Full details:
+`project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_BLINDED_SEVENTEENTH_RESULT_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
