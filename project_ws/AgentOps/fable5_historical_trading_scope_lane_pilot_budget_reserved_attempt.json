@@ -1,0 +1,1762 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 488241.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "data",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 651,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-0sv2yf6l\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 789,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-rx5sm6wr\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap FAILED [ 16%]\ntests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit FAILED [ 33%]\ntests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once FAILED [ 50%]\ntests/test_final.py::test_mixed_naive_and_aware_timestamps_have_stable_recency_order PASSED [ 66%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 83%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n____________ test_id_first_mode_merges_lanes_under_one_global_cap _____________\ntests\\test_final.py:16: in test_id_first_mode_merges_lanes_under_one_global_cap\n    assert len(store.calls) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\nE    +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x00000200B9870980>.calls\n___________ test_each_lane_gets_local_capacity_before_global_limit ____________\ntests\\test_final.py:26: in test_each_lane_gets_local_capacity_before_global_limit\n    assert [call[\"limit\"] for call in store.calls] == [1, 1]\nE   assert [1] == [1, 1]\nE     \nE     Right contains one more item: 1\nE     \nE     Full diff:\nE       [\nE           1,\nE     -     1,\nE       ]\n____________ test_duplicate_identity_across_lanes_is_returned_once ____________\ntests\\test_final.py:33: in test_duplicate_identity_across_lanes_is_returned_once\n    assert [row_id for row_id, _at in refs] == [4, 5]\nE   assert [4, 4, 5] == [4, 5]\nE     \nE     At index 1 diff: 4 != 5\nE     Left contains one more item: 5\nE     \nE     Full diff:\nE       [\nE     +     4,\nE           4,\nE           5,\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap - AssertionError: assert 1 == 2\n +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\n +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x00000200B9870980>.calls\nFAILED tests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit - assert [1] == [1, 1]\n  \n  Right contains one more item: 1\n  \n  Full diff:\n    [\n        1,\n  -     1,\n    ]\nFAILED tests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once - assert [4, 4, 5] == [4, 5]\n  \n  At index 1 diff: 4 != 5\n  Left contains one more item: 5\n  \n  Full diff:\n    [\n  +     4,\n        4,\n        5,\n    ]\n========================= 3 failed, 3 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 544,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-0sv2yf6l\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 50%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_split_candidate_scope_lanes",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": false,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "disabled_for_live_reasoning_ablation": true,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "deterministic_diagnosis_fast_path": false,
+      "deterministic_only": false,
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "data",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Mixed predicate causes broad backlog traversal",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "No split, same backlog",
+            "expected_if_true": "Split predicate into two lanes",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "data",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "trading/query_store.py"
+              ],
+              "probe_id": "p1",
+              "query": "or scope",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          },
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Merge overflow persists",
+            "expected_if_true": "Limit enforced before merge",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "state",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "trading/auto_trader.py"
+              ],
+              "probe_id": "p2",
+              "query": "global limit",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "causal_chain": [
+              "query_scope",
+              "mixed predicate",
+              "broad backlog"
+            ],
+            "claim": "Mixed predicate causes broad backlog traversal",
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Split predicate into two lanes",
+            "hypothesis_id": "h1",
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "support_evidence_ids": [
+              "operator-2",
+              "contract-source-1"
+            ]
+          },
+          {
+            "causal_chain": [
+              "select_candidate_refs",
+              "global limit",
+              "merge overflow"
+            ],
+            "claim": "Global limit not enforced in merge",
+            "context_paths": [
+              "trading/query_store.py"
+            ],
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Enforce limit before merge",
+            "hypothesis_id": "h2",
+            "owner_paths": [
+              "trading/auto_trader.py"
+            ],
+            "support_evidence_ids": [
+              "operator-4",
+              "source-6"
+            ]
+          },
+          {
+            "causal_chain": [
+              "_rank",
+              "recent_first",
+              "order misalignment"
+            ],
+            "claim": "Recent-first order misapplies to system alerts",
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Apply id-first to system alerts",
+            "hypothesis_id": "h3",
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "support_evidence_ids": [
+              "source-11",
+              "source-12"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 42,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "data"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "No split, same backlog",
+            "expected_if_true": "Split predicate into two lanes",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T08:54:00.825060+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          },
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "state"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p2",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p2",
+            "expected_if_false": "Merge overflow persists",
+            "expected_if_true": "Limit enforced before merge",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "independence_key": "diagnostic_probe:p2",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T08:54:00.844854+00:00",
+            "provenance": "diagnostic_probe:p2",
+            "reliability": 0.6,
+            "sequence": 1,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "data"
+            ],
+            "dimension": "data",
+            "duration_ms": 17,
+            "exit_code": 1,
+            "expected_if_false": "No split, same backlog",
+            "expected_if_true": "Split predicate into two lanes",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T08:54:00.825060+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "changed_dimensions": [
+              "state"
+            ],
+            "dimension": "state",
+            "duration_ms": 15,
+            "exit_code": 1,
+            "expected_if_false": "Merge overflow persists",
+            "expected_if_true": "Limit enforced before merge",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T08:54:00.844854+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p2",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "python_split_candidate_scope_lanes",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [
+            "Caller/callee source structure contradicts the claimed mutation owner."
+          ],
+          "causal_chain": [
+            "query_scope",
+            "mixed predicate",
+            "broad backlog"
+          ],
+          "causal_sufficiency": "observational",
+          "claim": "Mixed predicate causes broad backlog traversal",
+          "confidence": 0.3939,
+          "context_paths": [
+            "trading/auto_trader.py"
+          ],
+          "dimension": "data",
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "grounded_owner_paths": [],
+          "hypothesis_id": "h1",
+          "owner_evidence_ids": {
+            "trading/query_store.py": []
+          },
+          "owner_paths": [
+            "trading/query_store.py"
+          ],
+          "ownership_challenges": [
+            {
+              "claimed_owner_path": "trading/query_store.py",
+              "policy_caller_path": "trading/auto_trader.py",
+              "reason": "The claimed owner exposes multiple policy modes while a caller selects one of them; apply the caller/callee counterfactual before mutating the primitive.",
+              "shared_decision_literals": [
+                "or"
+              ]
+            }
+          ],
+          "ownership_grounding": "challenged",
+          "promotion_reason": "",
+          "reason": "Mixed predicate causes broad backlog traversal",
+          "requested_status": "provisional",
+          "status": "provisional",
+          "ungrounded_owner_paths": [
+            "trading/query_store.py"
+          ]
+        },
+        "contract_invariants": [
+          "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+        ],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "state_reconciliation"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [
+              "Caller/callee source structure contradicts the claimed mutation owner."
+            ],
+            "causal_chain": [
+              "query_scope",
+              "mixed predicate",
+              "broad backlog"
+            ],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [
+              "operator-2"
+            ],
+            "causal_support_weight": 0.65,
+            "claim": "Mixed predicate causes broad backlog traversal",
+            "coarse_reset_support": false,
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "context_weight": 0.188,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0.94,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Split predicate into two lanes",
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h1",
+            "owner_evidence_ids": {
+              "trading/query_store.py": []
+            },
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "ownership_challenges": [
+              {
+                "claimed_owner_path": "trading/query_store.py",
+                "policy_caller_path": "trading/auto_trader.py",
+                "reason": "The claimed owner exposes multiple policy modes while a caller selects one of them; apply the caller/callee counterfactual before mutating the primitive.",
+                "shared_decision_literals": [
+                  "or"
+                ]
+              }
+            ],
+            "ownership_grounding": "challenged",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2",
+              "contract-source-1"
+            ],
+            "support_weight": 0.65,
+            "typed_probe_evidence": false,
+            "ungrounded_owner_paths": [
+              "trading/query_store.py"
+            ]
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [
+              "Claimed mutation owners lack linked source evidence."
+            ],
+            "causal_chain": [
+              "select_candidate_refs",
+              "global limit",
+              "merge overflow"
+            ],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Global limit not enforced in merge",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_paths": [
+              "trading/query_store.py"
+            ],
+            "context_weight": 0.28,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Enforce limit before merge",
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h2",
+            "owner_evidence_ids": {
+              "trading/auto_trader.py": []
+            },
+            "owner_paths": [
+              "trading/auto_trader.py"
+            ],
+            "ownership_challenges": [],
+            "ownership_grounding": "ungrounded",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-4",
+              "source-6"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false,
+            "ungrounded_owner_paths": [
+              "trading/auto_trader.py"
+            ]
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [
+              "Caller/callee source structure contradicts the claimed mutation owner."
+            ],
+            "causal_chain": [
+              "_rank",
+              "recent_first",
+              "order misalignment"
+            ],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Recent-first order misapplies to system alerts",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0.9,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Apply id-first to system alerts",
+            "grounded_owner_paths": [
+              "trading/query_store.py"
+            ],
+            "hypothesis_id": "h3",
+            "owner_evidence_ids": {
+              "trading/query_store.py": [
+                "source-11",
+                "source-12"
+              ]
+            },
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "ownership_challenges": [
+              {
+                "claimed_owner_path": "trading/query_store.py",
+                "policy_caller_path": "trading/auto_trader.py",
+                "reason": "The claimed owner exposes multiple policy modes while a caller selects one of them; apply the caller/callee counterfactual before mutating the primitive.",
+                "shared_decision_literals": [
+                  "or"
+                ]
+              }
+            ],
+            "ownership_grounding": "challenged",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false,
+            "ungrounded_owner_paths": []
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Split predicate into two lanes",
+            "dimension": "data",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Enforce limit before merge",
+            "dimension": "state",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Apply id-first to system alerts",
+            "dimension": "clock",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [
+              "Caller/callee source structure contradicts the claimed mutation owner."
+            ],
+            "causal_chain": [
+              "query_scope",
+              "mixed predicate",
+              "broad backlog"
+            ],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog traversal",
+            "confidence": 0.3939,
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h1",
+            "owner_evidence_ids": {
+              "trading/query_store.py": []
+            },
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "ownership_challenges": [
+              {
+                "claimed_owner_path": "trading/query_store.py",
+                "policy_caller_path": "trading/auto_trader.py",
+                "reason": "The claimed owner exposes multiple policy modes while a caller selects one of them; apply the caller/callee counterfactual before mutating the primitive.",
+                "shared_decision_literals": [
+                  "or"
+                ]
+              }
+            ],
+            "ownership_grounding": "challenged",
+            "promotion_reason": "",
+            "reason": "Mixed predicate causes broad backlog traversal",
+            "requested_status": "provisional",
+            "status": "provisional",
+            "ungrounded_owner_paths": [
+              "trading/query_store.py"
+            ]
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [
+              "Caller/callee source structure contradicts the claimed mutation owner."
+            ],
+            "causal_chain": [
+              "query_scope",
+              "mixed predicate",
+              "broad backlog"
+            ],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog traversal",
+            "confidence": 0.3939,
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h1",
+            "owner_evidence_ids": {
+              "trading/query_store.py": []
+            },
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "ownership_challenges": [
+              {
+                "claimed_owner_path": "trading/query_store.py",
+                "policy_caller_path": "trading/auto_trader.py",
+                "reason": "The claimed owner exposes multiple policy modes while a caller selects one of them; apply the caller/callee counterfactual before mutating the primitive.",
+                "shared_decision_literals": [
+                  "or"
+                ]
+              }
+            ],
+            "ownership_grounding": "challenged",
+            "promotion_reason": "",
+            "reason": "Mixed predicate causes broad backlog traversal",
+            "requested_status": "provisional",
+            "status": "provisional",
+            "ungrounded_owner_paths": [
+              "trading/query_store.py"
+            ]
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2",
+              "contract-source-1"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Mixed predicate causes broad backlog traversal",
+            "status": "provisional"
+          },
+          "response_chars": 3174,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [
+              "Caller/callee source structure contradicts the claimed mutation owner."
+            ],
+            "causal_chain": [
+              "query_scope",
+              "mixed predicate",
+              "broad backlog"
+            ],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog traversal",
+            "confidence": 0.3939,
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h1",
+            "owner_evidence_ids": {
+              "trading/query_store.py": []
+            },
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "ownership_challenges": [
+              {
+                "claimed_owner_path": "trading/query_store.py",
+                "policy_caller_path": "trading/auto_trader.py",
+                "reason": "The claimed owner exposes multiple policy modes while a caller selects one of them; apply the caller/callee counterfactual before mutating the primitive.",
+                "shared_decision_literals": [
+                  "or"
+                ]
+              }
+            ],
+            "ownership_grounding": "challenged",
+            "promotion_reason": "",
+            "reason": "Mixed predicate causes broad backlog traversal",
+            "requested_status": "provisional",
+            "status": "provisional",
+            "ungrounded_owner_paths": [
+              "trading/query_store.py"
+            ]
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [
+              "Caller/callee source structure contradicts the claimed mutation owner."
+            ],
+            "causal_chain": [
+              "query_scope",
+              "mixed predicate",
+              "broad backlog"
+            ],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog traversal",
+            "confidence": 0.3939,
+            "context_paths": [
+              "trading/auto_trader.py"
+            ],
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h1",
+            "owner_evidence_ids": {
+              "trading/query_store.py": []
+            },
+            "owner_paths": [
+              "trading/query_store.py"
+            ],
+            "ownership_challenges": [
+              {
+                "claimed_owner_path": "trading/query_store.py",
+                "policy_caller_path": "trading/auto_trader.py",
+                "reason": "The claimed owner exposes multiple policy modes while a caller selects one of them; apply the caller/callee counterfactual before mutating the primitive.",
+                "shared_decision_literals": [
+                  "or"
+                ]
+              }
+            ],
+            "ownership_grounding": "challenged",
+            "promotion_reason": "",
+            "reason": "Mixed predicate causes broad backlog traversal",
+            "requested_status": "provisional",
+            "status": "provisional",
+            "ungrounded_owner_paths": [
+              "trading/query_store.py"
+            ]
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2",
+              "contract-source-1"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Mixed predicate causes broad backlog traversal",
+            "status": "provisional"
+          },
+          "response_chars": 2657,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 488241,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 672,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-xq5boqhp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 784,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-xgykq_rs\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap FAILED [ 16%]\ntests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit FAILED [ 33%]\ntests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once FAILED [ 50%]\ntests/test_final.py::test_mixed_naive_and_aware_timestamps_have_stable_recency_order PASSED [ 66%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 83%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n____________ test_id_first_mode_merges_lanes_under_one_global_cap _____________\ntests\\test_final.py:16: in test_id_first_mode_merges_lanes_under_one_global_cap\n    assert len(store.calls) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\nE    +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x000001865F960980>.calls\n___________ test_each_lane_gets_local_capacity_before_global_limit ____________\ntests\\test_final.py:26: in test_each_lane_gets_local_capacity_before_global_limit\n    assert [call[\"limit\"] for call in store.calls] == [1, 1]\nE   assert [1] == [1, 1]\nE     \nE     Right contains one more item: 1\nE     \nE     Full diff:\nE       [\nE           1,\nE     -     1,\nE       ]\n____________ test_duplicate_identity_across_lanes_is_returned_once ____________\ntests\\test_final.py:33: in test_duplicate_identity_across_lanes_is_returned_once\n    assert [row_id for row_id, _at in refs] == [4, 5]\nE   assert [4, 4, 5] == [4, 5]\nE     \nE     At index 1 diff: 4 != 5\nE     Left contains one more item: 5\nE     \nE     Full diff:\nE       [\nE     +     4,\nE           4,\nE           5,\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap - AssertionError: assert 1 == 2\n +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\n +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x000001865F960980>.calls\nFAILED tests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit - assert [1] == [1, 1]\n  \n  Right contains one more item: 1\n  \n  Full diff:\n    [\n        1,\n  -     1,\n    ]\nFAILED tests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once - assert [4, 4, 5] == [4, 5]\n  \n  At index 1 diff: 4 != 5\n  Left contains one more item: 5\n  \n  Full diff:\n    [\n  +     4,\n        4,\n        5,\n    ]\n========================= 3 failed, 3 passed in 0.12s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "size_bytes": 3647
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "size_bytes": 1283
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "size_bytes": 1867
+        }
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "data",
+      "initial_public_regression_correction": {
+        "applied_files": [],
+        "attempted": false,
+        "eligible_paths": [],
+        "succeeded": false,
+        "warnings": []
+      },
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T08:50:48.076878+00:00"
+        },
+        {
+          "actual_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T08:55:31.611055+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 7,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T08:58:53.933924+00:00"
+        },
+        {
+          "actual_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T08:58:53.934339+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sequence": 11,
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "timestamp_utc": "2026-07-14T08:58:53.934417+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T08:58:53.938714+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": false,
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T08:58:56.314431+00:00"
+        },
+        {
+          "actual_count": 7,
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 7,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T08:58:56.314461+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 78703351000,
+          "json_object_valid": true,
+          "latency_ms": 97618,
+          "load_duration_ns": 190994400,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 20098,
+          "prompt_eval_count": 4874,
+          "prompt_eval_duration_ns": 18183043000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"Mixed predicate causes broad backlog traversal\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"operator-2\", \"contract-source-1\"],\n      \"contradict_evidence_ids\": [],\n      \"owner_paths\": [\"trading/query_store.py\"],\n      \"context_paths\": [\"trading/auto_trader.py\"],\n      \"causal_chain\": [\"query_scope\", \"mixed predicate\", \"broad backlog\"],\n      \"falsification\": \"Split predicate into two lanes\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Global limit not enforced in merge\",\n      \"dimension\": \"state\",\n      \"support_evidence_ids\": [\"operator-4\", \"source-6\"],\n      \"contradict_evidence_ids\": [],\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"context_paths\": [\"trading/query_store.py\"],\n      \"causal_chain\": [\"select_candidate_refs\", \"global limit\", \"merge overflow\"],\n      \"falsification\": \"Enforce limit before merge\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"Recent-first order misapplies to system alerts\",\n      \"dimension\": \"clock\",\n      \"support_evidence_ids\": [\"source-11\", \"source-12\"],\n      \"contradict_evidence_ids\": [],\n      \"owner_paths\": [\"trading/query_store.py\"],\n      \"context_paths\": [\"trading/auto_trader.py\"],\n      \"causal_chain\": [\"_rank\", \"recent_first\", \"order misalignment\"],\n      \"falsification\": \"Apply id-first to system alerts\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"experiment_id\": \"x1\",\n      \"hypothesis_ids\": [\"h1\"],\n      \"changed_dimensions\": [\"data\"],\n      \"held_constant_dimensions\": [\"code\", \"clock\"],\n      \"expected_if_true\": \"Split predicate into two lanes\",\n      \"expected_if_false\": \"No split, same backlog\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p1\",\n        \"kind\": \"search\",\n        \"paths\": [\"trading/query_store.py\"],\n        \"query\": \"or scope\",\n        \"dimension\": \"data\"\n      }\n    },\n    {\n      \"experiment_id\": \"x2\",\n      \"hypothesis_ids\": [\"h2\"],\n      \"changed_dimensions\": [\"state\"],\n      \"held_constant_dimensions\": [\"code\", \"data\"],\n      \"expected_if_true\": \"Limit enforced before merge\",\n      \"expected_if_false\": \"Merge overflow persists\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p2\",\n        \"kind\": \"search\",\n        \"paths\": [\"trading/auto_trader.py\"],\n        \"query\": \"global limit\",\n        \"dimension\": \"state\"\n      }\n    },\n    {\n      \"experiment_id\": \"x3\",\n      \"hypothesis_ids\": [\"h3\"],\n      \"changed_dimensions\": [\"clock\"],\n      \"held_constant_dimensions\": [\"code\", \"data\"],\n      \"expected_if_true\": \"System alerts ordered by id\",\n      \"expected_if_false\": \"Recent-first misapplies\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p3\",\n        \"kind\": \"search\",\n        \"paths\": [\"trading/query_store.py\"],\n        \"query\": \"recent_first\",\n        \"dimension\": \"clock\"\n      }\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-2\", \"contract-source-1\"],\n    \"reason\": \"Mixed predicate causes broad backlog traversal\"\n  }\n}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "insufficient_visible_answer_budget",
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 841,
+          "wall_deadline_clamped": false,
+          "wall_ms": 97618
+        },
+        {
+          "case_budget_remaining_before_sec": 382.3813690000097,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 66866807000,
+          "json_object_valid": true,
+          "latency_ms": 93879,
+          "load_duration_ns": 228866700,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:2",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 27599,
+          "prompt_eval_count": 6569,
+          "prompt_eval_duration_ns": 26118338000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"Mixed predicate causes broad backlog traversal\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"operator-2\", \"contract-source-1\"],\n      \"contradict_evidence_ids\": [],\n      \"owner_paths\": [\"trading/query_store.py\"],\n      \"context_paths\": [\"trading/auto_trader.py\"],\n      \"causal_chain\": [\"query_scope\", \"mixed predicate\", \"broad backlog\"],\n      \"falsification\": \"Split predicate into two lanes\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Global limit not enforced in merge\",\n      \"dimension\": \"state\",\n      \"support_evidence_ids\": [\"operator-4\", \"source-6\"],\n      \"contradict_evidence_ids\": [],\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"context_paths\": [\"trading/query_store.py\"],\n      \"causal_chain\": [\"select_candidate_refs\", \"global limit\", \"merge overflow\"],\n      \"falsification\": \"Enforce limit before merge\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"Recent-first order misapplies to system alerts\",\n      \"dimension\": \"clock\",\n      \"support_evidence_ids\": [\"source-11\", \"source-12\"],\n      \"contradict_evidence_ids\": [],\n      \"owner_paths\": [\"trading/query_store.py\"],\n      \"context_paths\": [\"trading/auto_trader.py\"],\n      \"causal_chain\": [\"_rank\", \"recent_first\", \"order misalignment\"],\n      \"falsification\": \"Apply id-first to system alerts\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"experiment_id\": \"x1\",\n      \"hypothesis_ids\": [\"h1\"],\n      \"changed_dimensions\": [\"data\"],\n      \"held_constant_dimensions\": [\"code\", \"clock\"],\n      \"expected_if_true\": \"Split predicate into two lanes\",\n      \"expected_if_false\": \"No split, same backlog\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p1\",\n        \"kind\": \"search\",\n        \"paths\": [\"trading/query_store.py\"],\n        \"query\": \"or scope\",\n        \"dimension\": \"data\"\n      }\n    },\n    {\n      \"experiment_id\": \"x2\",\n      \"hypothesis_ids\": [\"h2\"],\n      \"changed_dimensions\": [\"state\"],\n      \"held_constant_dimensions\": [\"code\", \"data\"],\n      \"expected_if_true\": \"Limit enforced before merge\",\n      \"expected_if_false\": \"Merge overflow persists\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p2\",\n        \"kind\": \"search\",\n        \"paths\": [\"trading/auto_trader.py\"],\n        \"query\": \"global limit\",\n        \"dimension\": \"state\"\n      }\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-2\", \"contract-source-1\"],\n    \"reason\": \"Mixed predicate causes broad backlog traversal\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 706,
+          "wall_deadline_clamped": false,
+          "wall_ms": 93879
+        },
+        {
+          "case_budget_remaining_before_sec": 288.50194679998094,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 36042759000,
+          "latency_ms": 45184,
+          "load_duration_ns": 174090900,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 10821,
+          "prompt_eval_count": 2322,
+          "prompt_eval_duration_ns": 8428468000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The mixed predicate in the query_scope method causes the system to traverse the broad backlog instead of using the narrow index. The caller selects a mode, but the callee exposes multiple modes, violating the scope-asymmetric candidate selection invariant. The solution is to split the predicate into two lanes and enforce the global limit after merging.\",\n  \"files\": [\n    {\n      \"path\": \"trading/auto_trader.py\",\n      \"action\": \"modify\",\n      \"description\": \"Split the mixed predicate into two lanes: one for explicit-user and one for system-NULL. Enforce the global limit after merging to prevent lane starvation.\",\n      \"algorithm\": \"Split the query into two separate calls to query_scope with scope 'user' and 'system', then merge and deduplicate the results under a global limit.\",\n      \"required_primitives\": [\"trading/query_store.py::query_scope\"],\n      \"forbidden_shortcuts\": [\"mixed predicate\", \"limit before merge\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prompt_obligation::forbidden::5aa40a6e7da3\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"postcondition\": \"The query is split into two lanes and merged under a global limit to prevent lane starvation.\",\n      \"polarity\": \"forbidden\"\n    },\n    {\n      \"contract\": \"prompt_obligation::required::2b97d7823f4e\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"postcondition\": \"The query is split into two lanes and merged under a global limit to prevent lane starvation.\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The caller selects a mode, but the callee exposes multiple modes, violating the scope-asymmetric candidate selection invariant. The solution is to split the predicate into two lanes and enforce the global limit after merging.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 413,
+          "wall_deadline_clamped": false,
+          "wall_ms": 45184
+        },
+        {
+          "case_budget_remaining_before_sec": 243.31709800002864,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 19454343000,
+          "latency_ms": 44848,
+          "load_duration_ns": 20544377900,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 9737,
+          "prompt_eval_count": 2132,
+          "prompt_eval_duration_ns": 4804319000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\ndef select_candidate_refs(store, uid, *, limit, recent_first):\n    safe_limit = max(0, int(limit or 0))\n    if safe_limit <= 0:\n        return []\n    return store.query_scope(\n        (\"or\", int(uid), None),\n        limit=safe_limit,\n        recent_first=recent_first,\n    )\n=======\ndef select_candidate_refs(store, uid, *, limit, recent_first):\n    safe_limit = max(0, int(limit or 0))\n    if safe_limit <= 0:\n        return []\n\n    user_limit = safe_limit // 2\n    system_limit = safe_limit - user_limit\n\n    user_results = store.query_scope(\n        (\"user\", int(uid)),\n        limit=user_limit,\n        recent_first=recent_first,\n    )\n\n    system_results = store.query_scope(\n        (\"system\", None),\n        limit=system_limit,\n        recent_first=recent_first,\n    )\n\n    all_results = user_results + system_results\n    unique_results = []\n    seen_ids = set()\n\n    for result in all_results:\n        if result[0] not in seen_ids:\n            unique_results.append(result)\n            seen_ids.add(result[0])\n\n    return unique_results[:safe_limit]\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "unsupported_model_or_mode",
+          "tokens_out": 258,
+          "wall_deadline_clamped": false,
+          "wall_ms": 44848
+        },
+        {
+          "case_budget_remaining_before_sec": 198.46887040004367,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 61947250000,
+          "latency_ms": 87455,
+          "load_duration_ns": 13112436300,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 18054,
+          "prompt_eval_count": 4150,
+          "prompt_eval_duration_ns": 12318763000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The mixed predicate in the query_scope method causes the system to traverse the broad backlog instead of using the narrow index. The caller selects one mode, but the callee exposes multiple modes, violating the scope-asymmetric candidate selection invariant. The repair requires splitting the query into two lanes and enforcing the global merge and order without violating the invariant.\",\n  \"files\": [\n    {\n      \"path\": \"trading/auto_trader.py\",\n      \"action\": \"modify\",\n      \"description\": \"Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate in memory under a global cap.\",\n      \"algorithm\": \"Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate in memory under a global cap.\",\n      \"required_primitives\": [\n        \"trading.query_store.QueryStore.query_scope\"\n      ],\n      \"forbidden_shortcuts\": [\n        \"mixed OR predicate\",\n        \"lane concatenation\",\n        \"limiting before both lanes participate\"\n      ]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prompt_obligation::forbidden::5aa40a6e7da3\",\n      \"owner_paths\": [\n        \"trading/auto_trader.py\"\n      ],\n      \"postcondition\": \"Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id.\",\n      \"polarity\": \"forbidden\"\n    },\n    {\n      \"contract\": \"prompt_obligation::required::2b97d7823f4e\",\n      \"owner_paths\": [\n        \"trading/auto_trader.py\"\n      ],\n      \"postcondition\": \"Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id.\",\n      \"polarity\": \"required\"\n    },\n    {\n      \"contract\": \"prompt_contract::d02e8d819248\",\n      \"owner_paths\": [\n        \"trading/auto_trader.py\"\n      ],\n      \"postcondition\": \"trading/auto_trader.py still mixes scope query shape or omits global merge semantics\",\n      \"polarity\": \"forbidden\"\n    }\n  ],\n  \"notes\": \"The repair must split the query into two lanes, enforce the global merge and order, and avoid any shortcuts that violate the invariant. The caller must select one mode, and the callee must expose the correct primitive without introducing mixed predicates.\"\n}",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 699,
+          "wall_deadline_clamped": false,
+          "wall_ms": 87455
+        },
+        {
+          "case_budget_remaining_before_sec": 111.01331440004287,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 111.01331440004287,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 60211904000,
+          "latency_ms": 77216,
+          "load_duration_ns": 238912900,
+          "model": "qwen3:8b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 19553,
+          "prompt_eval_count": 4481,
+          "prompt_eval_duration_ns": 16310679000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The mixed predicate in the query_scope method causes the system to traverse the broad backlog instead of using the narrow index. The caller selects one mode, but the callee exposes multiple modes, violating the scope-asymmetric candidate selection invariant. The repair requires splitting the query into two lanes and enforcing the global merge and order without violating the invariant.\",\n  \"files\": [\n    {\n      \"path\": \"trading/auto_trader.py\",\n      \"action\": \"modify\",\n      \"description\": \"Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate in memory under a global cap.\",\n      \"algorithm\": \"Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate in memory under a global cap.\",\n      \"required_primitives\": [\"trading.query_store.QueryStore.query_scope\"],\n      \"forbidden_shortcuts\": [\"mixed OR predicate\", \"lane concatenation\", \"limiting before both lanes participate\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prompt_obligation::forbidden::5aa40a6e7da3\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"polarity\": \"forbidden\",\n      \"postcondition\": \"Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id.\"\n    },\n    {\n      \"contract\": \"prompt_obligation::required::2b97d7823f4e\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"polarity\": \"required\",\n      \"postcondition\": \"Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id.\"\n    },\n    {\n      \"contract\": \"prompt_contract::d02e8d819248\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"polarity\": \"forbidden\",\n      \"postcondition\": \"trading/auto_trader.py still mixes scope query shape or omits global merge semantics\"\n    }\n  ],\n  \"notes\": \"The repair must split the query into two lanes, enforce the global merge and order, and avoid any shortcuts that violate the invariant. The caller must select one mode, and the callee must expose the correct primitive without introducing mixed predicates.\"\n}",
+          "stage": "repair_review_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 677,
+          "wall_deadline_clamped": false,
+          "wall_ms": 77216
+        },
+        {
+          "case_budget_remaining_before_sec": 33.796679400024004,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 33.796679400024004,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "case_budget_timeout",
+          "eval_duration_ns": 0,
+          "latency_ms": 33814,
+          "load_duration_ns": 0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": true,
+          "ok": false,
+          "prompt_chars": 23760,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 150.0,
+          "response": "",
+          "stage": "repair_plan_2",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 33814
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 7,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": false,
+      "patch_warnings": [
+        "Rolled back initial patch because it regressed or made no validated progress.",
+        "Repair plan did not cover every failed contract with selected source owners.",
+        "Repair plan was empty or invalid; no review or edit authority was granted."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": false,
+      "prompt_contract_closure_warnings": {
+        "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+      },
+      "public_tests": {
+        "duration_ms": 706,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-xq5boqhp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 50%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [
+        {
+          "adapter_rejection": "CHILI adapter rejected the attempted edit:\nRepair plan did not cover every failed contract with selected source owners.",
+          "after_failure_signature": "6bff0dbcc2e54b51ea2863dac6bb08cfe51834859d35f7763047af134a1c9590",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "prompt_contract_details": {
+              "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+            },
+            "prompt_obligation_details": {
+              "prompt_obligation::forbidden::5aa40a6e7da3": {
+                "polarity": "forbidden",
+                "statement": "Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              "prompt_obligation::required::2b97d7823f4e": {
+                "polarity": "required",
+                "statement": "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              }
+            }
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-xq5boqhp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.11s =========================\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n- prompt_contract::d02e8d819248: trading/auto_trader.py still mixes scope query shape or omits global merge semantics",
+          "before_failure_signature": "6bff0dbcc2e54b51ea2863dac6bb08cfe51834859d35f7763047af134a1c9590",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "prompt_contract_details": {
+              "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+            },
+            "prompt_obligation_details": {
+              "prompt_obligation::forbidden::5aa40a6e7da3": {
+                "polarity": "forbidden",
+                "statement": "Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              "prompt_obligation::required::2b97d7823f4e": {
+                "polarity": "required",
+                "statement": "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              }
+            }
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-xq5boqhp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.11s =========================\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n- prompt_contract::d02e8d819248: trading/auto_trader.py still mixes scope query shape or omits global merge semantics",
+          "escalated": false,
+          "feedback_context_files": [
+            "trading/auto_trader.py",
+            "trading/query_store.py"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [],
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The mixed predicate in the query_scope method causes the system to traverse the broad backlog instead of using the narrow index. The caller selects one mode, but the callee exposes multiple modes, violating the scope-asymmetric candidate selection invariant. The repair requires splitting the query into two lanes and enforcing the global merge and order without violating the invariant.",
+            "contract_coverage": [
+              {
+                "contract": "prompt_obligation::forbidden::5aa40a6e7da3",
+                "owner_paths": [
+                  "trading/auto_trader.py"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              {
+                "contract": "prompt_obligation::required::2b97d7823f4e",
+                "owner_paths": [
+                  "trading/auto_trader.py"
+                ],
+                "polarity": "required",
+                "postcondition": "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              {
+                "contract": "prompt_contract::d02e8d819248",
+                "owner_paths": [
+                  "trading/auto_trader.py"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+              }
+            ],
+            "dimension": "code",
+            "files": [
+              {
+                "action": "modify",
+                "algorithm": "Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate in memory under a global cap.",
+                "description": "Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate in memory under a global cap.",
+                "forbidden_shortcuts": [
+                  "mixed OR predicate",
+                  "lane concatenation",
+                  "limiting before both lanes participate"
+                ],
+                "path": "trading/auto_trader.py",
+                "required_primitives": [
+                  "trading.query_store.QueryStore.query_scope"
+                ]
+              }
+            ],
+            "notes": "The repair must split the query into two lanes, enforce the global merge and order, and avoid any shortcuts that violate the invariant. The caller must select one mode, and the callee must expose the correct primitive without introducing mixed predicates."
+          },
+          "proposed_diagnosis_dimension": "code",
+          "round": 1,
+          "selected_file": "",
+          "selected_files": [],
+          "warnings": [
+            "Repair plan did not cover every failed contract with selected source owners."
+          ]
+        },
+        {
+          "adapter_rejection": "CHILI adapter rejected the attempted edit:\nRepair plan was empty or invalid; no review or edit authority was granted.",
+          "after_failure_signature": "6bff0dbcc2e54b51ea2863dac6bb08cfe51834859d35f7763047af134a1c9590",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "prompt_contract_details": {
+              "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+            },
+            "prompt_obligation_details": {
+              "prompt_obligation::forbidden::5aa40a6e7da3": {
+                "polarity": "forbidden",
+                "statement": "Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              "prompt_obligation::required::2b97d7823f4e": {
+                "polarity": "required",
+                "statement": "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              }
+            }
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-xq5boqhp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.11s =========================\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n- prompt_contract::d02e8d819248: trading/auto_trader.py still mixes scope query shape or omits global merge semantics",
+          "before_failure_signature": "6bff0dbcc2e54b51ea2863dac6bb08cfe51834859d35f7763047af134a1c9590",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "prompt_contract_details": {
+              "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+            },
+            "prompt_obligation_details": {
+              "prompt_obligation::forbidden::5aa40a6e7da3": {
+                "polarity": "forbidden",
+                "statement": "Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              "prompt_obligation::required::2b97d7823f4e": {
+                "polarity": "required",
+                "statement": "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              }
+            }
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-xq5boqhp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.11s =========================\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n- prompt_contract::d02e8d819248: trading/auto_trader.py still mixes scope query shape or omits global merge semantics",
+          "escalated": false,
+          "feedback_context_files": [],
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [],
+          "patch_applied": false,
+          "plan": {},
+          "proposed_diagnosis_dimension": "",
+          "round": 2,
+          "selected_file": "",
+          "selected_files": [],
+          "transport_failed": true,
+          "warnings": [
+            "Repair plan was empty or invalid; no review or edit authority was granted."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "data",
+      "score": 40,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "trading/auto_trader.py"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 6,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-14T08:58:56.349200+00:00",
+  "deterministic_contracts_disabled": true,
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 40.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "size_bytes": 3647
+        },
+        "case_id": "python_split_candidate_scope_lanes",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "size_bytes": 1283
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "size_bytes": 1867
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "size_bytes": 554
+    }
+  },
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "size_bytes": 554,
+      "timestamp_utc": "2026-07-14T08:50:45.304315+00:00"
+    },
+    {
+      "artifact": "case:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "size_bytes": 3647,
+      "timestamp_utc": "2026-07-14T08:50:45.306670+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "size_bytes": 1283,
+      "timestamp_utc": "2026-07-14T08:50:45.307224+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "size_bytes": 1867,
+      "timestamp_utc": "2026-07-14T08:50:45.307736+00:00"
+    },
+    {
+      "actual_sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T08:50:45.311795+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_BUDGET_RESERVED_RECOVERY_CHECKPOINT.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T08:50:48.075447+00:00"
+    },
+    {
+      "actual_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "artifact": "case:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "path": "cases/python_split_candidate_scope_lanes.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T08:50:48.076878+00:00"
+    },
+    {
+      "actual_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "path": "oracles/python_split_candidate_scope_lanes.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T08:55:31.611055+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 7,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T08:58:53.933924+00:00"
+    },
+    {
+      "actual_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "artifact": "final_oracle:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T08:58:53.934339+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "sequence": 11,
+      "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "timestamp_utc": "2026-07-14T08:58:53.934417+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T08:58:53.938714+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": false,
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T08:58:56.314431+00:00"
+    },
+    {
+      "actual_count": 7,
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 7,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T08:58:56.314461+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T08:58:56.318892+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T08:58:56.349044+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 1,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 40.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "180ce09664c5b2fabb2e702aa35548f9201ad768d2ccb8a913cfb2db8f86f47f",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_BUDGET_RESERVED_RECOVERY_CHECKPOINT.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 2,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 7,
+  "verdict": "needs_improvement"
+}

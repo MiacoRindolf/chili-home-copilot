@@ -759,6 +759,13 @@ global mode-aware ordering, and the final cap. Four diagnosis timeouts consumed 
 could not complete. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_COMPACT_OWNER_ATTEMPT_RECEIPT.md`.
 
+The budget-reserved attempt returned to **40/100**, retained the correct `auto_trader.py` owner, and reduced errors
+to one, but still solved **0/1**. Its initial patch split capacity between lanes and omitted global ordering. A later
+unanimous repair plan was rejected without editing because generic failed-test binding only accepted drafts with
+exactly one contract entry. This identified a harness convergence restriction rather than a new ownership failure.
+Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_BUDGET_RESERVED_ATTEMPT_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
