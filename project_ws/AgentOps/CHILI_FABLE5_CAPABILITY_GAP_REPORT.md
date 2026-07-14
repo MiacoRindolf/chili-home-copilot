@@ -636,6 +636,29 @@ non-wrapper system capability for a recognized family; it does not replace the u
 to the next Fable 5-era trading mechanism. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_PILOT_DISCLOSED_RECOVERY_RECEIPT.md`.
 
+### Historical Fable 5 Mesh Pressure Pilot
+
+A second post-source-freeze fixture reconstructed historical commit `d5ee0e92`, `fix: cap mesh teacher under
+queue pressure`. This case is disjoint from short-direction propagation: it requires effective settings ownership,
+live queue-pressure observation, optional teacher-work admission, bounded daily cost, zero-value overrides,
+fail-open telemetry, and continued mechanical aggregation across four stages. CHILI source was frozen at
+`b25c1058`, the current agent authored and validated the fixture, and fixture-only commit `ccd03ba9` sealed it
+before scoring. The historical Fable 5 attribution is user-attested, not provider-authenticated same-task output.
+
+The untouched protocol run scored **40/100**, solved **0/1** sealed finals, retained no patch, made **13 local
+calls** with two timeouts, took **488.1 seconds**, and used zero premium calls. It selected the correct `config`
+family but retained only an inconclusive statement about the zero daily cap. The first plan chose the queue
+repository instead of settings as the second owner; the editor nested pressure handling under the wrong branch,
+passed settings as the queue database object, omitted imports, and duplicated provider behavior. Feedback produced
+the correct two-owner plan, but the next edit hallucinated `def Settings()` instead of the actual dataclass. Atomic
+validation rejected both groups and preserved public behavior.
+
+This second negative result shows that the recovered direction operator did not create broad Fable 5-class
+diagnostic transfer. The next architecture work is a generic bounded-optional-work contract, behavior-level
+settings/consumer/provider ownership, AST-grounded dataclass and consumer repair, and a fast source-proven path that
+still preserves zero overrides and fail-open telemetry. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_MESH_PILOT_UNTOUCHED_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -672,7 +695,7 @@ to the next Fable 5-era trading mechanism. Full details:
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
-10. The historical Fable 5 trading pilot scored 25/100. The local reasoner inverted short-stop polarity despite explicit numeric evidence, and the editor could not serialize a valid two-owner Python repair before the case budget expired.
+10. The two historical Fable 5 trading pilots scored 25/100 and 40/100 untouched. The first inverted short-stop polarity; the second identified the broad configuration family but misassigned queue-policy ownership and could not serialize a valid settings-plus-consumer repair. Both exhausted nearly the full local budget and retained no patch.
 
 ## Promotion Gate
 
