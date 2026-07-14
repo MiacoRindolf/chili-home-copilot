@@ -64,6 +64,8 @@ RUN_POLICY_SOURCE_PATHS = (
     "scripts/autopilot_diagnosis_to_fix_benchmark.py",
 )
 LOCAL_TIMEOUT_RECOVERY_POLICY = "bounded_same_model_v1"
+PUBLIC_REGRESSION_RECOVERY_POLICY = "bounded_changed_source_v1"
+VALIDATED_PROGRESS_REFINEMENT_POLICY = "retained_contract_delta_v1"
 TEST_SUBPROCESS_ASSURANCE = {
     "mode": "static_safety_scan_plus_seeded_sha256_guard",
     "os_process_isolation": False,
@@ -1702,6 +1704,17 @@ def _snapshot_diff(
     return "\n".join(chunks)[:max_chars]
 
 
+def _snapshot_changed_paths(
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+) -> list[str]:
+    return sorted(
+        relative
+        for relative in set(before) | set(after)
+        if str(before.get(relative) or "") != str(after.get(relative) or "")
+    )
+
+
 def _apply_deterministic_contract_repair(
     repo: Path,
     case: Mapping[str, Any],
@@ -2003,6 +2016,21 @@ def _attempt_ledger_context(attempts: Sequence[Mapping[str, Any]]) -> str:
                 "attempt_fingerprint": item.get("attempt_fingerprint") or "",
                 "rolled_back": bool(item.get("rolled_back_after_validation")),
                 "duplicate_attempt": bool(item.get("duplicate_attempt")),
+                "validated_progress_retained": bool(
+                    item.get("validated_progress_retained")
+                ),
+                "resolved_contract_ids": list(
+                    (item.get("validated_progress") or {}).get(
+                        "resolved_contract_ids"
+                    )
+                    or []
+                )[:16],
+                "remaining_failed_contract_ids": list(
+                    (item.get("validated_progress") or {}).get(
+                        "remaining_failed_contract_ids"
+                    )
+                    or []
+                )[:16],
                 "before_failure": item.get("before_failure_signature") or "",
                 "after_failure": item.get("after_failure_signature") or "",
                 "before_contracts": item.get("before_test_contracts") or {},
@@ -2024,6 +2052,52 @@ def _attempt_ledger_context(attempts: Sequence[Mapping[str, Any]]) -> str:
             }
         )
     return json.dumps(entries, indent=2, sort_keys=True)
+
+
+def _retained_validation_progress(
+    before_contracts: Mapping[str, Any],
+    after_contracts: Mapping[str, Any],
+    before_prompt_contracts: Mapping[str, Any],
+    after_prompt_contracts: Mapping[str, Any],
+    repair: Mapping[str, Any],
+    retained_changed_files: Sequence[str],
+    after_public: Mapping[str, Any],
+    after_feedback: Mapping[str, Any],
+) -> dict[str, Any]:
+    before_failed = set(before_contracts.get("failed_ids") or [])
+    after_failed = set(after_contracts.get("failed_ids") or [])
+    after_passed = set(after_contracts.get("passed_ids") or [])
+    resolved = before_failed & after_passed
+    if before_contracts.get("complete") and after_contracts.get("complete"):
+        resolved.update(before_failed - after_failed)
+    resolved_prompt = set(before_prompt_contracts) - set(after_prompt_contracts)
+    return {
+        "mode": "validated_partial_refinement",
+        "instruction": (
+            "Treat the current source as the retained baseline. Preserve every green "
+            "contract and edit only the causal owners of the remaining failures."
+        ),
+        "resolved_contract_ids": sorted(resolved),
+        "remaining_failed_contract_ids": sorted(after_failed),
+        "preserve_passed_contract_ids": sorted(after_passed)[:32],
+        "resolved_prompt_contract_ids": sorted(resolved_prompt),
+        "remaining_prompt_contract_ids": sorted(after_prompt_contracts),
+        "retained_changed_files": sorted(set(retained_changed_files)),
+        "prior_selected_files": sorted(
+            {
+                str(value)
+                for value in repair.get("selected_files") or []
+                if str(value)
+            }
+        ),
+        "prior_contract_coverage": list(
+            (repair.get("plan") or {}).get("contract_coverage") or []
+        )[:32],
+        "current_failure_delta": validation_contracts.failure_delta_evidence(
+            after_feedback
+        ),
+        "public_contracts_green": bool(after_public.get("passed")),
+    }
 
 
 def _repair_model_schedule(args: argparse.Namespace) -> list[str]:
@@ -3165,6 +3239,154 @@ def _compiler_diagnostic_guidance(relative: str, diagnostics: str) -> str:
     return "\n".join(guidance)
 
 
+_PUBLIC_REGRESSION_RECOVERY_PATTERNS = (
+    r"\b(?:AttributeError|ImportError|ModuleNotFoundError|NameError|ReferenceError|SyntaxError|TypeError)\b",
+    r"\b(?:ERR_MODULE_NOT_FOUND|ERR_UNKNOWN_BUILTIN_MODULE)\b",
+    r"does not provide an export named",
+    r"\b(?:cannot find module|is not defined|is not a function)\b",
+    r"\b(?:undefined_identifier|undefined_function|undefined_method|argument_type_not_assignable|return_of_invalid_type)\b",
+    r"\b(?:too few|too many) positional arguments\b",
+    r"\btype\s+.+?\s+is not a subtype of type\b",
+    r"\b(?:no such column|no such table)\b",
+)
+
+
+def _public_regression_recovery_paths(
+    baseline_public: Mapping[str, Any],
+    public_tests: Mapping[str, Any],
+    changed_files: Sequence[str],
+) -> list[str]:
+    """Return a narrow source scope for one public load/name/type correction."""
+    changed = [
+        relative
+        for value in changed_files
+        for relative in [_safe_rel(value)]
+        if relative
+    ]
+    if (
+        not baseline_public.get("passed")
+        or public_tests.get("passed")
+        or not changed
+    ):
+        return []
+    output = str(public_tests.get("output") or "")
+    if not any(
+        re.search(pattern, output, flags=re.IGNORECASE | re.DOTALL)
+        for pattern in _PUBLIC_REGRESSION_RECOVERY_PATTERNS
+    ):
+        return []
+    normalized = output.replace("\\", "/").casefold()
+    mentioned = [
+        relative
+        for relative in changed
+        if relative.casefold() in normalized
+        or Path(relative).name.casefold() in normalized
+    ]
+    if mentioned:
+        return list(dict.fromkeys(mentioned))[:2]
+    return changed if len(changed) == 1 else []
+
+
+def _attempt_public_regression_correction(
+    repo: Path,
+    case: Mapping[str, Any],
+    baseline_public: Mapping[str, Any],
+    public_tests: Mapping[str, Any],
+    changed_files: Sequence[str],
+    model: str,
+    calls: list[dict[str, Any]],
+    timeout: float,
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    """Try one atomic source-only correction for a new public load/name/type error."""
+    paths = _public_regression_recovery_paths(
+        baseline_public,
+        public_tests,
+        changed_files,
+    )
+    result: dict[str, Any] = {
+        "attempted": False,
+        "succeeded": False,
+        "eligible_paths": paths,
+        "applied_files": [],
+        "warnings": [],
+    }
+    if not paths:
+        return result
+    if isinstance(calls, _ModelCallLedger) and calls.budget_exhausted:
+        result["warnings"] = [
+            "Skipped public-regression correction because the case model budget was exhausted."
+        ]
+        return result
+
+    result["attempted"] = True
+    before = _candidate_snapshot(repo, case)
+    exact_failure = str(public_tests.get("output") or "")[-7_000:]
+    instruction = (
+        "Correct only the newly introduced public load/import/name/type failure. Preserve the intended "
+        "behavioral repair and every previously green public contract. Do not edit tests, add dependencies, "
+        "weaken assertions, or redesign unrelated behavior. Keep public signatures compatible unless all "
+        "approved source callers are updated together.\n\n"
+        f"Original request:\n{case.get('prompt')}\n\n"
+        f"Exact public regression:\n{exact_failure}"
+    )
+    if len(paths) == 1:
+        edit = _apply_local_edit(
+            repo,
+            paths[0],
+            instruction,
+            model,
+            calls,
+            timeout,
+            stage=stage,
+            allow_model_recovery=False,
+        )
+    else:
+        edit = _apply_local_edit_bundle(
+            repo,
+            paths,
+            instruction,
+            model,
+            calls,
+            timeout,
+            stage=stage,
+            allow_adapter_recovery=False,
+        )
+    result["warnings"] = [str(value) for value in edit.get("warnings") or []]
+    if not (edit.get("patch_applied") or edit.get("already_satisfied")):
+        _restore_candidate_snapshot(repo, before)
+        result["warnings"].append(
+            "Public-regression correction produced no applicable source edit."
+        )
+        return result
+
+    attempted = _candidate_snapshot(repo, case)
+    result["attempted_diff"] = _snapshot_diff(before, attempted)
+    applied = _snapshot_changed_paths(before, attempted)
+    result["applied_files"] = applied
+    syntax = validator_runner.run_ast_syntax(repo, changed_files=applied or paths)
+    if syntax.exit_code != 0 or syntax.timed_out:
+        _restore_candidate_snapshot(repo, before)
+        result["warnings"].append(
+            "Rolled back public-regression correction after changed-file syntax validation failed."
+        )
+        return result
+    corrected_public = _run_case_tests(repo, case, public_only=True)
+    result["public_tests"] = corrected_public
+    if not corrected_public.get("passed"):
+        _restore_candidate_snapshot(repo, before)
+        result["warnings"].append(
+            "Rolled back public-regression correction because the public contract remained red."
+        )
+        return result
+    result["succeeded"] = True
+    result["warnings"].append(
+        "Recovered one public load/name/type regression within the existing case budget."
+    )
+    return result
+
+
 def _salvage_progressing_edit_subset(
     repo: Path,
     case: Mapping[str, Any],
@@ -4214,6 +4436,7 @@ def _repair_after_failure(
     failure_signature: str = "",
     attempted_plan_fingerprints: set[str] | None = None,
     planning_model: str = "",
+    validated_progress: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidates = [
         rel
@@ -4233,6 +4456,15 @@ def _repair_after_failure(
         str(case.get("prompt") or "")
     )
     prompt_obligations = _prompt_contract_obligations(str(case.get("prompt") or ""))
+    refinement_context = dict(validated_progress or {})
+    refinement_instruction = (
+        "\n\nVALIDATED PARTIAL PROGRESS (the current source is the retained baseline):\n"
+        f"{json.dumps(refinement_context, indent=2, sort_keys=True)}\n"
+        "Refine only the remaining failed contracts. Preserve resolved and already-passing contract ids; do "
+        "not replay the prior broad repair unless current evidence proves a cross-owner dependency."
+        if refinement_context
+        else ""
+    )
     repair_prompt = (
         "Return one compact JSON object only. A previous locally generated patch failed validation. "
         "Use the failure output and read-only feedback tests to propose a causal dimension, reconsider ownership, "
@@ -4253,7 +4485,7 @@ def _repair_after_failure(
         "Required prompt obligation ids (copy each id verbatim into exactly one contract field and preserve "
         f"its polarity):\n{json.dumps(prompt_obligations, indent=2, sort_keys=True)}\n\n"
         f"Previous selected files: {json.dumps(previous_patch.get('selected_files') or [])}\n\n"
-        f"Rejected/no-progress attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
+        f"Prior repair attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
         "Required failed contract ids (copy each id verbatim into exactly one contract field):\n"
         f"{json.dumps(failed_contract_ids, indent=2)}\n\n"
         "Feedback source-reference hints (advisory context, not automatic edit authority):\n"
@@ -4264,6 +4496,7 @@ def _repair_after_failure(
         f"Read-only repair-feedback tests:\n{feedback_context or '(unavailable)'}\n\n"
         f"Allowed candidates: {json.dumps(candidates)}\n\n"
         f"Current candidate contents:\n{context}"
+        f"{refinement_instruction}"
     )
     plan_text = _local_call(
         planning_model or model,
@@ -4349,7 +4582,7 @@ def _repair_after_failure(
         f"its polarity):\n{json.dumps(prompt_obligations, indent=2, sort_keys=True)}\n\n"
         f"Repair-feedback validation contracts:\n{failure_output[:12000]}\n\n"
         f"Read-only repair-feedback tests:\n{feedback_context or '(unavailable)'}\n\n"
-        f"Rejected/no-progress attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
+        f"Prior repair attempt ledger:\n{attempt_ledger or '(none)'}\n\n"
         "Required failed contract ids (copy each id verbatim into exactly one contract field):\n"
         f"{json.dumps(failed_contract_ids, indent=2)}\n\n"
         "Feedback source-reference hints (advisory context, not automatic edit authority):\n"
@@ -4360,6 +4593,7 @@ def _repair_after_failure(
         f"Current candidate contents:\n{context}\n\n"
         "Do not use action=review as a placeholder for a causal owner. If a source file must change to satisfy "
         "an invariant, select action=modify with a concrete responsibility; otherwise omit it."
+        f"{refinement_instruction}"
     )
     if skip_repair_review or compact_escalation:
         plan = {
@@ -4903,6 +5137,20 @@ def _validate_run_policy(
         raise FixtureIntegrityError(
             "Run policy local_timeout_recovery_policy mismatch."
         )
+    if (
+        policy.get("public_regression_recovery_policy")
+        != PUBLIC_REGRESSION_RECOVERY_POLICY
+    ):
+        raise FixtureIntegrityError(
+            "Run policy public_regression_recovery_policy mismatch."
+        )
+    if (
+        policy.get("validated_progress_refinement_policy")
+        != VALIDATED_PROGRESS_REFINEMENT_POLICY
+    ):
+        raise FixtureIntegrityError(
+            "Run policy validated_progress_refinement_policy mismatch."
+        )
 
     fixture_commit = str(policy.get("fixture_commit") or "").strip()
     if fixture_commit:
@@ -4942,6 +5190,8 @@ def _validate_run_policy(
         "fixture_commit": fixture_commit or None,
         "language_counts": language_counts,
         "local_timeout_recovery_policy": LOCAL_TIMEOUT_RECOVERY_POLICY,
+        "public_regression_recovery_policy": PUBLIC_REGRESSION_RECOVERY_POLICY,
+        "validated_progress_refinement_policy": VALIDATED_PROGRESS_REFINEMENT_POLICY,
         "enforced": True,
         "_absolute_path": str(path),
     }
@@ -5107,6 +5357,8 @@ def _checkpoint_binding(
             getattr(args, "case_model_time_budget", 690.0) or 690.0
         ),
         "local_timeout_recovery_policy": LOCAL_TIMEOUT_RECOVERY_POLICY,
+        "public_regression_recovery_policy": PUBLIC_REGRESSION_RECOVERY_POLICY,
+        "validated_progress_refinement_policy": VALIDATED_PROGRESS_REFINEMENT_POLICY,
         "run_policy_sha256": str((run_policy_binding or {}).get("sha256") or ""),
         "implementation_commit": str(
             (run_policy_binding or {}).get("implementation_commit") or ""
@@ -5410,6 +5662,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             patch["patch_applied"] = bool(patch["changed_files"])
             public_tests = _run_case_tests(repo, case, public_only=True)
+            if patch.get("patch_applied") and not public_tests.get("passed"):
+                initial_public_correction = _attempt_public_regression_correction(
+                    repo,
+                    case,
+                    initial_public,
+                    public_tests,
+                    patch.get("changed_files") or [],
+                    args.model,
+                    calls,
+                    args.timeout,
+                    stage="initial_public_regression_correction",
+                )
+                patch["initial_public_regression_correction"] = initial_public_correction
+                patch["warnings"] = [
+                    *(patch.get("warnings") or []),
+                    *(initial_public_correction.get("warnings") or []),
+                ]
+                if initial_public_correction.get("succeeded"):
+                    public_tests = dict(initial_public_correction["public_tests"])
+                    patch["changed_files"] = _changed_candidate_files(
+                        repo,
+                        case.get("candidate_paths") or [],
+                    )
+                    patch["patch_applied"] = bool(patch["changed_files"])
 
             # Oracle access begins only after the patch and public validation exist.
             oracle = _read_bound_json(
@@ -5588,6 +5864,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             repair_attempts: list[dict[str, Any]] = []
             rejected_attempt_fingerprints: set[str] = set()
             attempted_plan_fingerprints: set[str] = set()
+            validated_progress_context: dict[str, Any] = {}
             prompt_contract_closure = _prompt_contract_closure(repo, case)
             for repair_round, repair_model in enumerate(repair_schedule, start=1):
                 if (
@@ -5658,6 +5935,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     failure_signature=before_failure_signature,
                     attempted_plan_fingerprints=attempted_plan_fingerprints,
                     planning_model=reasoning_model,
+                    validated_progress=validated_progress_context,
                 )
                 repair_attempts.append(repair)
                 repair["model"] = repair_model
@@ -5733,6 +6011,44 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 patch["patch_applied"] = bool(patch["changed_files"])
                 public_tests = _run_case_tests(repo, case, public_only=True)
+                if before_public_tests.get("passed") and not public_tests.get("passed"):
+                    public_correction = _attempt_public_regression_correction(
+                        repo,
+                        case,
+                        before_public_tests,
+                        public_tests,
+                        _snapshot_changed_paths(
+                            before_repair,
+                            _candidate_snapshot(repo, case),
+                        ),
+                        repair_model,
+                        calls,
+                        args.timeout,
+                        stage=f"repair_public_regression_correction_{repair_round}",
+                    )
+                    repair["public_regression_correction"] = public_correction
+                    repair["warnings"] = [
+                        *(repair.get("warnings") or []),
+                        *(public_correction.get("warnings") or []),
+                    ]
+                    patch["warnings"] = [
+                        *(patch.get("warnings") or []),
+                        *(public_correction.get("warnings") or []),
+                    ]
+                    if public_correction.get("succeeded"):
+                        public_tests = dict(public_correction["public_tests"])
+                        attempted_snapshot = _candidate_snapshot(repo, case)
+                        attempt_fingerprint = _snapshot_fingerprint(attempted_snapshot)
+                        repair["attempt_fingerprint"] = attempt_fingerprint
+                        repair["attempted_diff"] = _snapshot_diff(
+                            before_repair,
+                            attempted_snapshot,
+                        )
+                        patch["changed_files"] = _changed_candidate_files(
+                            repo,
+                            case.get("candidate_paths") or [],
+                        )
+                        patch["patch_applied"] = bool(patch["changed_files"])
                 feedback_tests = _run_case_tests(repo, case, public_only=False)
                 prompt_contract_closure = _prompt_contract_closure(repo, case)
                 after_quality = _validation_quality(public_tests, feedback_tests)
@@ -5802,6 +6118,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     feedback_tests = _run_case_tests(repo, case, public_only=False)
                     prompt_contract_closure = _prompt_contract_closure(repo, case)
                     continue
+                repair["validated_progress_retained"] = True
+                validated_progress_context = _retained_validation_progress(
+                    before_feedback_contracts,
+                    after_feedback_contracts,
+                    before_prompt_contract_closure,
+                    prompt_contract_closure,
+                    repair,
+                    patch.get("changed_files") or [],
+                    public_tests,
+                    feedback_tests,
+                )
+                repair["validated_progress"] = dict(validated_progress_context)
                 if revised_dimension:
                     if (
                         not baseline_feedback.get("passed")
@@ -6002,6 +6330,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                     "prompt_contract_closure_warnings": prompt_contract_closure,
                     "patch_warnings": patch.get("warnings") or [],
+                    "initial_public_regression_correction": patch.get(
+                        "initial_public_regression_correction"
+                    )
+                    or {},
                     "public_tests": public_tests,
                     "feedback_tests": feedback_tests,
                     "final_tests": final_tests,

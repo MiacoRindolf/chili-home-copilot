@@ -1729,6 +1729,242 @@ def test_safe_dart_compiler_repair_qualifies_undefined_max(tmp_path):
     )
 
 
+def test_public_regression_recovery_scope_requires_load_name_or_type_evidence():
+    baseline = {"passed": True}
+    changed = ["src/owner.py", "src/adapter.py"]
+
+    assert benchmark._public_regression_recovery_paths(
+        baseline,
+        {
+            "passed": False,
+            "output": "src/owner.py:19: NameError: name 'normalized' is not defined",
+        },
+        changed,
+    ) == ["src/owner.py"]
+    assert benchmark._public_regression_recovery_paths(
+        baseline,
+        {"passed": False, "output": "NameError: name 'normalized' is not defined"},
+        changed,
+    ) == []
+    assert benchmark._public_regression_recovery_paths(
+        baseline,
+        {"passed": False, "output": "AssertionError: expected normalized value"},
+        ["src/owner.py"],
+    ) == []
+    assert benchmark._public_regression_recovery_paths(
+        {"passed": False},
+        {"passed": False, "output": "src/owner.py: NameError: missing"},
+        ["src/owner.py"],
+    ) == []
+
+
+def test_public_regression_gets_one_source_only_correction(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    owner = repo / "owner.py"
+    owner.write_text("def value():\n    return missing\n", encoding="utf-8")
+    captured = {}
+
+    def fake_edit(repo_path, selected, description, *_args, **kwargs):
+        captured["selected"] = selected
+        captured["description"] = description
+        captured["stage"] = kwargs["stage"]
+        captured["allow_model_recovery"] = kwargs["allow_model_recovery"]
+        (repo_path / selected).write_text(
+            "def value():\n    return 2\n",
+            encoding="utf-8",
+        )
+        return {"patch_applied": True, "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    monkeypatch.setattr(
+        benchmark.validator_runner,
+        "run_ast_syntax",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            exit_code=0,
+            timed_out=False,
+            stdout="",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_run_case_tests",
+        lambda *_args, **_kwargs: {"passed": True, "exit_code": 0},
+    )
+
+    result = benchmark._attempt_public_regression_correction(
+        repo,
+        {
+            "prompt": "Return the normalized value.",
+            "candidate_paths": ["owner.py"],
+        },
+        {"passed": True},
+        {
+            "passed": False,
+            "output": "owner.py:2: NameError: name 'missing' is not defined",
+        },
+        ["owner.py"],
+        "local-editor",
+        [],
+        10.0,
+        stage="public_correction",
+    )
+
+    assert result["attempted"] is True
+    assert result["succeeded"] is True
+    assert result["applied_files"] == ["owner.py"]
+    assert captured["selected"] == "owner.py"
+    assert captured["stage"] == "public_correction"
+    assert captured["allow_model_recovery"] is False
+    assert "Do not edit tests" in captured["description"]
+    assert owner.read_text(encoding="utf-8") == "def value():\n    return 2\n"
+
+
+def test_failed_public_regression_correction_restores_intended_patch(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    owner = repo / "owner.py"
+    intended_patch = "def value():\n    return missing\n"
+    owner.write_text(intended_patch, encoding="utf-8")
+
+    def fake_edit(repo_path, selected, *_args, **_kwargs):
+        (repo_path / selected).write_text(
+            "def value():\n    return still_missing\n",
+            encoding="utf-8",
+        )
+        return {"patch_applied": True, "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    monkeypatch.setattr(
+        benchmark.validator_runner,
+        "run_ast_syntax",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            exit_code=0,
+            timed_out=False,
+            stdout="",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_run_case_tests",
+        lambda *_args, **_kwargs: {
+            "passed": False,
+            "exit_code": 1,
+            "output": "owner.py:2: NameError: name 'still_missing' is not defined",
+        },
+    )
+
+    result = benchmark._attempt_public_regression_correction(
+        repo,
+        {"prompt": "Return a value.", "candidate_paths": ["owner.py"]},
+        {"passed": True},
+        {
+            "passed": False,
+            "output": "owner.py:2: NameError: name 'missing' is not defined",
+        },
+        ["owner.py"],
+        "local-editor",
+        [],
+        10.0,
+        stage="public_correction",
+    )
+
+    assert result["attempted"] is True
+    assert result["succeeded"] is False
+    assert "still_missing" in result["attempted_diff"]
+    assert owner.read_text(encoding="utf-8") == intended_patch
+    assert any("public contract remained red" in value for value in result["warnings"])
+
+
+def test_initial_public_name_regression_is_corrected_before_sealed_feedback(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = tmp_path / "fixture"
+    _write_protocol_fixture(fixture)
+    monkeypatch.setattr(benchmark.ollama_client, "list_models", lambda: ["local-editor"])
+    monkeypatch.setattr(
+        benchmark,
+        "_diagnose",
+        lambda _repo, case, *_args, **_kwargs: {
+            "report": {
+                "conclusion": {
+                    "dimension": "code",
+                    "causal_sufficiency": "direct_artifact",
+                    "status": "confirmed",
+                }
+            },
+            "packet": {},
+            "stages": [],
+            "case": {"problem_statement": case["prompt"]},
+        },
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_deterministic_contract_repair",
+        lambda *_args, **_kwargs: {"attempted": False, "patch_applied": False},
+    )
+
+    def fake_generate(repo, *_args, **_kwargs):
+        (repo / "owner.py").write_text("VALUE = missing\n", encoding="utf-8")
+        return {
+            "plan": {"dimension": "code"},
+            "selected_file": "owner.py",
+            "selected_files": ["owner.py"],
+            "applied_files": ["owner.py"],
+            "patch_applied": True,
+            "warnings": [],
+        }
+
+    stages = []
+
+    def fake_edit(repo, selected, *_args, **kwargs):
+        stages.append(kwargs["stage"])
+        (repo / selected).write_text("VALUE = 2\n", encoding="utf-8")
+        return {"patch_applied": True, "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_generate_patch", fake_generate)
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        model="local-editor",
+        reasoning_model="local-editor",
+        escalation_model="",
+        case=[],
+        timeout=10.0,
+        case_model_time_budget=60.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        validate_fixtures=False,
+        evaluation_context="disclosed_replay",
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "result.json"),
+        json=False,
+        resume=False,
+        checkpoint=str(tmp_path / "checkpoint.json"),
+        run_policy="",
+    )
+
+    result = benchmark.run(args)
+    case_result = result["cases"][0]
+
+    assert stages == ["initial_public_regression_correction"]
+    assert case_result["initial_public_regression_correction"]["succeeded"] is True
+    assert case_result["initial_public_regression_correction"]["eligible_paths"] == [
+        "owner.py"
+    ]
+    assert case_result["public_tests"]["passed"] is True
+    assert case_result["feedback_tests"]["passed"] is True
+    assert case_result["final_tests"]["passed"] is True
+    assert case_result["functional_repair_passed"] is True
+    assert case_result["premium_calls"] == 0
+
+
 def test_edit_group_rolls_back_when_result_contradicts_mechanism_contract(
     tmp_path, monkeypatch
 ):
@@ -2170,6 +2406,147 @@ def test_partial_validation_progress_is_explicitly_provisional_not_completed():
     assert patch["patch_applied"] is True
     assert patch["repair_contract_complete"] is True
     assert patch["provisional_patch_applied"] is False
+
+
+def test_retained_validation_progress_names_resolved_and_remaining_contracts():
+    before = {
+        "passed_ids": ["alpha"],
+        "failed_ids": ["beta", "gamma"],
+        "complete": True,
+    }
+    after = {
+        "passed_ids": ["alpha", "beta"],
+        "failed_ids": ["gamma"],
+        "complete": True,
+    }
+
+    progress = benchmark._retained_validation_progress(
+        before,
+        after,
+        {"prompt::first": "first", "prompt::second": "second"},
+        {"prompt::second": "second"},
+        {
+            "selected_files": ["owner.py"],
+            "plan": {
+                "contract_coverage": [
+                    {
+                        "contract": "beta",
+                        "owner_paths": ["owner.py"],
+                        "postcondition": "beta is fixed",
+                    }
+                ]
+            },
+        },
+        ["owner.py"],
+        {"passed": True},
+        {
+            "passed": False,
+            "runner": "pytest",
+            "output": "tests/test_contract.py::gamma FAILED [100%]",
+        },
+    )
+
+    assert progress["resolved_contract_ids"] == ["beta"]
+    assert progress["remaining_failed_contract_ids"] == ["gamma"]
+    assert progress["preserve_passed_contract_ids"] == ["alpha", "beta"]
+    assert progress["resolved_prompt_contract_ids"] == ["prompt::first"]
+    assert progress["remaining_prompt_contract_ids"] == ["prompt::second"]
+    assert progress["retained_changed_files"] == ["owner.py"]
+
+
+def test_repair_prompt_targets_only_remaining_contracts_after_validated_progress(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    prompts = {}
+    remaining = "tests/test_contract.py::test_remaining"
+    plan = {
+        "dimension": "code",
+        "analysis": "Refine the remaining owner contract.",
+        "files": [
+            {
+                "path": "owner.py",
+                "action": "modify",
+                "description": "Resolve only the remaining contract.",
+                "algorithm": "Preserve the first result and repair the second branch.",
+                "required_primitives": [],
+                "forbidden_shortcuts": ["rewriting the resolved branch"],
+            }
+        ],
+        "contract_coverage": [
+            {
+                "contract": remaining,
+                "owner_paths": ["owner.py"],
+                "postcondition": "The remaining branch now passes.",
+                "polarity": "required",
+            }
+        ],
+        "notes": "",
+    }
+
+    def fake_call(_model, messages, *, stage, **_kwargs):
+        prompts[stage] = messages[-1]["content"]
+        return json.dumps(plan)
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_planned_edits",
+        lambda *_args, **_kwargs: {
+            "patch_applied": False,
+            "selected_files": ["owner.py"],
+            "applied_files": [],
+            "warnings": ["test stop"],
+        },
+    )
+    progress = {
+        "mode": "validated_partial_refinement",
+        "resolved_contract_ids": ["tests/test_contract.py::test_resolved"],
+        "remaining_failed_contract_ids": [remaining],
+        "preserve_passed_contract_ids": ["tests/test_contract.py::test_resolved"],
+        "retained_changed_files": ["owner.py"],
+    }
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {
+            "prompt": "Repair both branches without regressing either.",
+            "candidate_paths": ["owner.py"],
+            "max_files": 1,
+        },
+        {"report": {}},
+        {"selected_files": ["owner.py"]},
+        "one contract remains red",
+        "local-editor",
+        [],
+        10.0,
+        2,
+        contract_evidence={
+            "passed_ids": ["tests/test_contract.py::test_resolved"],
+            "failed_ids": [remaining],
+            "observed_ids": [
+                "tests/test_contract.py::test_resolved",
+                remaining,
+            ],
+            "identity_available": True,
+            "complete": True,
+        },
+        attempted_plan_fingerprints=set(),
+        validated_progress=progress,
+    )
+
+    assert result["plan"]["review_skipped_reason"].startswith(
+        "complete stable-contract ownership"
+    )
+    prompt = prompts["repair_plan_2"]
+    assert "VALIDATED PARTIAL PROGRESS" in prompt
+    assert "current source is the retained baseline" in prompt
+    assert "test_resolved" in prompt
+    assert "test_remaining" in prompt
+    assert "Refine only the remaining failed contracts" in prompt
 
 
 def test_contract_alignment_preserves_executable_editor_handoff_fields():
@@ -4501,6 +4878,8 @@ def _current_run_policy(
             Path(benchmark.ollama_client.__file__).read_bytes()
         ),
         "local_timeout_recovery_policy": benchmark.LOCAL_TIMEOUT_RECOVERY_POLICY,
+        "public_regression_recovery_policy": benchmark.PUBLIC_REGRESSION_RECOVERY_POLICY,
+        "validated_progress_refinement_policy": benchmark.VALIDATED_PROGRESS_REFINEMENT_POLICY,
     }
     path = tmp_path / "run-policy.json"
     path.write_text(json.dumps(policy), encoding="utf-8")
@@ -4552,6 +4931,14 @@ def test_run_policy_enforces_models_budgets_case_mix_and_source_freeze(
     assert (
         binding["local_timeout_recovery_policy"]
         == benchmark.LOCAL_TIMEOUT_RECOVERY_POLICY
+    )
+    assert (
+        binding["public_regression_recovery_policy"]
+        == benchmark.PUBLIC_REGRESSION_RECOVERY_POLICY
+    )
+    assert (
+        binding["validated_progress_refinement_policy"]
+        == benchmark.VALIDATED_PROGRESS_REFINEMENT_POLICY
     )
     assert [item["event"] for item in events] == [
         "run_policy_verified",
@@ -4632,6 +5019,22 @@ def test_run_policy_seals_ollama_transport_and_timeout_recovery(tmp_path, monkey
     policy.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(benchmark.FixtureIntegrityError, match="ollama_client_sha256"):
         benchmark._validate_run_policy(policy, **common)
+
+    for field, invalid in (
+        ("public_regression_recovery_policy", "unbounded_public_rewrite"),
+        ("validated_progress_refinement_policy", "restart_from_scratch"),
+    ):
+        policy = _current_run_policy(
+            tmp_path,
+            fixture_root=FIXTURE_ROOT,
+            implementation_commit=implementation_commit,
+            languages={"python": 1},
+        )
+        value = json.loads(policy.read_text(encoding="utf-8"))
+        value[field] = invalid
+        policy.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(benchmark.FixtureIntegrityError, match=field):
+            benchmark._validate_run_policy(policy, **common)
 
     policy = _current_run_policy(
         tmp_path,
