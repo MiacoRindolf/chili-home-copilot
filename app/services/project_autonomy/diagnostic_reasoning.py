@@ -1740,6 +1740,51 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "Propagate the caller's exact cancellation signal through every wrapper; cancellation is terminal "
             "for retries and must use existing platform error identity without invented dependencies."
         )
+    subscriber_scoped_shared_work = bool(
+        any(
+            token in lowered
+            for token in (
+                "cancelling one",
+                "canceling one",
+                "one dashboard request",
+                "one subscriber",
+                "one waiter",
+                "several peers leave",
+            )
+        )
+        and any(
+            token in lowered
+            for token in (
+                "unrelated",
+                "same key",
+                "waiting on the same key",
+                "survivor",
+                "peers",
+            )
+        )
+        and any(token in lowered for token in ("coalesc", "shared", "same key"))
+    )
+    poisoned_result_retention = bool(
+        any(
+            token in lowered
+            for token in (
+                "remain unusable",
+                "remains unusable",
+                "upstream has recovered",
+                "after the upstream recovered",
+                "failed client read is not retained",
+                "success-only result retention",
+            )
+        )
+        and any(token in lowered for token in ("cache", "retention", "key", "result"))
+    )
+    if subscriber_scoped_shared_work or poisoned_result_retention:
+        invariants.append(
+            "Shared work has subscriber-scoped cancellation and success-only result retention: one caller leaves "
+            "through its own wrapper without aborting surviving peers; the upstream is aborted only after every "
+            "live subscriber leaves. In-flight work remains coalesced, while the result cache stores only resolved "
+            "success values and never retains rejection or cancellation for a later retry."
+        )
     if (
         any(token in lowered for token in ("ttl", "expiration", "expires", "expiry"))
         and any(token in lowered for token in ("injected clock", "replay time", "refresh"))
@@ -3952,6 +3997,68 @@ def contract_invariant_warnings(
                 warnings.append(
                     f"{path} point lookup incorrectly makes the effective-history lower bound exclusive"
                 )
+    if any("Shared work has subscriber-scoped cancellation" in value for value in invariants):
+        shared_pool_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if "new abortcontroller" in content
+            and ".get(" in content
+            and ".set(" in content
+            and ".signal" in content
+        ]
+        result_cache_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if "new map" in content
+            and ".has(" in content
+            and ".set(" in content
+            and re.search(r"this\.[a-z_$]\w*\.[a-z_$]\w*\s*\(", content)
+        ]
+        if not shared_pool_sources:
+            warnings.append("shared-work owner is not structurally identifiable")
+        for path, content in shared_pool_sources:
+            if re.search(
+                r"if\s*\(\s*[a-z_$]\w*\.aborted\s*\)\s*\{?\s*"
+                r"[a-z_$]\w*\.controller\.abort",
+                content,
+                re.DOTALL,
+            ) or re.search(
+                r"addeventlistener\s*\(\s*['\"]abort['\"]\s*,\s*"
+                r"\(\s*\)\s*=>\s*[a-z_$]\w*\.controller\.abort",
+                content,
+                re.DOTALL,
+            ):
+                warnings.append(
+                    f"{path} lets one subscriber abort shared upstream work"
+                )
+            required = (
+                "subscribers",
+                "subscribers === 0",
+                "new promise((resolve, reject)",
+                "removeeventlistener('abort'",
+            )
+            if not all(marker in content for marker in required):
+                warnings.append(
+                    f"{path} does not expose an independently releasable subscriber wrapper"
+                )
+        if not result_cache_sources:
+            warnings.append("success-result cache owner is not structurally identifiable")
+        for path, content in result_cache_sources:
+            if re.search(
+                r"\.set\s*\([^,]+,\s*this\.[a-z_$]\w*\.[a-z_$]\w*\s*\(",
+                content,
+            ):
+                warnings.append(
+                    f"{path} stores an unresolved shared promise in the result cache"
+                )
+            if ".then(" not in content or not re.search(
+                r"\.then\s*\(\s*\(?\s*[a-z_$]\w*\s*\)?\s*=>\s*\{[^}]*\.set\s*\(",
+                content,
+                re.DOTALL,
+            ):
+                warnings.append(
+                    f"{path} does not retain only a successfully resolved result value"
+                )
     return list(dict.fromkeys(warnings))
 
 
@@ -4726,6 +4833,170 @@ def _repair_half_open_effective_history_sql(content: str) -> str:
     )
     insert_at = insert_trigger.end("full")
     return updated[:insert_at] + "\n\n" + update_trigger + updated[insert_at:]
+
+
+def _repair_subscriber_scoped_shared_work(content: str) -> str:
+    """Repair recognized JS shared-work and success-result cache owner shapes."""
+    methods = list(
+        re.finditer(
+            r"(?m)^(?P<indent>[ \t]+)(?:async\s+)?(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
+            r"\s*\((?P<parameters>[^\n{}]*)\)\s*\{",
+            content,
+        )
+    )
+    for method in methods:
+        opening = method.end() - 1
+        closing = _closing_brace_index(content, opening)
+        if closing is None:
+            continue
+        body = content[opening + 1 : closing]
+        if "new AbortController" not in body:
+            continue
+        parameters = [
+            value.strip().split("=", 1)[0].strip()
+            for value in method.group("parameters").split(",")
+            if value.strip()
+        ]
+        if len(parameters) < 2 or not all(
+            re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", value)
+            for value in parameters[:2]
+        ):
+            continue
+        key_name, signal_name = parameters[:2]
+        map_match = re.search(
+            rf"this\.([A-Za-z_$][A-Za-z0-9_$]*)\.get\(\s*{re.escape(key_name)}\s*\)",
+            body,
+        )
+        controller_match = re.search(
+            r"const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*new\s+AbortController\s*\(\s*\)",
+            body,
+        )
+        if not map_match or not controller_match:
+            continue
+        controller_name = controller_match.group(1)
+        loader_match = re.search(
+            rf"this\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*{re.escape(key_name)}\s*,\s*"
+            rf"{re.escape(controller_name)}\.signal\s*\)",
+            body,
+        )
+        if not loader_match:
+            continue
+        map_name = map_match.group(1)
+        loader_name = loader_match.group(1)
+        repaired = _replace_braced_js_method_body(
+            content,
+            method.group("name"),
+            (
+                f"{method.group('indent')}let flight = this.{map_name}.get({key_name});\n"
+                f"{method.group('indent')}if (!flight) {{\n"
+                f"{method.group('indent')}  const controller = new AbortController();\n"
+                f"{method.group('indent')}  const promise = Promise.resolve().then(() => "
+                f"this.{loader_name}({key_name}, controller.signal));\n"
+                f"{method.group('indent')}  flight = {{ controller, promise, subscribers: 0, settled: false }};\n"
+                f"{method.group('indent')}  this.{map_name}.set({key_name}, flight);\n"
+                f"{method.group('indent')}  promise.finally(() => {{\n"
+                f"{method.group('indent')}    flight.settled = true;\n"
+                f"{method.group('indent')}    if (this.{map_name}.get({key_name}) === flight) "
+                f"this.{map_name}.delete({key_name});\n"
+                f"{method.group('indent')}  }}).catch(() => {{}});\n"
+                f"{method.group('indent')}}}\n\n"
+                f"{method.group('indent')}flight.subscribers += 1;\n"
+                f"{method.group('indent')}let released = false;\n"
+                f"{method.group('indent')}const release = () => {{\n"
+                f"{method.group('indent')}  if (released) return;\n"
+                f"{method.group('indent')}  released = true;\n"
+                f"{method.group('indent')}  flight.subscribers -= 1;\n"
+                f"{method.group('indent')}  if (flight.subscribers === 0 && !flight.settled) {{\n"
+                f"{method.group('indent')}    flight.controller.abort(new Error('all subscribers left'));\n"
+                f"{method.group('indent')}  }}\n"
+                f"{method.group('indent')}}};\n\n"
+                f"{method.group('indent')}if (!{signal_name}) {{\n"
+                f"{method.group('indent')}  return flight.promise.finally(release);\n"
+                f"{method.group('indent')}}}\n"
+                f"{method.group('indent')}if ({signal_name}.aborted) {{\n"
+                f"{method.group('indent')}  release();\n"
+                f"{method.group('indent')}  return Promise.reject({signal_name}.reason || new Error('aborted'));\n"
+                f"{method.group('indent')}}}\n"
+                f"{method.group('indent')}return new Promise((resolve, reject) => {{\n"
+                f"{method.group('indent')}  const onAbort = () => {{\n"
+                f"{method.group('indent')}    release();\n"
+                f"{method.group('indent')}    reject({signal_name}.reason || new Error('aborted'));\n"
+                f"{method.group('indent')}  }};\n"
+                f"{method.group('indent')}  {signal_name}.addEventListener('abort', onAbort, {{ once: true }});\n"
+                f"{method.group('indent')}  flight.promise.then(\n"
+                f"{method.group('indent')}    (value) => {{ {signal_name}.removeEventListener('abort', onAbort); "
+                f"release(); resolve(value); }},\n"
+                f"{method.group('indent')}    (error) => {{ {signal_name}.removeEventListener('abort', onAbort); "
+                f"release(); reject(error); }},\n"
+                f"{method.group('indent')}  );\n"
+                f"{method.group('indent')}}});"
+            ),
+        )
+        if repaired and repaired != content:
+            return repaired
+
+    for method in methods:
+        opening = method.end() - 1
+        closing = _closing_brace_index(content, opening)
+        if closing is None:
+            continue
+        body = content[opening + 1 : closing]
+        parameters = [
+            value.strip().split("=", 1)[0].strip()
+            for value in method.group("parameters").split(",")
+            if value.strip()
+        ]
+        if not parameters or not re.fullmatch(
+            r"[A-Za-z_$][A-Za-z0-9_$]*", parameters[0]
+        ):
+            continue
+        key_name = parameters[0]
+        signal_name = (
+            parameters[1]
+            if len(parameters) > 1
+            and re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", parameters[1])
+            else "undefined"
+        )
+        cache_match = re.search(
+            rf"this\.([A-Za-z_$][A-Za-z0-9_$]*)\.has\(\s*{re.escape(key_name)}\s*\)",
+            body,
+        )
+        provider_match = next(
+            (
+                match
+                for match in re.finditer(
+                    rf"this\.([A-Za-z_$][A-Za-z0-9_$]*)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*"
+                    rf"{re.escape(key_name)}(?:\s*,\s*{re.escape(signal_name)})?\s*\)",
+                    body,
+                )
+                if match.group(1) != cache_match.group(1)
+                and match.group(2) not in {"get", "has", "set", "delete"}
+            ),
+            None,
+        )
+        if not cache_match or not provider_match:
+            continue
+        cache_name = cache_match.group(1)
+        provider_name, load_name = provider_match.groups()
+        arguments = (
+            f"{key_name}, {signal_name}" if signal_name != "undefined" else key_name
+        )
+        repaired = _replace_braced_js_method_body(
+            content,
+            method.group("name"),
+            (
+                f"{method.group('indent')}if (this.{cache_name}.has({key_name})) {{\n"
+                f"{method.group('indent')}  return Promise.resolve(this.{cache_name}.get({key_name}));\n"
+                f"{method.group('indent')}}}\n"
+                f"{method.group('indent')}return this.{provider_name}.{load_name}({arguments}).then((value) => {{\n"
+                f"{method.group('indent')}  this.{cache_name}.set({key_name}, value);\n"
+                f"{method.group('indent')}  return value;\n"
+                f"{method.group('indent')}}});"
+            ),
+        )
+        if repaired and repaired != content:
+            return repaired
+    return content
 
 
 def _replace_python_definition(
@@ -6728,6 +6999,8 @@ def contract_repair_proposals(
             updated = _repair_scoped_temporal_sql(updated)
         if any("Contiguous effective-history rows use half-open" in value for value in invariants):
             updated = _repair_half_open_effective_history_sql(updated)
+        if any("Shared work has subscriber-scoped cancellation" in value for value in invariants):
+            updated = _repair_subscriber_scoped_shared_work(updated)
         if any(
             token in value
             for value in invariants
@@ -6989,6 +7262,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("Recursive relation expansion carries", "data"),
     ("A claimed job attempt is a fencing token", "state"),
     ("Contiguous effective-history rows use half-open", "data"),
+    ("Shared work has subscriber-scoped cancellation", "state"),
 )
 
 
@@ -7045,6 +7319,7 @@ def contract_repair_dimension(
         ("Normalize every physical length", "data", _repair_package_unit_sql),
         ("A nullable suppression target cannot participate", "data", _repair_nullable_suppression_anti_join),
         ("Contiguous effective-history rows use half-open", "data", _repair_half_open_effective_history_sql),
+        ("Shared work has subscriber-scoped cancellation", "state", _repair_subscriber_scoped_shared_work),
     )
     active_dimensions: set[str] = set()
     for invariant_marker, dimension, operator in operators:

@@ -3473,6 +3473,101 @@ def test_effective_history_wording_yields_half_open_write_and_read_contract():
     assert reasoning.contract_invariant_dimension(prompt) == "data"
 
 
+def test_shared_waiter_incident_wording_yields_subscriber_and_result_contract():
+    prompt = (
+        "A metadata client coalesces concurrent reads, but cancelling one dashboard request makes an unrelated "
+        "dashboard waiting on the same key fail and the key remains unusable after the upstream has recovered. "
+        "Preserve successful caching and request coalescing."
+    )
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+
+    contract = next(
+        value for value in invariants if "subscriber-scoped cancellation" in value
+    )
+    assert "without aborting surviving peers" in contract
+    assert "only after every live subscriber leaves" in contract
+    assert "stores only resolved success values" in contract
+    assert "never retains rejection or cancellation" in contract
+    assert reasoning.contract_invariant_dimension(prompt) == "state"
+
+
+def test_subscriber_scoped_shared_work_operator_transfers_to_alternate_js_names():
+    prompt = (
+        "Cancelling one subscriber must not fail an unrelated waiter on the same key. Preserve shared work and "
+        "cache only successful results so a failed key does not remain unusable after recovery."
+    )
+    files = {
+        "src/workGroup.js": (
+            "class WorkGroup {\n"
+            "  constructor(fetcher) { this.fetcher = fetcher; this.jobs = new Map(); }\n"
+            "  join(name, callerSignal) {\n"
+            "    let job = this.jobs.get(name);\n"
+            "    if (!job) {\n"
+            "      const upstream = new AbortController();\n"
+            "      const promise = Promise.resolve().then(() => this.fetcher(name, upstream.signal));\n"
+            "      job = { controller: upstream, promise }; this.jobs.set(name, job);\n"
+            "    }\n"
+            "    if (callerSignal) callerSignal.addEventListener('abort', () => job.controller.abort());\n"
+            "    return job.promise;\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/recordStore.js": (
+            "class RecordStore {\n"
+            "  constructor(group) { this.group = group; this.values = new Map(); }\n"
+            "  read(name, callerSignal) {\n"
+            "    if (!this.values.has(name)) this.values.set(name, this.group.join(name, callerSignal));\n"
+            "    return this.values.get(name);\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/keyFormat.js": "export const keyFormat = (value) => String(value).trim();\n",
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert any("one subscriber abort" in value for value in rejected)
+    assert any("unresolved shared promise" in value for value in rejected)
+    assert set(proposals) == {"src/workGroup.js", "src/recordStore.js"}
+    assert ".subscribers += 1" in proposals["src/workGroup.js"]
+    assert ".subscribers === 0" in proposals["src/workGroup.js"]
+    assert "return new Promise((resolve, reject)" in proposals["src/workGroup.js"]
+    assert "callerSignal.removeEventListener('abort'" in proposals["src/workGroup.js"]
+    assert "this.group.join(name, callerSignal).then((value)" in proposals[
+        "src/recordStore.js"
+    ]
+    assert "this.values.set(name, value)" in proposals["src/recordStore.js"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_dimension(prompt, files) == "state"
+
+
+def test_subscriber_scoped_shared_work_operator_ignores_unrelated_abort_owner():
+    prompt = (
+        "Cancelling one subscriber must not fail an unrelated waiter on the same key. Preserve shared work and "
+        "cache only successful results so a failed key does not remain unusable after recovery."
+    )
+    files = {
+        "src/upload.js": (
+            "class Upload {\n"
+            "  constructor(transport) { this.transport = transport; }\n"
+            "  send(payload, callerSignal) {\n"
+            "    const controller = new AbortController();\n"
+            "    if (callerSignal) callerSignal.addEventListener('abort', () => controller.abort());\n"
+            "    return this.transport.send(payload, controller.signal);\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/audit.js": (
+            "export const remember = (events, event) => events.set(event.id, event);\n"
+        ),
+    }
+
+    assert reasoning.contract_repair_proposals(prompt, files) == {}
+
+
 def test_half_open_history_operator_transfers_to_alternate_sql_names():
     prompt = (
         "A rate scheduled exactly when the prior rate expires is rejected. Repair write-time and read-time "
