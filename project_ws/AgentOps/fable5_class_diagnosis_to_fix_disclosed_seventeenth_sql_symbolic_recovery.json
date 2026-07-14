@@ -1,0 +1,1035 @@
+{
+  "accepted_diagnosis_count": 1,
+  "average_case_duration_ms": 88259.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "data",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 579,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-o01yyxpd\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: overlapping price interval\n========================= 1 failed, 1 passed in 0.09s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 569,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-9_viqxhk\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_final.py::test_final_sql_contracts FAILED                     [ 33%]\ntests/test_final.py::test_final_schema_rejects_overlap_created_by_update FAILED [ 66%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n__________________________ test_final_sql_contracts ___________________________\ntests\\test_final.py:37: in test_final_sql_contracts\n    run_sql(script_name)\ntests\\test_final.py:30: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n_____________ test_final_schema_rejects_overlap_created_by_update _____________\ntests\\test_final.py:51: in test_final_schema_rejects_overlap_created_by_update\n    with pytest.raises(sqlite3.IntegrityError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_final_sql_contracts - sqlite3.IntegrityError: overlapping price interval\nFAILED tests/test_final.py::test_final_schema_rejects_overlap_created_by_update - Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>\n========================= 2 failed, 1 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 507,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-o01yyxpd\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n============================== 1 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "sqlite_effective_price_intervals",
+      "changed_files": [
+        "db/resolved_prices.sql",
+        "db/schema.sql"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "data",
+        "selected_files": [
+          "db/resolved_prices.sql",
+          "db/schema.sql"
+        ],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "data",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "data",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Trigger may not handle exact expiration",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Trigger allows exact expiration overlap",
+            "expected_if_true": "Trigger blocks overlapping inserts",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "data",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "db"
+              ],
+              "probe_id": "p1",
+              "query": "CREATE TRIGGER prices_no_overlap",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Overlap trigger fails at exact expiration",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Check trigger enforces no overlap",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-4"
+            ]
+          },
+          {
+            "claim": "Clock drift causes temporal contract breach",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Verify write/read timestamps align",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-3"
+            ]
+          },
+          {
+            "claim": "State transition skips expiration boundary",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Confirm state handles exact expiration",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "source-6"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 29,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "data"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "data",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Trigger allows exact expiration overlap",
+            "expected_if_true": "Trigger blocks overlapping inserts",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-14T03:34:35.750760+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.9,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: db\\schema.sql:18:CREATE TRIGGER prices_no_overlap"
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "data"
+            ],
+            "dimension": "data",
+            "duration_ms": 21,
+            "exit_code": 0,
+            "expected_if_false": "Trigger allows exact expiration overlap",
+            "expected_if_true": "Trigger blocks overlapping inserts",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T03:34:35.750760+00:00",
+            "output": "db\\schema.sql:18:CREATE TRIGGER prices_no_overlap",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "sqlite_effective_price_intervals",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Overlap trigger fails at exact expiration",
+          "confidence": 0.0,
+          "dimension": "data",
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Trigger may not handle exact expiration",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "An ineffective-at-expiration interval has an exclusive upper bound: valid_from <= as_of < valid_until; do not rewrite unrelated revocation semantics.",
+          "Contiguous effective-history rows use half-open intervals [start, end): adjacency where the old end equals the new start is legal; overlap is existing_start < new_end and new_start < existing_end, with a missing end treated as infinity. Point lookup keeps start <= instant and instant < end. The same overlap guard applies to INSERT and UPDATE, and UPDATE excludes the row being changed."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Overlap trigger fails at exact expiration",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Check trigger enforces no overlap",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-4"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Clock drift causes temporal contract breach",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify write/read timestamps align",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-3"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "State transition skips expiration boundary",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.15,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Confirm state handles exact expiration",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-6"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Check trigger enforces no overlap",
+            "dimension": "data",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify write/read timestamps align",
+            "dimension": "clock",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Confirm state handles exact expiration",
+            "dimension": "state",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Overlap trigger fails at exact expiration",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger may not handle exact expiration",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Overlap trigger fails at exact expiration",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger may not handle exact expiration",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Trigger may not handle exact expiration",
+            "status": "provisional"
+          },
+          "response_chars": 1208,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Overlap trigger fails at exact expiration",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger may not handle exact expiration",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Overlap trigger fails at exact expiration",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger may not handle exact expiration",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Trigger may not handle exact expiration",
+            "status": "provisional"
+          },
+          "response_chars": 1208,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 88259,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": true,
+      "feedback_tests": {
+        "duration_ms": 498,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-3bjevzbw\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql PASSED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 469,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-49ow9xcp\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_final.py::test_final_sql_contracts PASSED                     [ 33%]\ntests/test_final.py::test_final_schema_rejects_overlap_created_by_update PASSED [ 66%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n============================== 3 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:sqlite_effective_price_intervals",
+          "path": "cases/sqlite_effective_price_intervals.json",
+          "sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "size_bytes": 3528
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+          "path": "oracles/sqlite_effective_price_intervals.json",
+          "sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "size_bytes": 1955
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:sqlite_effective_price_intervals",
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "size_bytes": 4294
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "data",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "artifact": "case:sqlite_effective_price_intervals",
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "path": "cases/sqlite_effective_price_intervals.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T03:33:12.124417+00:00"
+        },
+        {
+          "actual_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "path": "oracles/sqlite_effective_price_intervals.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T03:34:36.390771+00:00"
+        },
+        {
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 2,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T03:34:38.384506+00:00"
+        },
+        {
+          "actual_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "artifact": "final_oracle:sqlite_effective_price_intervals",
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T03:34:38.384819+00:00"
+        },
+        {
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "sequence": 11,
+          "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "timestamp_utc": "2026-07-14T03:34:38.384886+00:00"
+        },
+        {
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T03:34:38.389127+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T03:34:40.382833+00:00"
+        },
+        {
+          "actual_count": 2,
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 2,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T03:34:40.382852+00:00"
+        }
+      ],
+      "language": "sql",
+      "live_reasoning_qualified": true,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 22432031000,
+          "json_object_valid": true,
+          "latency_ms": 56479,
+          "load_duration_ns": 175341300,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 13732,
+          "prompt_eval_count": 3665,
+          "prompt_eval_duration_ns": 1780831000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Overlap trigger fails at exact expiration\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check trigger enforces no overlap\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Clock drift causes temporal contract breach\",\"dimension\":\"clock\",\"support_evidence_ids\":[\"operator-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify write/read timestamps align\"},{\"hypothesis_id\":\"h3\",\"claim\":\"State transition skips expiration boundary\",\"dimension\":\"state\",\"support_evidence_ids\":[\"source-6\"],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm state handles exact expiration\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"data\"],\"held_constant_dimensions\":[\"clock\"],\"expected_if_true\":\"Trigger blocks overlapping inserts\",\"expected_if_false\":\"Trigger allows exact expiration overlap\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"db\"],\"query\":\"CREATE TRIGGER prices_no_overlap\",\"dimension\":\"data\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-4\"],\"reason\":\"Trigger may not handle exact expiration\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 2006,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 273,
+          "wall_deadline_clamped": false,
+          "wall_ms": 56479
+        },
+        {
+          "case_budget_remaining_before_sec": 423.5201087000314,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 22698576000,
+          "json_object_valid": true,
+          "latency_ms": 26168,
+          "load_duration_ns": 171215100,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:2",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 16895,
+          "prompt_eval_count": 4017,
+          "prompt_eval_duration_ns": 2880434000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Overlap trigger fails at exact expiration\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check trigger enforces no overlap\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Clock drift causes temporal contract breach\",\"dimension\":\"clock\",\"support_evidence_ids\":[\"operator-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify write/read timestamps align\"},{\"hypothesis_id\":\"h3\",\"claim\":\"State transition skips expiration boundary\",\"dimension\":\"state\",\"support_evidence_ids\":[\"source-6\"],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm state handles exact expiration\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"data\"],\"held_constant_dimensions\":[\"clock\"],\"expected_if_true\":\"Trigger blocks overlapping inserts\",\"expected_if_false\":\"Trigger allows exact expiration overlap\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"db\"],\"query\":\"CREATE TRIGGER prices_no_overlap\",\"dimension\":\"data\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-4\"],\"reason\":\"Trigger may not handle exact expiration\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 273,
+          "wall_deadline_clamped": false,
+          "wall_ms": 26168
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "development_regression",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 490,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-3bjevzbw\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n============================== 1 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "data",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "db/resolved_prices.sql",
+        "db/schema.sql"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 2,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 2,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-14T03:34:40.402783+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_passed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:sqlite_effective_price_intervals",
+          "path": "cases/sqlite_effective_price_intervals.json",
+          "sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "size_bytes": 3528
+        },
+        "case_id": "sqlite_effective_price_intervals",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+          "path": "oracles/sqlite_effective_price_intervals.json",
+          "sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "size_bytes": 1955
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:sqlite_effective_price_intervals",
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "size_bytes": 4294
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902
+    }
+  },
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902,
+      "timestamp_utc": "2026-07-14T03:33:09.370310+00:00"
+    },
+    {
+      "artifact": "case:sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "path": "cases/sqlite_effective_price_intervals.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+      "size_bytes": 3528,
+      "timestamp_utc": "2026-07-14T03:33:09.372720+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "path": "oracles/sqlite_effective_price_intervals.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+      "size_bytes": 1955,
+      "timestamp_utc": "2026-07-14T03:33:09.373192+00:00"
+    },
+    {
+      "artifact": "final_oracle:sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/sqlite_effective_price_intervals.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "size_bytes": 4294,
+      "timestamp_utc": "2026-07-14T03:33:09.373657+00:00"
+    },
+    {
+      "actual_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T03:33:09.377153+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_sql_symbolic_recovery.checkpoint.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T03:33:12.123087+00:00"
+    },
+    {
+      "actual_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+      "artifact": "case:sqlite_effective_price_intervals",
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+      "path": "cases/sqlite_effective_price_intervals.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T03:33:12.124417+00:00"
+    },
+    {
+      "actual_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+      "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+      "path": "oracles/sqlite_effective_price_intervals.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T03:34:36.390771+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 2,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T03:34:38.384506+00:00"
+    },
+    {
+      "actual_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "artifact": "final_oracle:sqlite_effective_price_intervals",
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "path": "final_oracles/sqlite_effective_price_intervals.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T03:34:38.384819+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/sqlite_effective_price_intervals.json",
+      "sequence": 11,
+      "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "timestamp_utc": "2026-07-14T03:34:38.384886+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T03:34:38.389127+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T03:34:40.382833+00:00"
+    },
+    {
+      "actual_count": 2,
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 2,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T03:34:40.382852+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T03:34:40.384245+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T03:34:40.402691+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 1,
+  "live_reasoning_qualified_case_rate": 100.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "5008c668003160ad68a15427fb2ada5cb052e0ba05f330c4d895010cae031f7c",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_sql_symbolic_recovery.checkpoint.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 2,
+  "successful_causal_reasoning_call_count": 2,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 2,
+  "verdict": "shadow_ready"
+}

@@ -5,11 +5,18 @@ Date: 2026-07-12
 ## Current Verdict
 
 CHILI is qualified for local-only development shadow use **only on recognized and regression-tested contracts**.
-It is not yet a credible Fable 5 replacement for unseen complex diagnosis-to-fix work. The newest independently
-authored 12-case transfer suite scored **49.17/100 with 2/12 sealed-final solves**, despite zero premium calls and
-complete public-regression preservation.
+It is not yet a credible Fable 5 replacement for unseen complex diagnosis-to-fix work. The latest fully
+interpretable unseen composite remains the fifteenth holdout at **41.88/100 with 1/8 sealed-final solves**. The
+newer seventeenth holdout completed durably with zero premium calls and **0/8 sealed-final solves**; its recorded
+27.5/100 composite has an invalid diagnosis-label component, but even its maximum possible corrected score is
+only 42.5/100.
 
-This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
+This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence,
+select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own
+patch, and pass cross-language development regressions without premium calls. Post-seventeenth hardening also
+adds bounded same-model timeout recovery, atomic partial-bundle recovery, public load/name/type correction,
+validated-progress refinement, and symbolic half-open history reasoning. It does not yet provide a blinded,
+statistically meaningful head-to-head against Fable 5.
 
 The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call for its case. The first eight-case v3 holdout scored 53.75/100 with 1/8 final passes. After generic repair-loop hardening, a new independently authored eight-case holdout improved to 68.75/100 and 2/8 final passes, still far below replacement readiness.
 
@@ -549,6 +556,26 @@ case yields only a **42.5/100 upper bound**, so the negative functional verdict 
 41.88/100 remains the latest fully interpretable unseen composite score; the seventeenth contributes valid 0/8
 functional evidence and a requirement for fail-closed oracle-schema validation. Full details:
 `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_BLINDED_SEVENTEENTH_RESULT_RECEIPT.md`.
+
+### Seventeenth Disclosed SQL A/B
+
+After the seventeenth result was sealed, `sqlite_effective_price_intervals` became a disclosed development case.
+The first replay on the generic recovery engine completed all **8/8 local calls successfully** but still scored
+**25/100** and retained no patch. It selected the correct two owners, then generated incorrect interval algebra:
+an exclusive lower point-lookup bound, a reversed overlap predicate, and no UPDATE overlap guard.
+
+Commit `99122e485505b89dd3c887082917a877ff8bd877` added a source-shape-gated half-open effective-history contract:
+adjacency is legal, overlap uses both strict cross-bounds, point lookup is lower-inclusive/upper-exclusive, and
+INSERT/UPDATE share the guard while UPDATE excludes itself. The operator fails closed on unrelated INSERT
+triggers and transfers to alternate table/column names. The exact-source replay then scored **100/100** with the
+correct `data` family, exact two-file ownership, public/feedback/sealed-final success, **2/2 local diagnostic
+calls**, no planning/edit/repair model calls, **88.3 seconds**, and zero premium calls. Broad affected validation
+passed **348 tests**.
+
+This A/B proves disclosed mechanism capture and a useful premium-independent symbolic reasoning path. It does not
+change the untouched seventeenth 0/8 functional result, does not establish unknown-mechanism transfer, and does
+not support a Fable 5 parity claim. Full details:
+`project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_DISCLOSED_SEVENTEENTH_SQL_AB_RECEIPT.md`.
 
 ## Safety Boundaries
 

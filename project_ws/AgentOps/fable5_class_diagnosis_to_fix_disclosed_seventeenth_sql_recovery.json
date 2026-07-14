@@ -1,0 +1,1421 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 383722.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "code",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 765,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-00piydvl\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: overlapping price interval\n========================= 1 failed, 1 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 525,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-deqaxg26\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_final.py::test_final_sql_contracts FAILED                     [ 33%]\ntests/test_final.py::test_final_schema_rejects_overlap_created_by_update FAILED [ 66%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n__________________________ test_final_sql_contracts ___________________________\ntests\\test_final.py:37: in test_final_sql_contracts\n    run_sql(script_name)\ntests\\test_final.py:30: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n_____________ test_final_schema_rejects_overlap_created_by_update _____________\ntests\\test_final.py:51: in test_final_schema_rejects_overlap_created_by_update\n    with pytest.raises(sqlite3.IntegrityError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_final_sql_contracts - sqlite3.IntegrityError: overlapping price interval\nFAILED tests/test_final.py::test_final_schema_rejects_overlap_created_by_update - Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>\n========================= 2 failed, 1 passed in 0.09s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 509,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-00piydvl\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n============================== 1 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "sqlite_effective_price_intervals",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": false,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "code",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "code",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Trigger code lacks boundary handling",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "No trigger logs",
+            "expected_if_true": "Trigger logs boundary errors",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "code",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "app"
+              ],
+              "probe_id": "p1",
+              "query": "overlap trigger error",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Trigger fails on exact boundary overlap",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Check trigger logic for boundary cases",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-4"
+            ]
+          },
+          {
+            "claim": "View join misses boundary timestamps",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Verify join conditions for exact time matches",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-7"
+            ]
+          },
+          {
+            "claim": "Test harness lacks boundary scenarios",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Run tests with exact time overlaps",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 25,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "code"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "No trigger logs",
+            "expected_if_true": "Trigger logs boundary errors",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T03:12:45.982319+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "code"
+            ],
+            "dimension": "code",
+            "duration_ms": 20,
+            "exit_code": 1,
+            "expected_if_false": "No trigger logs",
+            "expected_if_true": "Trigger logs boundary errors",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "clock"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T03:12:45.982319+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "sqlite_effective_price_intervals",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Trigger fails on exact boundary overlap",
+          "confidence": 0.0,
+          "dimension": "code",
+          "evidence_ids": [
+            "source-4"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Trigger code lacks boundary handling",
+          "requested_status": "inconclusive",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Trigger fails on exact boundary overlap",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Check trigger logic for boundary cases",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-4"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "View join misses boundary timestamps",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify join conditions for exact time matches",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-7"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Test harness lacks boundary scenarios",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Run tests with exact time overlaps",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Check trigger logic for boundary cases",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify join conditions for exact time matches",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Run tests with exact time overlaps",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Trigger fails on exact boundary overlap",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger code lacks boundary handling",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Trigger fails on exact boundary overlap",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger code lacks boundary handling",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Trigger code lacks boundary handling",
+            "status": "inconclusive"
+          },
+          "response_chars": 1192,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Trigger fails on exact boundary overlap",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger code lacks boundary handling",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Trigger fails on exact boundary overlap",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Trigger code lacks boundary handling",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Trigger code lacks boundary handling",
+            "status": "inconclusive"
+          },
+          "response_chars": 1192,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 383722,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 564,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: overlapping price interval\n========================= 1 failed, 1 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 615,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-6sj6reuy\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_final.py::test_final_sql_contracts FAILED                     [ 33%]\ntests/test_final.py::test_final_schema_rejects_overlap_created_by_update FAILED [ 66%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n__________________________ test_final_sql_contracts ___________________________\ntests\\test_final.py:37: in test_final_sql_contracts\n    run_sql(script_name)\ntests\\test_final.py:30: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n_____________ test_final_schema_rejects_overlap_created_by_update _____________\ntests\\test_final.py:51: in test_final_schema_rejects_overlap_created_by_update\n    with pytest.raises(sqlite3.IntegrityError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_final_sql_contracts - sqlite3.IntegrityError: overlapping price interval\nFAILED tests/test_final.py::test_final_schema_rejects_overlap_created_by_update - Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>\n========================= 2 failed, 1 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:sqlite_effective_price_intervals",
+          "path": "cases/sqlite_effective_price_intervals.json",
+          "sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "size_bytes": 3528
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+          "path": "oracles/sqlite_effective_price_intervals.json",
+          "sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "size_bytes": 1955
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:sqlite_effective_price_intervals",
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "size_bytes": 4294
+        }
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "code",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "artifact": "case:sqlite_effective_price_intervals",
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "path": "cases/sqlite_effective_price_intervals.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T03:10:30.297489+00:00"
+        },
+        {
+          "actual_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "path": "oracles/sqlite_effective_price_intervals.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T03:14:10.790758+00:00"
+        },
+        {
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 8,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T03:16:52.180067+00:00"
+        },
+        {
+          "actual_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "artifact": "final_oracle:sqlite_effective_price_intervals",
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T03:16:52.180390+00:00"
+        },
+        {
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "sequence": 11,
+          "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "timestamp_utc": "2026-07-14T03:16:52.180464+00:00"
+        },
+        {
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T03:16:52.184465+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": false,
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T03:16:54.018467+00:00"
+        },
+        {
+          "actual_count": 8,
+          "case_id": "sqlite_effective_price_intervals",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 8,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T03:16:54.018496+00:00"
+        }
+      ],
+      "language": "sql",
+      "live_reasoning_qualified": true,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 23420285000,
+          "json_object_valid": true,
+          "latency_ms": 97289,
+          "load_duration_ns": 17721040300,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 13191,
+          "prompt_eval_count": 3644,
+          "prompt_eval_duration_ns": 2028282000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Trigger fails on exact boundary overlap\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check trigger logic for boundary cases\"},{\"hypothesis_id\":\"h2\",\"claim\":\"View join misses boundary timestamps\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-7\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify join conditions for exact time matches\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Test harness lacks boundary scenarios\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"baseline-public-contracts\"],\"contradict_evidence_ids\":[],\"falsification\":\"Run tests with exact time overlaps\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"clock\"],\"expected_if_true\":\"Trigger logs boundary errors\",\"expected_if_false\":\"No trigger logs\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"app\"],\"query\":\"overlap trigger error\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"inconclusive\",\"evidence_ids\":[\"source-4\"],\"reason\":\"Trigger code lacks boundary handling\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 2505,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 274,
+          "wall_deadline_clamped": false,
+          "wall_ms": 97289
+        },
+        {
+          "case_budget_remaining_before_sec": 382.71063879999565,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 22603792000,
+          "json_object_valid": true,
+          "latency_ms": 37268,
+          "load_duration_ns": 177991400,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:2",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 16370,
+          "prompt_eval_count": 3916,
+          "prompt_eval_duration_ns": 14156915000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Trigger fails on exact boundary overlap\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check trigger logic for boundary cases\"},{\"hypothesis_id\":\"h2\",\"claim\":\"View join misses boundary timestamps\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-7\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify join conditions for exact time matches\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Test harness lacks boundary scenarios\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"baseline-public-contracts\"],\"contradict_evidence_ids\":[],\"falsification\":\"Run tests with exact time overlaps\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"clock\"],\"expected_if_true\":\"Trigger logs boundary errors\",\"expected_if_false\":\"No trigger logs\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"app\"],\"query\":\"overlap trigger error\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"inconclusive\",\"evidence_ids\":[\"source-4\"],\"reason\":\"Trigger code lacks boundary handling\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 274,
+          "wall_deadline_clamped": false,
+          "wall_ms": 37268
+        },
+        {
+          "case_budget_remaining_before_sec": 345.44196029996965,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 35209834000,
+          "latency_ms": 40472,
+          "load_duration_ns": 167549700,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 5832,
+          "prompt_eval_count": 1378,
+          "prompt_eval_duration_ns": 4794386000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"clock\",\n  \"analysis\": \"The issue arises from the temporal boundary handling in the price insertion logic. The trigger fails to prevent overlapping intervals when the new price's valid_from exactly matches the existing price's valid_to, leading to ambiguous or duplicate prices during lookup. The root cause is the lack of strict temporal ordering and boundary enforcement in the trigger logic.\",\n  \"files\": [\n    {\n      \"path\": \"db/schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Fix the trigger to enforce strict temporal ordering and prevent overlapping intervals at exact boundary cases.\",\n      \"algorithm\": \"Update the trigger condition to ensure that the new price's valid_from is strictly greater than the existing price's valid_to, and vice versa, to avoid ambiguity at exact boundaries.\",\n      \"required_primitives\": [\"PRAGMA foreign_keys\", \"CREATE TRIGGER\", \"CHECK constraint\"],\n      \"forbidden_shortcuts\": [\"COALESCE\", \"implicit time comparisons\"]\n    },\n    {\n      \"path\": \"db/resolved_prices.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure the join condition in the view strictly enforces temporal ordering to avoid ambiguous or duplicate price lookups.\",\n      \"algorithm\": \"Update the join condition to require that the request's at_time is strictly greater than the price's valid_to, ensuring no overlap at exact boundaries.\",\n      \"required_primitives\": [\"CREATE VIEW\", \"JOIN\", \"WHERE clause\"],\n      \"forbidden_shortcuts\": [\"implicit time comparisons\", \"COALESCE\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prices_no_overlap\",\n      \"owner_paths\": [\"db/schema.sql\"],\n      \"postcondition\": \"No overlapping price intervals are allowed at exact boundary cases.\",\n      \"polarity\": \"forbidden\"\n    },\n    {\n      \"contract\": \"resolved_prices\",\n      \"owner_paths\": [\"db/resolved_prices.sql\"],\n      \"postcondition\": \"Every lookup instant resolves to a single, unambiguous price.\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The trigger and view must be updated to strictly enforce temporal ordering and prevent ambiguity at exact boundary cases.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 454,
+          "wall_deadline_clamped": false,
+          "wall_ms": 40472
+        },
+        {
+          "case_budget_remaining_before_sec": 304.96935479994863,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 21757398000,
+          "latency_ms": 43677,
+          "load_duration_ns": 19044119700,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 6614,
+          "prompt_eval_count": 1485,
+          "prompt_eval_duration_ns": 2848019000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"db/schema.sql\",\n      \"blocks\": [\n        {\n          \"search\": \"WHEN EXISTS (\\n  SELECT 1\\n  FROM prices AS existing\\n  WHERE existing.sku = NEW.sku\\n    AND existing.valid_from <= COALESCE(NEW.valid_to, '9999-12-31T23:59:59Z')\\n    AND NEW.valid_from <= COALESCE(existing.valid_to, '9999-12-31T23:59:59Z')\",\n          \"replace\": \"WHEN EXISTS (\\n  SELECT 1\\n  FROM prices AS existing\\n  WHERE existing.sku = NEW.sku\\n    AND existing.valid_from < COALESCE(NEW.valid_to, '9999-12-31T23:59:59Z')\\n    AND NEW.valid_from > COALESCE(existing.valid_to, '0000-01-01T00:00:00Z')\"\n        }\n      ]\n    },\n    {\n      \"path\": \"db/resolved_prices.sql\",\n      \"blocks\": [\n        {\n          \"search\": \"AND price.valid_from <= request.at_time\\n AND (price.valid_to IS NULL OR request.at_time <= price.valid_to)\",\n          \"replace\": \"AND price.valid_from < request.at_time\\n AND (price.valid_to IS NULL OR request.at_time < price.valid_to)\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "edit_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 330,
+          "wall_deadline_clamped": false,
+          "wall_ms": 43677
+        },
+        {
+          "case_budget_remaining_before_sec": 261.2918242999003,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 32663235000,
+          "latency_ms": 45176,
+          "load_duration_ns": 5519433300,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 10039,
+          "prompt_eval_count": 2428,
+          "prompt_eval_duration_ns": 6939890000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"clock\",\n  \"analysis\": \"The failure occurs due to overlapping price intervals at exact boundary times, which violates the temporal contract. The trigger logic in `db/schema.sql` is insufficient to prevent this overlap when the new price's `valid_from` matches an existing price's `valid_to`. The root cause is the lack of strict boundary enforcement in the trigger condition.\",\n  \"files\": [\n    {\n      \"path\": \"db/schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Update the trigger to enforce strict boundary checks and prevent overlapping intervals at exact time points.\",\n      \"algorithm\": \"Modify the `prices_no_overlap` trigger to ensure that the new price's `valid_from` is strictly greater than the existing price's `valid_to`.\",\n      \"required_primitives\": [\"sqlite3\", \"trigger\", \"check constraint\"],\n      \"forbidden_shortcuts\": [\"coalescing boundary times\", \"implicit time resolution\"]\n    },\n    {\n      \"path\": \"db/resolved_prices.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure the view correctly resolves prices at exact boundary times by enforcing strict temporal ordering.\",\n      \"algorithm\": \"Update the `resolved_prices` view to prioritize the latest valid price at exact boundary times.\",\n      \"required_primitives\": [\"sqlite3\", \"view\", \"join\"],\n      \"forbidden_shortcuts\": [\"implicit time resolution\", \"ambiguous boundary handling\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"tests/test_feedback.py::test_feedback_sql\",\n      \"owner_paths\": [\"db/schema.sql\", \"db/resolved_prices.sql\"],\n      \"postcondition\": \"No overlapping price intervals at exact boundary times, and every boundary instant resolves unambiguously.\",\n      \"polarity\": \"forbidden\"\n    }\n  ],\n  \"notes\": \"The trigger in `db/schema.sql` must be updated to strictly enforce that new prices do not overlap with existing ones at exact boundary times. The `resolved_prices` view must also be adjusted to ensure that boundary times are resolved correctly.\"\n}",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 432,
+          "wall_deadline_clamped": false,
+          "wall_ms": 45176
+        },
+        {
+          "case_budget_remaining_before_sec": 216.1151168998913,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 16521786000,
+          "latency_ms": 27734,
+          "load_duration_ns": 5349908000,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 9721,
+          "prompt_eval_count": 2293,
+          "prompt_eval_duration_ns": 5820398000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"db/schema.sql\",\n      \"blocks\": [\n        {\n          \"search\": \"WHEN EXISTS (\\n  SELECT 1\\n  FROM prices AS existing\\n  WHERE existing.sku = NEW.sku\\n    AND existing.valid_from <= COALESCE(NEW.valid_to, '9999-12-31T23:59:59Z')\\n    AND NEW.valid_from <= COALESCE(existing.valid_to, '9999-12-31T23:59:59Z')\",\n          \"replace\": \"WHEN EXISTS (\\n  SELECT 1\\n  FROM prices AS existing\\n  WHERE existing.sku = NEW.sku\\n    AND existing.valid_to < NEW.valid_from\"\n        }\n      ]\n    },\n    {\n      \"path\": \"db/resolved_prices.sql\",\n      \"blocks\": [\n        {\n          \"search\": \"AND price.valid_from <= request.at_time\\n AND (price.valid_to IS NULL OR request.at_time <= price.valid_to)\",\n          \"replace\": \"AND price.valid_to < request.at_time\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "repair_edit_1_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 251,
+          "wall_deadline_clamped": false,
+          "wall_ms": 27734
+        },
+        {
+          "case_budget_remaining_before_sec": 188.38013609987684,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 32142504000,
+          "latency_ms": 50174,
+          "load_duration_ns": 5112995300,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 15831,
+          "prompt_eval_count": 4040,
+          "prompt_eval_duration_ns": 12872313000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"clock\",\n  \"analysis\": \"The failure stems from a misalignment in temporal boundaries between price intervals, leading to overlapping or ambiguous resolution at exact boundary points. The trigger logic and join conditions in the schema and resolved_prices view are not handling the exact boundary cases correctly, causing the CHECK constraint to fail.\",\n  \"files\": [\n    {\n      \"path\": \"db/schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Fix the trigger logic to ensure overlapping intervals are correctly detected at exact boundary points.\",\n      \"algorithm\": \"Update the trigger condition to strictly enforce that new intervals do not overlap with existing ones at exact boundary times.\",\n      \"required_primitives\": [\"valid_from\", \"valid_to\", \"COALESCE\", \"RAISE(ABORT)\"],\n      \"forbidden_shortcuts\": [\"<=\", \">=\", \"exact boundary overlap\"]\n    },\n    {\n      \"path\": \"db/resolved_prices.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure the join condition correctly resolves prices at exact boundary times without ambiguity.\",\n      \"algorithm\": \"Adjust the join condition to strictly enforce that the request time falls within the valid interval, including exact boundary cases.\",\n      \"required_primitives\": [\"valid_from\", \"valid_to\", \"request.at_time\", \"JOIN\"],\n      \"forbidden_shortcuts\": [\"<=\", \">=\", \"exact boundary ambiguity\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"tests/test_feedback.py::test_feedback_sql\",\n      \"owner_paths\": [\"db/schema.sql\", \"db/resolved_prices.sql\"],\n      \"postcondition\": \"The CHECK constraint must not trigger for valid, non-overlapping price intervals, including exact boundary cases.\",\n      \"polarity\": \"forbidden\"\n    }\n  ],\n  \"notes\": \"The repair must ensure that exact boundary cases are handled correctly in both the trigger and the join logic to prevent overlapping intervals and ensure unambiguous resolution.\"\n}",
+          "stage": "repair_plan_2",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 408,
+          "wall_deadline_clamped": false,
+          "wall_ms": 50174
+        },
+        {
+          "case_budget_remaining_before_sec": 138.20577489986317,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 138.20577489986317,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 17482329000,
+          "latency_ms": 28473,
+          "load_duration_ns": 4864715400,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 9666,
+          "prompt_eval_count": 2270,
+          "prompt_eval_duration_ns": 6091286000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"db/schema.sql\",\n      \"blocks\": [\n        {\n          \"search\": \"existing.valid_from <= COALESCE(NEW.valid_to, '9999-12-31T23:59:59Z') AND NEW.valid_from <= COALESCE(existing.valid_to, '9999-12-31T23:59:59Z')\",\n          \"replace\": \"existing.valid_to < COALESCE(NEW.valid_from, '0000-01-01T00:00:00Z') AND NEW.valid_to > COALESCE(existing.valid_from, '0000-01-01T00:00:00Z')\"\n        }\n      ]\n    },\n    {\n      \"path\": \"db/resolved_prices.sql\",\n      \"blocks\": [\n        {\n          \"search\": \"price.valid_from <= request.at_time AND (price.valid_to IS NULL OR request.at_time <= price.valid_to)\",\n          \"replace\": \"price.valid_from < request.at_time AND (price.valid_to IS NULL OR request.at_time < price.valid_to)\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "repair_edit_2_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 264,
+          "wall_deadline_clamped": false,
+          "wall_ms": 28473
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 8,
+      "original_evaluation_role": "development_regression",
+      "patch_applied": false,
+      "patch_warnings": [
+        "Rolled back initial patch because it regressed or made no validated progress.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Rolled back repair because validation regressed or made no measurable progress."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 456,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n============================== 1 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "6db1a7afb535129f7c1aade00ae39d9c7e36dcbaaa44b02d47392311fc2176aa",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_feedback_sql",
+              "tests/test_public.py::test_public_sql"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_feedback_sql",
+              "tests/test_public.py::test_public_sql"
+            ],
+            "passed_ids": []
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_public.py::test_public_sql\"\n    ]\n  },\n  \"repair_feedback\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_feedback_sql\",\n      \"tests/test_public.py::test_public_sql\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_public_sql FAILED                             [100%]\n\n================================== FAILURES ===================================\n_______________________________ test_public_sql _______________________________\ntests\\test_public.py:34: in test_public_sql\n    run_sql(\"public.sql\")\ntests\\test_public.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_public_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n============================== 1 failed in 0.08s ==============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql FAILED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n_______________________________ test_public_sql _______________________________\ntests\\test_public.py:34: in test_public_sql\n    run_sql(\"public.sql\")\ntests\\test_public.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\nFAILED tests/test_public.py::test_public_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n============================== 2 failed in 0.09s ==============================",
+          "applied_files": [
+            "db/schema.sql",
+            "db/resolved_prices.sql"
+          ],
+          "attempt_fingerprint": "c773eb31f7dbfc38de8560d03e0cc95f02f6651d6ea08d1ff2adbce4cd21ac5b",
+          "attempted_diff": "--- a/db/resolved_prices.sql\n+++ b/db/resolved_prices.sql\n@@ -3,5 +3,4 @@\n FROM price_requests AS request\n JOIN prices AS price\n   ON price.sku = request.sku\n- AND price.valid_from <= request.at_time\n- AND (price.valid_to IS NULL OR request.at_time <= price.valid_to);\n+ AND price.valid_to < request.at_time;\n\n--- a/db/schema.sql\n+++ b/db/schema.sql\n@@ -21,8 +21,7 @@\n   SELECT 1\n   FROM prices AS existing\n   WHERE existing.sku = NEW.sku\n-    AND existing.valid_from <= COALESCE(NEW.valid_to, '9999-12-31T23:59:59Z')\n-    AND NEW.valid_from <= COALESCE(existing.valid_to, '9999-12-31T23:59:59Z')\n+    AND existing.valid_to < NEW.valid_from\n )\n BEGIN\n   SELECT RAISE(ABORT, 'overlapping price interval');\n",
+          "before_failure_signature": "f4091b6f9f6947de6e714dfea7d4c55a5a5791e8079303f324bcea5b0b2b25fb",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_feedback_sql"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_feedback_sql",
+              "tests/test_public.py::test_public_sql"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_public_sql"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_feedback_sql\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: sqlite3.IntegrityError: overlapping price interval\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: overlapping price interval\n========================= 1 failed, 1 passed in 0.09s =========================",
+          "escalated": false,
+          "feedback_context_files": [
+            "db/schema.sql",
+            "db/resolved_prices.sql"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure occurs due to overlapping price intervals at exact boundary times, which violates the temporal contract. The trigger logic in `db/schema.sql` is insufficient to prevent this overlap when the new price's `valid_from` matches an existing price's `valid_to`. The root cause is the lack of strict boundary enforcement in the trigger condition.",
+            "contract_coverage": [
+              {
+                "contract": "tests/test_feedback.py::test_feedback_sql",
+                "owner_paths": [
+                  "db/schema.sql",
+                  "db/resolved_prices.sql"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "No overlapping price intervals at exact boundary times, and every boundary instant resolves unambiguously."
+              }
+            ],
+            "dimension": "clock",
+            "files": [
+              {
+                "action": "modify",
+                "algorithm": "Modify the `prices_no_overlap` trigger to ensure that the new price's `valid_from` is strictly greater than the existing price's `valid_to`.",
+                "description": "Update the trigger to enforce strict boundary checks and prevent overlapping intervals at exact time points.",
+                "forbidden_shortcuts": [
+                  "coalescing boundary times",
+                  "implicit time resolution"
+                ],
+                "path": "db/schema.sql",
+                "required_primitives": [
+                  "sqlite3",
+                  "trigger",
+                  "check constraint"
+                ]
+              },
+              {
+                "action": "modify",
+                "algorithm": "Update the `resolved_prices` view to prioritize the latest valid price at exact boundary times.",
+                "description": "Ensure the view correctly resolves prices at exact boundary times by enforcing strict temporal ordering.",
+                "forbidden_shortcuts": [
+                  "implicit time resolution",
+                  "ambiguous boundary handling"
+                ],
+                "path": "db/resolved_prices.sql",
+                "required_primitives": [
+                  "sqlite3",
+                  "view",
+                  "join"
+                ]
+              }
+            ],
+            "notes": "The trigger in `db/schema.sql` must be updated to strictly enforce that new prices do not overlap with existing ones at exact boundary times. The `resolved_prices` view must also be adjusted to ensure that boundary times are resolved correctly.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "9e32fc392070947aeaf3d4b612c6229ae3240fc9da477a35a6b7f54f13f1f28b",
+          "proposed_diagnosis_dimension": "clock",
+          "public_regression_correction": {
+            "applied_files": [],
+            "attempted": false,
+            "eligible_paths": [],
+            "succeeded": false,
+            "warnings": []
+          },
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "db/schema.sql",
+          "selected_files": [
+            "db/schema.sql",
+            "db/resolved_prices.sql"
+          ],
+          "skipped_optional_files": [],
+          "validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_public.py::test_public_sql\"\n    ]\n  },\n  \"repair_feedback\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_feedback_sql\",\n      \"tests/test_public.py::test_public_sql\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_public_sql FAILED                             [100%]\n\n================================== FAILURES ===================================\n_______________________________ test_public_sql _______________________________\ntests\\test_public.py:34: in test_public_sql\n    run_sql(\"public.sql\")\ntests\\test_public.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_public_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n============================== 1 failed in 0.08s ==============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql FAILED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n_______________________________ test_public_sql _______________________________\ntests\\test_public.py:34: in test_public_sql\n    run_sql(\"public.sql\")\ntests\\test_public.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\nFAILED tests/test_public.py::test_public_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n============================== 2 failed in 0.09s ==============================",
+          "validation_regression": {
+            "after_failure_signature": "6db1a7afb535129f7c1aade00ae39d9c7e36dcbaaa44b02d47392311fc2176aa",
+            "after_quality": 0,
+            "before_failure_signature": "f4091b6f9f6947de6e714dfea7d4c55a5a5791e8079303f324bcea5b0b2b25fb",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "after_failure_signature": "b6c83a13ef668727271a031663ed73944dcde0103773859cc78ddf9e85b9f0a2",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_feedback_sql"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_feedback_sql",
+              "tests/test_public.py::test_public_sql"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_public_sql"
+            ]
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_feedback_sql\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n========================= 1 failed, 1 passed in 0.09s =========================",
+          "applied_files": [
+            "db/schema.sql",
+            "db/resolved_prices.sql"
+          ],
+          "attempt_fingerprint": "5ad8faf63b7edb56717c380f32684405a8efd76b642f0b1dbfde1509334383e1",
+          "attempted_diff": "--- a/db/resolved_prices.sql\n+++ b/db/resolved_prices.sql\n@@ -3,5 +3,4 @@\n FROM price_requests AS request\n JOIN prices AS price\n   ON price.sku = request.sku\n- AND price.valid_from <= request.at_time\n- AND (price.valid_to IS NULL OR request.at_time <= price.valid_to);\n+ AND price.valid_from < request.at_time AND (price.valid_to IS NULL OR request.at_time < price.valid_to);\n\n--- a/db/schema.sql\n+++ b/db/schema.sql\n@@ -21,8 +21,7 @@\n   SELECT 1\n   FROM prices AS existing\n   WHERE existing.sku = NEW.sku\n-    AND existing.valid_from <= COALESCE(NEW.valid_to, '9999-12-31T23:59:59Z')\n-    AND NEW.valid_from <= COALESCE(existing.valid_to, '9999-12-31T23:59:59Z')\n+    AND existing.valid_to < COALESCE(NEW.valid_from, '0000-01-01T00:00:00Z') AND NEW.valid_to > COALESCE(existing.valid_from, '0000-01-01T00:00:00Z')\n )\n BEGIN\n   SELECT RAISE(ABORT, 'overlapping price interval');\n",
+          "before_failure_signature": "f4091b6f9f6947de6e714dfea7d4c55a5a5791e8079303f324bcea5b0b2b25fb",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_feedback_sql"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_feedback_sql",
+              "tests/test_public.py::test_public_sql"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_public_sql"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_feedback_sql\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: sqlite3.IntegrityError: overlapping price interval\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: overlapping price interval\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: overlapping price interval\n========================= 1 failed, 1 passed in 0.08s =========================",
+          "escalated": false,
+          "feedback_context_files": [
+            "db/schema.sql",
+            "db/resolved_prices.sql"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure stems from a misalignment in temporal boundaries between price intervals, leading to overlapping or ambiguous resolution at exact boundary points. The trigger logic and join conditions in the schema and resolved_prices view are not handling the exact boundary cases correctly, causing the CHECK constraint to fail.",
+            "contract_coverage": [
+              {
+                "contract": "tests/test_feedback.py::test_feedback_sql",
+                "owner_paths": [
+                  "db/schema.sql",
+                  "db/resolved_prices.sql"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "The CHECK constraint must not trigger for valid, non-overlapping price intervals, including exact boundary cases."
+              }
+            ],
+            "dimension": "clock",
+            "files": [
+              {
+                "action": "modify",
+                "algorithm": "Update the trigger condition to strictly enforce that new intervals do not overlap with existing ones at exact boundary times.",
+                "description": "Fix the trigger logic to ensure overlapping intervals are correctly detected at exact boundary points.",
+                "forbidden_shortcuts": [
+                  "<=",
+                  ">=",
+                  "exact boundary overlap"
+                ],
+                "path": "db/schema.sql",
+                "required_primitives": [
+                  "valid_from",
+                  "valid_to",
+                  "COALESCE",
+                  "RAISE(ABORT)"
+                ]
+              },
+              {
+                "action": "modify",
+                "algorithm": "Adjust the join condition to strictly enforce that the request time falls within the valid interval, including exact boundary cases.",
+                "description": "Ensure the join condition correctly resolves prices at exact boundary times without ambiguity.",
+                "forbidden_shortcuts": [
+                  "<=",
+                  ">=",
+                  "exact boundary ambiguity"
+                ],
+                "path": "db/resolved_prices.sql",
+                "required_primitives": [
+                  "valid_from",
+                  "valid_to",
+                  "request.at_time",
+                  "JOIN"
+                ]
+              }
+            ],
+            "notes": "The repair must ensure that exact boundary cases are handled correctly in both the trigger and the join logic to prevent overlapping intervals and ensure unambiguous resolution.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "78dd3018b26b49fdcdf349f55cf915df7cb83611c978e365e1f2d02aed9476da",
+          "proposed_diagnosis_dimension": "clock",
+          "rolled_back_after_validation": true,
+          "round": 2,
+          "satisfied_files": [],
+          "selected_file": "db/schema.sql",
+          "selected_files": [
+            "db/schema.sql",
+            "db/resolved_prices.sql"
+          ],
+          "skipped_optional_files": [],
+          "validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_feedback_sql\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sqlite_effective_price_intervals-xef5g7qo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_feedback.py::test_feedback_sql FAILED                         [ 50%]\ntests/test_public.py::test_public_sql PASSED                             [100%]\n\n================================== FAILURES ===================================\n______________________________ test_feedback_sql ______________________________\ntests\\test_feedback.py:34: in test_feedback_sql\n    run_sql(\"feedback.sql\")\ntests\\test_feedback.py:28: in run_sql\n    connection.executescript(expand_sql(f\"tests/{script_name}\"))\nE   sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_feedback_sql - sqlite3.IntegrityError: CHECK constraint failed: ok = 1\n========================= 1 failed, 1 passed in 0.09s =========================",
+          "validation_regression": {
+            "after_failure_signature": "b6c83a13ef668727271a031663ed73944dcde0103773859cc78ddf9e85b9f0a2",
+            "after_quality": 2,
+            "before_failure_signature": "f4091b6f9f6947de6e714dfea7d4c55a5a5791e8079303f324bcea5b0b2b25fb",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "code",
+      "score": 25,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "db/schema.sql",
+        "db/resolved_prices.sql"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 2,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 8,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-14T03:16:54.046229+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 25.0,
+  "diagnosis_accuracy": 0.0,
+  "diagnosis_correct_count": 0,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:sqlite_effective_price_intervals",
+          "path": "cases/sqlite_effective_price_intervals.json",
+          "sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+          "size_bytes": 3528
+        },
+        "case_id": "sqlite_effective_price_intervals",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+          "path": "oracles/sqlite_effective_price_intervals.json",
+          "sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+          "size_bytes": 1955
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:sqlite_effective_price_intervals",
+          "path": "final_oracles/sqlite_effective_price_intervals.json",
+          "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+          "size_bytes": 4294
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902
+    }
+  },
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902,
+      "timestamp_utc": "2026-07-14T03:10:27.544936+00:00"
+    },
+    {
+      "artifact": "case:sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "path": "cases/sqlite_effective_price_intervals.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+      "size_bytes": 3528,
+      "timestamp_utc": "2026-07-14T03:10:27.547578+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "path": "oracles/sqlite_effective_price_intervals.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+      "size_bytes": 1955,
+      "timestamp_utc": "2026-07-14T03:10:27.548023+00:00"
+    },
+    {
+      "artifact": "final_oracle:sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/sqlite_effective_price_intervals.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "size_bytes": 4294,
+      "timestamp_utc": "2026-07-14T03:10:27.548480+00:00"
+    },
+    {
+      "actual_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T03:10:27.551851+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_sql_recovery.checkpoint.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T03:10:30.296242+00:00"
+    },
+    {
+      "actual_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+      "artifact": "case:sqlite_effective_price_intervals",
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "a557b861509bfc5a7b226aafa00752194f1dea0fe8675ad2154827a3c5d461f5",
+      "path": "cases/sqlite_effective_price_intervals.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T03:10:30.297489+00:00"
+    },
+    {
+      "actual_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+      "artifact": "feedback_oracle:sqlite_effective_price_intervals",
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "77f6beeed96a2703e434e20f34405fb223e248bb95536cac177a042935e9cd78",
+      "path": "oracles/sqlite_effective_price_intervals.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T03:14:10.790758+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 8,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T03:16:52.180067+00:00"
+    },
+    {
+      "actual_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "artifact": "final_oracle:sqlite_effective_price_intervals",
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "path": "final_oracles/sqlite_effective_price_intervals.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T03:16:52.180390+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/sqlite_effective_price_intervals.json",
+      "sequence": 11,
+      "sha256": "7c0c9f7026fb97ab814f53ef0b446375316e892ab5efd70b15cfdc842321ac25",
+      "timestamp_utc": "2026-07-14T03:16:52.180464+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T03:16:52.184465+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": false,
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T03:16:54.018467+00:00"
+    },
+    {
+      "actual_count": 8,
+      "case_id": "sqlite_effective_price_intervals",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 8,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T03:16:54.018496+00:00"
+    },
+    {
+      "case_id": "sqlite_effective_price_intervals",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T03:16:54.019936+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T03:16:54.046109+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 1,
+  "live_reasoning_qualified_case_rate": 100.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 25.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "a28c729a5886f7e98da2d4af466fe4a711fc12184a0f62de6ba4e3c87f4cbef1",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_sql_recovery.checkpoint.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 2,
+  "successful_causal_reasoning_call_count": 2,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 8,
+  "verdict": "needs_improvement"
+}
