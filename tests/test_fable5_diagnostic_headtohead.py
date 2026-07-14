@@ -1,10 +1,34 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
 from scripts import autopilot_fable5_diagnostic_headtohead as headtohead
+
+
+def test_cli_boots_without_database_url():
+    env = os.environ.copy()
+    env.pop("DATABASE_URL", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(headtohead.ROOT / "scripts" / "autopilot_fable5_diagnostic_headtohead.py"),
+            "--help",
+        ],
+        cwd=headtohead.ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--emit-prompt-pack" in completed.stdout
 
 
 def _fixture(tmp_path):

@@ -20,6 +20,10 @@ from typing import Any, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql://chili:chili@127.0.0.1:5433/chili_diagnostic_benchmark",
+)
 
 from app.services.project_autonomy import diagnostic_reasoning  # noqa: E402
 from scripts import autopilot_model_candidate_artifact_builder as identity_tools  # noqa: E402
