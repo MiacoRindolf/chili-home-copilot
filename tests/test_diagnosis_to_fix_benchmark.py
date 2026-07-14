@@ -5335,3 +5335,63 @@ def test_disclosed_fable5_trading_direction_operator_passes_feedback_and_final(
     assert public["passed"] is True, public["output"]
     assert feedback["passed"] is True, feedback["output"]
     assert final["passed"] is True, final["output"]
+
+
+def test_disclosed_fable5_trading_contract_bypasses_model_diagnosis_and_editing(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: ["qwen2.5-coder:7b", "qwen3:8b"],
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_diagnose",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recognized trading contract should bypass model diagnosis")
+        ),
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_generate_patch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recognized trading contract should bypass model editing")
+        ),
+    )
+    args = argparse.Namespace(
+        fixture_root=str(FABLE5_TRADING_PILOT_FIXTURE_ROOT),
+        model="qwen2.5-coder:7b",
+        reasoning_model="qwen3:8b",
+        escalation_model="",
+        case=[],
+        timeout=1.0,
+        case_model_time_budget=10.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        validate_fixtures=False,
+        evaluation_context="disclosed_replay",
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "result.json"),
+        checkpoint=str(tmp_path / "checkpoint.json"),
+        resume=False,
+        json=False,
+    )
+
+    result = benchmark.run(args)
+    case_result = result["cases"][0]
+
+    assert case_result["score"] == 100
+    assert case_result["functional_repair_passed"] is True
+    assert case_result["diagnosis_dimension"] == "data"
+    assert set(case_result["changed_files"]) == {
+        "trading/paper_trading.py",
+        "trading/portfolio_risk.py",
+    }
+    assert case_result["model_calls"] == []
+    assert case_result["deterministic_diagnosis_fast_path"] is True
+    assert case_result["deterministic_only"] is True
+    assert case_result["live_reasoning_qualified"] is False
+    assert result["verdict"] == "needs_improvement"
+    assert result["fable5_class_reasoning_claim_supported"] is False

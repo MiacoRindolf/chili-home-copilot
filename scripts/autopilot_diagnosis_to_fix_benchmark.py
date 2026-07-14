@@ -1762,6 +1762,86 @@ def _apply_deterministic_contract_repair(
     }
 
 
+def _recognized_contract_diagnosis(
+    repo: Path,
+    case: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Build a provisional local diagnosis when a guarded source operator is active."""
+    snapshot = _candidate_snapshot(repo, case)
+    prompt = str(case.get("prompt") or "")
+    dimension = diagnostic_reasoning.contract_repair_dimension(prompt, snapshot)
+    if dimension not in REPAIR_DIMENSION_RUBRIC:
+        return None
+    proposals = diagnostic_reasoning.contract_repair_proposals(prompt, snapshot)
+    if not proposals:
+        return None
+    diagnostic_case = diagnostic_reasoning.build_case_from_prompt(
+        prompt,
+        case_id=str(case.get("case_id") or "repair-case"),
+        repo_path=repo,
+        candidate_paths=[str(value) for value in case.get("candidate_paths") or []],
+    )
+    invariants = diagnostic_reasoning.derive_contract_invariants(prompt)
+    claim = next(
+        (str(value) for value in invariants if str(value).strip()),
+        "A recognized source contract requires bounded structural validation.",
+    )
+    hypothesis_id = f"recognized-{dimension}-contract"
+    conclusion = {
+        "hypothesis_id": hypothesis_id,
+        "claim": claim[:700],
+        "dimension": dimension,
+        "status": "provisional",
+        "requested_status": "provisional",
+        "causal_sufficiency": "direct_artifact",
+        "evidence_ids": [],
+        "reason": (
+            "Prompt invariants and candidate source shape activate a guarded repair; "
+            "validation remains authoritative."
+        ),
+        "confidence": 0.0,
+        "blockers": ["No source intervention has been validated yet."],
+    }
+    packet = diagnostic_reasoning.normalize_packet(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "claim": claim[:700],
+                    "dimension": dimension,
+                    "support_evidence_ids": [],
+                    "contradict_evidence_ids": [],
+                    "falsification": (
+                        "Apply only the guarded owner repair and rerun pinned contracts."
+                    ),
+                }
+            ],
+            "experiments": [],
+            "conclusion": {
+                "hypothesis_id": hypothesis_id,
+                "status": "provisional",
+                "evidence_ids": [],
+                "reason": conclusion["reason"],
+            },
+        }
+    )
+    return {
+        "report": {
+            "valid": True,
+            "errors": [],
+            "decision": "instrument_first",
+            "conclusion": conclusion,
+            "hypothesis_results": [],
+            "contract_invariants": invariants,
+        },
+        "packet": packet,
+        "stages": [],
+        "case": diagnostic_case,
+        "deterministic_diagnosis_fast_path": True,
+        "deterministic_diagnosis_selected_files": sorted(proposals),
+    }
+
+
 def _accept_validated_contract_repair_diagnosis(
     diagnosis: dict[str, Any],
     dimension: str,
@@ -5657,7 +5737,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 initial_public.get("test_files") or [],
                 max_chars=12_000,
             )
-            diagnosis = _diagnose(
+            diagnosis = _recognized_contract_diagnosis(repo, case) or _diagnose(
                 repo,
                 case,
                 reasoning_model,
@@ -6368,6 +6448,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "diagnosis_packet": diagnosis.get("packet") or {},
                     "diagnosis_stages": diagnosis.get("stages") or [],
                     "diagnosis_probe_run": diagnosis.get("probe_run") or {},
+                    "deterministic_diagnosis_fast_path": bool(
+                        diagnosis.get("deterministic_diagnosis_fast_path")
+                    ),
                     "post_probe_conclusion_revision": diagnosis.get(
                         "post_probe_conclusion_revision"
                     )
