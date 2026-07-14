@@ -1,0 +1,16 @@
+{
+  "case_id": "python_protected_refresh_queue_priority",
+  "expected_dimension": "state",
+  "expected_contracts": [
+    "fixed-cap replacement only at exact queue capacity",
+    "protected refresh replaces one oldest unlocked stale imminent event",
+    "auditable dead lifecycle transition before protected admission",
+    "correlation rejection precedes any destructive queue-pressure transition"
+  ],
+  "expected_files": [
+    "mesh_queue/repository.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "from datetime import datetime, timedelta, timezone\n\nimport pytest\n\nfrom mesh_queue import repository as repo\n\n\ndef _event(event_id, *, cause=\"imminent_eval\", created_at, locked=False, payload=None):\n    return repo.Event(\n        id=event_id,\n        source_node_id=\"source\",\n        cause=cause,\n        payload=dict(payload or {\"original\": event_id}),\n        correlation_id=f\"cid-{event_id}\",\n        created_at=created_at,\n        locked=locked,\n    )\n\n\n@pytest.mark.parametrize(\"protected_cause\", [\"brain_market_snapshots\", \"momentum_context_refresh\"])\ndef test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity(monkeypatch, protected_cause):\n    monkeypatch.setattr(repo, \"MAX_PENDING_QUEUE_DEPTH\", 3)\n    now = datetime(2026, 6, 4, 2, 0, tzinfo=timezone.utc)\n    old = datetime(2026, 6, 4, 0, 0)\n    db = repo.MemorySession([\n        _event(2, created_at=old),\n        _event(1, created_at=old),\n        _event(3, created_at=old + timedelta(minutes=1)),\n    ])\n    event_id = repo.enqueue_activation(\n        db,\n        source_node_id=\"nm_event_bus\",\n        cause=protected_cause,\n        payload={\"signal_type\": protected_cause},\n        correlation_id=f\"protected-{protected_cause}\",\n        now=now,\n    )\n    assert event_id == 4\n    assert repo.pending_queue_depth(db) == 3\n    dead = [event for event in db.events if event.status == \"dead\"]\n    assert [event.id for event in dead] == [1]\n    assert dead[0].processed_at == now.replace(tzinfo=None)\n    assert dead[0].payload[\"original\"] == 1\n    audit = dead[0].payload[\"_queue_pressure_shed\"]\n    assert audit[\"shed_for_cause\"] == protected_cause\n    assert audit[\"age_seconds\"] == 7200.0\n    assert db.events[-1].cause == protected_cause\n\n\ndef test_unprotected_incoming_cause_never_sheds(monkeypatch):\n    monkeypatch.setattr(repo, \"MAX_PENDING_QUEUE_DEPTH\", 2)\n    old = datetime(2026, 6, 4, 0, 0)\n    db = repo.MemorySession([_event(1, created_at=old), _event(2, created_at=old)])\n    assert repo.enqueue_activation(\n        db,\n        source_node_id=\"ordinary\",\n        cause=\"setup_vitals_change\",\n        correlation_id=\"ordinary\",\n        now=datetime(2026, 6, 4, 2, 0),\n    ) == -1\n    assert all(event.status == \"pending\" for event in db.events)\n"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "reference_family": "claude-fable-5",
+  "fixture_set": "autonomy_diagnosis_to_fix_fable5_trading_queue_priority_pilot_v1",
+  "cases": [
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "language": "python",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-fable5-trading-queue-priority-pilot",
+      "case": "cases/python_protected_refresh_queue_priority.json",
+      "oracle": "oracles/python_protected_refresh_queue_priority.json",
+      "final_oracle": "final_oracles/python_protected_refresh_queue_priority.json"
+    }
+  ]
+}
