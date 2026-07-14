@@ -1,15 +1,9 @@
 {
   "case_id": "sqlite_effective_price_intervals",
-  "expected_dimensions": [
-    "contiguous effective-interval integrity",
-    "unambiguous boundary-time resolution"
-  ],
-  "expected_files": [
-    "db/schema.sql",
-    "db/resolved_prices.sql"
-  ],
+  "expected_dimensions": ["contiguous effective-interval integrity", "unambiguous boundary-time resolution"],
+  "expected_files": ["db/schema.sql", "db/resolved_prices.sql"],
   "feedback_files": {
     "tests/feedback.sql": ".bail on\n.read db/schema.sql\n.read db/resolved_prices.sql\n\nINSERT INTO prices(sku, amount_cents, valid_from, valid_to) VALUES\n  ('coffee', 900, '2026-05-01T00:00:00Z', '2026-06-01T00:00:00Z'),\n  ('coffee', 1100, '2026-06-01T00:00:00Z', NULL);\nINSERT INTO price_requests(request_id, sku, at_time)\nVALUES ('changeover', 'coffee', '2026-06-01T00:00:00Z');\n\nCREATE TEMP TABLE assertion(ok INTEGER NOT NULL CHECK(ok = 1));\nINSERT INTO assertion\nSELECT CASE WHEN COUNT(*) = 1 AND MIN(amount_cents) = 1100 THEN 1 ELSE 0 END\nFROM resolved_prices\nWHERE request_id = 'changeover';\n",
-    "tests/test_feedback.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef execute_cli_fixture(name):\n    script = []\n    for line in (ROOT / \"tests\" / name).read_text(encoding=\"utf-8\").splitlines():\n        directive = line.strip()\n        if directive.startswith(\".read \"):\n            script.append((ROOT / directive[6:].strip()).read_text(encoding=\"utf-8\"))\n        elif not directive.startswith(\".\"):\n            script.append(line)\n    connection = sqlite3.connect(\":memory:\")\n    try:\n        connection.executescript(\"\\n\".join(script))\n    finally:\n        connection.close()\n\n\ndef test_feedback_sql_contract():\n    execute_cli_fixture(\"feedback.sql\")\n"
+    "tests/test_feedback.py": "import sqlite3\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef expand_sql(relative_path):\n    path = (ROOT / relative_path).resolve()\n    if path == ROOT or ROOT not in path.parents:\n        raise ValueError(\"SQL path escapes case repository\")\n    expanded = []\n    for line in path.read_text(encoding=\"utf-8\").splitlines():\n        parts = line.strip().split(maxsplit=1)\n        if parts and parts[0] == \".bail\":\n            continue\n        if parts and parts[0] == \".read\":\n            if len(parts) != 2:\n                raise ValueError(\"missing .read target\")\n            expanded.append(expand_sql(parts[1]))\n        else:\n            expanded.append(line)\n    return \"\\n\".join(expanded)\n\n\ndef run_sql(script_name):\n    connection = sqlite3.connect(\":memory:\")\n    try:\n        connection.executescript(expand_sql(f\"tests/{script_name}\"))\n    finally:\n        connection.close()\n\n\ndef test_feedback_sql():\n    run_sql(\"feedback.sql\")\n"
   }
 }

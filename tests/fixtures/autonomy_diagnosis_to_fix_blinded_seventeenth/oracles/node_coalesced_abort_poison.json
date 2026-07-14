@@ -1,14 +1,8 @@
 {
   "case_id": "node_coalesced_abort_poison",
-  "expected_dimensions": [
-    "subscriber-scoped cancellation for shared work",
-    "rejection-safe cache lifecycle"
-  ],
-  "expected_files": [
-    "src/flightPool.js",
-    "src/resourceClient.js"
-  ],
+  "expected_dimensions": ["subscriber-scoped shared-work lifecycle", "success-only result retention", "integrated cancellation and retry isolation"],
+  "expected_files": ["src/flightPool.js", "src/resourceClient.js"],
   "feedback_files": {
-    "tests/feedback.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { ResourceClient } = require('../src/resourceClient');\n\ntest('one cancelled subscriber does not cancel another subscriber', async () => {\n  let release;\n  const client = new ResourceClient((key, signal) => new Promise((resolve, reject) => {\n    release = () => resolve('revision-9');\n    signal.addEventListener('abort', () => reject(signal.reason || new Error('aborted')), { once: true });\n  }));\n  const cancelled = new AbortController();\n  const survivor = new AbortController();\n  const first = client.get('shared', cancelled.signal);\n  const firstRejected = assert.rejects(first);\n  const second = client.get('shared', survivor.signal);\n  await Promise.resolve();\n  cancelled.abort(new Error('view closed'));\n  release();\n  await firstRejected;\n  assert.equal(await second, 'revision-9');\n});\n"
+    "tests/feedback.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { FlightPool } = require('../src/flightPool');\nconst { ResourceClient } = require('../src/resourceClient');\n\ntest('shared work gives each direct pool subscriber its own cancellation outcome', async () => {\n  let release;\n  const pool = new FlightPool((key, signal) => new Promise((resolve, reject) => {\n    release = resolve;\n    signal.addEventListener('abort', () => reject(signal.reason || new Error('aborted')), { once: true });\n  }));\n  const closed = new AbortController();\n  const cancelled = pool.load('direct', closed.signal);\n  const cancelledCheck = assert.rejects(cancelled);\n  const survivor = pool.load('direct');\n  await Promise.resolve();\n  closed.abort(new Error('closed'));\n  release('available');\n  await cancelledCheck;\n  assert.equal(await survivor, 'available');\n});\n\ntest('a failed client read is not retained as a result', async () => {\n  let calls = 0;\n  const client = new ResourceClient(async () => {\n    calls += 1;\n    if (calls === 1) throw new Error('temporary');\n    return 'restored';\n  });\n  await assert.rejects(client.get('retryable'));\n  assert.equal(await client.get('retryable'), 'restored');\n  assert.equal(calls, 2);\n});\n"
   }
 }

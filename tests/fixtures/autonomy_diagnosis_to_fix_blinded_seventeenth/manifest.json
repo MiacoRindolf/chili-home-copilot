@@ -1,6 +1,6 @@
 {
   "reference_family": "claude-fable-5",
-  "fixture_set": "autonomy_diagnosis_to_fix_blinded_seventeenth",
+  "fixture_set": "autonomy_diagnosis_to_fix_blinded_seventeenth_author_v2",
   "cases": [
     {"case_id": "node_coalesced_abort_poison", "language": "javascript", "evaluation_role": "blinded_holdout", "split": "holdout_sealed_javascript_multifile", "case": "cases/node_coalesced_abort_poison.json", "oracle": "oracles/node_coalesced_abort_poison.json", "final_oracle": "final_oracles/node_coalesced_abort_poison.json"},
     {"case_id": "node_wrapped_sequence_window", "language": "javascript", "evaluation_role": "blinded_holdout", "split": "holdout_sealed_javascript_multifile", "case": "cases/node_wrapped_sequence_window.json", "oracle": "oracles/node_wrapped_sequence_window.json", "final_oracle": "final_oracles/node_wrapped_sequence_window.json"},

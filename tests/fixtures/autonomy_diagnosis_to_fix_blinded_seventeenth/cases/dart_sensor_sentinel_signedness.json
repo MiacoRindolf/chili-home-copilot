@@ -3,17 +3,13 @@
   "language": "dart",
   "test_runner": "dart",
   "prompt": "A cold-storage dashboard reports implausibly high temperatures during deep-cold cycles and displays a numeric temperature when a probe reports no sample. Positive room-temperature packets remain correct, and packet lengths and status bytes look valid. Diagnose the boundary between the wire representation and the domain value so real negative readings and unavailable samples remain distinct.",
-  "candidate_paths": [
-    "lib/packet_decoder.dart",
-    "lib/temperature.dart",
-    "lib/sensor_registry.dart"
-  ],
+  "candidate_paths": ["lib/packet_decoder.dart", "lib/temperature.dart", "lib/sensor_registry.dart"],
   "max_files": 2,
   "repo_files": {
-    "pubspec.yaml": "name: sensor_packet_case\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\ndev_dependencies:\n  test: any\n",
+    "pubspec.yaml": "name: sensor_packet_case\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\n",
     "lib/packet_decoder.dart": "class SensorFrame {\n  final int rawTemperature;\n  final int status;\n\n  const SensorFrame(this.rawTemperature, this.status);\n}\n\nSensorFrame decodeSensorFrame(List<int> packet) {\n  if (packet.length != 3) {\n    throw FormatException('expected three-byte sensor packet');\n  }\n  final raw = packet[0] | (packet[1] << 8);\n  return SensorFrame(raw, packet[2]);\n}\n",
     "lib/temperature.dart": "import 'packet_decoder.dart';\n\ndouble? temperatureCelsius(SensorFrame frame) {\n  return frame.rawTemperature / 100.0;\n}\n",
     "lib/sensor_registry.dart": "class SensorRegistry {\n  final Set<String> activeIds;\n  SensorRegistry(Iterable<String> ids) : activeIds = ids.toSet();\n\n  bool contains(String id) => activeIds.contains(id);\n}\n",
-    "tests/public_test.dart": "import '../lib/packet_decoder.dart';\nimport '../lib/temperature.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final frame = decodeSensorFrame([0xc4, 0x09, 0x01]);\n  check(frame.rawTemperature == 2500, 'positive raw temperature');\n  check(temperatureCelsius(frame) == 25.0, 'positive Celsius conversion');\n\n  var malformedRejected = false;\n  try {\n    decodeSensorFrame([0, 1]);\n  } on FormatException {\n    malformedRejected = true;\n  }\n  check(malformedRejected, 'malformed packet length is rejected');\n}\n"
+    "tests/public_test.dart": "import '../lib/packet_decoder.dart';\nimport '../lib/temperature.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final frame = decodeSensorFrame([0xc4, 0x09, 0x01]);\n  check(frame.rawTemperature == 2500, 'positive raw value');\n  check(temperatureCelsius(frame) == 25.0, 'positive domain value');\n\n  var malformedRejected = false;\n  try {\n    decodeSensorFrame([0, 1]);\n  } on FormatException {\n    malformedRejected = true;\n  }\n  check(malformedRejected, 'packet length validation');\n}\n"
   }
 }

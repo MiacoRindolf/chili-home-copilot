@@ -1,8 +1,8 @@
 {
   "case_id": "python_invoice_residual_allocation",
-  "expected_dimensions": ["currency-specific minor-unit precision", "deterministic residual-conserving allocation"],
+  "expected_dimensions": ["currency-specific monetary precision", "deterministic residual-conserving allocation"],
   "expected_files": ["billing/money.py", "billing/allocation.py"],
   "feedback_files": {
-    "tests/test_feedback.py": "from decimal import Decimal\n\nfrom billing.allocation import allocate\nfrom billing.money import round_minor\n\n\ndef test_settlement_precision_is_currency_aware():\n    assert round_minor(Decimal(\"1.2344\"), \"KWD\") == Decimal(\"1.234\")\n\n\ndef test_small_charge_conserves_total_with_stable_residual_order():\n    shares = allocate(Decimal(\"0.05\"), [1, 1], \"USD\")\n    assert shares == [Decimal(\"0.03\"), Decimal(\"0.02\")]\n    assert sum(shares) == Decimal(\"0.05\")\n"
+    "tests/test_feedback.py": "from decimal import Decimal\n\nfrom billing.allocation import allocate\nfrom billing.money import minor_unit, round_minor\n\n\ndef test_money_uses_settlement_precision_for_three_decimal_currency():\n    assert minor_unit(\"KWD\") == Decimal(\"0.001\")\n    assert round_minor(Decimal(\"1.2344\"), \"KWD\") == Decimal(\"1.234\")\n\n\ndef test_allocation_conserves_a_small_total_with_stable_residual_order():\n    shares = allocate(Decimal(\"0.05\"), [1, 1], \"USD\")\n    assert shares == [Decimal(\"0.03\"), Decimal(\"0.02\")]\n    assert sum(shares) == Decimal(\"0.05\")\n"
   }
 }

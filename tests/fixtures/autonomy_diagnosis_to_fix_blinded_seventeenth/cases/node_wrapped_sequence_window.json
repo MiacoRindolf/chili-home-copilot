@@ -3,11 +3,7 @@
   "language": "javascript",
   "test_runner": "node_test",
   "prompt": "A long-lived edge replica occasionally freezes for one full counter cycle just after a gateway sequence rolls over. Logs show that the transport continues delivering frames, including a few delayed frames from immediately before the rollover, but the projected state stops advancing. Short-lived integration tests and ordinary duplicate suppression still pass. Diagnose the disagreement between sequence classification and state application, preserving protection against replayed or delayed frames.",
-  "candidate_paths": [
-    "src/serialOrder.js",
-    "src/replica.js",
-    "src/frameCodec.js"
-  ],
+  "candidate_paths": ["src/serialOrder.js", "src/replica.js", "src/frameCodec.js"],
   "max_files": 2,
   "repo_files": {
     "package.json": "{\"name\":\"wrapped-sequence-case\",\"private\":true,\"scripts\":{\"test\":\"node --test\"}}\n",

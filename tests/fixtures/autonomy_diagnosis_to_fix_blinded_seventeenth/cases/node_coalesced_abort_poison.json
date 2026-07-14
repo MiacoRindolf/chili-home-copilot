@@ -3,11 +3,7 @@
   "language": "javascript",
   "test_runner": "node_test",
   "prompt": "A metadata client coalesces concurrent reads and normally saves substantial upstream load. In production, cancelling one dashboard request can make an unrelated dashboard waiting on the same key fail too, and that key can remain unusable after the upstream has recovered. The issue is timing-dependent and was not reproduced by the existing happy-path tests. Diagnose the ownership boundary between request sharing and result retention, then make the smallest complete repair without removing successful caching or request coalescing.",
-  "candidate_paths": [
-    "src/flightPool.js",
-    "src/resourceClient.js",
-    "src/keyPolicy.js"
-  ],
+  "candidate_paths": ["src/flightPool.js", "src/resourceClient.js", "src/keyPolicy.js"],
   "max_files": 2,
   "repo_files": {
     "package.json": "{\"name\":\"coalesced-client-case\",\"private\":true,\"scripts\":{\"test\":\"node --test\"}}\n",
