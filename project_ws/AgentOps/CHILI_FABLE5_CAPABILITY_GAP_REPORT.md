@@ -577,6 +577,30 @@ change the untouched seventeenth 0/8 functional result, does not establish unkno
 not support a Fable 5 parity claim. Full details:
 `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_DISCLOSED_SEVENTEENTH_SQL_AB_RECEIPT.md`.
 
+### Seventeenth Disclosed Node Shared-State A/B
+
+The disclosed `node_coalesced_abort_poison` case exposed two different gaps. The repair system had no generic
+subscriber-lifetime/result-retention operator, and the local diagnosis packet ranked constructor and key-policy
+snippets above the direct abort and unresolved-promise cache lines. A first post-repair replay solved the fixture
+functionally but the raw local reasoner selected a key-normalization distractor.
+
+Commits `56203b45`, `fa0cd8ff`, and `fe89a111` added a source-shape-gated shared-work repair, contract-aware
+behavioral evidence ranking, and bounded static contract/source mismatch context. Commit `3c69c2c4` separately
+tightened the honesty gate: successful model calls no longer qualify as Fable 5-class live reasoning unless the
+model conclusion is confirmed, causally sufficient, and consistent with the retained family.
+
+The final disclosed replay scored **100/100** with exact two-file ownership, public/feedback/fresh-final success,
+**2/2 successful local calls**, no model errors, **110.9 seconds**, and zero premium calls. The raw reasoner moved
+to the correct `state` family and surfaced both unresolved-promise retention and unisolated abort propagation, but
+selected only the cache half as its inconclusive leader. Consequently live-reasoning qualification was **0/1**,
+claim eligibility was false, and the honest verdict remained `needs_improvement`. Full affected validation passed
+**314 tests**.
+
+This is stronger system-level evidence than a model wrapper: deterministic evidence extraction, causal gates,
+symbolic repair, rollback, and sealed validation all contributed without a premium call. It is still disclosed
+mechanism capture, not unknown-mechanism transfer or Fable 5 parity. Full details:
+`project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_DISCLOSED_SEVENTEENTH_NODE_AB_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -608,7 +632,7 @@ not support a Fable 5 parity claim. Full details:
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local output remains stochastic, and structural usability is not diagnostic quality. The untouched fifteenth suite completed 78/78 local calls with all eight cases live-reasoning-qualified, yet solved only 1/8 finals. The disclosed lane later reached 8/8, but unknown-mechanism reasoning remains a separate capability.
+5. Local output remains stochastic, and structural usability is not diagnostic quality. The untouched fifteenth suite completed 78/78 local calls with all eight cases live-reasoning-qualified, yet solved only 1/8 finals. In the disclosed Node shared-state replay, the local reasoner reached the correct family and found both component mechanisms but still failed to synthesize the complete leading boundary. Disclosed functional solves therefore remain separate from unknown-mechanism reasoning quality.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.

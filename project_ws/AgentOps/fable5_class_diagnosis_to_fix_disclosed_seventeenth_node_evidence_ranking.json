@@ -1,0 +1,1268 @@
+{
+  "accepted_diagnosis_count": 1,
+  "average_case_duration_ms": 155876.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "state",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 291,
+        "exit_code": 1,
+        "output": "[tests/feedback.test.js]\n\u2716 shared work gives each direct pool subscriber its own cancellation outcome (1.2114ms)\n\u2716 a failed client read is not retained with pool behavior isolated (0.2401ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 79.6966\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.js:8:1\n\u2716 shared work gives each direct pool subscriber its own cancellation outcome (1.2114ms)\n  Error: closed\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-d93t894n\\repo\\tests\\feedback.test.js:19:16)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)\n\ntest at tests\\feedback.test.js:25:1\n\u2716 a failed client read is not retained with pool behavior isolated (0.2401ms)\n  Error: temporary\n      at Object.load (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-d93t894n\\repo\\tests\\feedback.test.js:30:30)\n      at ResourceClient.get (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-d93t894n\\repo\\src\\resourceClient.js:13:37)\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-d93t894n\\repo\\tests\\feedback.test.js:35:31)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)\n      at Test.postRun (node:internal/test_runner/test:1330:19)\n      at Test.run (node:internal/test_runner/test:1258:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.4739ms)\n\u2714 a normalized successful value remains cached (0.2342ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 90.4374",
+        "passed": false,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/feedback.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "baseline_final_tests": {
+        "duration_ms": 304,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.js]\n\u2716 direct pool subscribers remain isolated when several peers leave (1.5125ms)\n\u2716 direct client crosses isolated repeated failures before retaining success (0.2776ms)\n\u2716 integrated sharing survives one cancellation and still caches success (0.7475ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 3\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 91.7252\n\n\u2716 failing tests:\n\ntest at tests\\final.test.js:8:1\n\u2716 direct pool subscribers remain isolated when several peers leave (1.5125ms)\n  Error: upstream aborted\n      at signal.addEventListener.once (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-qrbn_0zg\\repo\\tests\\final.test.js:15:77)\n      at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)\n      at AbortSignal.dispatchEvent (node:internal/event_target:776:26)\n      at runAbort (node:internal/abort_controller:488:10)\n      at abortSignal (node:internal/abort_controller:459:3)\n      at AbortController.abort (node:internal/abort_controller:507:5)\n      at signal.addEventListener.once (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-qrbn_0zg\\repo\\src\\flightPool.js:25:66)\n      at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)\n      at AbortSignal.dispatchEvent (node:internal/event_target:776:26)\n      at runAbort (node:internal/abort_controller:488:10)\n\ntest at tests\\final.test.js:35:1\n\u2716 direct client crosses isolated repeated failures before retaining success (0.2776ms)\n  Error: transient-1\n      at Object.load (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-qrbn_0zg\\repo\\tests\\final.test.js:40:28)\n      at ResourceClient.get (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-qrbn_0zg\\repo\\src\\resourceClient.js:13:37)\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-qrbn_0zg\\repo\\tests\\final.test.js:45:31)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)\n      at Test.postRun (node:internal/test_runner/test:1330:19)\n      at Test.run (node:internal/test_runner/test:1258:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)\n\ntest at tests\\final.test.js:52:1\n\u2716 integrated sharing survives one cancellation and still caches success (0.7475ms)\n  Error: navigation\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-qrbn_0zg\\repo\\tests\\final.test.js:65:18)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7)\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.6513ms)\n\u2714 a normalized successful value remains cached (0.2538ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 86.0715",
+        "passed": false,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/final.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "baseline_public_tests": {
+        "duration_ms": 126,
+        "exit_code": 0,
+        "output": "[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.3206ms)\n\u2714 a normalized successful value remains cached (0.2112ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 74.9414",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/public.test.js"
+        ],
+        "test_process_count": 1
+      },
+      "case_id": "node_coalesced_abort_poison",
+      "changed_files": [
+        "src/flightPool.js",
+        "src/resourceClient.js"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "state",
+        "selected_files": [
+          "src/flightPool.js",
+          "src/resourceClient.js"
+        ],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "state",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "state",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "state",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Cache retention observed in production",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Cache retains failures",
+            "expected_if_true": "Cache clears on cancellation",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "state",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "src"
+              ],
+              "probe_id": "p1",
+              "query": "cache.clear",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          },
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Inflight leaks across keys",
+            "expected_if_true": "Inflight entries deleted on completion",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "data",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "src"
+              ],
+              "probe_id": "p2",
+              "query": "inflight.delete",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          },
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Normalization mismatch causes cache partitioning",
+            "expected_if_true": "Normalization consistent across calls",
+            "experiment_id": "x3",
+            "held_constant_dimensions": [
+              "data",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h3"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "code",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "src"
+              ],
+              "probe_id": "p3",
+              "query": "normalizeKey",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Cache retains cancellation state for shared keys",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Verify cache clears on cancellation",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Inflight tracking leaks across key namespaces",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Confirm inflight entries are deleted on completion",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-5",
+              "source-8"
+            ]
+          },
+          {
+            "claim": "Normalization mismatch causes cache partitioning",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Validate normalization consistency across calls",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "source-7",
+              "source-16"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 77,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "state"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Cache retains failures",
+            "expected_if_true": "Cache clears on cancellation",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T04:11:10.099839+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          },
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "data"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "data",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p2",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p2",
+            "expected_if_false": "Inflight leaks across keys",
+            "expected_if_true": "Inflight entries deleted on completion",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "independence_key": "diagnostic_probe:p2",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-14T04:11:10.125083+00:00",
+            "provenance": "diagnostic_probe:p2",
+            "reliability": 0.9,
+            "sequence": 1,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: src\\flightPool.js:17:        if (this.inflight.get(key) === flight) this.inflight.delete(key);"
+          },
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "code"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "code",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p3",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p3",
+            "expected_if_false": "Normalization mismatch causes cache partitioning",
+            "expected_if_true": "Normalization consistent across calls",
+            "experiment_id": "x3",
+            "held_constant_dimensions": [
+              "data",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h3"
+            ],
+            "independence_key": "diagnostic_probe:p3",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-14T04:11:10.150607+00:00",
+            "provenance": "diagnostic_probe:p3",
+            "reliability": 0.9,
+            "sequence": 2,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: src\\keyPolicy.js:3:function normalizeKey(value) {\nsrc\\keyPolicy.js:8:  return client.get(normalizeKey(value), signal);\nsrc\\keyPolicy.js:11:module.exports = { normalizeKey, loadNormalized };"
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "state"
+            ],
+            "dimension": "state",
+            "duration_ms": 18,
+            "exit_code": 1,
+            "expected_if_false": "Cache retains failures",
+            "expected_if_true": "Cache clears on cancellation",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T04:11:10.099839+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "changed_dimensions": [
+              "data"
+            ],
+            "dimension": "data",
+            "duration_ms": 17,
+            "exit_code": 0,
+            "expected_if_false": "Inflight leaks across keys",
+            "expected_if_true": "Inflight entries deleted on completion",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T04:11:10.125083+00:00",
+            "output": "src\\flightPool.js:17:        if (this.inflight.get(key) === flight) this.inflight.delete(key);",
+            "probe_id": "p2",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "changed_dimensions": [
+              "code"
+            ],
+            "dimension": "code",
+            "duration_ms": 20,
+            "exit_code": 0,
+            "expected_if_false": "Normalization mismatch causes cache partitioning",
+            "expected_if_true": "Normalization consistent across calls",
+            "experiment_id": "x3",
+            "held_constant_dimensions": [
+              "data",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h3"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T04:11:10.150607+00:00",
+            "output": "src\\keyPolicy.js:3:function normalizeKey(value) {\nsrc\\keyPolicy.js:8:  return client.get(normalizeKey(value), signal);\nsrc\\keyPolicy.js:11:module.exports = { normalizeKey, loadNormalized };",
+            "probe_id": "p3",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "node_coalesced_abort_poison",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Cache retains cancellation state for shared keys",
+          "confidence": 0.0,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Cache retention observed in production",
+          "requested_status": "inconclusive",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "Shared work has subscriber-scoped cancellation and success-only result retention: one caller leaves through its own wrapper without aborting surviving peers; the upstream is aborted only after every live subscriber leaves. In-flight work remains coalesced, while the result cache stores only resolved success values and never retains rejection or cancellation for a later retry."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Cache retains cancellation state for shared keys",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Verify cache clears on cancellation",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Inflight tracking leaks across key namespaces",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Confirm inflight entries are deleted on completion",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-5",
+              "source-8"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Normalization mismatch causes cache partitioning",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0.9,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Validate normalization consistency across calls",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-7",
+              "source-16"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Verify cache clears on cancellation",
+            "dimension": "state",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Confirm inflight entries are deleted on completion",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Validate normalization consistency across calls",
+            "dimension": "code",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache retains cancellation state for shared keys",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retention observed in production",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache retains cancellation state for shared keys",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retention observed in production",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Cache retention observed in production",
+            "status": "inconclusive"
+          },
+          "response_chars": 1239,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache retains cancellation state for shared keys",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retention observed in production",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache retains cancellation state for shared keys",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retention observed in production",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Cache retention observed in production",
+            "status": "inconclusive"
+          },
+          "response_chars": 2005,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 155876,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 277,
+        "exit_code": 0,
+        "output": "[tests/feedback.test.js]\n\u2714 shared work gives each direct pool subscriber its own cancellation outcome (1.2604ms)\n\u2714 a failed client read is not retained with pool behavior isolated (0.3028ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 87.1753\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.453ms)\n\u2714 a normalized successful value remains cached (0.2249ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 77.8675",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/feedback.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "final_tests": {
+        "duration_ms": 295,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.js]\n\u2714 direct pool subscribers remain isolated when several peers leave (1.3644ms)\n\u2714 direct client crosses isolated repeated failures before retaining success (0.8582ms)\n\u2714 integrated sharing survives one cancellation and still caches success (0.3224ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 3\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 99.4582\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.4679ms)\n\u2714 a normalized successful value remains cached (0.2515ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 79.9962",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/final.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:node_coalesced_abort_poison",
+          "path": "cases/node_coalesced_abort_poison.json",
+          "sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "size_bytes": 3741
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:node_coalesced_abort_poison",
+          "path": "oracles/node_coalesced_abort_poison.json",
+          "sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "size_bytes": 1738
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:node_coalesced_abort_poison",
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "size_bytes": 2849
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "state",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "artifact": "case:node_coalesced_abort_poison",
+          "case_id": "node_coalesced_abort_poison",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "path": "cases/node_coalesced_abort_poison.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T04:08:36.990503+00:00"
+        },
+        {
+          "actual_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "artifact": "feedback_oracle:node_coalesced_abort_poison",
+          "case_id": "node_coalesced_abort_poison",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "path": "oracles/node_coalesced_abort_poison.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T04:11:10.352881+00:00"
+        },
+        {
+          "case_id": "node_coalesced_abort_poison",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 2,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T04:11:11.542679+00:00"
+        },
+        {
+          "actual_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "artifact": "final_oracle:node_coalesced_abort_poison",
+          "case_id": "node_coalesced_abort_poison",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T04:11:11.542937+00:00"
+        },
+        {
+          "case_id": "node_coalesced_abort_poison",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "sequence": 11,
+          "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "timestamp_utc": "2026-07-14T04:11:11.542993+00:00"
+        },
+        {
+          "case_id": "node_coalesced_abort_poison",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T04:11:11.544939+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "node_coalesced_abort_poison",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T04:11:12.865838+00:00"
+        },
+        {
+          "actual_count": 2,
+          "case_id": "node_coalesced_abort_poison",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 2,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T04:11:12.865865+00:00"
+        }
+      ],
+      "language": "javascript",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 24135348000,
+          "json_object_valid": true,
+          "latency_ms": 91981,
+          "load_duration_ns": 179918600,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 20409,
+          "prompt_eval_count": 5612,
+          "prompt_eval_duration_ns": 2488041000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Cache retains cancellation state for shared keys\",\"dimension\":\"state\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify cache clears on cancellation\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Inflight tracking leaks across key namespaces\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-5\",\"source-8\"],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm inflight entries are deleted on completion\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Normalization mismatch causes cache partitioning\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-7\",\"source-16\"],\"contradict_evidence_ids\":[],\"falsification\":\"Validate normalization consistency across calls\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"state\"],\"held_constant_dimensions\":[\"code\",\"data\"],\"expected_if_true\":\"Cache clears on cancellation\",\"expected_if_false\":\"Cache retains failures\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"src\"],\"query\":\"cache.clear\",\"dimension\":\"state\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"inconclusive\",\"evidence_ids\":[\"operator-2\"],\"reason\":\"Cache retention observed in production\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 2940,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 282,
+          "wall_deadline_clamped": false,
+          "wall_ms": 91981
+        },
+        {
+          "case_budget_remaining_before_sec": 388.01881109998794,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 37924431000,
+          "json_object_valid": true,
+          "latency_ms": 60346,
+          "load_duration_ns": 166102000,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:2",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 23925,
+          "prompt_eval_count": 5861,
+          "prompt_eval_duration_ns": 21880045000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Cache retains cancellation state for shared keys\",\"dimension\":\"state\",\"support_evidence_ids\":[\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify cache clears on cancellation\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Inflight tracking leaks across key namespaces\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-5\",\"source-8\"],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm inflight entries are deleted on completion\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Normalization mismatch causes cache partitioning\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-7\",\"source-16\"],\"contradict_evidence_ids\":[],\"falsification\":\"Validate normalization consistency across calls\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"state\"],\"held_constant_dimensions\":[\"code\",\"data\"],\"expected_if_true\":\"Cache clears on cancellation\",\"expected_if_false\":\"Cache retains failures\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"src\"],\"query\":\"cache.clear\",\"dimension\":\"state\"}},{\"experiment_id\":\"x2\",\"hypothesis_ids\":[\"h2\"],\"changed_dimensions\":[\"data\"],\"held_constant_dimensions\":[\"code\",\"state\"],\"expected_if_true\":\"Inflight entries deleted on completion\",\"expected_if_false\":\"Inflight leaks across keys\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p2\",\"kind\":\"search\",\"paths\":[\"src\"],\"query\":\"inflight.delete\",\"dimension\":\"data\"}},{\"experiment_id\":\"x3\",\"hypothesis_ids\":[\"h3\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"state\"],\"expected_if_true\":\"Normalization consistent across calls\",\"expected_if_false\":\"Normalization mismatch causes cache partitioning\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p3\",\"kind\":\"search\",\"paths\":[\"src\"],\"query\":\"normalizeKey\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"inconclusive\",\"evidence_ids\":[\"operator-2\"],\"reason\":\"Cache retention observed in production\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 452,
+          "wall_deadline_clamped": false,
+          "wall_ms": 60346
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "development_regression",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 143,
+        "exit_code": 0,
+        "output": "[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.6862ms)\n\u2714 a normalized successful value remains cached (0.2562ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 85.2158",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/public.test.js"
+        ],
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "state",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "src/flightPool.js",
+        "src/resourceClient.js"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 2,
+      "test_runner": "node_test",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-14T04:11:12.889769+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:node_coalesced_abort_poison",
+          "path": "cases/node_coalesced_abort_poison.json",
+          "sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "size_bytes": 3741
+        },
+        "case_id": "node_coalesced_abort_poison",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:node_coalesced_abort_poison",
+          "path": "oracles/node_coalesced_abort_poison.json",
+          "sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "size_bytes": 1738
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:node_coalesced_abort_poison",
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "size_bytes": 2849
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902
+    }
+  },
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902,
+      "timestamp_utc": "2026-07-14T04:08:34.226202+00:00"
+    },
+    {
+      "artifact": "case:node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "path": "cases/node_coalesced_abort_poison.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+      "size_bytes": 3741,
+      "timestamp_utc": "2026-07-14T04:08:34.229550+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "path": "oracles/node_coalesced_abort_poison.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+      "size_bytes": 1738,
+      "timestamp_utc": "2026-07-14T04:08:34.230114+00:00"
+    },
+    {
+      "artifact": "final_oracle:node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/node_coalesced_abort_poison.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "size_bytes": 2849,
+      "timestamp_utc": "2026-07-14T04:08:34.230844+00:00"
+    },
+    {
+      "actual_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T04:08:34.235155+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_node_subscriber_recovery.checkpoint.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T04:08:36.988148+00:00"
+    },
+    {
+      "actual_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+      "artifact": "case:node_coalesced_abort_poison",
+      "case_id": "node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+      "path": "cases/node_coalesced_abort_poison.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T04:08:36.990503+00:00"
+    },
+    {
+      "actual_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+      "artifact": "feedback_oracle:node_coalesced_abort_poison",
+      "case_id": "node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+      "path": "oracles/node_coalesced_abort_poison.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T04:11:10.352881+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 2,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T04:11:11.542679+00:00"
+    },
+    {
+      "actual_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "artifact": "final_oracle:node_coalesced_abort_poison",
+      "case_id": "node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "path": "final_oracles/node_coalesced_abort_poison.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T04:11:11.542937+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/node_coalesced_abort_poison.json",
+      "sequence": 11,
+      "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "timestamp_utc": "2026-07-14T04:11:11.542993+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T04:11:11.544939+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "node_coalesced_abort_poison",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T04:11:12.865838+00:00"
+    },
+    {
+      "actual_count": 2,
+      "case_id": "node_coalesced_abort_poison",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 2,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T04:11:12.865865+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T04:11:12.867401+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T04:11:12.889667+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "6fccd23553b5dcd23d07ef073cdcdfdc577c12a623e2c4cf6d8337381508179f",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_node_subscriber_recovery.checkpoint.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 2,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 2,
+  "verdict": "needs_improvement"
+}

@@ -1,0 +1,1062 @@
+{
+  "accepted_diagnosis_count": 1,
+  "average_case_duration_ms": 110858.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "state",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 301,
+        "exit_code": 1,
+        "output": "[tests/feedback.test.js]\n\u2716 shared work gives each direct pool subscriber its own cancellation outcome (1.17ms)\n\u2716 a failed client read is not retained with pool behavior isolated (0.2693ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 79.7998\n\n\u2716 failing tests:\n\ntest at tests\\feedback.test.js:8:1\n\u2716 shared work gives each direct pool subscriber its own cancellation outcome (1.17ms)\n  Error: closed\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-tp6iycb1\\repo\\tests\\feedback.test.js:19:16)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)\n\ntest at tests\\feedback.test.js:25:1\n\u2716 a failed client read is not retained with pool behavior isolated (0.2693ms)\n  Error: temporary\n      at Object.load (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-tp6iycb1\\repo\\tests\\feedback.test.js:30:30)\n      at ResourceClient.get (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-tp6iycb1\\repo\\src\\resourceClient.js:13:37)\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-tp6iycb1\\repo\\tests\\feedback.test.js:35:31)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)\n      at Test.postRun (node:internal/test_runner/test:1330:19)\n      at Test.run (node:internal/test_runner/test:1258:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.6747ms)\n\u2714 a normalized successful value remains cached (0.2571ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 100.781",
+        "passed": false,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/feedback.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "baseline_final_tests": {
+        "duration_ms": 285,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.js]\n\u2716 direct pool subscribers remain isolated when several peers leave (1.2958ms)\n\u2716 direct client crosses isolated repeated failures before retaining success (0.2944ms)\n\u2716 integrated sharing survives one cancellation and still caches success (0.4099ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 0\n\u2139 fail 3\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 83.2987\n\n\u2716 failing tests:\n\ntest at tests\\final.test.js:8:1\n\u2716 direct pool subscribers remain isolated when several peers leave (1.2958ms)\n  Error: upstream aborted\n      at signal.addEventListener.once (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-g30duwf3\\repo\\tests\\final.test.js:15:77)\n      at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)\n      at AbortSignal.dispatchEvent (node:internal/event_target:776:26)\n      at runAbort (node:internal/abort_controller:488:10)\n      at abortSignal (node:internal/abort_controller:459:3)\n      at AbortController.abort (node:internal/abort_controller:507:5)\n      at signal.addEventListener.once (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-g30duwf3\\repo\\src\\flightPool.js:25:66)\n      at [nodejs.internal.kHybridDispatch] (node:internal/event_target:843:20)\n      at AbortSignal.dispatchEvent (node:internal/event_target:776:26)\n      at runAbort (node:internal/abort_controller:488:10)\n\ntest at tests\\final.test.js:35:1\n\u2716 direct client crosses isolated repeated failures before retaining success (0.2944ms)\n  Error: transient-1\n      at Object.load (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-g30duwf3\\repo\\tests\\final.test.js:40:28)\n      at ResourceClient.get (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-g30duwf3\\repo\\src\\resourceClient.js:13:37)\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-g30duwf3\\repo\\tests\\final.test.js:45:31)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)\n      at Test.postRun (node:internal/test_runner/test:1330:19)\n      at Test.run (node:internal/test_runner/test:1258:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)\n\ntest at tests\\final.test.js:52:1\n\u2716 integrated sharing survives one cancellation and still caches success (0.4099ms)\n  Error: navigation\n      at TestContext.<anonymous> (C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-g30duwf3\\repo\\tests\\final.test.js:65:18)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7)\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.4995ms)\n\u2714 a normalized successful value remains cached (0.4817ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 83.8268",
+        "passed": false,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/final.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "baseline_public_tests": {
+        "duration_ms": 140,
+        "exit_code": 0,
+        "output": "[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.4017ms)\n\u2714 a normalized successful value remains cached (0.2534ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 81.5381",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/public.test.js"
+        ],
+        "test_process_count": 1
+      },
+      "case_id": "node_coalesced_abort_poison",
+      "changed_files": [
+        "src/flightPool.js",
+        "src/resourceClient.js"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "state",
+        "selected_files": [
+          "src/flightPool.js",
+          "src/resourceClient.js"
+        ],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "state",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "state",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "state",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "contract-source-3"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Cache retains unresolved promises",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Cache isolates resolved values",
+            "expected_if_true": "Cache leaks unresolved promises",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "state",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "src"
+              ],
+              "probe_id": "p1",
+              "query": "cache.set",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Cache stores unresolved shared promises",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Cache only holds resolved values",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "contract-source-3"
+            ]
+          },
+          {
+            "claim": "Abort signal propagation is unbounded",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Abort signals isolate subscribers",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-5",
+              "source-6"
+            ]
+          },
+          {
+            "claim": "Timing race in coalescing logic",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Coalescing completes before aborts",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "operator-3"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 26,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "state"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "state",
+            "dimension_origin": "inferred",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Cache isolates resolved values",
+            "expected_if_true": "Cache leaks unresolved promises",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "artifact",
+            "observed_at": "2026-07-14T04:16:51.039027+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.9,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=0: src\\resourceClient.js:13:      this.cache.set(key, this.pool.load(key, signal));"
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "state"
+            ],
+            "dimension": "state",
+            "duration_ms": 19,
+            "exit_code": 0,
+            "expected_if_false": "Cache isolates resolved values",
+            "expected_if_true": "Cache leaks unresolved promises",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T04:16:51.039027+00:00",
+            "output": "src\\resourceClient.js:13:      this.cache.set(key, this.pool.load(key, signal));",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "node_coalesced_abort_poison",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Cache stores unresolved shared promises",
+          "confidence": 0.0,
+          "dimension": "state",
+          "evidence_ids": [
+            "contract-source-3"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Cache retains unresolved promises",
+          "requested_status": "inconclusive",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "Shared work has subscriber-scoped cancellation and success-only result retention: one caller leaves through its own wrapper without aborting surviving peers; the upstream is aborted only after every live subscriber leaves. In-flight work remains coalesced, while the result cache stores only resolved success values and never retains rejection or cancellation for a later retry."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Cache stores unresolved shared promises",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.188,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.94,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Cache only holds resolved values",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "contract-source-3"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Abort signal propagation is unbounded",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Abort signals isolate subscribers",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-5",
+              "source-6"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Timing race in coalescing logic",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Coalescing completes before aborts",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-3"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Cache only holds resolved values",
+            "dimension": "state",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Abort signals isolate subscribers",
+            "dimension": "code",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Coalescing completes before aborts",
+            "dimension": "clock",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache stores unresolved shared promises",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "contract-source-3"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retains unresolved promises",
+            "requested_status": "rejected",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache stores unresolved shared promises",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "contract-source-3"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retains unresolved promises",
+            "requested_status": "rejected",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "contract-source-3"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Cache retains unresolved promises",
+            "status": "rejected"
+          },
+          "response_chars": 1177,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache stores unresolved shared promises",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "contract-source-3"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retains unresolved promises",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Cache stores unresolved shared promises",
+            "confidence": 0.0,
+            "dimension": "state",
+            "evidence_ids": [
+              "contract-source-3"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Cache retains unresolved promises",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "contract-source-3"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Cache retains unresolved promises",
+            "status": "inconclusive"
+          },
+          "response_chars": 1181,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 110858,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 278,
+        "exit_code": 0,
+        "output": "[tests/feedback.test.js]\n\u2714 shared work gives each direct pool subscriber its own cancellation outcome (1.2335ms)\n\u2714 a failed client read is not retained with pool behavior isolated (0.3ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 87.7356\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.4933ms)\n\u2714 a normalized successful value remains cached (0.2883ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 80.397",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/feedback.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "final_tests": {
+        "duration_ms": 281,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "[tests/final.test.js]\n\u2714 direct pool subscribers remain isolated when several peers leave (1.3614ms)\n\u2714 direct client crosses isolated repeated failures before retaining success (0.8022ms)\n\u2714 integrated sharing survives one cancellation and still caches success (0.3085ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 3\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 85.7531\n\n[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.4547ms)\n\u2714 a normalized successful value remains cached (0.2486ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 81.776",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/final.test.js",
+          "tests/public.test.js"
+        ],
+        "test_process_count": 2
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:node_coalesced_abort_poison",
+          "path": "cases/node_coalesced_abort_poison.json",
+          "sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "size_bytes": 3741
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:node_coalesced_abort_poison",
+          "path": "oracles/node_coalesced_abort_poison.json",
+          "sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "size_bytes": 1738
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:node_coalesced_abort_poison",
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "size_bytes": 2849
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "state",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "artifact": "case:node_coalesced_abort_poison",
+          "case_id": "node_coalesced_abort_poison",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "path": "cases/node_coalesced_abort_poison.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T04:15:03.054051+00:00"
+        },
+        {
+          "actual_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "artifact": "feedback_oracle:node_coalesced_abort_poison",
+          "case_id": "node_coalesced_abort_poison",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "path": "oracles/node_coalesced_abort_poison.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T04:16:51.325179+00:00"
+        },
+        {
+          "case_id": "node_coalesced_abort_poison",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 2,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T04:16:52.607549+00:00"
+        },
+        {
+          "actual_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "artifact": "final_oracle:node_coalesced_abort_poison",
+          "case_id": "node_coalesced_abort_poison",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T04:16:52.607865+00:00"
+        },
+        {
+          "case_id": "node_coalesced_abort_poison",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "sequence": 11,
+          "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "timestamp_utc": "2026-07-14T04:16:52.607942+00:00"
+        },
+        {
+          "case_id": "node_coalesced_abort_poison",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T04:16:52.609420+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "node_coalesced_abort_poison",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T04:16:53.911112+00:00"
+        },
+        {
+          "actual_count": 2,
+          "case_id": "node_coalesced_abort_poison",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 2,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T04:16:53.911130+00:00"
+        }
+      ],
+      "language": "javascript",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 22656060000,
+          "json_object_valid": true,
+          "latency_ms": 78118,
+          "load_duration_ns": 167535200,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 23325,
+          "prompt_eval_count": 6314,
+          "prompt_eval_duration_ns": 2699867000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Cache stores unresolved shared promises\",\"dimension\":\"state\",\"support_evidence_ids\":[\"contract-source-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Cache only holds resolved values\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Abort signal propagation is unbounded\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-5\",\"source-6\"],\"contradict_evidence_ids\":[],\"falsification\":\"Abort signals isolate subscribers\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Timing race in coalescing logic\",\"dimension\":\"clock\",\"support_evidence_ids\":[\"operator-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Coalescing completes before aborts\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"state\"],\"held_constant_dimensions\":[\"code\",\"data\"],\"expected_if_true\":\"Cache leaks unresolved promises\",\"expected_if_false\":\"Cache isolates resolved values\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"src\"],\"query\":\"cache.set\",\"dimension\":\"state\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"rejected\",\"evidence_ids\":[\"contract-source-3\"],\"reason\":\"Cache retains unresolved promises\"}}",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 3167,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 274,
+          "wall_deadline_clamped": false,
+          "wall_ms": 78118
+        },
+        {
+          "case_budget_remaining_before_sec": 401.88148659997387,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 21941341000,
+          "json_object_valid": true,
+          "latency_ms": 29215,
+          "load_duration_ns": 167566900,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:2",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 26746,
+          "prompt_eval_count": 6485,
+          "prompt_eval_duration_ns": 6363990000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Cache stores unresolved shared promises\",\"dimension\":\"state\",\"support_evidence_ids\":[\"contract-source-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Cache only holds resolved values\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Abort signal propagation is unbounded\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-5\",\"source-6\"],\"contradict_evidence_ids\":[],\"falsification\":\"Abort signals isolate subscribers\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Timing race in coalescing logic\",\"dimension\":\"clock\",\"support_evidence_ids\":[\"operator-3\"],\"contradict_evidence_ids\":[],\"falsification\":\"Coalescing completes before aborts\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"state\"],\"held_constant_dimensions\":[\"code\",\"data\"],\"expected_if_true\":\"Cache leaks unresolved promises\",\"expected_if_false\":\"Cache isolates resolved values\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"src\"],\"query\":\"cache.set\",\"dimension\":\"state\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"inconclusive\",\"evidence_ids\":[\"contract-source-3\"],\"reason\":\"Cache retains unresolved promises\"}}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 276,
+          "wall_deadline_clamped": false,
+          "wall_ms": 29215
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 2,
+      "original_evaluation_role": "development_regression",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 220,
+        "exit_code": 0,
+        "output": "[tests/public.test.js]\n\u2714 concurrent readers share one successful load (1.9923ms)\n\u2714 a normalized successful value remains cached (0.2674ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 85.4623",
+        "passed": true,
+        "runner": "node_test",
+        "seeded_file_integrity_verified": true,
+        "test_files": [
+          "tests/public.test.js"
+        ],
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "state",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "src/flightPool.js",
+        "src/resourceClient.js"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 2,
+      "test_runner": "node_test",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-14T04:16:53.929618+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:node_coalesced_abort_poison",
+          "path": "cases/node_coalesced_abort_poison.json",
+          "sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+          "size_bytes": 3741
+        },
+        "case_id": "node_coalesced_abort_poison",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:node_coalesced_abort_poison",
+          "path": "oracles/node_coalesced_abort_poison.json",
+          "sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+          "size_bytes": 1738
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:node_coalesced_abort_poison",
+          "path": "final_oracles/node_coalesced_abort_poison.json",
+          "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+          "size_bytes": 2849
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902
+    }
+  },
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "size_bytes": 2902,
+      "timestamp_utc": "2026-07-14T04:15:00.321323+00:00"
+    },
+    {
+      "artifact": "case:node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "path": "cases/node_coalesced_abort_poison.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+      "size_bytes": 3741,
+      "timestamp_utc": "2026-07-14T04:15:00.324048+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "path": "oracles/node_coalesced_abort_poison.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+      "size_bytes": 1738,
+      "timestamp_utc": "2026-07-14T04:15:00.324487+00:00"
+    },
+    {
+      "artifact": "final_oracle:node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/node_coalesced_abort_poison.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "size_bytes": 2849,
+      "timestamp_utc": "2026-07-14T04:15:00.324902+00:00"
+    },
+    {
+      "actual_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "f5557bab3d1789e5d5bd8cc3b9b9ecbf6ef3da491c00a2dc45a0cdf1b6309119",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T04:15:00.327662+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_node_subscriber_recovery.checkpoint.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T04:15:03.052631+00:00"
+    },
+    {
+      "actual_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+      "artifact": "case:node_coalesced_abort_poison",
+      "case_id": "node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "b413025de14dddbca64cf914a83ca9a66876eabd06f94516a7e5120050519f78",
+      "path": "cases/node_coalesced_abort_poison.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T04:15:03.054051+00:00"
+    },
+    {
+      "actual_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+      "artifact": "feedback_oracle:node_coalesced_abort_poison",
+      "case_id": "node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "aa2d299ede3860625bea883d61d19cbfdbf562a38d5f880846a794b50b892ba7",
+      "path": "oracles/node_coalesced_abort_poison.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T04:16:51.325179+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 2,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T04:16:52.607549+00:00"
+    },
+    {
+      "actual_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "artifact": "final_oracle:node_coalesced_abort_poison",
+      "case_id": "node_coalesced_abort_poison",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "path": "final_oracles/node_coalesced_abort_poison.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T04:16:52.607865+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/node_coalesced_abort_poison.json",
+      "sequence": 11,
+      "sha256": "463e50930b6b4a9817642f146d7df177c5d02ed7f0423690a4f878515b036c2e",
+      "timestamp_utc": "2026-07-14T04:16:52.607942+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T04:16:52.609420+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "node_coalesced_abort_poison",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T04:16:53.911112+00:00"
+    },
+    {
+      "actual_count": 2,
+      "case_id": "node_coalesced_abort_poison",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 2,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T04:16:53.911130+00:00"
+    },
+    {
+      "case_id": "node_coalesced_abort_poison",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T04:16:53.912364+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T04:16:53.929547+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "63293cbebf64ca998a28088b4e7493e59ffe436f2b48b10b762e218363a8e852",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_class_diagnosis_to_fix_disclosed_seventeenth_node_subscriber_recovery.checkpoint.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 2,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 2,
+  "verdict": "needs_improvement"
+}
