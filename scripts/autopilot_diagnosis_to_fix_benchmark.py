@@ -5971,6 +5971,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     )
             if (
                 not (public_tests["passed"] and feedback_tests["passed"])
+                and not deterministic_contracts_disabled
                 and not deterministic_contract_repair.get("attempted")
             ):
                 deterministic_contract_repair = _apply_deterministic_contract_repair(

@@ -5443,6 +5443,90 @@ def test_parser_exposes_explicit_live_reasoning_ablation(monkeypatch):
     assert args.disable_deterministic_contracts is True
 
 
+def test_live_reasoning_ablation_disables_initial_and_feedback_contract_paths(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = tmp_path / "fixture"
+    _write_protocol_fixture(fixture)
+    monkeypatch.setattr(benchmark.ollama_client, "list_models", lambda: ["local-model"])
+
+    def forbidden_contract_path(*_args, **_kwargs):
+        raise AssertionError("deterministic contract path must stay disabled")
+
+    monkeypatch.setattr(
+        benchmark,
+        "_recognized_contract_diagnosis",
+        forbidden_contract_path,
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_deterministic_contract_repair",
+        forbidden_contract_path,
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_diagnose",
+        lambda _repo, case, *_args, **_kwargs: {
+            "report": {
+                "conclusion": {
+                    "dimension": "code",
+                    "status": "provisional",
+                    "causal_sufficiency": "observational",
+                }
+            },
+            "packet": {},
+            "stages": [],
+            "case": {"problem_statement": case["prompt"]},
+        },
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_generate_patch",
+        lambda *_args, **_kwargs: {
+            "plan": {"dimension": "code", "files": []},
+            "selected_file": "",
+            "selected_files": [],
+            "applied_files": [],
+            "patch_applied": False,
+            "warnings": [],
+        },
+    )
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        model="local-model",
+        reasoning_model="local-model",
+        escalation_model="",
+        case=[],
+        timeout=1.0,
+        case_model_time_budget=30.0,
+        max_repairs=0,
+        max_escalation_repairs=0,
+        disable_deterministic_contracts=True,
+        validate_fixtures=False,
+        evaluation_context="protocol",
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "result.json"),
+        checkpoint=str(tmp_path / "checkpoint.json"),
+        resume=False,
+        json=False,
+    )
+
+    result = benchmark.run(args)
+
+    case_result = result["cases"][0]
+    assert result["deterministic_contracts_disabled"] is True
+    assert case_result["deterministic_contract_repair"] == {
+        "attempted": False,
+        "patch_applied": False,
+        "selected_files": [],
+        "warnings": [],
+        "proposed_dimension": "unknown",
+        "disabled_for_live_reasoning_ablation": True,
+    }
+    assert case_result["final_tests"]["passed"] is False
+
+
 def test_disclosed_fable5_mesh_pressure_operator_passes_feedback_and_final(
     tmp_path,
 ):
