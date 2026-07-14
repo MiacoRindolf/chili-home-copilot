@@ -3454,6 +3454,98 @@ def test_realworld_boundary_language_yields_mechanical_contract_invariants():
     assert any("tombstones win" in value for value in convergence)
 
 
+def test_effective_history_wording_yields_half_open_write_and_read_contract():
+    prompt = (
+        "A catalog change scheduled exactly when the prior rate expires can create two rows at one boundary "
+        "instant. Repair the write-time and read-time temporal contract so contiguous history is legal and "
+        "overlap remains impossible."
+    )
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+
+    contract = next(
+        value for value in invariants if "Contiguous effective-history rows" in value
+    )
+    assert "existing_start < new_end" in contract
+    assert "new_start < existing_end" in contract
+    assert "start <= instant and instant < end" in contract
+    assert "INSERT and UPDATE" in contract
+    assert reasoning.contract_invariant_dimension(prompt) == "data"
+
+
+def test_half_open_history_operator_transfers_to_alternate_sql_names():
+    prompt = (
+        "A rate scheduled exactly when the prior rate expires is rejected. Repair write-time and read-time "
+        "temporal behavior so contiguous effective history is legal, overlap remains impossible, and each "
+        "boundary instant resolves once."
+    )
+    files = {
+        "db/rates.sql": (
+            "CREATE TABLE rates (id INTEGER PRIMARY KEY, account TEXT, effective_from TEXT, effective_to TEXT);\n"
+            "CREATE TRIGGER rate_conflict BEFORE INSERT ON rates WHEN EXISTS (\n"
+            "  SELECT 1 FROM rates AS prior WHERE prior.account = NEW.account\n"
+            "    AND prior.effective_from <= COALESCE(NEW.effective_to, '9999-12-31')\n"
+            "    AND NEW.effective_from <= COALESCE(prior.effective_to, '9999-12-31')\n"
+            ") BEGIN SELECT RAISE(ABORT, 'rate conflict'); END;\n"
+        ),
+        "db/current_rate.sql": (
+            "SELECT rate.id FROM lookups AS lookup JOIN rates AS rate ON rate.account = lookup.account\n"
+            " AND rate.effective_from < lookup.as_of\n"
+            " AND (rate.effective_to IS NULL OR lookup.as_of <= rate.effective_to);\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert any("legal adjacency" in warning for warning in rejected)
+    assert any("INSERT and UPDATE" in warning for warning in rejected)
+    assert any("upper bound" in warning for warning in rejected)
+    assert any("lower bound" in warning for warning in rejected)
+    assert set(proposals) == {"db/rates.sql", "db/current_rate.sql"}
+    assert "prior.effective_from < COALESCE(NEW.effective_to" in projected[
+        "db/rates.sql"
+    ]
+    assert "NEW.effective_from < COALESCE(prior.effective_to" in projected[
+        "db/rates.sql"
+    ]
+    assert "BEFORE UPDATE ON rates" in projected["db/rates.sql"]
+    assert "prior.id <> OLD.id" in projected["db/rates.sql"]
+    assert "rate.effective_from <= lookup.as_of" in projected["db/current_rate.sql"]
+    assert "lookup.as_of < rate.effective_to" in projected["db/current_rate.sql"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_dimension(prompt, files) == "data"
+
+
+def test_half_open_history_operator_does_not_clone_unrelated_insert_trigger():
+    prompt = (
+        "Repair write-time and read-time temporal behavior so contiguous effective history is legal, overlap "
+        "remains impossible, and each boundary instant resolves once."
+    )
+    files = {
+        "db/schema.sql": (
+            "CREATE TABLE rates (id INTEGER PRIMARY KEY, effective_from TEXT, effective_to TEXT);\n"
+            "CREATE TABLE audit_log (message TEXT);\n"
+            "CREATE TRIGGER audit_rate BEFORE INSERT ON rates BEGIN\n"
+            "  INSERT INTO audit_log(message) VALUES ('inserted');\n"
+            "END;\n"
+        ),
+        "db/read.sql": (
+            "SELECT rate.id FROM rates AS rate JOIN lookups AS lookup\n"
+            "ON rate.effective_from <= lookup.as_of AND lookup.as_of <= rate.effective_to;\n"
+        ),
+    }
+
+    direct = reasoning._repair_half_open_effective_history_sql(files["db/schema.sql"])
+    warnings = reasoning.contract_invariant_warnings(prompt, files)
+
+    assert direct == files["db/schema.sql"]
+    assert "audit_rate_update" not in direct
+    assert any("no recognized write-time overlap guard" in value for value in warnings)
+    assert reasoning.contract_repair_proposals(prompt, files) == {}
+
+
 def test_node_esm_contract_family_names_order_and_url_primitives():
     invariants = reasoning.derive_contract_invariants(
         "A Node ESM host resolves browser, node, and default export conditions, "

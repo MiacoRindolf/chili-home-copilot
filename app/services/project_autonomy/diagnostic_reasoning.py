@@ -1772,10 +1772,43 @@ def derive_contract_invariants(statement: str) -> list[str]:
         invariants.append(
             "A wildcard Vary response is non-cacheable: do not store it and never return it from cache matching."
         )
-    if any(token in lowered for token in ("exact instant", "expiration boundary", "expiry boundary")):
+    if any(
+        token in lowered
+        for token in (
+            "exact instant",
+            "expiration boundary",
+            "expiry boundary",
+            "boundary instant",
+            "scheduled exactly when",
+        )
+    ):
         invariants.append(
             "An ineffective-at-expiration interval has an exclusive upper bound: valid_from <= as_of < valid_until; "
             "do not rewrite unrelated revocation semantics."
+        )
+    effective_history_boundary = bool(
+        any(
+            token in lowered
+            for token in (
+                "contiguous history",
+                "contiguous effective",
+                "overlap remains impossible",
+                "write-time and read-time temporal",
+                "two prices for one lookup instant",
+                "scheduled exactly when the prior",
+            )
+        )
+        and any(
+            token in lowered
+            for token in ("boundary", "effective", "expires", "history", "interval")
+        )
+    )
+    if effective_history_boundary:
+        invariants.append(
+            "Contiguous effective-history rows use half-open intervals [start, end): adjacency where the old end "
+            "equals the new start is legal; overlap is existing_start < new_end and new_start < existing_end, "
+            "with a missing end treated as infinity. Point lookup keeps start <= instant and instant < end. "
+            "The same overlap guard applies to INSERT and UPDATE, and UPDATE excludes the row being changed."
         )
     if "retry-after" in lowered and "numeric" in lowered:
         invariants.append(
@@ -3848,6 +3881,77 @@ def contract_invariant_warnings(
         ]
         if temporal_sources:
             warnings.append("temporal read still uses inclusive BETWEEN at the expiration boundary")
+    if any("Contiguous effective-history rows use half-open" in value for value in invariants):
+        temporal_start = r"(?:valid_from|effective_from|active_from)"
+        temporal_end = r"(?:valid_to|valid_until|effective_to|effective_until|active_to|active_until)"
+        instant = r"(?:at_time|as_of|instant|effective_at|seen_at|requested_at)"
+        overlap_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if "create trigger" in content
+            and any(token in content for token in ("overlap", "conflict"))
+            and re.search(temporal_start, content)
+            and re.search(temporal_end, content)
+        ]
+        temporal_schema_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if "create table" in content
+            and re.search(temporal_start, content)
+            and re.search(temporal_end, content)
+        ]
+        if temporal_schema_sources and not overlap_sources and "exclude using" not in combined:
+            warnings.append(
+                "effective-history schema has no recognized write-time overlap guard"
+            )
+        for path, content in overlap_sources:
+            inclusive_overlap = bool(
+                re.search(
+                    rf"(?:[a-z_]\w*\.)?{temporal_start}\s*<=\s*coalesce\(\s*(?:new|[a-z_]\w*)\.{temporal_end}",
+                    content,
+                )
+            )
+            if inclusive_overlap:
+                warnings.append(
+                    f"{path} rejects legal adjacency with an inclusive effective-history overlap predicate"
+                )
+            if "before insert" not in content or "before update" not in content:
+                warnings.append(
+                    f"{path} does not enforce the same effective-history overlap guard on INSERT and UPDATE"
+                )
+            update_at = content.find("before update")
+            if update_at >= 0:
+                update_tail = content[update_at:]
+                if not re.search(
+                    r"(?:rowid|\bid\b)\s*(?:<>|!=)\s*old\.(?:rowid|id)\b",
+                    update_tail,
+                ):
+                    warnings.append(
+                        f"{path} update overlap guard does not exclude the row being changed"
+                    )
+        read_sources = [
+            (path, content)
+            for path, content in lowered_files.items()
+            if re.search(temporal_start, content)
+            and re.search(temporal_end, content)
+            and re.search(instant, content)
+            and any(token in content for token in ("select", "create view", " join "))
+        ]
+        for path, content in read_sources:
+            if re.search(
+                rf"(?:[a-z_]\w*\.)?{instant}\s*<=\s*(?:[a-z_]\w*\.)?{temporal_end}\b",
+                content,
+            ):
+                warnings.append(
+                    f"{path} point lookup keeps an inclusive effective-history upper bound"
+                )
+            if re.search(
+                rf"(?:[a-z_]\w*\.)?{temporal_start}\s*<(?!=)\s*(?:[a-z_]\w*\.)?{instant}\b",
+                content,
+            ):
+                warnings.append(
+                    f"{path} point lookup incorrectly makes the effective-history lower bound exclusive"
+                )
     return list(dict.fromkeys(warnings))
 
 
@@ -4529,6 +4633,99 @@ def _repair_scoped_temporal_sql(content: str) -> str:
         flags=re.IGNORECASE,
     )
     return updated
+
+
+def _repair_half_open_effective_history_sql(content: str) -> str:
+    """Repair recognized SQLite effective-history overlap and point-lookup shapes."""
+    temporal_start = r"(?:valid_from|effective_from|active_from)"
+    temporal_end = r"(?:valid_to|valid_until|effective_to|effective_until|active_to|active_until)"
+    instant = r"(?:at_time|as_of|instant|effective_at|seen_at|requested_at)"
+    updated = re.sub(
+        rf"(?P<start>\b(?:[A-Za-z_]\w*\.)?{temporal_start})\s*<=\s*"
+        rf"(?P<end>COALESCE\(\s*(?:NEW|[A-Za-z_]\w*)\.{temporal_end}\b[^)]*\))",
+        lambda match: f"{match.group('start')} < {match.group('end')}",
+        content,
+        flags=re.IGNORECASE,
+    )
+    updated = re.sub(
+        rf"(?P<instant>\b(?:[A-Za-z_]\w*\.)?{instant})\s*<=\s*"
+        rf"(?P<end>(?:[A-Za-z_]\w*\.)?{temporal_end}\b)",
+        lambda match: f"{match.group('instant')} < {match.group('end')}",
+        updated,
+        flags=re.IGNORECASE,
+    )
+    updated = re.sub(
+        rf"(?P<start>\b(?:[A-Za-z_]\w*\.)?{temporal_start})\s*<(?!=)\s*"
+        rf"(?P<instant>(?:[A-Za-z_]\w*\.)?{instant}\b)",
+        lambda match: f"{match.group('start')} <= {match.group('instant')}",
+        updated,
+        flags=re.IGNORECASE,
+    )
+
+    insert_trigger = re.search(
+        r"(?P<full>CREATE\s+TRIGGER\s+(?P<name>[A-Za-z_]\w*)\s+"
+        r"BEFORE\s+INSERT\s+ON\s+(?P<table>[A-Za-z_]\w*)\s+"
+        r"(?P<body>WHEN\s+EXISTS\s*\(.*?\)\s*BEGIN\s+.*?END\s*;))",
+        updated,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not insert_trigger:
+        return updated
+    trigger_body = insert_trigger.group("body")
+    if not (
+        re.search(temporal_start, trigger_body, flags=re.IGNORECASE)
+        and re.search(temporal_end, trigger_body, flags=re.IGNORECASE)
+    ):
+        return updated
+    table = insert_trigger.group("table")
+    if re.search(
+        rf"BEFORE\s+UPDATE(?:\s+OF\s+[^\n]+)?\s+ON\s+{re.escape(table)}\b",
+        updated,
+        flags=re.IGNORECASE,
+    ):
+        return updated
+    alias_match = re.search(
+        rf"FROM\s+{re.escape(table)}\s+AS\s+([A-Za-z_]\w*)",
+        insert_trigger.group("body"),
+        flags=re.IGNORECASE,
+    )
+    if not alias_match:
+        return updated
+    alias = alias_match.group(1)
+    primary_key = re.search(
+        rf"\bCREATE\s+TABLE\s+{re.escape(table)}\s*\(.*?\b"
+        r"(?P<column>[A-Za-z_]\w*)\s+(?:INTEGER\s+)?PRIMARY\s+KEY\b",
+        updated,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    identity = primary_key.group("column") if primary_key else "rowid"
+    if not primary_key and re.search(r"\bWITHOUT\s+ROWID\b", updated, re.IGNORECASE):
+        return updated
+    update_trigger = re.sub(
+        rf"\b{re.escape(insert_trigger.group('name'))}\b",
+        f"{insert_trigger.group('name')}_update",
+        insert_trigger.group("full"),
+        count=1,
+    )
+    update_trigger = re.sub(
+        r"BEFORE\s+INSERT\s+ON",
+        "BEFORE UPDATE ON",
+        update_trigger,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    update_trigger = re.sub(
+        r"(?P<prefix>\bWHERE\s+)(?P<first>[^\r\n]+)",
+        lambda match: (
+            f"{match.group('prefix')}{alias}.{identity} <> OLD.{identity}\n"
+            f"    AND {match.group('first')}"
+        ),
+        update_trigger,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    insert_at = insert_trigger.end("full")
+    return updated[:insert_at] + "\n\n" + update_trigger + updated[insert_at:]
 
 
 def _replace_python_definition(
@@ -6529,6 +6726,8 @@ def contract_repair_proposals(
             updated = _repair_scoped_temporal_sql(updated)
         if any("exclusive upper bound" in value for value in invariants):
             updated = _repair_scoped_temporal_sql(updated)
+        if any("Contiguous effective-history rows use half-open" in value for value in invariants):
+            updated = _repair_half_open_effective_history_sql(updated)
         if any(
             token in value
             for value in invariants
@@ -6789,6 +6988,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("JSON-array membership and removal", "data"),
     ("Recursive relation expansion carries", "data"),
     ("A claimed job attempt is a fencing token", "state"),
+    ("Contiguous effective-history rows use half-open", "data"),
 )
 
 
@@ -6844,6 +7044,7 @@ def contract_repair_dimension(
         ("state transition matches exactly its allowed predecessor", "state", _repair_export_job_state_sql),
         ("Normalize every physical length", "data", _repair_package_unit_sql),
         ("A nullable suppression target cannot participate", "data", _repair_nullable_suppression_anti_join),
+        ("Contiguous effective-history rows use half-open", "data", _repair_half_open_effective_history_sql),
     )
     active_dimensions: set[str] = set()
     for invariant_marker, dimension, operator in operators:

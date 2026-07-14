@@ -5883,6 +5883,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     public_tests,
                     feedback_tests,
                 )
+                prior_rejections = [
+                    str(value)
+                    for value in patch.get("warnings") or []
+                    if any(
+                        marker in str(value).casefold()
+                        for marker in (
+                            "contract invariant guard",
+                            "adapter rejected",
+                            "bundle rejection",
+                            "syntax validation failed",
+                        )
+                    )
+                ][-6:]
+                if prior_rejections:
+                    failure_context += (
+                        "\n\nPRIOR SOURCE-ADAPTER OR INVARIANT REJECTIONS "
+                        "(do not repeat these mechanisms):\n"
+                        + "\n".join(f"- {value}" for value in prior_rejections)
+                    )
                 if prompt_contract_closure:
                     failure_context += (
                         "\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n"
