@@ -1751,6 +1751,100 @@ def test_repo_evidence_prioritizes_contract_relevant_stateful_owner_lines(tmp_pa
     )
 
 
+def test_contract_source_evidence_exposes_both_shared_work_ownership_violations(
+    tmp_path,
+):
+    flight = tmp_path / "src/flightPool.js"
+    flight.parent.mkdir(parents=True)
+    flight.write_text(
+        "class FlightPool {\n"
+        "  constructor(loader) { this.loader = loader; this.inflight = new Map(); }\n"
+        "  load(key, signal) {\n"
+        "    let flight = this.inflight.get(key);\n"
+        "    if (!flight) {\n"
+        "      const controller = new AbortController();\n"
+        "      const promise = this.loader(key, controller.signal);\n"
+        "      flight = { controller, promise }; this.inflight.set(key, flight);\n"
+        "    }\n"
+        "    if (signal) signal.addEventListener('abort', () => flight.controller.abort());\n"
+        "    return flight.promise;\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    client = tmp_path / "src/resourceClient.js"
+    client.write_text(
+        "class ResourceClient {\n"
+        "  constructor(pool) { this.pool = pool; this.cache = new Map(); }\n"
+        "  get(key, signal) {\n"
+        "    if (!this.cache.has(key)) this.cache.set(key, this.pool.load(key, signal));\n"
+        "    return this.cache.get(key);\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    prompt = (
+        "Cancelling one dashboard request makes an unrelated dashboard waiting on the same key fail, and the "
+        "key remains unusable after upstream recovery. Preserve coalescing and successful caching."
+    )
+
+    evidence = reasoning.collect_contract_source_evidence(
+        tmp_path,
+        prompt,
+        candidate_paths=["src/flightPool.js", "src/resourceClient.js"],
+    )
+    statements = "\n".join(item["statement"] for item in evidence)
+
+    assert "lets one subscriber abort shared upstream work" in statements
+    assert "stores an unresolved shared promise in the result cache" in statements
+    assert {item["dimension"] for item in evidence} == {"state"}
+    assert all(item["dimension_origin"] == "inferred" for item in evidence)
+    assert all(item["causal_role"] == "context" for item in evidence)
+    assert all(item["discriminating"] is False for item in evidence)
+
+
+def test_contract_source_evidence_is_empty_after_shared_work_contract_closes(tmp_path):
+    prompt = (
+        "Cancelling one subscriber must not fail an unrelated waiter on the same key. Preserve shared work and "
+        "cache only successful results so a failed key does not remain unusable after recovery."
+    )
+    broken = {
+        "src/workGroup.js": (
+            "class WorkGroup {\n"
+            "  constructor(fetcher) { this.fetcher = fetcher; this.jobs = new Map(); }\n"
+            "  join(name, callerSignal) {\n"
+            "    let job = this.jobs.get(name);\n"
+            "    if (!job) { const upstream = new AbortController();\n"
+            "      const promise = this.fetcher(name, upstream.signal);\n"
+            "      job = { controller: upstream, promise }; this.jobs.set(name, job); }\n"
+            "    callerSignal.addEventListener('abort', () => job.controller.abort());\n"
+            "    return job.promise;\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/store.js": (
+            "class Store {\n"
+            "  constructor(group) { this.group = group; this.values = new Map(); }\n"
+            "  read(name, signal) {\n"
+            "    if (!this.values.has(name)) this.values.set(name, this.group.join(name, signal));\n"
+            "    return this.values.get(name);\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+    repaired = reasoning.contract_repair_proposals(prompt, broken)
+    for path, content in repaired.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    assert reasoning.collect_contract_source_evidence(
+        tmp_path,
+        prompt,
+        candidate_paths=list(repaired),
+    ) == []
+
+
 def test_diagnostic_request_detection_is_specific_to_investigation_language():
     assert reasoning.looks_like_diagnostic_request("Root-cause the replay regression") is True
     assert reasoning.looks_like_diagnostic_request("Add a label to the settings page") is False

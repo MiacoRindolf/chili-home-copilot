@@ -8285,6 +8285,76 @@ def collect_repo_evidence(
     return records
 
 
+def collect_contract_source_evidence(
+    repo_path: Path,
+    prompt: str,
+    *,
+    candidate_paths: Sequence[str] = (),
+    max_records: int = 8,
+) -> list[dict[str, Any]]:
+    """Expose bounded static mismatches between inferred contracts and candidate owners."""
+    root = repo_path.resolve()
+    if not root.is_dir() or not derive_contract_invariants(prompt):
+        return []
+    sources: dict[str, str] = {}
+    for raw in candidate_paths:
+        candidate = (root / raw).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if (
+            not candidate.is_file()
+            or candidate.suffix.lower() not in _SOURCE_SUFFIXES
+            or candidate.stat().st_size > 600_000
+        ):
+            continue
+        try:
+            sources[candidate.relative_to(root).as_posix()] = candidate.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            continue
+    if not sources:
+        return []
+
+    dimension = contract_invariant_dimension(prompt)
+    records: list[dict[str, Any]] = []
+    for warning in contract_invariant_warnings(prompt, sources):
+        path = next(
+            (value for value in sources if warning.startswith(f"{value} ")),
+            "",
+        )
+        if not path:
+            continue
+        index = len(records)
+        records.append(
+            normalize_evidence(
+                {
+                    "evidence_id": f"contract-source-{index + 1}",
+                    "statement": f"Static contract/source mismatch: {warning}.",
+                    "structured_context": {
+                        "source_path": path,
+                        "contract_source_check": warning,
+                    },
+                    "dimension": dimension,
+                    "dimension_origin": "inferred",
+                    "kind": "artifact",
+                    "provenance": f"{path}:contract-check",
+                    "independence_key": path,
+                    "reliability": 0.94,
+                    "discriminating": False,
+                    "causal_role": "context",
+                },
+                index,
+            )
+        )
+        if len(records) >= max_records:
+            break
+    return records
+
+
 def build_case_from_prompt(
     prompt: str,
     *,
@@ -8314,6 +8384,13 @@ def build_case_from_prompt(
     if repo_path is not None:
         observations.extend(
             collect_repo_evidence(
+                repo_path,
+                prompt,
+                candidate_paths=candidate_paths,
+            )
+        )
+        observations.extend(
+            collect_contract_source_evidence(
                 repo_path,
                 prompt,
                 candidate_paths=candidate_paths,
