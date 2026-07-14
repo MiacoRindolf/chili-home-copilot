@@ -4036,6 +4036,180 @@ def test_optional_teacher_pressure_operator_fails_closed_with_ambiguous_queue_pr
     assert reasoning.contract_repair_dimension(prompt, files) == "unknown"
 
 
+def test_protected_queue_incident_yields_ordered_state_contract_without_snapshot_collision():
+    prompt = (
+        "At fixed capacity the queue is exactly full. Protected brain_market_snapshots and "
+        "momentum_context_refresh work is starved by stale imminent_eval rows. Replace one unlocked row at least "
+        "30 minutes old, preserve audit metadata, and reject over-cap state."
+    )
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+
+    contract = next(
+        value for value in invariants if "Protected queue replacement" in value
+    )
+    assert "reject an exhausted incoming correlation before mutation" in contract
+    assert "brain_market_snapshots, momentum_context_refresh" in contract
+    assert "imminent_eval" in contract
+    assert "1800 seconds old" in contract
+    assert "oldest unlocked row with stable id ties" in contract
+    assert "already over-cap queue never shed state" in contract
+    assert not any("immutable deep snapshot" in value for value in invariants)
+    assert reasoning.contract_invariant_dimension(prompt) == "state"
+
+
+def test_protected_queue_operator_transfers_across_alternate_repository_names():
+    prompt = (
+        "The fixed-capacity queue is exactly full and protected catalog_refresh plus risk_context_refresh work is "
+        "starved by stale alert_eval backlog. Replace one oldest unlocked alert_eval at least 45 minutes old with "
+        "audit metadata, but never shed an over-cap queue or exhausted correlation."
+    )
+    source = (
+        "from dataclasses import dataclass, field\n"
+        "from datetime import datetime, timezone\n"
+        "import uuid\n\n"
+        "@dataclass\n"
+        "class WorkItem:\n"
+        "    id: int\n"
+        "    cause: str\n"
+        "    correlation_key: str\n"
+        "    payload: dict\n"
+        "    status: str = 'pending'\n"
+        "    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))\n"
+        "    processed_at: datetime | None = None\n"
+        "    locked: bool = False\n\n"
+        "MAX_WORK_QUEUE_SIZE = 8\n"
+        "MAX_CORRELATION_ITEM_LIMIT = 4\n\n"
+        "def pending_queue_size(session):\n"
+        "    return sum(item.status == 'pending' for item in session.events)\n\n"
+        "def correlation_size(session, correlation_key):\n"
+        "    return sum(item.correlation_key == correlation_key for item in session.events)\n\n"
+        "def enqueue_work(session, *, event_cause, payload=None, correlation_key=None, observed_at=None):\n"
+        "    cid = correlation_key or str(uuid.uuid4())\n"
+        "    if pending_queue_size(session) >= MAX_WORK_QUEUE_SIZE:\n"
+        "        return -1\n"
+        "    if correlation_size(session, cid) >= MAX_CORRELATION_ITEM_LIMIT:\n"
+        "        return -1\n"
+        "    item = WorkItem(\n"
+        "        id=max((row.id for row in session.events), default=0) + 1,\n"
+        "        cause=event_cause,\n"
+        "        correlation_key=cid,\n"
+        "        payload=dict(payload or {}),\n"
+        "        created_at=observed_at or datetime.now(timezone.utc),\n"
+        "    )\n"
+        "    session.add(item)\n"
+        "    session.flush()\n"
+        "    return item.id\n"
+    )
+    files = {
+        "queue/work_store.py": source,
+        "queue/metrics.py": "def queue_health(rows):\n    return len(rows)\n",
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert rejected == [
+        "queue/work_store.py does not preserve protected queue eligibility, mutation ordering, and audit lifecycle"
+    ]
+    assert set(proposals) == {"queue/work_store.py"}
+    repaired = proposals["queue/work_store.py"]
+    assert "QUEUE_PRESSURE_PROTECTED_CAUSES = frozenset({'catalog_refresh', 'risk_context_refresh'})" in repaired
+    assert "QUEUE_PRESSURE_SHEDDABLE_CAUSES = frozenset({'alert_eval'})" in repaired
+    assert "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS = 2700" in repaired
+    assert "if correlation_size(session, cid) >= MAX_CORRELATION_ITEM_LIMIT:" in repaired
+    assert "if queue_depth == MAX_WORK_QUEUE_SIZE:" in repaired
+    assert "session, incoming_cause=event_cause, now=observed_at" in repaired
+    assert "not getattr(event, \"locked\", False)" in repaired
+    assert "key=lambda event: (_naive_utc(event.created_at), int(event.id))" in repaired
+    ast.parse(repaired)
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_proposals(prompt, projected) == {}
+    assert reasoning.contract_repair_dimension(prompt, files) == "state"
+    malformed = {
+        **projected,
+        "queue/work_store.py": repaired.replace(
+            "queue_depth == MAX_WORK_QUEUE_SIZE",
+            "queue_depth >= MAX_WORK_QUEUE_SIZE",
+        ),
+    }
+    assert reasoning.contract_repair_proposals(prompt, malformed) == {}
+    assert "mutation ordering" in reasoning.contract_invariant_warnings(
+        prompt, malformed
+    )[0]
+
+
+def test_protected_queue_operator_preserves_orm_skip_locked_boundary():
+    prompt = (
+        "The fixed-capacity queue is exactly full. Protected catalog_refresh is starved by stale alert_eval rows. "
+        "Replace one oldest unlocked alert_eval at least 30 minutes old with audit metadata, but never shed an "
+        "over-cap queue or exhausted correlation."
+    )
+    source = (
+        "from datetime import datetime, timedelta, timezone\n\n"
+        "MAX_PENDING_QUEUE_DEPTH = 100\n"
+        "MAX_EVENTS_PER_CORRELATION = 20\n\n"
+        "def pending_queue_depth(db):\n"
+        "    return db.query(Activation).filter(Activation.status == 'pending').count()\n\n"
+        "def correlation_event_count(db, correlation_id):\n"
+        "    return db.query(Activation).filter(Activation.correlation_id == correlation_id).count()\n\n"
+        "def enqueue_activation(db, *, cause, correlation_id=None, payload=None):\n"
+        "    cid = correlation_id or 'generated'\n"
+        "    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:\n"
+        "        return -1\n"
+        "    if correlation_event_count(db, cid) >= MAX_EVENTS_PER_CORRELATION:\n"
+        "        return -1\n"
+        "    event = Activation(cause=cause, correlation_id=cid, payload=payload, status='pending')\n"
+        "    db.add(event)\n"
+        "    db.flush()\n"
+        "    return int(event.id)\n"
+    )
+
+    proposals = reasoning.contract_repair_proposals(
+        prompt, {"mesh/repository.py": source}
+    )
+    repaired = proposals["mesh/repository.py"]
+
+    assert ".with_for_update(skip_locked=True)" in repaired
+    assert "Activation.cause.in_(QUEUE_PRESSURE_SHEDDABLE_CAUSES)" in repaired
+    assert ".order_by(Activation.created_at.asc(), Activation.id.asc())" in repaired
+    assert repaired.index("correlation_event_count(db, cid)") < repaired.index(
+        "queue_depth = pending_queue_depth(db)"
+    )
+    assert "if queue_depth == MAX_PENDING_QUEUE_DEPTH:" in repaired
+    assert "if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:" in repaired
+    ast.parse(repaired)
+
+
+def test_protected_queue_operator_fails_closed_with_ambiguous_state_owners():
+    prompt = (
+        "At fixed capacity the queue is exactly full. Protected catalog_refresh is starved by stale alert_eval. "
+        "Replace one unlocked alert_eval at least 30 minutes old without shedding over-cap state."
+    )
+    owner = (
+        "from datetime import datetime, timezone\n"
+        "MAX_WORK_QUEUE_SIZE = 8\n"
+        "MAX_CORRELATION_EVENT_LIMIT = 4\n"
+        "def pending_queue_size(db): return sum(row.status == 'pending' for row in db.events)\n"
+        "def correlation_count(db, correlation_id): return sum(row.correlation_id == correlation_id for row in db.events)\n"
+        "def enqueue_work(db, *, event_cause, correlation_id=None, now=None):\n"
+        "    cid = correlation_id or 'new'\n"
+        "    if pending_queue_size(db) >= MAX_WORK_QUEUE_SIZE:\n"
+        "        return -1\n"
+        "    if correlation_count(db, cid) >= MAX_CORRELATION_EVENT_LIMIT:\n"
+        "        return -1\n"
+        "    return 1\n"
+    )
+    files = {"queue/primary.py": owner, "queue/replica.py": owner}
+
+    assert reasoning.contract_repair_proposals(prompt, files) == {}
+    assert reasoning.contract_repair_dimension(prompt, files) == "unknown"
+    assert "structurally ambiguous" in reasoning.contract_invariant_warnings(
+        prompt, files
+    )[0]
+
+
 def test_half_open_history_operator_transfers_to_alternate_sql_names():
     prompt = (
         "A rate scheduled exactly when the prior rate expires is rejected. Repair write-time and read-time "

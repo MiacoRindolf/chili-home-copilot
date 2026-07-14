@@ -1453,6 +1453,46 @@ def infer_causal_role(
     return "context"
 
 
+def _protected_queue_contract_terms(statement: str) -> dict[str, Any]:
+    lowered = str(statement or "").lower()
+    if not (
+        "queue" in lowered
+        and "protected" in lowered
+        and "stale" in lowered
+        and any(token in lowered for token in ("replace", "shed", "starv"))
+        and any(
+            token in lowered
+            for token in ("exactly full", "exact capacity", "exactly at", "fixed capacity")
+        )
+    ):
+        return {}
+    identifiers = list(
+        dict.fromkeys(
+            re.findall(r"(?<![a-z0-9_])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![a-z0-9_])", lowered)
+        )
+    )
+    protected = [
+        value
+        for value in identifiers
+        if any(token in value for token in ("refresh", "snapshot"))
+        and not any(token in value for token in ("shed", "audit"))
+    ]
+    sheddable = [
+        value
+        for value in identifiers
+        if any(token in value for token in ("eval", "chatter", "backlog"))
+        and value not in protected
+    ]
+    age_match = re.search(r"\b(\d{1,4})\s*minutes?\b", lowered)
+    if not protected or not sheddable or age_match is None:
+        return {}
+    return {
+        "protected": protected,
+        "sheddable": sheddable,
+        "min_age_seconds": int(age_match.group(1)) * 60,
+    }
+
+
 def derive_contract_invariants(statement: str) -> list[str]:
     """Extract reusable mechanism contracts without asking the local model."""
     lowered = str(statement or "").lower()
@@ -1670,10 +1710,22 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "payload, validates it before commit, and then rebinds every derived runtime consumer; omitted old "
             "overrides must not survive through merge/update state."
         )
-    if (
-        any(token in lowered for token in ("snapshot", "generation", "reload"))
-        and any(token in lowered for token in ("request", "audit", "async", "asynchronous", "policy"))
-    ):
+    natural_snapshot = bool(re.search(r"\bsnapshots?\b", lowered))
+    policy_request_boundary = bool(
+        "request" in lowered
+        and "policy" in lowered
+        and any(token in lowered for token in ("generation", "reload"))
+        and any(token in lowered for token in ("audit", "async", "asynchronous", "in flight"))
+    )
+    request_snapshot_boundary = bool(
+        policy_request_boundary
+        or (
+            natural_snapshot
+            and any(token in lowered for token in ("generation", "reload"))
+            and any(token in lowered for token in ("request", "audit", "async", "policy"))
+        )
+    )
+    if request_snapshot_boundary:
         invariants.append(
             "A request captures one immutable deep snapshot and its generation before the asynchronous boundary; "
             "authorization, response, and audit all use that same snapshot even when a reload commits concurrently."
@@ -1876,6 +1928,19 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "aggregation and state persistence always continue. Queue depth exactly at the threshold sheds "
             "optional work. Zero-valued budget and pressure overrides preserve explicit unlimited and disabled "
             "semantics, while absent telemetry or a bounded pressure-probe failure fails open."
+        )
+    protected_queue_terms = _protected_queue_contract_terms(statement)
+    if protected_queue_terms:
+        protected = ", ".join(protected_queue_terms["protected"])
+        sheddable = ", ".join(protected_queue_terms["sheddable"])
+        invariants.append(
+            "Protected queue replacement is one ordered state transition at fixed capacity: reject an exhausted "
+            "incoming correlation before mutation; only when pending depth equals the cap may protected causes "
+            f"[{protected}] replace one pending sheddable cause [{sheddable}] that is at least "
+            f"{protected_queue_terms['min_age_seconds']} seconds old. Select the oldest unlocked row with stable "
+            "id ties, retain it as dead with processed time and payload audit metadata, then recheck capacity and "
+            "admit the protected event. Unprotected input, fresh or wrong-cause rows, no eligible row, and an "
+            "already over-cap queue never shed state."
         )
     if (
         any(token in lowered for token in ("ttl", "expiration", "expires", "expiry"))
@@ -4177,6 +4242,20 @@ def contract_invariant_warnings(
             warnings.append(
                 f"{path} does not preserve bounded optional-work policy and mechanical fallback under queue pressure"
             )
+    if any("Protected queue replacement is one ordered state transition" in value for value in invariants):
+        owners = [
+            (str(path), content, metadata)
+            for path, content in files.items()
+            if (metadata := _protected_queue_owner_metadata(content))
+        ]
+        if len(owners) > 1:
+            warnings.append("protected queue state owner is structurally ambiguous")
+        elif owners and not _protected_queue_contract_satisfied(
+            owners[0][1], prompt, owners[0][2]
+        ):
+            warnings.append(
+                f"{owners[0][0]} does not preserve protected queue eligibility, mutation ordering, and audit lifecycle"
+            )
     return list(dict.fromkeys(warnings))
 
 
@@ -6319,6 +6398,496 @@ def _repair_bounded_optional_work_contract(
     return proposals
 
 
+def _protected_queue_owner_metadata(content: str) -> dict[str, Any]:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return {}
+    assignments = {
+        assignment[0]: (node, assignment[1])
+        for node in tree.body
+        if (assignment := _bounded_assignment(node)) is not None
+    }
+    queue_caps = [
+        name
+        for name, (_node, value) in assignments.items()
+        if name.upper().startswith("MAX_")
+        and "QUEUE" in name.upper()
+        and any(token in name.upper() for token in ("DEPTH", "SIZE", "CAPACITY"))
+        and isinstance(value, ast.Constant)
+        and isinstance(value.value, int)
+        and value.value > 0
+    ]
+    correlation_caps = [
+        name
+        for name, (_node, value) in assignments.items()
+        if name.upper().startswith("MAX_")
+        and "CORRELATION" in name.upper()
+        and any(token in name.upper() for token in ("EVENT", "COUNT", "CAP", "LIMIT"))
+        and isinstance(value, ast.Constant)
+        and isinstance(value.value, int)
+        and value.value > 0
+    ]
+    if len(queue_caps) != 1 or len(correlation_caps) != 1:
+        return {}
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    pending_functions = [
+        node
+        for node in functions
+        if "queue" in node.name.lower()
+        and any(token in node.name.lower() for token in ("depth", "size", "count"))
+        and "pending" in (ast.get_source_segment(content, node) or "").lower()
+    ]
+    correlation_functions = [
+        node
+        for node in functions
+        if "correlation" in node.name.lower()
+        and any(token in node.name.lower() for token in ("count", "size", "depth"))
+    ]
+    if len(pending_functions) != 1 or len(correlation_functions) != 1:
+        return {}
+    pending_name = pending_functions[0].name
+    correlation_name = correlation_functions[0].name
+    enqueue_functions = []
+    for function in functions:
+        if "enqueue" not in function.name.lower():
+            continue
+        call_names = {
+            _bounded_call_name(call)
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+        }
+        if {pending_name, correlation_name}.issubset(call_names):
+            enqueue_functions.append(function)
+    if len(enqueue_functions) != 1:
+        return {}
+    enqueue = enqueue_functions[0]
+    argument_names = [argument.arg for argument in enqueue.args.args]
+    argument_names.extend(argument.arg for argument in enqueue.args.kwonlyargs)
+    db_name = next(
+        (
+            name
+            for name in argument_names
+            if name.lower() in {"db", "session", "database"}
+            or "session" in name.lower()
+        ),
+        "",
+    )
+    cause_name = next((name for name in argument_names if "cause" in name.lower()), "")
+    correlation_argument = next(
+        (name for name in argument_names if "correlation" in name.lower()),
+        "",
+    )
+    now_name = next(
+        (
+            name
+            for name in argument_names
+            if name.lower() in {"now", "at", "current_time"}
+            or name.lower().endswith("_at")
+            or any(token in name.lower() for token in ("observed_time", "current_time"))
+        ),
+        "",
+    )
+    if not db_name or not cause_name or not correlation_argument:
+        return {}
+    cid_assignment = next(
+        (
+            node
+            for node in enqueue.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and correlation_argument
+            in (ast.get_source_segment(content, node.value) or "")
+        ),
+        None,
+    )
+    if cid_assignment is None:
+        return {}
+    cid_name = cid_assignment.targets[0].id
+
+    def calls(test: ast.AST, name: str) -> bool:
+        return any(
+            isinstance(node, ast.Call) and _bounded_call_name(node) == name
+            for node in ast.walk(test)
+        )
+
+    global_guards = [
+        node
+        for node in enqueue.body
+        if isinstance(node, ast.If) and calls(node.test, pending_name)
+    ]
+    correlation_guards = [
+        node
+        for node in enqueue.body
+        if isinstance(node, ast.If) and calls(node.test, correlation_name)
+    ]
+    if len(global_guards) != 1 or len(correlation_guards) != 1:
+        return {}
+    enqueue_source = ast.get_source_segment(content, enqueue) or ""
+    body_indices = {id(node): index for index, node in enumerate(enqueue.body)}
+    if (
+        abs(body_indices[id(global_guards[0])] - body_indices[id(correlation_guards[0])]) != 1
+        and "_shed_stale_low_priority_pending_event" not in enqueue_source
+    ):
+        return {}
+    pending_source = ast.get_source_segment(content, pending_functions[0]) or ""
+    if f"{db_name}.events" in enqueue_source or f"{db_name}.events" in pending_source:
+        backend = "memory"
+        event_model = ""
+    elif f"{db_name}.query(" in enqueue_source or f"{db_name}.query(" in pending_source:
+        model_match = re.search(
+            rf"\b{re.escape(db_name)}\.query\(\s*([A-Za-z_]\w*)\s*\)",
+            pending_source,
+        )
+        if model_match is None:
+            return {}
+        backend = "orm"
+        event_model = model_match.group(1)
+    else:
+        return {}
+    return {
+        "tree": tree,
+        "queue_cap": queue_caps[0],
+        "correlation_cap": correlation_caps[0],
+        "pending_name": pending_name,
+        "correlation_name": correlation_name,
+        "enqueue_name": enqueue.name,
+        "db_name": db_name,
+        "cause_name": cause_name,
+        "correlation_argument": correlation_argument,
+        "cid_name": cid_name,
+        "now_name": now_name,
+        "backend": backend,
+        "event_model": event_model,
+    }
+
+
+def _protected_queue_contract_satisfied(
+    content: str,
+    prompt: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> bool:
+    terms = _protected_queue_contract_terms(prompt)
+    metadata = dict(metadata or _protected_queue_owner_metadata(content))
+    if not terms or not metadata:
+        return False
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return False
+    enqueue = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == metadata["enqueue_name"]
+        ),
+        None,
+    )
+    helper = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_shed_stale_low_priority_pending_event"
+        ),
+        None,
+    )
+    if enqueue is None or helper is None:
+        return False
+    enqueue_source = ast.get_source_segment(content, enqueue) or ""
+    helper_source = ast.get_source_segment(content, helper) or ""
+    correlation_position = enqueue_source.find(f"{metadata['correlation_name']}(")
+    queue_position = enqueue_source.find("queue_depth =")
+    shed_position = enqueue_source.find("_shed_stale_low_priority_pending_event(")
+    final_guard_position = enqueue_source.rfind(f"{metadata['pending_name']}(")
+    if not (
+        0 <= correlation_position < queue_position < shed_position < final_guard_position
+        and re.search(
+            rf"queue_depth\s*==\s*{re.escape(str(metadata['queue_cap']))}",
+            enqueue_source,
+        )
+    ):
+        return False
+    required_helper_markers = (
+        "incoming_cause not in QUEUE_PRESSURE_PROTECTED_CAUSES",
+        "QUEUE_PRESSURE_SHEDDABLE_CAUSES",
+        "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS",
+        "_queue_pressure_shed",
+        "stale.status = \"dead\"",
+        "stale.processed_at = now_dt",
+        "audit_payload = dict(stale.payload or {})",
+    )
+    if not all(marker in helper_source for marker in required_helper_markers):
+        return False
+    if metadata["backend"] == "memory":
+        if not all(
+            marker in helper_source
+            for marker in (
+                "getattr(event, \"locked\", False)",
+                "(_naive_utc(event.created_at), int(event.id))",
+            )
+        ):
+            return False
+    else:
+        model = str(metadata["event_model"])
+        if not all(
+            marker in helper_source
+            for marker in (
+                ".with_for_update(skip_locked=True)",
+                f".order_by({model}.created_at.asc(), {model}.id.asc())",
+            )
+        ):
+            return False
+    if str(int(terms["min_age_seconds"])) not in content:
+        return False
+    return all(repr(value) in content for value in [*terms["protected"], *terms["sheddable"]])
+
+
+def _ensure_datetime_imports(content: str, required: Sequence[str]) -> str | None:
+    match = re.search(r"(?m)^from\s+datetime\s+import\s+([^\n]+)$", content)
+    if match is None:
+        return None
+    names = [value.strip() for value in match.group(1).split(",") if value.strip()]
+    missing = [value for value in required if value not in names]
+    if not missing:
+        return content
+    replacement = "from datetime import " + ", ".join([*names, *missing])
+    return content[: match.start()] + replacement + content[match.end() :]
+
+
+def _protected_queue_helper_source(
+    *,
+    metadata: Mapping[str, Any],
+    terms: Mapping[str, Any],
+) -> str:
+    protected_values = ", ".join(repr(value) for value in terms["protected"])
+    sheddable_values = ", ".join(repr(value) for value in terms["sheddable"])
+    common = (
+        f"QUEUE_PRESSURE_PROTECTED_CAUSES = frozenset({{{protected_values}}})\n"
+        f"QUEUE_PRESSURE_SHEDDABLE_CAUSES = frozenset({{{sheddable_values}}})\n"
+        f"QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS = {int(terms['min_age_seconds'])}\n\n\n"
+        "def _naive_utc(value):\n"
+        "    if value.tzinfo is not None:\n"
+        "        return value.astimezone(timezone.utc).replace(tzinfo=None)\n"
+        "    return value\n\n\n"
+    )
+    helper_head = (
+        "def _shed_stale_low_priority_pending_event(db, *, incoming_cause, now=None):\n"
+        "    if incoming_cause not in QUEUE_PRESSURE_PROTECTED_CAUSES:\n"
+        "        return None\n"
+        "    now_dt = _naive_utc(now or datetime.now(timezone.utc))\n"
+        "    cutoff = now_dt - timedelta(seconds=QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS)\n"
+    )
+    if metadata["backend"] == "memory":
+        helper_body = (
+            "    eligible = [\n"
+            "        event\n"
+            "        for event in db.events\n"
+            "        if event.status == \"pending\"\n"
+            "        and event.cause in QUEUE_PRESSURE_SHEDDABLE_CAUSES\n"
+            "        and not getattr(event, \"locked\", False)\n"
+            "        and isinstance(event.created_at, datetime)\n"
+            "        and _naive_utc(event.created_at) <= cutoff\n"
+            "    ]\n"
+            "    if not eligible:\n"
+            "        return None\n"
+            "    stale = min(eligible, key=lambda event: (_naive_utc(event.created_at), int(event.id)))\n"
+        )
+    else:
+        model = str(metadata["event_model"])
+        helper_body = (
+            "    stale = (\n"
+            f"        db.query({model})\n"
+            "        .filter(\n"
+            f"            {model}.status == \"pending\",\n"
+            f"            {model}.cause.in_(QUEUE_PRESSURE_SHEDDABLE_CAUSES),\n"
+            f"            {model}.created_at <= cutoff,\n"
+            "        )\n"
+            f"        .order_by({model}.created_at.asc(), {model}.id.asc())\n"
+            "        .with_for_update(skip_locked=True)\n"
+            "        .first()\n"
+            "    )\n"
+            "    if stale is None:\n"
+            "        return None\n"
+        )
+    audit = (
+        "    created_at = getattr(stale, \"created_at\", None)\n"
+        "    age_seconds = None\n"
+        "    if isinstance(created_at, datetime):\n"
+        "        age_seconds = max(0.0, (now_dt - _naive_utc(created_at)).total_seconds())\n"
+        "    info = {\n"
+        "        \"event_id\": int(stale.id),\n"
+        "        \"cause\": stale.cause,\n"
+        "        \"age_seconds\": round(age_seconds, 3) if age_seconds is not None else None,\n"
+        "    }\n"
+        "    audit_payload = dict(stale.payload or {})\n"
+        "    audit_payload[\"_queue_pressure_shed\"] = {\n"
+        "        \"shed_for_cause\": incoming_cause,\n"
+        "        \"shed_at\": now_dt.isoformat(),\n"
+        "        \"age_seconds\": info[\"age_seconds\"],\n"
+        "    }\n"
+        "    stale.payload = audit_payload\n"
+        "    stale.status = \"dead\"\n"
+        "    stale.processed_at = now_dt\n"
+        "    db.flush()\n"
+        "    return info\n\n\n"
+    )
+    return common + helper_head + helper_body + audit
+
+
+def _repair_protected_queue_priority(content: str, prompt: str) -> str:
+    terms = _protected_queue_contract_terms(prompt)
+    metadata = _protected_queue_owner_metadata(content)
+    if not terms or not metadata:
+        return content
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+    enqueue = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == metadata["enqueue_name"]
+    )
+    enqueue_source = ast.get_source_segment(content, enqueue) or ""
+    if _protected_queue_contract_satisfied(content, prompt, metadata):
+        return content
+    if any(
+        marker in content
+        for marker in (
+            "QUEUE_PRESSURE_PROTECTED_CAUSES",
+            "QUEUE_PRESSURE_SHEDDABLE_CAUSES",
+            "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS",
+            "_shed_stale_low_priority_pending_event",
+        )
+    ):
+        return content
+
+    updated = _ensure_datetime_imports(content, ("timedelta", "timezone"))
+    if updated is None:
+        return content
+    try:
+        tree = ast.parse(updated)
+    except SyntaxError:
+        return content
+    enqueue = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == metadata["enqueue_name"]
+        ),
+        None,
+    )
+    if enqueue is None:
+        return content
+    helper_source = _protected_queue_helper_source(metadata=metadata, terms=terms)
+    lines = updated.splitlines(keepends=True)
+    lines.insert(int(enqueue.lineno) - 1, helper_source)
+    updated = "".join(lines)
+
+    try:
+        tree = ast.parse(updated)
+    except SyntaxError:
+        return content
+    enqueue = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == metadata["enqueue_name"]
+    )
+
+    def calls(test: ast.AST, name: str) -> bool:
+        return any(
+            isinstance(node, ast.Call) and _bounded_call_name(node) == name
+            for node in ast.walk(test)
+        )
+
+    global_guard = next(
+        (
+            node
+            for node in enqueue.body
+            if isinstance(node, ast.If) and calls(node.test, str(metadata["pending_name"]))
+        ),
+        None,
+    )
+    correlation_guard = next(
+        (
+            node
+            for node in enqueue.body
+            if isinstance(node, ast.If)
+            and calls(node.test, str(metadata["correlation_name"]))
+        ),
+        None,
+    )
+    if global_guard is None or correlation_guard is None:
+        return content
+    global_span = _python_node_offsets(updated, global_guard)
+    correlation_span = _python_node_offsets(updated, correlation_guard)
+    if global_span is None or correlation_span is None:
+        return content
+    start = min(global_span[0], correlation_span[0])
+    end = max(global_span[1], correlation_span[1])
+    indent = " " * int(global_guard.col_offset)
+    correlation_source = ast.get_source_segment(updated, correlation_guard) or ""
+    global_source = ast.get_source_segment(updated, global_guard) or ""
+    now_argument = (
+        f", now={metadata['now_name']}" if metadata.get("now_name") else ""
+    )
+    replacement = (
+        correlation_source
+        + "\n\n"
+        + indent
+        + "# Circuit breaker: global queue depth\n"
+        + indent
+        + f"queue_depth = {metadata['pending_name']}({metadata['db_name']})\n"
+        + indent
+        + f"if queue_depth == {metadata['queue_cap']}:\n"
+        + indent
+        + "    _shed_stale_low_priority_pending_event(\n"
+        + indent
+        + f"        {metadata['db_name']}, incoming_cause={metadata['cause_name']}{now_argument}\n"
+        + indent
+        + "    )\n"
+        + indent
+        + global_source
+    )
+    repaired = _apply_python_node_replacements(updated, [(start, end, replacement)])
+    if repaired == updated:
+        return content
+    repaired = repaired.replace(
+        f"{indent}# Circuit breaker: global queue depth\n"
+        f"{indent}if {metadata['correlation_name']}",
+        f"{indent}# Circuit breaker: per-correlation-id cap\n"
+        f"{indent}if {metadata['correlation_name']}",
+        1,
+    )
+    try:
+        ast.parse(repaired)
+    except SyntaxError:
+        return content
+    return repaired
+
+
+def _protected_queue_priority_updates(
+    prompt: str,
+    files: Mapping[str, str],
+) -> dict[str, str]:
+    candidates: dict[str, str] = {}
+    for path, content in files.items():
+        updated = _repair_protected_queue_priority(content, prompt)
+        if updated != content:
+            candidates[str(path).replace("\\", "/")] = updated
+    return candidates if len(candidates) == 1 else {}
+
+
 def _repair_canonical_base64url(content: str) -> str:
     updated = content
     if "function decodeBase64Url" in updated and "Buffer.from" in updated:
@@ -8114,9 +8683,19 @@ def contract_repair_proposals(
         if any("Bounded optional teacher work is governed" in value for value in invariants)
         else {}
     )
+    protected_queue_updates = (
+        _protected_queue_priority_updates(prompt, files)
+        if any(
+            "Protected queue replacement is one ordered state transition" in value
+            for value in invariants
+        )
+        else {}
+    )
     proposals: dict[str, str] = {}
     for path, content in files.items():
-        updated = bounded_optional_updates.get(str(path).replace("\\", "/"), content)
+        normalized_path = str(path).replace("\\", "/")
+        updated = bounded_optional_updates.get(normalized_path, content)
+        updated = protected_queue_updates.get(normalized_path, updated)
         bindings = recognition.get(str(path), {})
         if any("canonical text decoder" in value for value in invariants):
             updated = _repair_canonical_base64url(updated)
@@ -8492,6 +9071,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("Shared work has subscriber-scoped cancellation", "state"),
     ("Directional position ownership is normalized once", "data"),
     ("Bounded optional teacher work is governed", "config"),
+    ("Protected queue replacement is one ordered state transition", "state"),
 )
 
 
@@ -8557,6 +9137,11 @@ def contract_repair_dimension(
         and _repair_bounded_optional_work_contract(files)
     ):
         active_dimensions.add("config")
+    if any(
+        "Protected queue replacement is one ordered state transition" in value
+        for value in invariants
+    ) and _protected_queue_priority_updates(prompt, files):
+        active_dimensions.add("state")
     for invariant_marker, dimension, operator in operators:
         if not any(invariant_marker in invariant for invariant in invariants):
             continue
