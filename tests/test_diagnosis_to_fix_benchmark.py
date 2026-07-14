@@ -2363,6 +2363,62 @@ def test_partial_explicit_contract_mapping_is_not_auto_completed():
     ) is False
 
 
+def test_unanimous_prompt_contract_owners_bind_missing_feedback_test_id():
+    plan = {
+        "files": [
+            {
+                "path": "owner.py",
+                "action": "modify",
+                "description": "Implement the complete boundary contract.",
+            }
+        ],
+        "contract_coverage": [
+            {
+                "contract": "prompt_obligation::required::abc",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The required boundary is implemented by the owner.",
+                "polarity": "required",
+            },
+            {
+                "contract": "prompt_obligation::forbidden::def",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The prohibited shortcut is absent from the owner.",
+                "polarity": "forbidden",
+            },
+            {
+                "contract": "prompt_contract::ghi",
+                "owner_paths": ["owner.py"],
+                "postcondition": "The semantic source guard closes in the owner.",
+                "polarity": "forbidden",
+            },
+        ],
+    }
+    evidence = {
+        "failed_ids": ["tests/test_owner.py::test_boundary"],
+        "prompt_obligation_details": {
+            "prompt_obligation::required::abc": {"polarity": "required"},
+            "prompt_obligation::forbidden::def": {"polarity": "forbidden"},
+        },
+    }
+
+    canonical = benchmark._canonicalize_generic_repair_contract_coverage(
+        plan,
+        ["owner.py", "context.py"],
+        evidence,
+        ["owner.py", "context.py"],
+    )
+
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        canonical,
+        ["owner.py", "context.py"],
+        evidence,
+    ) is True
+    assert canonical["contract_coverage"][-1]["contract"] == (
+        "tests/test_owner.py::test_boundary"
+    )
+    assert canonical["contract_coverage"][-1]["owner_paths"] == ["owner.py"]
+
+
 def test_prompt_contract_closure_uses_semantic_guard_not_a_fake_test_identity():
     plan = {
         "files": [

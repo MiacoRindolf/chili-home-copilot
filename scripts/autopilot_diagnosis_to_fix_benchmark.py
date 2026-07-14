@@ -2325,7 +2325,7 @@ def _canonicalize_generic_repair_contract_coverage(
         for item in result.get("contract_coverage") or []
         if isinstance(item, Mapping)
     ]
-    if not failed_ids or len(coverage) != 1:
+    if not failed_ids or not coverage:
         return result
     allowed = {str(value) for value in candidates if str(value)}
     selected = {
@@ -2335,14 +2335,22 @@ def _canonicalize_generic_repair_contract_coverage(
         and code_agent._is_mutating_plan_action(item.get("action"))
         and (relative := _safe_rel(item.get("path")))
     }
-    item = coverage[0]
-    contract = validation_contracts.normalize_contract_id(item.get("contract"))
-    postcondition = str(item.get("postcondition") or "").strip()
-    owners = {
-        relative
-        for value in item.get("owner_paths") or []
-        if (relative := _safe_rel(value))
-    }
+    normalized_contracts = [
+        validation_contracts.normalize_contract_id(item.get("contract"))
+        for item in coverage
+    ]
+    postconditions = [
+        str(item.get("postcondition") or "").strip()
+        for item in coverage
+    ]
+    owner_sets = [
+        {
+            relative
+            for value in item.get("owner_paths") or []
+            if (relative := _safe_rel(value))
+        }
+        for item in coverage
+    ]
     hinted = {
         relative
         for value in feedback_owner_hints
@@ -2355,16 +2363,50 @@ def _canonicalize_generic_repair_contract_coverage(
         if alias
     }
     if (
-        not contract
-        or len(postcondition) < 8
-        or not owners
-        or not owners <= allowed
-        or not owners <= selected
+        any(not contract for contract in normalized_contracts)
+        or any(len(postcondition) < 8 for postcondition in postconditions)
+        or any(not owners for owners in owner_sets)
+        or any(owners != owner_sets[0] for owners in owner_sets[1:])
+        or not owner_sets[0]
+        or not owner_sets[0] <= allowed
+        or not owner_sets[0] <= selected
         or not hinted
-        or not owners <= hinted
-        or any(alias in contract for alias in failed_aliases)
+        or not owner_sets[0] <= hinted
+        or any(
+            alias in contract
+            for contract in normalized_contracts
+            for alias in failed_aliases
+        )
     ):
         return result
+    prompt_obligation_details = (
+        (contract_evidence or {}).get("prompt_obligation_details") or {}
+    )
+    for obligation_id, detail in prompt_obligation_details.items():
+        normalized_id = validation_contracts.normalize_contract_id(
+            obligation_id
+        )
+        matches = [
+            item
+            for item in coverage
+            if normalized_id
+            and normalized_id
+            in validation_contracts.normalize_contract_id(
+                item.get("contract")
+            )
+        ]
+        expected_polarity = str(
+            detail.get("polarity") if isinstance(detail, Mapping) else ""
+        ).strip().casefold()
+        if (
+            len(matches) != 1
+            or expected_polarity not in {"required", "forbidden"}
+            or str(matches[0].get("polarity") or "").strip().casefold()
+            != expected_polarity
+        ):
+            return result
+    owners = owner_sets[0]
+    postcondition = max(postconditions, key=len)
     result["contract_coverage"] = [
         *coverage,
         *(
