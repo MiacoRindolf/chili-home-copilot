@@ -1,0 +1,1194 @@
+{
+  "accepted_diagnosis_count": 1,
+  "average_case_duration_ms": 242522.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 0,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "data",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 553,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-654vg3x_\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry FAILED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry FAILED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_short_position_sizing_uses_stop_above_entry _______________\ntests\\test_feedback.py:6: in test_short_position_sizing_uses_stop_above_entry\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n______ test_short_signal_preserves_direction_across_entry_and_telemetry _______\ntests\\test_feedback.py:24: in test_short_signal_preserves_direction_across_entry_and_telemetry\n    assert entered == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry - TypeError: size_position() got an unexpected keyword argument 'direction'\nFAILED tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry - assert 0 == 1\n========================= 2 failed, 2 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 558,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-ycjo99je\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default FAILED [ 20%]\ntests/test_final.py::test_invalid_short_stop_is_not_rescued_by_quantity_fallback PASSED [ 40%]\ntests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable FAILED [ 60%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 80%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n_________ test_uppercase_short_without_stop_gets_side_correct_default _________\ntests\\test_final.py:18: in test_uppercase_short_without_stop_gets_side_correct_default\n    assert entered == 1\nE   assert 0 == 1\n_____ test_unknown_direction_remains_long_and_long_behavior_stays_stable ______\ntests\\test_final.py:60: in test_unknown_direction_remains_long_and_long_behavior_stays_stable\n    assert size_position(10_000.0, 100.0, 95.0, limits=RiskLimits(), direction=\"sideways\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default - assert 0 == 1\nFAILED tests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable - TypeError: size_position() got an unexpected keyword argument 'direction'\n========================= 2 failed, 3 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 508,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-654vg3x_\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 50%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 2 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_short_paper_direction",
+      "changed_files": [
+        "trading/paper_trading.py",
+        "trading/portfolio_risk.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "data",
+        "selected_files": [
+          "trading/paper_trading.py",
+          "trading/portfolio_risk.py"
+        ],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "data",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "data",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "contract-source-1",
+            "contract-source-2"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-state"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "isolate-test_harness",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h-test_harness"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-unknown"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "contract-source-1",
+              "contract-source-2"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": [
+              "operator-4",
+              "operator-5"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8",
+              "source-9",
+              "source-10",
+              "source-11",
+              "source-12",
+              "source-13",
+              "source-14",
+              "source-15",
+              "source-16",
+              "source-17",
+              "source-18"
+            ]
+          }
+        ],
+        "problem_statement": "An intraday paper sweep repeatedly selects valid stock candidates but enters none of the short ORB breakdowns. Logs classify their stops as invalid even though a representative signal has entry 300.29, stop 337.15, target 291.70, and direction short. Long stock entries and the separate option-premium path remain healthy. Diagnose where directional ownership is lost across risk sizing, sizing telemetry, and the persisted paper trade. Make the smallest complete repair without weakening stop geometry, risk limits, or duplicate-entry gates.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {},
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "python_short_paper_direction",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.0,
+          "dimension": "data",
+          "evidence_ids": [
+            "contract-source-1",
+            "contract-source-2"
+          ],
+          "hypothesis_id": "h-data",
+          "promotion_reason": "",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "requested_status": "provisional",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [
+          "Directional position ownership is normalized once and propagated unchanged through risk sizing, telemetry, and persistence. Long geometry uses stop < entry < target and loss distance entry - stop; short geometry uses target < entry < stop and loss distance stop - entry. Side-specific default stops preserve the same inequalities, and an unknown side keeps the established long-compatible behavior."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "strategy_contract",
+          "state_reconciliation"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by data drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.376,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 1.88,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "contract-source-1",
+              "contract-source-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by state drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-4",
+              "operator-5"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.82,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8",
+              "source-9",
+              "source-10",
+              "source-11",
+              "source-12",
+              "source-13",
+              "source-14",
+              "source-15",
+              "source-16",
+              "source-17",
+              "source-18"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "dimension": "state",
+            "experiment_id": "falsify-h-state",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h-test_harness",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "contract-source-1",
+              "contract-source-2"
+            ],
+            "hypothesis_id": "h-data",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "contract-source-1",
+              "contract-source-2"
+            ],
+            "hypothesis_id": "h-data",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": false,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": false,
+          "json_parsed": false,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": false,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "contract-source-1",
+              "contract-source-2"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 0,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "contract-source-1",
+              "contract-source-2"
+            ],
+            "hypothesis_id": "h-data",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.0,
+            "dimension": "data",
+            "evidence_ids": [
+              "contract-source-1",
+              "contract-source-2"
+            ],
+            "hypothesis_id": "h-data",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive"
+          },
+          "errors": [
+            "x-data: Unknown diagnostic probe kind: fixed-string search.",
+            "x-state: Unknown diagnostic probe kind: bounded file_excerpt."
+          ],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-1",
+              "source-2",
+              "source-15",
+              "source-16"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Data normalization fails to preserve direction in short geometry.",
+            "status": "provisional"
+          },
+          "response_chars": 2660,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 242522,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 508,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-m78soe3t\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry PASSED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry PASSED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 4 passed in 0.05s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 518,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-az79y_wi\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default PASSED [ 20%]\ntests/test_final.py::test_invalid_short_stop_is_not_rescued_by_quantity_fallback PASSED [ 40%]\ntests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable PASSED [ 60%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 80%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 5 passed in 0.05s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_short_paper_direction",
+          "path": "cases/python_short_paper_direction.json",
+          "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "size_bytes": 6067
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "path": "oracles/python_short_paper_direction.json",
+          "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "size_bytes": 1584
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_short_paper_direction",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "size_bytes": 1930
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "data",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "artifact": "case:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "path": "cases/python_short_paper_direction.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T04:53:00.602047+00:00"
+        },
+        {
+          "actual_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "path": "oracles/python_short_paper_direction.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T04:56:59.286078+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 3,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T04:57:01.256056+00:00"
+        },
+        {
+          "actual_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "artifact": "final_oracle:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T04:57:01.256295+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sequence": 11,
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "timestamp_utc": "2026-07-14T04:57:01.256345+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T04:57:01.258471+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "python_short_paper_direction",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T04:57:03.119802+00:00"
+        },
+        {
+          "actual_count": 3,
+          "case_id": "python_short_paper_direction",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 3,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T04:57:03.119822+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 105016,
+          "load_duration_ns": 0,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 23549,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 105.0,
+          "response": "",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 105016
+        },
+        {
+          "case_budget_remaining_before_sec": 374.98344760003965,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 44.98339389998,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 45008,
+          "load_duration_ns": 0,
+          "logical_attempt": 2,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_remaining_before_sec": 44.98339389998,
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 23833,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "recovery_trigger": "call_timeout",
+          "requested_timeout_sec": 44.98339389998,
+          "response": "",
+          "retry_for_invalid_json": true,
+          "stage": "diagnosis_investigator_json_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 45008
+        },
+        {
+          "case_budget_remaining_before_sec": 329.9747372000711,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 59533503000,
+          "json_object_valid": true,
+          "latency_ms": 87171,
+          "load_duration_ns": 168588000,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:3",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 28869,
+          "prompt_eval_count": 7146,
+          "prompt_eval_duration_ns": 26899514000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-data\",\n      \"claim\": \"Directional data fails to normalize across risk sizing.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"source-1\", \"source-2\", \"source-15\", \"source-16\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold state and code constant; data normalization must persist.\"\n    },\n    {\n      \"hypothesis_id\": \"h-state\",\n      \"claim\": \"State ownership is lost during risk telemetry propagation.\",\n      \"dimension\": \"state\",\n      \"support_evidence_ids\": [\"operator-4\", \"operator-5\", \"source-7\", \"source-13\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Reestablish state ownership and verify telemetry persistence.\"\n    },\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"Code logic fails to preserve direction in short geometry.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"source-1\", \"source-2\", \"source-15\", \"source-16\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Reimplement short geometry logic and verify direction preservation.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"experiment_id\": \"x-data\",\n      \"hypothesis_ids\": [\"h-data\"],\n      \"changed_dimensions\": [\"data\"],\n      \"held_constant_dimensions\": [\"code\", \"state\", \"config\", \"clock\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"expected_if_true\": \"Data normalization persists across risk sizing.\",\n      \"expected_if_false\": \"Data normalization fails, confirming drift.\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p-data\",\n        \"kind\": \"fixed-string search\",\n        \"paths\": [\"trading/paper_trading.py\"],\n        \"query\": \"direction == \\\"short\\\"\",\n        \"dimension\": \"data\"\n      }\n    },\n    {\n      \"experiment_id\": \"x-state\",\n      \"hypothesis_ids\": [\"h-state\"],\n      \"changed_dimensions\": [\"state\"],\n      \"held_constant_dimensions\": [\"code\", \"data\", \"config\", \"clock\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"expected_if_true\": \"State ownership is restored across telemetry.\",\n      \"expected_if_false\": \"State ownership remains lost, confirming drift.\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p-state\",\n        \"kind\": \"bounded file_excerpt\",\n        \"paths\": [\"trading/paper_trading.py\"],\n        \"query\": \"direction\",\n        \"dimension\": \"state\"\n      }\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-data\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"source-1\", \"source-2\", \"source-15\", \"source-16\"],\n    \"reason\": \"Data normalization fails to preserve direction in short geometry.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 686,
+          "wall_deadline_clamped": false,
+          "wall_ms": 87171
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 3,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 475,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-m78soe3t\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 50%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "data",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "trading/paper_trading.py",
+        "trading/portfolio_risk.py"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 1,
+      "successful_live_model_call_count": 1,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-14T04:57:03.145949+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 0.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 50.0,
+  "diagnostic_stage_schema_acceptance_rate": 50.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_short_paper_direction",
+          "path": "cases/python_short_paper_direction.json",
+          "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "size_bytes": 6067
+        },
+        "case_id": "python_short_paper_direction",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "path": "oracles/python_short_paper_direction.json",
+          "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "size_bytes": 1584
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_short_paper_direction",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "size_bytes": 1930
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "size_bytes": 508
+    }
+  },
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "size_bytes": 508,
+      "timestamp_utc": "2026-07-14T04:52:57.841474+00:00"
+    },
+    {
+      "artifact": "case:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "size_bytes": 6067,
+      "timestamp_utc": "2026-07-14T04:52:57.843608+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "size_bytes": 1584,
+      "timestamp_utc": "2026-07-14T04:52:57.844029+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "size_bytes": 1930,
+      "timestamp_utc": "2026-07-14T04:52:57.844443+00:00"
+    },
+    {
+      "actual_sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T04:52:57.847024+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_historical_trading_pilot_disclosed_recovery.checkpoint.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T04:53:00.600660+00:00"
+    },
+    {
+      "actual_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "artifact": "case:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "path": "cases/python_short_paper_direction.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T04:53:00.602047+00:00"
+    },
+    {
+      "actual_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "artifact": "feedback_oracle:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "path": "oracles/python_short_paper_direction.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T04:56:59.286078+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 3,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T04:57:01.256056+00:00"
+    },
+    {
+      "actual_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "artifact": "final_oracle:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "path": "final_oracles/python_short_paper_direction.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T04:57:01.256295+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_short_paper_direction.json",
+      "sequence": 11,
+      "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "timestamp_utc": "2026-07-14T04:57:01.256345+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T04:57:01.258471+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "python_short_paper_direction",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T04:57:03.119802+00:00"
+    },
+    {
+      "actual_count": 3,
+      "case_id": "python_short_paper_direction",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 3,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T04:57:03.119822+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T04:57:03.124881+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T04:57:03.145868+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 2,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "b0f0005f482c18ef42a5d946f9a77170b4242c36d35ac026a78f7d7a10b7db4d",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_historical_trading_pilot_disclosed_recovery.checkpoint.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 1,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 3,
+  "verdict": "needs_improvement"
+}

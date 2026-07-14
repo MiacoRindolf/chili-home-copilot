@@ -623,6 +623,19 @@ fixes. It also pinpoints the next capability work: directional-polarity contract
 propagation, AST-aware Python repair, and faster retained-progress refinement. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_PILOT_UNTOUCHED_RECEIPT.md`.
 
+After disclosure, commit `fb96519b` added a generic direction contract and AST-positioned repair that transfers to
+alternate names and the real historical `EmitterSignal`/`open_paper_trade` shape. The first recovery replay reached
+**100/100**, but two of three local diagnosis calls timed out and wall time remained **242.5 seconds**. Commit
+`3e0a8204` then added a conservative deterministic diagnosis fast path for source-structurally proven operators.
+The final recovery retained **100/100** with exact owners and all public/feedback/fresh-final tests passing in
+**5.1 seconds**, with **zero model calls and zero premium calls**. Full affected validation passed **319 tests**.
+
+Both recovery results remain disclosed development evidence. The fast result is deliberately
+`deterministic_only`, has no live-reasoning credit, and keeps the `needs_improvement` verdict. It proves a useful
+non-wrapper system capability for a recognized family; it does not replace the untouched 25/100 or prove transfer
+to the next Fable 5-era trading mechanism. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_PILOT_DISCLOSED_RECOVERY_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.

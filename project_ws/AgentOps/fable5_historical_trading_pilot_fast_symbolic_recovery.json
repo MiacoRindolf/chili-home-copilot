@@ -1,0 +1,563 @@
+{
+  "accepted_diagnosis_count": 1,
+  "average_case_duration_ms": 5115.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 0,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "data",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 537,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-cs_hvtwk\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry FAILED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry FAILED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_short_position_sizing_uses_stop_above_entry _______________\ntests\\test_feedback.py:6: in test_short_position_sizing_uses_stop_above_entry\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n______ test_short_signal_preserves_direction_across_entry_and_telemetry _______\ntests\\test_feedback.py:24: in test_short_signal_preserves_direction_across_entry_and_telemetry\n    assert entered == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry - TypeError: size_position() got an unexpected keyword argument 'direction'\nFAILED tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry - assert 0 == 1\n========================= 2 failed, 2 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 601,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-5991zgxy\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default FAILED [ 20%]\ntests/test_final.py::test_invalid_short_stop_is_not_rescued_by_quantity_fallback PASSED [ 40%]\ntests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable FAILED [ 60%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 80%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n_________ test_uppercase_short_without_stop_gets_side_correct_default _________\ntests\\test_final.py:18: in test_uppercase_short_without_stop_gets_side_correct_default\n    assert entered == 1\nE   assert 0 == 1\n_____ test_unknown_direction_remains_long_and_long_behavior_stays_stable ______\ntests\\test_final.py:60: in test_unknown_direction_remains_long_and_long_behavior_stays_stable\n    assert size_position(10_000.0, 100.0, 95.0, limits=RiskLimits(), direction=\"sideways\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default - assert 0 == 1\nFAILED tests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable - TypeError: size_position() got an unexpected keyword argument 'direction'\n========================= 2 failed, 3 passed in 0.12s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 498,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-cs_hvtwk\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 50%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_short_paper_direction",
+      "changed_files": [
+        "trading/paper_trading.py",
+        "trading/portfolio_risk.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "data",
+        "selected_files": [
+          "trading/paper_trading.py",
+          "trading/portfolio_risk.py"
+        ],
+        "warnings": []
+      },
+      "deterministic_diagnosis_fast_path": true,
+      "deterministic_only": true,
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "data",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "data",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [],
+          "hypothesis_id": "recognized-data-contract",
+          "reason": "Prompt invariants and candidate source shape activate a guarded repair; validation remains authoritative.",
+          "status": "provisional"
+        },
+        "experiments": [],
+        "hypotheses": [
+          {
+            "claim": "Directional position ownership is normalized once and propagated unchanged through risk sizing, telemetry, and persistence. Long geometry uses stop < entry < target and loss distance entry - stop; short geometry uses target < entry < stop and loss distance stop - entry. Side-specific default stops preserve the same inequalities, and an unknown side keeps the established long-compatible behavior.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Apply only the guarded owner repair and rerun pinned contracts.",
+            "hypothesis_id": "recognized-data-contract",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {},
+      "diagnosis_report": {
+        "conclusion": {
+          "blockers": [
+            "No source intervention has been validated yet."
+          ],
+          "causal_sufficiency": "direct_artifact",
+          "claim": "Directional position ownership is normalized once and propagated unchanged through risk sizing, telemetry, and persistence. Long geometry uses stop < entry < target and loss distance entry - stop; short geometry uses target < entry < stop and loss distance stop - entry. Side-specific default stops preserve the same inequalities, and an unknown side keeps the established long-compatible behavior.",
+          "confidence": 0.0,
+          "dimension": "data",
+          "evidence_ids": [],
+          "hypothesis_id": "recognized-data-contract",
+          "reason": "Prompt invariants and candidate source shape activate a guarded repair; validation remains authoritative.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [
+          "Directional position ownership is normalized once and propagated unchanged through risk sizing, telemetry, and persistence. Long geometry uses stop < entry < target and loss distance entry - stop; short geometry uses target < entry < stop and loss distance stop - entry. Side-specific default stops preserve the same inequalities, and an unknown side keeps the established long-compatible behavior."
+        ],
+        "decision": "instrument_first",
+        "errors": [],
+        "hypothesis_results": [],
+        "valid": true
+      },
+      "diagnosis_stages": [],
+      "diagnosis_status": "provisional",
+      "duration_ms": 5115,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 447,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-0wqwea4o\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry PASSED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry PASSED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 4 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 479,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-hctl_67m\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default PASSED [ 20%]\ntests/test_final.py::test_invalid_short_stop_is_not_rescued_by_quantity_fallback PASSED [ 40%]\ntests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable PASSED [ 60%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 80%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 5 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_short_paper_direction",
+          "path": "cases/python_short_paper_direction.json",
+          "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "size_bytes": 6067
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "path": "oracles/python_short_paper_direction.json",
+          "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "size_bytes": 1584
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_short_paper_direction",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "size_bytes": 1930
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "data",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "artifact": "case:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "path": "cases/python_short_paper_direction.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T05:04:31.519960+00:00"
+        },
+        {
+          "actual_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "path": "oracles/python_short_paper_direction.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T05:04:32.977215+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 0,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T05:04:34.853631+00:00"
+        },
+        {
+          "actual_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "artifact": "final_oracle:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T05:04:34.853845+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sequence": 11,
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "timestamp_utc": "2026-07-14T05:04:34.853887+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T05:04:34.855966+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "python_short_paper_direction",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T05:04:36.630010+00:00"
+        },
+        {
+          "actual_count": 0,
+          "case_id": "python_short_paper_direction",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 0,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T05:04:36.630030+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 0,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 481,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-0wqwea4o\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 50%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "data",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "trading/paper_trading.py",
+        "trading/portfolio_risk.py"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 0,
+      "successful_live_model_call_count": 0,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-14T05:04:36.652753+00:00",
+  "deterministic_only_case_count": 1,
+  "deterministic_only_case_rate": 100.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 0.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 0,
+  "diagnostic_stage_json_parse_rate": 0.0,
+  "diagnostic_stage_schema_acceptance_rate": 0.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_short_paper_direction",
+          "path": "cases/python_short_paper_direction.json",
+          "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "size_bytes": 6067
+        },
+        "case_id": "python_short_paper_direction",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "path": "oracles/python_short_paper_direction.json",
+          "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "size_bytes": 1584
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_short_paper_direction",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "size_bytes": 1930
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "size_bytes": 508
+    }
+  },
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "size_bytes": 508,
+      "timestamp_utc": "2026-07-14T05:04:28.773556+00:00"
+    },
+    {
+      "artifact": "case:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "size_bytes": 6067,
+      "timestamp_utc": "2026-07-14T05:04:28.775863+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "size_bytes": 1584,
+      "timestamp_utc": "2026-07-14T05:04:28.776333+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "size_bytes": 1930,
+      "timestamp_utc": "2026-07-14T05:04:28.776765+00:00"
+    },
+    {
+      "actual_sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T05:04:28.779186+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_historical_trading_pilot_fast_symbolic_recovery.checkpoint.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T05:04:31.518195+00:00"
+    },
+    {
+      "actual_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "artifact": "case:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "path": "cases/python_short_paper_direction.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T05:04:31.519960+00:00"
+    },
+    {
+      "actual_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "artifact": "feedback_oracle:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "path": "oracles/python_short_paper_direction.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T05:04:32.977215+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 0,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T05:04:34.853631+00:00"
+    },
+    {
+      "actual_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "artifact": "final_oracle:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "path": "final_oracles/python_short_paper_direction.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T05:04:34.853845+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_short_paper_direction.json",
+      "sequence": 11,
+      "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "timestamp_utc": "2026-07-14T05:04:34.853887+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T05:04:34.855966+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "python_short_paper_direction",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T05:04:36.630010+00:00"
+    },
+    {
+      "actual_count": 0,
+      "case_id": "python_short_paper_direction",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 0,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T05:04:36.630030+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T05:04:36.635411+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T05:04:36.652702+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "8349760522a4c9d514cdf252864a6e52ce6c207c575a23c2d114b84fef518cf9",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_historical_trading_pilot_fast_symbolic_recovery.checkpoint.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 0,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 0,
+  "verdict": "needs_improvement"
+}
