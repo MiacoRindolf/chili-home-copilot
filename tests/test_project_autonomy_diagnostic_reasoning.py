@@ -4210,6 +4210,100 @@ def test_protected_queue_operator_fails_closed_with_ambiguous_state_owners():
     )[0]
 
 
+def test_scope_lane_incident_yields_query_ownership_and_global_merge_contract():
+    prompt = (
+        "Seven explicit-user candidates are hidden behind 98,000 system alerts because the user_id = uid OR "
+        "user_id IS NULL mixed predicate uses the broad index. Split it into two scope-pure lanes, then merge, "
+        "deduplicate, and apply one global limit."
+    )
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+
+    contract = next(
+        value for value in invariants if "Scope-asymmetric candidate selection" in value
+    )
+    assert "query execution and selection policy separate" in contract
+    assert "one locally bounded explicit-user query" in contract
+    assert "one locally bounded system-NULL query" in contract
+    assert "mode-aware global order and limit" in contract
+    assert "Nonpositive limits perform no query" in contract
+    assert "normalizes naive and aware event times" in contract
+    assert reasoning.contract_invariant_dimension(prompt) == "data"
+
+
+def test_scope_lane_operator_transfers_across_alternate_selector_names():
+    prompt = (
+        "An explicit user path and system alerts with user_id NULL share a broad OR selector. Replace the mixed "
+        "predicate with two scope-pure separate lanes, merge and deduplicate them, and preserve one global cap."
+    )
+    files = {
+        "engine/selector.py": (
+            "def gather_refs(gateway, account_user_id, *, batch_limit, prefer_recent):\n"
+            "    safe_limit = max(0, int(batch_limit or 0))\n"
+            "    if safe_limit <= 0:\n"
+            "        return []\n"
+            "    return gateway.fetch_scope(\n"
+            "        ('or', int(account_user_id), None),\n"
+            "        limit=safe_limit,\n"
+            "        recent_first=prefer_recent,\n"
+            "    )\n"
+        ),
+        "engine/provider.py": (
+            "class Gateway:\n"
+            "    def fetch_scope(self, scope, *, limit, recent_first):\n"
+            "        return []\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert rejected == [
+        "engine/selector.py still mixes scope query shape or omits global merge semantics"
+    ]
+    assert set(proposals) == {"engine/selector.py"}
+    repaired = proposals["engine/selector.py"]
+    assert "gateway.fetch_scope(\n        (\"user\", int(account_user_id))" in repaired
+    assert "gateway.fetch_scope(\n        (\"system\", None)" in repaired
+    assert "[*user_refs, *system_refs]" in repaired
+    assert "if safe_limit <= 0:\n        return []" in repaired
+    assert "seen = set()" in repaired
+    assert "alerted_at.replace(tzinfo=timezone.utc)" in repaired
+    assert "merged.sort(key=lambda ref: int(ref[0]))" in repaired
+    ast.parse(repaired)
+    assert projected["engine/provider.py"] == files["engine/provider.py"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_proposals(prompt, projected) == {}
+    assert reasoning.contract_repair_dimension(prompt, files) == "data"
+    malformed = {
+        **projected,
+        "engine/selector.py": repaired.replace("seen = set()", "seen = []"),
+    }
+    assert reasoning.contract_repair_proposals(prompt, malformed) == {}
+    assert "global merge semantics" in reasoning.contract_invariant_warnings(
+        prompt, malformed
+    )[0]
+
+
+def test_scope_lane_operator_fails_closed_with_ambiguous_selectors():
+    prompt = (
+        "An explicit user path and system alerts with user_id NULL share a broad OR selector. Use two separate "
+        "scope-pure lanes, then merge and deduplicate under one global limit."
+    )
+    selector = (
+        "def select_refs(store, user_id, *, limit, recent_first):\n"
+        "    return store.query_scope(('or', user_id, None), limit=limit, recent_first=recent_first)\n"
+    )
+    files = {"a/selector.py": selector, "b/selector.py": selector}
+
+    assert reasoning.contract_repair_proposals(prompt, files) == {}
+    assert reasoning.contract_repair_dimension(prompt, files) == "unknown"
+    assert reasoning.contract_invariant_warnings(prompt, files) == [
+        "candidate scope-lane owner is structurally ambiguous"
+    ]
+
+
 def test_half_open_history_operator_transfers_to_alternate_sql_names():
     prompt = (
         "A rate scheduled exactly when the prior rate expires is rejected. Repair write-time and read-time "

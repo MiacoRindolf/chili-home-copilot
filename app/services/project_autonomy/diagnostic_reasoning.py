@@ -1942,6 +1942,25 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "admit the protected event. Unprotected input, fresh or wrong-cause rows, no eligible row, and an "
             "already over-cap queue never shed state."
         )
+    split_scope_query = bool(
+        any(token in lowered for token in ("explicit-user", "explicit user", "user_id = uid"))
+        and any(
+            token in lowered
+            for token in ("system alerts", "system null", "user_id is null", "user_id null")
+        )
+        and any(token in lowered for token in ("mixed predicate", " broad or", " or ", "or selector"))
+        and any(token in lowered for token in ("scope-pure", "separate", "split", "two scope"))
+        and any(token in lowered for token in ("merge", "deduplic", "global cap", "global limit"))
+    )
+    if split_scope_query:
+        invariants.append(
+            "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the "
+            "orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, "
+            "then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A "
+            "mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is "
+            "not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event "
+            "times with stable id ties, while non-recent mode orders by id."
+        )
     if (
         any(token in lowered for token in ("ttl", "expiration", "expires", "expiry"))
         and any(token in lowered for token in ("injected clock", "replay time", "refresh"))
@@ -4255,6 +4274,19 @@ def contract_invariant_warnings(
         ):
             warnings.append(
                 f"{owners[0][0]} does not preserve protected queue eligibility, mutation ordering, and audit lifecycle"
+            )
+    if any("Scope-asymmetric candidate selection keeps query execution" in value for value in invariants):
+        owners = [
+            (str(path), content)
+            for path, content in files.items()
+            if _repair_scope_lane_contract(content) != content
+            or "def _merge_candidate_ref_lanes(" in content
+        ]
+        if len(owners) > 1:
+            warnings.append("candidate scope-lane owner is structurally ambiguous")
+        elif owners and not _scope_lane_contract_satisfied(owners[0][1]):
+            warnings.append(
+                f"{owners[0][0]} still mixes scope query shape or omits global merge semantics"
             )
     return list(dict.fromkeys(warnings))
 
@@ -6888,6 +6920,380 @@ def _protected_queue_priority_updates(
     return candidates if len(candidates) == 1 else {}
 
 
+def _scope_lane_simple_metadata(content: str) -> dict[str, Any]:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return {}
+    candidates: list[dict[str, Any]] = []
+    for function in tree.body:
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        argument_names = [argument.arg for argument in function.args.args]
+        argument_names.extend(argument.arg for argument in function.args.kwonlyargs)
+        uid_name = next(
+            (
+                name
+                for name in argument_names
+                if name.lower() in {"uid", "user_id"}
+                or ("user" in name.lower() and "id" in name.lower())
+            ),
+            "",
+        )
+        limit_name = next((name for name in argument_names if "limit" in name.lower()), "")
+        recent_name = next(
+            (name for name in argument_names if "recent" in name.lower()),
+            "",
+        )
+        if not uid_name or not limit_name or not recent_name:
+            continue
+        for call in (
+            node for node in ast.walk(function) if isinstance(node, ast.Call)
+        ):
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.args
+                and isinstance(call.args[0], ast.Tuple)
+                and len(call.args[0].elts) >= 2
+                and isinstance(call.args[0].elts[0], ast.Constant)
+                and call.args[0].elts[0].value == "or"
+            ):
+                continue
+            store_name = call.func.value.id
+            candidates.append(
+                {
+                    "tree": tree,
+                    "function_name": function.name,
+                    "store_name": store_name,
+                    "method_name": call.func.attr,
+                    "uid_name": uid_name,
+                    "limit_name": limit_name,
+                    "recent_name": recent_name,
+                }
+            )
+    return candidates[0] if len(candidates) == 1 else {}
+
+
+def _scope_lane_merge_helpers() -> str:
+    return (
+        "def _candidate_ref_recency_sort_key(ref):\n"
+        "    alerted_at = ref[1]\n"
+        "    if isinstance(alerted_at, datetime):\n"
+        "        if alerted_at.tzinfo is None:\n"
+        "            alerted_at = alerted_at.replace(tzinfo=timezone.utc)\n"
+        "        rank = alerted_at.timestamp()\n"
+        "    else:\n"
+        "        rank = -math.inf\n"
+        "    return (rank, int(ref[0]))\n\n\n"
+        "def _merge_candidate_ref_lanes(refs, *, limit, recent_first):\n"
+        "    if limit <= 0:\n"
+        "        return []\n"
+        "    merged = []\n"
+        "    seen = set()\n"
+        "    for row_id, alerted_at in refs:\n"
+        "        candidate_id = int(row_id)\n"
+        "        if candidate_id in seen:\n"
+        "            continue\n"
+        "        seen.add(candidate_id)\n"
+        "        merged.append((candidate_id, alerted_at))\n"
+        "    if recent_first:\n"
+        "        merged.sort(key=_candidate_ref_recency_sort_key, reverse=True)\n"
+        "    else:\n"
+        "        merged.sort(key=lambda ref: int(ref[0]))\n"
+        "    return merged[:limit]\n\n\n"
+    )
+
+
+def _repair_scope_lane_simple(content: str) -> str:
+    metadata = _scope_lane_simple_metadata(content)
+    if not metadata:
+        return content
+    if any(
+        marker in content
+        for marker in ("_merge_candidate_ref_lanes", "_candidate_ref_recency_sort_key")
+    ):
+        return content
+    tree = metadata["tree"]
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == metadata["function_name"]
+    )
+    function_span = _python_node_offsets(content, function)
+    first_body_span = _python_node_offsets(content, function.body[0]) if function.body else None
+    if function_span is None or first_body_span is None:
+        return content
+    header = content[function_span[0] : first_body_span[0]]
+    store_name = str(metadata["store_name"])
+    uid_name = str(metadata["uid_name"])
+    limit_name = str(metadata["limit_name"])
+    recent_name = str(metadata["recent_name"])
+    method_name = str(metadata["method_name"])
+    body = (
+        f"safe_limit = max(0, int({limit_name} or 0))\n"
+        "    if safe_limit <= 0:\n"
+        "        return []\n"
+        f"    user_refs = {store_name}.{method_name}(\n"
+        f"        (\"user\", int({uid_name})),\n"
+        "        limit=safe_limit,\n"
+        f"        recent_first={recent_name},\n"
+        "    )\n"
+        f"    system_refs = {store_name}.{method_name}(\n"
+        "        (\"system\", None),\n"
+        "        limit=safe_limit,\n"
+        f"        recent_first={recent_name},\n"
+        "    )\n"
+        "    return _merge_candidate_ref_lanes(\n"
+        "        [*user_refs, *system_refs],\n"
+        "        limit=safe_limit,\n"
+        f"        recent_first={recent_name},\n"
+        "    )"
+    )
+    replacement = "\n\n" + _scope_lane_merge_helpers() + header + body
+    updated = _apply_python_node_replacements(
+        content,
+        [(function_span[0], function_span[1], replacement)],
+    )
+    if updated == content:
+        return content
+    updated = _insert_python_import(updated, "import math")
+    updated = _insert_python_import(updated, "from datetime import datetime, timezone")
+    try:
+        ast.parse(updated)
+    except SyntaxError:
+        return content
+    return updated
+
+
+def _scope_lane_sqlalchemy_helpers() -> str:
+    return (
+        "def _candidate_ref_recency_sort_key(ref):\n"
+        "    alerted_at = ref[1]\n"
+        "    if isinstance(alerted_at, datetime):\n"
+        "        if alerted_at.tzinfo is None:\n"
+        "            alerted_at = alerted_at.replace(tzinfo=timezone.utc)\n"
+        "        rank = alerted_at.timestamp()\n"
+        "    else:\n"
+        "        rank = -math.inf\n"
+        "    return (ref[1] is None, rank, int(ref[0]))\n\n\n"
+        "def _merge_candidate_ref_lanes(refs, *, limit, recent_first):\n"
+        "    if limit <= 0:\n"
+        "        return []\n"
+        "    merged = []\n"
+        "    seen = set()\n"
+        "    for row_id, alerted_at in refs:\n"
+        "        candidate_id = int(row_id)\n"
+        "        if candidate_id in seen:\n"
+        "            continue\n"
+        "        seen.add(candidate_id)\n"
+        "        merged.append((candidate_id, alerted_at))\n"
+        "    if recent_first:\n"
+        "        merged.sort(key=_candidate_ref_recency_sort_key, reverse=True)\n"
+        "    else:\n"
+        "        merged.sort(key=lambda ref: int(ref[0]))\n"
+        "    return merged[:limit]\n\n\n"
+        "def _select_candidate_refs_by_user_scope(\n"
+        "    candidate_base,\n"
+        "    uid,\n"
+        "    *,\n"
+        "    limit,\n"
+        "    order_by_clauses,\n"
+        "    recent_first,\n"
+        "):\n"
+        "    safe_limit = max(0, int(limit or 0))\n"
+        "    if safe_limit <= 0:\n"
+        "        return []\n"
+        "    refs = []\n"
+        "    for scope_filter in (\n"
+        "        BreakoutAlert.user_id == uid,\n"
+        "        BreakoutAlert.user_id.is_(None),\n"
+        "    ):\n"
+        "        rows = (\n"
+        "            candidate_base.filter(scope_filter)\n"
+        "            .order_by(*order_by_clauses)\n"
+        "            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)\n"
+        "            .limit(safe_limit)\n"
+        "            .all()\n"
+        "        )\n"
+        "        refs.extend((int(row_id), alerted_at) for row_id, alerted_at in rows)\n"
+        "    return _merge_candidate_ref_lanes(\n"
+        "        refs, limit=safe_limit, recent_first=recent_first\n"
+        "    )\n\n\n"
+    )
+
+
+def _repair_scope_lane_sqlalchemy(content: str) -> str:
+    if not all(
+        marker in content
+        for marker in (
+            "def _candidate_order_by_clauses(",
+            "candidate_base",
+            "BreakoutAlert.user_id == uid",
+            "BreakoutAlert.user_id.is_(None)",
+            "fresh_candidate_refs = (",
+        )
+    ):
+        return content
+    if "def _select_candidate_refs_by_user_scope(" in content:
+        return content
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+    anchor = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_candidate_order_by_clauses"
+        ),
+        None,
+    )
+    if anchor is None:
+        return content
+    old_scope = (
+        "            BreakoutAlert.alert_tier == \"pattern_imminent\",\n"
+        "            or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),\n"
+        "            ~processed_alert_exists,\n"
+    )
+    new_scope = (
+        "            BreakoutAlert.alert_tier == \"pattern_imminent\",\n"
+        "            ~processed_alert_exists,\n"
+    )
+    fresh_old = (
+        "        fresh_candidate_refs = (\n"
+        "            candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff)\n"
+        "            .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())\n"
+        "            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)\n"
+        "            .limit(candidate_query_limit)\n"
+        "            .all()\n"
+        "        )\n"
+    )
+    fresh_new = (
+        "        fresh_candidate_refs = _select_candidate_refs_by_user_scope(\n"
+        "            candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff),\n"
+        "            uid,\n"
+        "            limit=candidate_query_limit,\n"
+        "            order_by_clauses=(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc()),\n"
+        "            recent_first=True,\n"
+        "        )\n"
+    )
+    older_old = (
+        "            older_candidate_refs = (\n"
+        "                candidate_base.filter(\n"
+        "                    or_(\n"
+        "                        BreakoutAlert.alerted_at < fresh_cutoff,\n"
+        "                        BreakoutAlert.alerted_at.is_(None),\n"
+        "                    )\n"
+        "                )\n"
+        "                .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())\n"
+        "                .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)\n"
+        "                .limit(remaining_candidate_slots)\n"
+        "                .all()\n"
+        "            )\n"
+    )
+    older_new = (
+        "            older_candidate_refs = _select_candidate_refs_by_user_scope(\n"
+        "                candidate_base.filter(\n"
+        "                    or_(\n"
+        "                        BreakoutAlert.alerted_at < fresh_cutoff,\n"
+        "                        BreakoutAlert.alerted_at.is_(None),\n"
+        "                    )\n"
+        "                ),\n"
+        "                uid,\n"
+        "                limit=remaining_candidate_slots,\n"
+        "                order_by_clauses=(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc()),\n"
+        "                recent_first=True,\n"
+        "            )\n"
+    )
+    default_old = (
+        "        candidate_refs = (\n"
+        "            candidate_base.order_by(BreakoutAlert.id.asc())\n"
+        "            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)\n"
+        "            .limit(candidate_query_limit)\n"
+        "            .all()\n"
+        "        )\n"
+    )
+    default_new = (
+        "        candidate_refs = _select_candidate_refs_by_user_scope(\n"
+        "            candidate_base,\n"
+        "            uid,\n"
+        "            limit=candidate_query_limit,\n"
+        "            order_by_clauses=(BreakoutAlert.id.asc(),),\n"
+        "            recent_first=False,\n"
+        "        )\n"
+    )
+    replacements = (
+        (old_scope, new_scope),
+        (fresh_old, fresh_new),
+        (older_old, older_new),
+        (default_old, default_new),
+    )
+    if not all(old in content for old, _new in replacements):
+        return content
+    updated = content
+    for old, new in replacements:
+        updated = updated.replace(old, new, 1)
+    lines = updated.splitlines(keepends=True)
+    lines.insert(int(anchor.end_lineno or anchor.lineno), "\n\n" + _scope_lane_sqlalchemy_helpers())
+    updated = "".join(lines)
+    try:
+        ast.parse(updated)
+    except SyntaxError:
+        return content
+    return updated
+
+
+def _repair_scope_lane_contract(content: str) -> str:
+    simple = _repair_scope_lane_simple(content)
+    if simple != content:
+        return simple
+    return _repair_scope_lane_sqlalchemy(content)
+
+
+def _scope_lane_contract_satisfied(content: str) -> bool:
+    common = (
+        "def _candidate_ref_recency_sort_key(",
+        "def _merge_candidate_ref_lanes(",
+        "seen = set()",
+        "merged.sort(key=_candidate_ref_recency_sort_key, reverse=True)",
+        "merged.sort(key=lambda ref: int(ref[0]))",
+    )
+    if not all(marker in content for marker in common):
+        return False
+    if "def _select_candidate_refs_by_user_scope(" in content:
+        return bool(
+            "BreakoutAlert.user_id == uid" in content
+            and "BreakoutAlert.user_id.is_(None)" in content
+            and content.count("_select_candidate_refs_by_user_scope(") >= 4
+            and "recent_first=False" in content
+            and (
+                "BreakoutAlert.alert_tier == \"pattern_imminent\",\n"
+                "            or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),"
+                not in content
+            )
+        )
+    return bool(
+        "(\"or\"" not in content
+        and "('or'" not in content
+        and "(\"user\"" in content
+        and "(\"system\"" in content
+        and "if safe_limit <= 0:" in content
+        and "[*user_refs, *system_refs]" in content
+    )
+
+
+def _scope_lane_updates(files: Mapping[str, str]) -> dict[str, str]:
+    candidates = {
+        str(path).replace("\\", "/"): updated
+        for path, content in files.items()
+        if (updated := _repair_scope_lane_contract(content)) != content
+    }
+    return candidates if len(candidates) == 1 else {}
+
+
 def _repair_canonical_base64url(content: str) -> str:
     updated = content
     if "function decodeBase64Url" in updated and "Buffer.from" in updated:
@@ -8691,11 +9097,20 @@ def contract_repair_proposals(
         )
         else {}
     )
+    scope_lane_updates = (
+        _scope_lane_updates(files)
+        if any(
+            "Scope-asymmetric candidate selection keeps query execution" in value
+            for value in invariants
+        )
+        else {}
+    )
     proposals: dict[str, str] = {}
     for path, content in files.items():
         normalized_path = str(path).replace("\\", "/")
         updated = bounded_optional_updates.get(normalized_path, content)
         updated = protected_queue_updates.get(normalized_path, updated)
+        updated = scope_lane_updates.get(normalized_path, updated)
         bindings = recognition.get(str(path), {})
         if any("canonical text decoder" in value for value in invariants):
             updated = _repair_canonical_base64url(updated)
@@ -9072,6 +9487,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("Directional position ownership is normalized once", "data"),
     ("Bounded optional teacher work is governed", "config"),
     ("Protected queue replacement is one ordered state transition", "state"),
+    ("Scope-asymmetric candidate selection keeps query execution", "data"),
 )
 
 
@@ -9142,6 +9558,11 @@ def contract_repair_dimension(
         for value in invariants
     ) and _protected_queue_priority_updates(prompt, files):
         active_dimensions.add("state")
+    if any(
+        "Scope-asymmetric candidate selection keeps query execution" in value
+        for value in invariants
+    ) and _scope_lane_updates(files):
+        active_dimensions.add("data")
     for invariant_marker, dimension, operator in operators:
         if not any(invariant_marker in invariant for invariant in invariants):
             continue
