@@ -3829,6 +3829,213 @@ def test_directional_position_operator_ignores_unrecognized_risk_math():
     assert reasoning.contract_repair_proposals(prompt, files) == {}
 
 
+def test_optional_teacher_pressure_incident_yields_policy_and_fallback_contract():
+    prompt = (
+        "Optional teacher model calls continue while the activation queue is at its limit. The daily budget has "
+        "a bounded default, teacher work sheds at 80% queue utilization, and mechanical aggregation must continue."
+    )
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+
+    contract = next(
+        value for value in invariants if "Bounded optional teacher work" in value
+    )
+    assert "settings own the finite default daily budget" in contract
+    assert "repository only measures queue depth" in contract
+    assert "consumer admits teacher work only below that threshold" in contract
+    assert "mechanical aggregation and state persistence always continue" in contract
+    assert "exactly at the threshold sheds" in contract
+    assert "fails open" in contract
+    assert reasoning.contract_invariant_dimension(prompt) == "config"
+
+
+def test_optional_teacher_pressure_operator_transfers_across_python_policy_names():
+    prompt = (
+        "Optional teacher work continues under queue pressure even though deterministic aggregation is available. "
+        "Use a bounded daily budget and shed teacher calls at 80% queue utilization while preserving fallback."
+    )
+    files = {
+        "neural/policy.py": (
+            "from dataclasses import dataclass\n\n"
+            "@dataclass\n"
+            "class MeshPolicy:\n"
+            "    neural_poll_seconds: int = 15\n\n"
+            "policy = MeshPolicy()\n"
+        ),
+        "neural/queue_store.py": (
+            "MAX_ACTIVATION_QUEUE_DEPTH = 20\n\n"
+            "def activation_queue_depth(session):\n"
+            "    if getattr(session, 'probe_error', False):\n"
+            "        raise RuntimeError('no telemetry')\n"
+            "    return int(getattr(session, 'pending', 0))\n"
+        ),
+        "neural/context.py": (
+            "from datetime import date\n"
+            "from .policy import policy as default_policy\n\n"
+            "DEFAULT_DAILY_TEACHER_LIMIT = 0\n"
+            "_calls = {}\n\n"
+            "def mechanical_aggregate(children):\n"
+            "    return {'method': 'mechanical', 'count': len(children)}\n\n"
+            "def _invoke_teacher(children, policy, gateway):\n"
+            "    limit = int(getattr(policy, 'neural_daily_teacher_limit', DEFAULT_DAILY_TEACHER_LIMIT) or 0)\n"
+            "    today = date.today().isoformat()\n"
+            "    if limit > 0 and _calls.get(today, 0) >= limit:\n"
+            "        return None\n"
+            "    value = gateway(children)\n"
+            "    if value is not None:\n"
+            "        _calls[today] = _calls.get(today, 0) + 1\n"
+            "    return value\n\n"
+            "def evaluate_context(session, state, children, phase, gateway, policy=None):\n"
+            "    policy = policy or default_policy\n"
+            "    mechanical = mechanical_aggregate(children)\n"
+            "    teacher = _invoke_teacher(children, policy, gateway)\n"
+            "    final = teacher if phase in {'bootstrap', 'demoted'} and teacher else mechanical\n"
+            "    state['decision'] = final\n"
+            "    return final\n"
+        ),
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert len(rejected) == 2
+    assert set(proposals) == {"neural/policy.py", "neural/context.py"}
+    assert "neural_daily_teacher_limit: int = 50" in proposals["neural/policy.py"]
+    assert (
+        "neural_teacher_queue_pressure_block_fraction: float = 0.8"
+        in proposals["neural/policy.py"]
+    )
+    assert "DEFAULT_DAILY_TEACHER_LIMIT = 50" in proposals["neural/context.py"]
+    assert "DEFAULT_TEACHER_QUEUE_PRESSURE_BLOCK_FRACTION = 0.8" in proposals[
+        "neural/context.py"
+    ]
+    assert "from .queue_store import MAX_ACTIVATION_QUEUE_DEPTH, activation_queue_depth" in proposals[
+        "neural/context.py"
+    ]
+    assert "activation_queue_depth(db) / max_depth" in proposals["neural/context.py"]
+    assert "except Exception:\n        return False" in proposals["neural/context.py"]
+    assert "if not _teacher_blocked_by_queue_pressure(session, policy):" in proposals[
+        "neural/context.py"
+    ]
+    ast.parse(proposals["neural/policy.py"])
+    ast.parse(proposals["neural/context.py"])
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_proposals(prompt, projected) == {}
+    assert reasoning.contract_repair_dimension(prompt, files) == "config"
+
+
+def test_optional_teacher_pressure_operator_handles_global_settings_and_stage_gates():
+    prompt = (
+        "The teacher LLM keeps running at a saturated activation queue despite a mechanical fallback and daily "
+        "cost cap. Apply an 80% queue-pressure block with a bounded default budget."
+    )
+    files = {
+        "app/config.py": (
+            "from pydantic import Field\n\n"
+            "class Settings(BaseSettings):\n"
+            "    mesh_interval_seconds: int = Field(default=30, ge=1)\n\n"
+            "settings = Settings()\n"
+        ),
+        "app/services/trading/brain_neural_mesh/repository.py": (
+            "MAX_PENDING_QUEUE_DEPTH = 500\n\n"
+            "def pending_queue_depth(db):\n"
+            "    return int(db.pending)\n"
+        ),
+        "app/services/trading/brain_neural_mesh/trade_context_aggregator.py": (
+            "from .graduation import should_call_teacher\n\n"
+            "DEFAULT_DAILY_LLM_CAP = 0\n\n"
+            "def _daily_calls_remaining():\n"
+            "    from ....config import settings\n"
+            "    cap = getattr(settings, 'mesh_daily_llm_cap', DEFAULT_DAILY_LLM_CAP)\n"
+            "    return 999999 if not cap else int(cap)\n\n"
+            "def _call_teacher_llm(children):\n"
+            "    if _daily_calls_remaining() <= 0:\n"
+            "        return None\n"
+            "    return gateway(children)\n\n"
+            "def _mechanical_decide(children):\n"
+            "    return {'method': 'mechanical'}\n\n"
+            "def handle_trade_context(db, node_id, state, context):\n"
+            "    children = context.get('children_state', {})\n"
+            "    stage = context.get('stage', 'bootstrap')\n"
+            "    mechanical_decision = _mechanical_decide(children)\n"
+            "    teacher_decision = None\n"
+            "    use_teacher = should_call_teacher(stage)\n"
+            "    if stage in {'bootstrap', 'demoted'}:\n"
+            "        if use_teacher:\n"
+            "            teacher_decision = _call_teacher_llm(children)\n"
+            "        final_decision = teacher_decision or mechanical_decision\n"
+            "    else:\n"
+            "        final_decision = mechanical_decision\n"
+            "        if use_teacher:\n"
+            "            teacher_decision = _call_teacher_llm(children)\n"
+            "    state.local_state = final_decision\n"
+            "    return final_decision\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert set(proposals) == {
+        "app/config.py",
+        "app/services/trading/brain_neural_mesh/trade_context_aggregator.py",
+    }
+    config = proposals["app/config.py"]
+    aggregator = proposals[
+        "app/services/trading/brain_neural_mesh/trade_context_aggregator.py"
+    ]
+    assert "mesh_daily_llm_cap: int = Field(default=50, ge=0, le=500)" in config
+    assert "mesh_teacher_queue_pressure_block_fraction: float = Field(" in config
+    assert "from ....config import settings as _teacher_policy_settings" in aggregator
+    assert "teacher_allowed = use_teacher and not _teacher_blocked_by_queue_pressure(" in aggregator
+    assert aggregator.count("if teacher_allowed:") == 2
+    assert "if use_teacher:" not in aggregator
+    ast.parse(config)
+    ast.parse(aggregator)
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+
+
+def test_optional_teacher_pressure_operator_fails_closed_with_ambiguous_queue_provider():
+    prompt = (
+        "Optional teacher calls must shed under queue pressure while mechanical aggregation continues under a "
+        "bounded daily cap."
+    )
+    files = {
+        "mesh/settings.py": (
+            "from dataclasses import dataclass\n"
+            "@dataclass\n"
+            "class Settings:\n"
+            "    mesh_interval_seconds: int = 30\n"
+            "settings = Settings()\n"
+        ),
+        "mesh/aggregator.py": (
+            "from .settings import settings as default_settings\n"
+            "DEFAULT_DAILY_LLM_CAP = 0\n"
+            "def mechanical_decision(children): return {'method': 'mechanical'}\n"
+            "def _call_teacher(children, settings, gateway):\n"
+            "    cap = getattr(settings, 'mesh_daily_llm_cap', DEFAULT_DAILY_LLM_CAP)\n"
+            "    return gateway(children) if cap >= 0 else None\n"
+            "def handle_trade_context(db, state, children, stage, gateway, settings=None):\n"
+            "    mechanical = mechanical_decision(children)\n"
+            "    teacher = _call_teacher(children, settings or default_settings, gateway)\n"
+            "    state['decision'] = teacher or mechanical\n"
+            "    return state['decision']\n"
+        ),
+        "mesh/repository.py": (
+            "MAX_PENDING_QUEUE_DEPTH = 10\n"
+            "def pending_queue_depth(db): return db.pending\n"
+        ),
+        "mesh/queue_metrics.py": (
+            "MAX_ACTIVATION_QUEUE_DEPTH = 10\n"
+            "def activation_queue_depth(db): return db.pending\n"
+        ),
+    }
+
+    assert reasoning.contract_repair_proposals(prompt, files) == {}
+    assert reasoning.contract_repair_dimension(prompt, files) == "unknown"
+
+
 def test_half_open_history_operator_transfers_to_alternate_sql_names():
     prompt = (
         "A rate scheduled exactly when the prior rate expires is rejected. Repair write-time and read-time "

@@ -1833,6 +1833,50 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "short geometry uses target < entry < stop and loss distance stop - entry. Side-specific default stops "
             "preserve the same inequalities, and an unknown side keeps the established long-compatible behavior."
         )
+    bounded_optional_teacher_work = bool(
+        any(token in lowered for token in ("teacher", "llm", "model call"))
+        and any(
+            token in lowered
+            for token in (
+                "queue pressure",
+                "queue utilization",
+                "queue limit",
+                "queue depth",
+                "activation queue",
+                "saturated queue",
+            )
+        )
+        and any(
+            token in lowered
+            for token in (
+                "mechanical",
+                "deterministic",
+                "fallback",
+                "aggregation",
+            )
+        )
+        and any(
+            token in lowered
+            for token in (
+                "daily cap",
+                "daily budget",
+                "bounded default",
+                "bounded teacher",
+                "cost cap",
+                "50 teacher",
+                "80%",
+            )
+        )
+    )
+    if bounded_optional_teacher_work:
+        invariants.append(
+            "Bounded optional teacher work is governed by effective settings and live queue state: settings own "
+            "the finite default daily budget and configurable pressure threshold, the repository only measures "
+            "queue depth, and the consumer admits teacher work only below that threshold while mechanical "
+            "aggregation and state persistence always continue. Queue depth exactly at the threshold sheds "
+            "optional work. Zero-valued budget and pressure overrides preserve explicit unlimited and disabled "
+            "semantics, while absent telemetry or a bounded pressure-probe failure fails open."
+        )
     if (
         any(token in lowered for token in ("ttl", "expiration", "expires", "expiry"))
         and any(token in lowered for token in ("injected clock", "replay time", "refresh"))
@@ -4128,6 +4172,11 @@ def contract_invariant_warnings(
                 warnings.append(
                     f"{path} does not preserve normalized direction through side-aware geometry and ownership"
                 )
+    if any("Bounded optional teacher work is governed" in value for value in invariants):
+        for path in _repair_bounded_optional_work_contract(files):
+            warnings.append(
+                f"{path} does not preserve bounded optional-work policy and mechanical fallback under queue pressure"
+            )
     return list(dict.fromkeys(warnings))
 
 
@@ -5553,6 +5602,721 @@ def _repair_directional_position_contract(content: str) -> str:
         replacements.append(replacement)
     repaired = _apply_python_node_replacements(updated, replacements)
     return repaired if repaired != updated or updated != content else content
+
+
+def _bounded_assignment(
+    node: ast.AST,
+) -> tuple[str, ast.expr] | None:
+    if (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    ):
+        return node.targets[0].id, node.value
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
+        return node.target.id, node.value
+    return None
+
+
+def _bounded_call_name(call: ast.Call) -> str:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return ""
+
+
+def _bounded_settings_class(tree: ast.Module) -> ast.ClassDef | None:
+    candidates: list[ast.ClassDef] = []
+    instantiated = {
+        _bounded_call_name(node.value)
+        for node in tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and isinstance(getattr(node, "value", None), ast.Call)
+    }
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        field_count = sum(isinstance(child, ast.AnnAssign) for child in node.body)
+        bases = {_bounded_call_name(base) for base in node.bases if isinstance(base, ast.Call)}
+        bases.update(
+            base.id if isinstance(base, ast.Name) else base.attr
+            for base in node.bases
+            if isinstance(base, (ast.Name, ast.Attribute))
+        )
+        decorated = any(
+            (
+                isinstance(decorator, ast.Name)
+                and decorator.id == "dataclass"
+            )
+            or (
+                isinstance(decorator, ast.Attribute)
+                and decorator.attr == "dataclass"
+            )
+            for decorator in node.decorator_list
+        )
+        if field_count and (
+            decorated
+            or node.name in instantiated
+            or any("settings" in base.lower() for base in bases)
+        ):
+            candidates.append(node)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _bounded_import_target(path: str, node: ast.ImportFrom) -> str:
+    if node.level <= 0 or not node.module:
+        return ""
+    parts = str(path).replace("\\", "/").split("/")[:-1]
+    ascend = node.level - 1
+    if ascend > len(parts):
+        return ""
+    if ascend:
+        parts = parts[:-ascend]
+    parts.extend(node.module.split("."))
+    return "/".join(parts) + ".py"
+
+
+def _bounded_pressure_attribute(cap_attribute: str) -> str:
+    lowered = str(cap_attribute or "").lower()
+    suffixes = (
+        "daily_llm_cap",
+        "daily_llm_limit",
+        "daily_teacher_cap",
+        "daily_teacher_limit",
+        "daily_model_cap",
+        "daily_model_limit",
+    )
+    suffix = next((value for value in suffixes if lowered.endswith(value)), "")
+    if not suffix:
+        return ""
+    prefix = cap_attribute[: len(cap_attribute) - len(suffix)]
+    return f"{prefix}teacher_queue_pressure_block_fraction"
+
+
+def _bounded_optional_work_roles(
+    files: Mapping[str, str],
+) -> dict[str, Any]:
+    parsed: dict[str, ast.Module] = {}
+    normalized_files: dict[str, str] = {}
+    for raw_path, content in files.items():
+        path = str(raw_path).replace("\\", "/")
+        if not path.endswith(".py"):
+            continue
+        try:
+            parsed[path] = ast.parse(content)
+        except SyntaxError:
+            continue
+        normalized_files[path] = content
+
+    aggregator_candidates: list[dict[str, Any]] = []
+    for path, tree in parsed.items():
+        content = normalized_files[path]
+        cap_assignments = []
+        for node in tree.body:
+            assignment = _bounded_assignment(node)
+            if assignment is None:
+                continue
+            name, value = assignment
+            upper = name.upper()
+            if not (
+                upper.startswith("DEFAULT_")
+                and "DAILY" in upper
+                and any(token in upper for token in ("LLM", "TEACHER", "MODEL"))
+                and any(token in upper for token in ("CAP", "LIMIT"))
+                and isinstance(value, ast.Constant)
+                and value.value in {0, 50}
+            ):
+                continue
+            cap_assignments.append((name, node, value))
+        for cap_name, cap_node, cap_value in cap_assignments:
+            accessors: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str, str]] = []
+            for function in (
+                node
+                for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ):
+                for call in (
+                    node for node in ast.walk(function) if isinstance(node, ast.Call)
+                ):
+                    if not (
+                        isinstance(call.func, ast.Name)
+                        and call.func.id == "getattr"
+                        and len(call.args) >= 3
+                        and isinstance(call.args[1], ast.Constant)
+                        and isinstance(call.args[1].value, str)
+                        and isinstance(call.args[2], ast.Name)
+                        and call.args[2].id == cap_name
+                        and isinstance(call.args[0], ast.Name)
+                    ):
+                        continue
+                    cap_attribute = str(call.args[1].value)
+                    if not _bounded_pressure_attribute(cap_attribute):
+                        continue
+                    accessors.append((function, cap_attribute, call.args[0].id))
+            for accessor, cap_attribute, settings_name in accessors:
+                teacher_functions = [
+                    function
+                    for function in tree.body
+                    if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and "teacher" in function.name.lower()
+                    and (
+                        function is accessor
+                        or any(
+                            isinstance(call, ast.Call)
+                            and _bounded_call_name(call) == accessor.name
+                            for call in ast.walk(function)
+                        )
+                    )
+                ]
+                for teacher in teacher_functions:
+                    handlers = []
+                    for function in tree.body:
+                        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            continue
+                        source = ast.get_source_segment(content, function) or ""
+                        calls_teacher = any(
+                            isinstance(call, ast.Call)
+                            and _bounded_call_name(call) == teacher.name
+                            for call in ast.walk(function)
+                        )
+                        if function is teacher or not calls_teacher or "mechanical" not in source.lower():
+                            continue
+                        argument_names = [argument.arg for argument in function.args.args]
+                        db_name = next(
+                            (
+                                name
+                                for name in argument_names
+                                if name.lower() in {"db", "session", "database"}
+                                or "session" in name.lower()
+                            ),
+                            "",
+                        )
+                        if not db_name:
+                            continue
+                        handlers.append((function, db_name, argument_names))
+                    if len(handlers) != 1:
+                        continue
+                    handler, db_name, argument_names = handlers[0]
+                    handler_policy_name = next(
+                        (
+                            name
+                            for name in argument_names
+                            if name == settings_name
+                            or any(
+                                token in name.lower()
+                                for token in ("settings", "policy", "config")
+                            )
+                        ),
+                        "",
+                    )
+                    aggregator_candidates.append(
+                        {
+                            "path": path,
+                            "tree": tree,
+                            "cap_name": cap_name,
+                            "cap_node": cap_node,
+                            "cap_value": cap_value,
+                            "cap_attribute": cap_attribute,
+                            "pressure_attribute": _bounded_pressure_attribute(cap_attribute),
+                            "settings_name": settings_name,
+                            "handler_policy_name": handler_policy_name,
+                            "teacher_name": teacher.name,
+                            "handler_name": handler.name,
+                            "db_name": db_name,
+                        }
+                    )
+    if len(aggregator_candidates) != 1:
+        return {}
+    aggregator = aggregator_candidates[0]
+    aggregator_path = str(aggregator["path"])
+    parent = aggregator_path.rsplit("/", 1)[0] if "/" in aggregator_path else ""
+
+    repository_candidates: list[dict[str, Any]] = []
+    for path, tree in parsed.items():
+        if path == aggregator_path:
+            continue
+        if (path.rsplit("/", 1)[0] if "/" in path else "") != parent:
+            continue
+        max_assignments = []
+        for node in tree.body:
+            assignment = _bounded_assignment(node)
+            if assignment is None:
+                continue
+            name, value = assignment
+            upper = name.upper()
+            if (
+                upper.startswith("MAX_")
+                and "QUEUE" in upper
+                and any(token in upper for token in ("DEPTH", "SIZE", "CAPACITY"))
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, int)
+                and value.value > 0
+            ):
+                max_assignments.append(name)
+        depth_functions = [
+            function.name
+            for function in tree.body
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and "queue" in function.name.lower()
+            and any(token in function.name.lower() for token in ("depth", "size", "count"))
+            and len(function.args.args) >= 1
+        ]
+        if len(max_assignments) == 1 and len(depth_functions) == 1:
+            repository_candidates.append(
+                {
+                    "path": path,
+                    "max_name": max_assignments[0],
+                    "depth_name": depth_functions[0],
+                }
+            )
+    if len(repository_candidates) != 1:
+        return {}
+    repository = repository_candidates[0]
+
+    config_candidates: dict[str, dict[str, Any]] = {}
+    aggregator_tree = parsed[aggregator_path]
+    for node in ast.walk(aggregator_tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        target = _bounded_import_target(aggregator_path, node)
+        config_tree = parsed.get(target)
+        if config_tree is None:
+            continue
+        settings_class = _bounded_settings_class(config_tree)
+        if settings_class is None:
+            continue
+        for alias in node.names:
+            if any(token in alias.name.lower() for token in ("settings", "policy", "config")):
+                config_candidates[target] = {
+                    "path": target,
+                    "class_name": settings_class.name,
+                    "import_level": node.level,
+                    "import_module": node.module,
+                    "imported_name": alias.name,
+                }
+    if not config_candidates:
+        for path, tree in parsed.items():
+            if path in {aggregator_path, str(repository["path"])}:
+                continue
+            settings_class = _bounded_settings_class(tree)
+            if settings_class is not None:
+                config_candidates[path] = {
+                    "path": path,
+                    "class_name": settings_class.name,
+                    "import_level": 0,
+                    "import_module": "",
+                    "imported_name": "settings",
+                }
+    if len(config_candidates) != 1:
+        return {}
+    config = next(iter(config_candidates.values()))
+    return {"aggregator": aggregator, "repository": repository, "config": config}
+
+
+def _bounded_field_default_replacement(
+    content: str,
+    field: ast.AnnAssign,
+    expected: int | float,
+) -> tuple[int, int, str] | None:
+    value = field.value
+    if value is None:
+        return None
+    if isinstance(value, ast.Constant):
+        if value.value == expected:
+            return (0, 0, "")
+        if value.value not in {0, 0.0}:
+            return None
+        span = _python_node_offsets(content, value)
+        return (*span, repr(expected)) if span else None
+    if isinstance(value, ast.Call) and _bounded_call_name(value) == "Field":
+        default = next((item for item in value.keywords if item.arg == "default"), None)
+        if default is None or not isinstance(default.value, ast.Constant):
+            return None
+        if default.value.value == expected:
+            return (0, 0, "")
+        if default.value.value not in {0, 0.0}:
+            return None
+        span = _python_node_offsets(content, default.value)
+        return (*span, repr(expected)) if span else None
+    return None
+
+
+def _repair_bounded_optional_settings(
+    content: str,
+    *,
+    class_name: str,
+    cap_attribute: str,
+    pressure_attribute: str,
+) -> str | None:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+    owner = next(
+        (node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name),
+        None,
+    )
+    if owner is None:
+        return None
+    fields = {
+        child.target.id: child
+        for child in owner.body
+        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name)
+    }
+    replacements: list[tuple[int, int, str]] = []
+    for name, expected in ((cap_attribute, 50), (pressure_attribute, 0.8)):
+        field = fields.get(name)
+        if field is None:
+            continue
+        replacement = _bounded_field_default_replacement(content, field, expected)
+        if replacement is None:
+            return None
+        if replacement[0] != replacement[1]:
+            replacements.append(replacement)
+
+    missing = [
+        (cap_attribute, "int", 50),
+        (pressure_attribute, "float", 0.8),
+    ]
+    missing = [item for item in missing if item[0] not in fields]
+    if missing:
+        annotated = [
+            child
+            for child in owner.body
+            if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name)
+        ]
+        if not annotated:
+            return None
+        prefix = cap_attribute[: cap_attribute.find("daily_")]
+        owner_tokens = {
+            token
+            for token in re.split(r"_+", cap_attribute.lower())
+            if token
+            and token
+            not in {"daily", "llm", "teacher", "model", "cap", "limit"}
+        }
+        related = [
+            child
+            for child in annotated
+            if (child.target.id.startswith(prefix) and prefix)
+            or owner_tokens.intersection(child.target.id.lower().split("_"))
+        ]
+        anchor = (related or annotated)[-1]
+        lines = content.splitlines(keepends=True)
+        insertion = sum(len(line) for line in lines[: int(anchor.end_lineno or anchor.lineno)])
+        indent = re.match(r"\s*", lines[int(anchor.lineno) - 1]).group(0)
+        uses_field = any(
+            isinstance(child.value, ast.Call)
+            and _bounded_call_name(child.value) == "Field"
+            for child in annotated
+            if child.value is not None
+        )
+        rendered = []
+        for name, annotation, default in missing:
+            aliases = []
+            if uses_field and "AliasChoices" in content:
+                aliases = [name.upper()]
+                if not aliases[0].startswith("CHILI_"):
+                    aliases.append(f"CHILI_{aliases[0]}")
+            alias_argument = (
+                ", validation_alias=AliasChoices("
+                + ", ".join(repr(alias) for alias in aliases)
+                + ")"
+                if aliases
+                else ""
+            )
+            if uses_field and name == cap_attribute:
+                value = f"Field(default=50, ge=0, le=500{alias_argument})"
+            elif uses_field:
+                value = f"Field(default=0.8, ge=0.0, le=1.0{alias_argument})"
+            else:
+                value = repr(default)
+            rendered.append(f"{indent}{name}: {annotation} = {value}\n")
+        replacements.append((insertion, insertion, "".join(rendered)))
+    updated = _apply_python_node_replacements(content, replacements)
+    return updated if ast.parse(updated) is not None else None
+
+
+def _repair_bounded_optional_aggregator(
+    content: str,
+    *,
+    metadata: Mapping[str, Any],
+    repository: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> str | None:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+    cap_name = str(metadata["cap_name"])
+    pressure_name = "DEFAULT_TEACHER_QUEUE_PRESSURE_BLOCK_FRACTION"
+    cap_assignment = next(
+        (
+            node
+            for node in tree.body
+            if (assignment := _bounded_assignment(node)) is not None
+            and assignment[0] == cap_name
+        ),
+        None,
+    )
+    if cap_assignment is None:
+        return None
+    cap_value = _bounded_assignment(cap_assignment)[1]
+    if not isinstance(cap_value, ast.Constant) or cap_value.value not in {0, 50}:
+        return None
+    replacements: list[tuple[int, int, str]] = []
+    if cap_value.value == 0:
+        span = _python_node_offsets(content, cap_value)
+        if span is None:
+            return None
+        replacements.append((*span, "50"))
+    pressure_assignment = next(
+        (
+            node
+            for node in tree.body
+            if (assignment := _bounded_assignment(node)) is not None
+            and assignment[0] == pressure_name
+        ),
+        None,
+    )
+    if pressure_assignment is None:
+        lines = content.splitlines(keepends=True)
+        insertion = sum(
+            len(line)
+            for line in lines[: int(cap_assignment.end_lineno or cap_assignment.lineno)]
+        )
+        replacements.append((insertion, insertion, f"{pressure_name} = 0.8\n"))
+    else:
+        pressure_value = _bounded_assignment(pressure_assignment)[1]
+        if not isinstance(pressure_value, ast.Constant) or pressure_value.value not in {0, 0.0, 0.8}:
+            return None
+        if pressure_value.value != 0.8:
+            span = _python_node_offsets(content, pressure_value)
+            if span is None:
+                return None
+            replacements.append((*span, "0.8"))
+    updated = _apply_python_node_replacements(content, replacements)
+
+    repository_path = str(repository["path"])
+    repository_module = Path(repository_path).stem
+    imported_names = {
+        alias.name
+        for node in ast.walk(ast.parse(updated))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    missing_repository_names = [
+        symbol
+        for symbol in (str(repository["max_name"]), str(repository["depth_name"]))
+        if symbol not in imported_names
+    ]
+    if missing_repository_names:
+        repository_import = (
+            f"from .{repository_module} import {', '.join(missing_repository_names)}"
+        )
+        updated = _insert_python_import(updated, repository_import)
+
+    policy_expression = str(metadata.get("handler_policy_name") or "")
+    if not policy_expression:
+        level = int(config.get("import_level") or 0)
+        module = str(config.get("import_module") or "")
+        imported_name = str(config.get("imported_name") or "settings")
+        if level <= 0 or not module:
+            return None
+        policy_expression = "_teacher_policy_settings"
+        updated = _insert_python_import(
+            updated,
+            f"from {'.' * level}{module} import {imported_name} as {policy_expression}",
+        )
+
+    try:
+        tree = ast.parse(updated)
+    except SyntaxError:
+        return None
+    helper_name = "_teacher_blocked_by_queue_pressure"
+    if not any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == helper_name
+        for node in tree.body
+    ):
+        handler = next(
+            (
+                node
+                for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == metadata["handler_name"]
+            ),
+            None,
+        )
+        if handler is None:
+            return None
+        helper = (
+            f"def {helper_name}(db, settings):\n"
+            "    if db is None:\n"
+            "        return False\n"
+            "    try:\n"
+            "        block_fraction = float(\n"
+            "            getattr(\n"
+            "                settings,\n"
+            f"                {metadata['pressure_attribute']!r},\n"
+            f"                {pressure_name},\n"
+            "            )\n"
+            "            or 0.0\n"
+            "        )\n"
+            "    except (TypeError, ValueError):\n"
+            f"        block_fraction = {pressure_name}\n"
+            "    if block_fraction <= 0.0:\n"
+            "        return False\n"
+            "    try:\n"
+            f"        max_depth = max(1, int({repository['max_name']}))\n"
+            f"        pressure = {repository['depth_name']}(db) / max_depth\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "    return pressure >= min(1.0, block_fraction)\n\n\n"
+        )
+        lines = updated.splitlines(keepends=True)
+        lines.insert(int(handler.lineno) - 1, helper)
+        updated = "".join(lines)
+
+    try:
+        tree = ast.parse(updated)
+    except SyntaxError:
+        return None
+    handler = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == metadata["handler_name"]
+        ),
+        None,
+    )
+    if handler is None:
+        return None
+    handler_source = ast.get_source_segment(updated, handler) or ""
+    if helper_name in handler_source:
+        return updated
+
+    use_teacher_assignment = next(
+        (
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "use_teacher"
+        ),
+        None,
+    )
+    if use_teacher_assignment is not None:
+        replacements = []
+        for node in ast.walk(handler):
+            if not (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Name)
+                and node.test.id == "use_teacher"
+            ):
+                continue
+            span = _python_node_offsets(updated, node.test)
+            if span is None:
+                return None
+            replacements.append((*span, "teacher_allowed"))
+        if not replacements:
+            return None
+        updated = _apply_python_node_replacements(updated, replacements)
+        tree = ast.parse(updated)
+        handler = next(
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == metadata["handler_name"]
+        )
+        use_teacher_assignment = next(
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "use_teacher"
+        )
+        lines = updated.splitlines(keepends=True)
+        line_index = int(use_teacher_assignment.end_lineno or use_teacher_assignment.lineno)
+        indent = re.match(
+            r"\s*", lines[int(use_teacher_assignment.lineno) - 1]
+        ).group(0)
+        lines.insert(
+            line_index,
+            f"{indent}teacher_allowed = use_teacher and not {helper_name}("
+            f"{metadata['db_name']}, {policy_expression})\n",
+        )
+        updated = "".join(lines)
+    else:
+        teacher_assignments = [
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and _bounded_call_name(node.value) == metadata["teacher_name"]
+        ]
+        if len(teacher_assignments) != 1:
+            return None
+        assignment = teacher_assignments[0]
+        span = _python_node_offsets(updated, assignment)
+        call_source = ast.get_source_segment(updated, assignment.value) or ""
+        if span is None or not call_source:
+            return None
+        indent = " " * int(assignment.col_offset)
+        target = assignment.targets[0].id
+        replacement = (
+            f"{target} = None\n"
+            f"{indent}if not {helper_name}({metadata['db_name']}, {policy_expression}):\n"
+            f"{indent}    {target} = {call_source}"
+        )
+        updated = _apply_python_node_replacements(updated, [(*span, replacement)])
+    try:
+        ast.parse(updated)
+    except SyntaxError:
+        return None
+    return updated
+
+
+def _repair_bounded_optional_work_contract(
+    files: Mapping[str, str],
+) -> dict[str, str]:
+    roles = _bounded_optional_work_roles(files)
+    if not roles:
+        return {}
+    aggregator = roles["aggregator"]
+    config = roles["config"]
+    repository = roles["repository"]
+    normalized = {
+        str(path).replace("\\", "/"): str(content)
+        for path, content in files.items()
+    }
+    config_path = str(config["path"])
+    aggregator_path = str(aggregator["path"])
+    repaired_config = _repair_bounded_optional_settings(
+        normalized[config_path],
+        class_name=str(config["class_name"]),
+        cap_attribute=str(aggregator["cap_attribute"]),
+        pressure_attribute=str(aggregator["pressure_attribute"]),
+    )
+    repaired_aggregator = _repair_bounded_optional_aggregator(
+        normalized[aggregator_path],
+        metadata=aggregator,
+        repository=repository,
+        config=config,
+    )
+    if repaired_config is None or repaired_aggregator is None:
+        return {}
+    proposals: dict[str, str] = {}
+    if repaired_config != normalized[config_path]:
+        proposals[config_path] = repaired_config
+    if repaired_aggregator != normalized[aggregator_path]:
+        proposals[aggregator_path] = repaired_aggregator
+    return proposals
 
 
 def _repair_canonical_base64url(content: str) -> str:
@@ -7345,9 +8109,14 @@ def contract_repair_proposals(
     """Synthesize structurally recognized repairs and guard the projected result."""
     invariants = derive_contract_invariants(prompt)
     recognition = _contract_repair_recognition(invariants, files)
+    bounded_optional_updates = (
+        _repair_bounded_optional_work_contract(files)
+        if any("Bounded optional teacher work is governed" in value for value in invariants)
+        else {}
+    )
     proposals: dict[str, str] = {}
     for path, content in files.items():
-        updated = content
+        updated = bounded_optional_updates.get(str(path).replace("\\", "/"), content)
         bindings = recognition.get(str(path), {})
         if any("canonical text decoder" in value for value in invariants):
             updated = _repair_canonical_base64url(updated)
@@ -7722,6 +8491,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("Contiguous effective-history rows use half-open", "data"),
     ("Shared work has subscriber-scoped cancellation", "state"),
     ("Directional position ownership is normalized once", "data"),
+    ("Bounded optional teacher work is governed", "config"),
 )
 
 
@@ -7782,6 +8552,11 @@ def contract_repair_dimension(
         ("Directional position ownership is normalized once", "data", _repair_directional_position_contract),
     )
     active_dimensions: set[str] = set()
+    if (
+        any("Bounded optional teacher work is governed" in value for value in invariants)
+        and _repair_bounded_optional_work_contract(files)
+    ):
+        active_dimensions.add("config")
     for invariant_marker, dimension, operator in operators:
         if not any(invariant_marker in invariant for invariant in invariants):
             continue
