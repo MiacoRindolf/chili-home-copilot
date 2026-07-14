@@ -15,8 +15,9 @@ managers = double-sell. This fix coordinates them via a single-writer
   Step 4  ``cancel_automation_session`` ADOPTS a filled entry (re-point + walk the
           live FSM to pending-entry) instead of orphaning it.
 
-All behavior is gated behind ``chili_momentum_adopt_on_cancel_fill_enabled``; OFF ==
-byte-identical to the pre-fix orphan behavior.
+Adoption remains gated behind ``chili_momentum_adopt_on_cancel_fill_enabled``. A
+disabled adoption switch no longer authorizes terminalizing through a known fill;
+the fail-closed terminal-truth fence quarantines it for reconciliation.
 """
 from __future__ import annotations
 
@@ -54,15 +55,30 @@ def _variant(db):
     return v
 
 
-def _live_session(db, *, symbol, state, entry_order_id="ORD-1", execution_family="robinhood_spot"):
+def _live_session(
+    db, *, symbol, state, entry_order_id="ORD-1",
+    entry_client_order_id="CID-1", execution_family="robinhood_spot",
+    account_scope=None,
+):
     """A LIVE momentum session whose live-exec snapshot points at one entry order."""
     v = _variant(db)
     le = {
         "entry_order_id": entry_order_id,
-        "entry_order_ids_all": [entry_order_id],
+        "entry_order_ids_all": ([entry_order_id] if entry_order_id else []),
         "entry_orders_resolved": {},
         "entry_submitted": True,
+        "entry_want_qty": 100.0,
     }
+    if entry_client_order_id:
+        le["entry_client_order_id"] = entry_client_order_id
+        le["entry_reconcile_pending_client_order_id"] = entry_client_order_id
+    snapshot = {"momentum_live_execution": le}
+    if account_scope is not None:
+        snapshot["alpaca_account_scope"] = account_scope
+    if execution_family in {"alpaca_spot", "alpaca_short"}:
+        snapshot["alpaca_account_id"] = "acct-adopt-test"
+    else:
+        snapshot["non_alpaca_account_identity"] = "adopt-test-account-v1"
     sess = TradingAutomationSession(
         user_id=None,
         venue="test",
@@ -71,7 +87,7 @@ def _live_session(db, *, symbol, state, entry_order_id="ORD-1", execution_family
         symbol=symbol,
         variant_id=v.id,
         state=state,
-        risk_snapshot_json={"momentum_live_execution": le},
+        risk_snapshot_json=snapshot,
         correlation_id="corr-adopt",
     )
     db.add(sess)
@@ -79,16 +95,46 @@ def _live_session(db, *, symbol, state, entry_order_id="ORD-1", execution_family
     return sess
 
 
-def _fake_adapter(*, filled_size, status="filled"):
+def _fake_adapter(*, filled_size, status="filled", symbol: str):
     """A venue adapter double: get_order -> (NormalizedOrder-like, FreshnessMeta)."""
-    order = SimpleNamespace(filled_size=filled_size, status=status)
 
     class _A:
+        def __init__(self):
+            self.status = status
+
+        def _order(self, oid):
+            return SimpleNamespace(
+                order_id=str(oid),
+                client_order_id="CID-1",
+                product_id=symbol,
+                filled_size=filled_size,
+                status=self.status,
+                side="buy",
+                raw={"quantity": 100.0},
+            )
+
+        def get_account_identity_truth(self):
+            return {"readable": True, "identity": "adopt-test-account-v1"}
+
+        def get_position_quantity_truth(self, _product_id):
+            return {"readable": True, "quantity": 0.0}
+
         def get_order(self, oid):
-            return order, None
+            return self._order(oid), None
+
+        def get_order_truth(self, oid):
+            return {"readable": True, "found": True, "order": self._order(oid)}
+
+        def list_open_orders_truth(self, *, product_id=None, limit=250):
+            terminal = {
+                "filled", "cancelled", "canceled", "rejected", "failed", "expired",
+            }
+            orders = [] if self.status.lower() in terminal else [self._order("ORD-1")]
+            return {"readable": True, "orders": orders}
 
         def cancel_order(self, oid):  # never reached on the adopt path
-            return True
+            self.status = "cancelled"
+            return {"ok": True}
 
     return _A()
 
@@ -130,13 +176,24 @@ def _set_flag(monkeypatch, value: bool):
     monkeypatch.setattr(
         bsvc.settings, "chili_momentum_adopt_on_cancel_fill_enabled", value
     )
+    monkeypatch.setattr(
+        aq.settings, "chili_alpaca_expected_account_id", "acct-adopt-test"
+    )
+    monkeypatch.setattr(
+        aq,
+        "_reaper_broker_position_truth",
+        lambda _sess: (True, {"broker_quantity": 0.0}),
+    )
 
 
 # ── 1. adopt on filled entry ───────────────────────────────────────────────
 def test_cancel_adopts_on_filled_entry(db, monkeypatch):
     _set_flag(monkeypatch, True)
     sess = _live_session(db, symbol="CRVO", state=aq.STATE_WATCHING_LIVE)
-    _patch_adapter(monkeypatch, _fake_adapter(filled_size=100.0, status="filled"))
+    _patch_adapter(
+        monkeypatch,
+        _fake_adapter(filled_size=100.0, status="filled", symbol="CRVO"),
+    )
 
     res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
 
@@ -162,7 +219,10 @@ def test_cancel_adopts_on_filled_entry(db, monkeypatch):
 def test_cancel_no_fill_byte_identical(db, monkeypatch):
     _set_flag(monkeypatch, True)
     sess = _live_session(db, symbol="NOFILL", state=aq.STATE_WATCHING_LIVE)
-    _patch_adapter(monkeypatch, _fake_adapter(filled_size=0.0, status="cancelled"))
+    _patch_adapter(
+        monkeypatch,
+        _fake_adapter(filled_size=0.0, status="cancelled", symbol="NOFILL"),
+    )
 
     res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
 
@@ -175,21 +235,86 @@ def test_cancel_no_fill_byte_identical(db, monkeypatch):
     assert "entry_adopted_on_cancel" not in evs
 
 
+def test_cancel_legacy_missing_scope_never_adopts_from_client_id(db, monkeypatch):
+    _set_flag(monkeypatch, True)
+    sess = _live_session(
+        db,
+        symbol="ACTU",
+        state=aq.STATE_WATCHING_LIVE,
+        entry_order_id=None,
+        entry_client_order_id="chili_ml_e_actu",
+        execution_family="alpaca_spot",
+    )
+    class _A:
+        def get_order_by_client_order_id(self, cid):
+            raise AssertionError("missing-scope quarantine must precede broker lookup")
+
+        def get_order(self, oid):
+            raise AssertionError("missing-scope quarantine must precede broker lookup")
+
+    _patch_adapter(monkeypatch, _A())
+
+    res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
+
+    assert res["pending"] == "execution_quarantine"
+    assert res["quarantine_reason"] == "alpaca_account_scope_unfrozen_or_mismatched"
+    db.refresh(sess)
+    assert sess.state == aq.STATE_WATCHING_LIVE
+    assert "operator_stop_execution_quarantined" in _events(db, sess.id)
+    assert "entry_client_id_recovered_on_cancel" not in _events(db, sess.id)
+    assert "session_cancelled" not in _events(db, sess.id)
+
+
+def test_scoped_alpaca_cancel_defers_client_id_to_claim_aware_runner(db, monkeypatch):
+    _set_flag(monkeypatch, True)
+    sess = _live_session(
+        db,
+        symbol="ACTU",
+        state=aq.STATE_WATCHING_LIVE,
+        entry_order_id=None,
+        entry_client_order_id="chili_ml_e_actu",
+        execution_family="alpaca_spot",
+        account_scope="alpaca:paper",
+    )
+
+    class _A:
+        def get_order_by_client_order_id(self, cid):
+            raise AssertionError("operator cancel persists authority; runner owns lookup")
+
+    _patch_adapter(monkeypatch, _A())
+
+    res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
+
+    assert res["pending"] == "entry_order_truth_reconcile"
+    db.refresh(sess)
+    assert sess.state == aq.STATE_WATCHING_LIVE
+    assert "operator_cancel_emergency_requested" in _events(db, sess.id)
+    assert "session_cancelled" not in _events(db, sess.id)
+
+
 # ── 3. kill switch OFF restores the orphan (pre-fix) behavior ───────────────
-def test_kill_switch_off_restores_orphan(db, monkeypatch):
+def test_kill_switch_off_quarantines_known_fill(db, monkeypatch):
     _set_flag(monkeypatch, False)
     sess = _live_session(db, symbol="CRVO", state=aq.STATE_WATCHING_LIVE)
-    # even with a FILLED entry, flag OFF -> no adoption (today's orphan behavior)
-    _patch_adapter(monkeypatch, _fake_adapter(filled_size=100.0, status="filled"))
+    # Flag OFF prevents adoption, but it must never authorize an orphaning death.
+    _patch_adapter(
+        monkeypatch,
+        _fake_adapter(filled_size=100.0, status="filled", symbol="CRVO"),
+    )
 
     res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
 
     assert "adopted" not in res
+    assert res["quarantine_reason"] == "terminalization_filled_order_requires_management"
     db.refresh(sess)
-    assert sess.state == aq.STATE_LIVE_CANCELLED
+    assert sess.state == aq.STATE_WATCHING_LIVE
+    assert sess.ended_at is None
+    assert sess.risk_snapshot_json.get("operator_pause")
     evs = _events(db, sess.id)
     assert "entry_adopted_on_cancel" not in evs
-    assert "live_cancelled" in evs
+    assert "live_cancelled" not in evs
+    assert "session_cancelled" not in evs
+    assert "live_terminalization_quarantined" in evs
 
 
 # ── 4. reconciler skips momentum-owned by scope ─────────────────────────────
@@ -289,7 +414,10 @@ def test_cancel_default_records_automation_monitor(db, monkeypatch):
     stale-session reaper) must NOT be mislabeled as an operator action."""
     _set_flag(monkeypatch, True)
     sess = _live_session(db, symbol="BTCT", state=aq.STATE_WATCHING_LIVE)
-    _patch_adapter(monkeypatch, _fake_adapter(filled_size=0.0, status="cancelled"))
+    _patch_adapter(
+        monkeypatch,
+        _fake_adapter(filled_size=0.0, status="cancelled", symbol="BTCT"),
+    )
 
     res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
 
@@ -305,7 +433,10 @@ def test_cancel_operator_records_operator(db, monkeypatch):
     'operator') still records 'operator'."""
     _set_flag(monkeypatch, True)
     sess = _live_session(db, symbol="BTCT", state=aq.STATE_WATCHING_LIVE)
-    _patch_adapter(monkeypatch, _fake_adapter(filled_size=0.0, status="cancelled"))
+    _patch_adapter(
+        monkeypatch,
+        _fake_adapter(filled_size=0.0, status="cancelled", symbol="BTCT"),
+    )
 
     res = aq.cancel_automation_session(
         db, user_id=None, session_id=sess.id, cancelled_by="operator"
@@ -322,7 +453,10 @@ def test_adopt_on_cancel_records_caller_identity(db, monkeypatch):
     entry_adopted_on_cancel event's "by"), not a hardcoded 'operator'."""
     _set_flag(monkeypatch, True)
     sess = _live_session(db, symbol="BTCT", state=aq.STATE_WATCHING_LIVE)
-    _patch_adapter(monkeypatch, _fake_adapter(filled_size=100.0, status="filled"))
+    _patch_adapter(
+        monkeypatch,
+        _fake_adapter(filled_size=100.0, status="filled", symbol="BTCT"),
+    )
 
     res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
 

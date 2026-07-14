@@ -58,16 +58,56 @@ def test_factory_resolves_momentum_execution_families() -> None:
 
 # ── session-death order sweep ────────────────────────────────────────────────
 class _FakeAdapter:
-    def __init__(self, *, filled: float = 0.0, status: str = "open") -> None:
+    def __init__(
+        self,
+        *,
+        order_ids: list[str],
+        filled: float = 0.0,
+        status: str = "open",
+    ) -> None:
         self.cancelled: list[str] = []
         self._filled = filled
-        self._status = status
+        self._statuses = {str(oid): status for oid in order_ids}
+
+    def _order(self, order_id: str):
+        return SimpleNamespace(
+            order_id=str(order_id),
+            client_order_id=f"cid-{order_id}",
+            product_id="KMRK",
+            filled_size=self._filled,
+            status=self._statuses[str(order_id)],
+            side="buy",
+            raw={"quantity": 10.0},
+        )
+
+    def get_account_identity_truth(self):
+        return {"readable": True, "identity": "order-truth-test-account-v1"}
+
+    def get_position_quantity_truth(self, _product_id):
+        return {"readable": True, "quantity": 0.0}
 
     def get_order(self, order_id: str):
-        return SimpleNamespace(filled_size=self._filled, status=self._status), None
+        return self._order(order_id), None
+
+    def get_order_truth(self, order_id: str):
+        if str(order_id) not in self._statuses:
+            return {"readable": True, "found": False, "order": None}
+        return {"readable": True, "found": True, "order": self._order(order_id)}
+
+    def list_open_orders_truth(self, *, product_id=None, limit=250):
+        terminal = {
+            "filled", "cancelled", "canceled", "rejected", "failed", "expired",
+        }
+        orders = [
+            self._order(oid)
+            for oid, status in self._statuses.items()
+            if status.lower() not in terminal
+        ]
+        return {"readable": True, "orders": orders[:limit]}
 
     def cancel_order(self, order_id: str):
         self.cancelled.append(order_id)
+        self._statuses[str(order_id)] = "cancelled"
         return {"ok": True}
 
 
@@ -88,9 +128,14 @@ def _live_session_with_orders(db, *, order_ids: list[str]) -> TradingAutomationS
         state="watching_live",
         execution_family="robinhood_spot",
         risk_snapshot_json={
+            "non_alpaca_account_identity": "order-truth-test-account-v1",
             "momentum_live_execution": {
                 "entry_order_id": order_ids[0] if order_ids else None,
                 "entry_order_ids_all": list(order_ids),
+                "entry_client_order_id": (
+                    f"cid-{order_ids[0]}" if order_ids else None
+                ),
+                "entry_want_qty": 10.0,
             }
         },
     )
@@ -100,33 +145,45 @@ def _live_session_with_orders(db, *, order_ids: list[str]) -> TradingAutomationS
     return sess
 
 
-def test_session_death_cancels_resting_orders(db, monkeypatch) -> None:
-    fake = _FakeAdapter(status="confirmed")
+def test_session_death_cancels_exactly_owned_resting_order(db, monkeypatch) -> None:
+    fake = _FakeAdapter(order_ids=["oid-1"], status="confirmed")
     import app.services.trading.venue.factory as factory
+    from app.services.trading.momentum_neural import automation_query as aq
 
     monkeypatch.setattr(factory, "get_adapter", lambda src: fake)
-    sess = _live_session_with_orders(db, order_ids=["oid-1", "oid-2"])
+    monkeypatch.setattr(
+        aq,
+        "_reaper_broker_position_truth",
+        lambda _sess: (True, {"broker_quantity": 0.0}),
+    )
+    sess = _live_session_with_orders(db, order_ids=["oid-1"])
     res = cancel_automation_session(db, user_id=sess.user_id, session_id=sess.id)
     assert res["ok"] and res["state"] == "live_cancelled"
-    assert fake.cancelled == ["oid-1", "oid-2"]
+    assert fake.cancelled == ["oid-1"]
 
 
-def test_session_death_surfaces_filled_order_instead_of_cancelling(db, monkeypatch) -> None:
-    fake = _FakeAdapter(filled=304.0, status="filled")
+def test_session_death_adopts_filled_order_instead_of_cancelling(db, monkeypatch) -> None:
+    fake = _FakeAdapter(
+        order_ids=["oid-filled"],
+        filled=304.0,
+        status="filled",
+    )
     import app.services.trading.venue.factory as factory
 
     monkeypatch.setattr(factory, "get_adapter", lambda src: fake)
     sess = _live_session_with_orders(db, order_ids=["oid-filled"])
     res = cancel_automation_session(db, user_id=sess.user_id, session_id=sess.id)
-    assert res["ok"]
+    assert res["ok"] and res["adopted"] is True
     assert fake.cancelled == []  # never cancel a filled order — surface it
     from sqlalchemy import text
 
-    payload = db.execute(text(
-        "SELECT payload_json::text FROM trading_automation_events "
+    cancelled_event = db.execute(text(
+        "SELECT 1 FROM trading_automation_events "
         "WHERE session_id = :sid AND event_type = 'session_cancelled'"
     ), {"sid": sess.id}).scalar()
-    assert payload is not None and "FILLED_NEEDS_ADOPTION" in payload
+    db.refresh(sess)
+    assert sess.state == "live_pending_entry"
+    assert cancelled_event is None
 
 
 # ── event-driven pending-entry lifecycle (no magic seconds) ──────────────────

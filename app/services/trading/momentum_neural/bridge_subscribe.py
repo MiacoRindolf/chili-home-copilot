@@ -55,7 +55,9 @@ def request_bridge_subscription(
     if not bool(getattr(settings, "chili_momentum_bridge_subscribe_on_alert_enabled", True)):
         return False
     sym = str(symbol or "").strip().upper()
-    if not sym or sym.endswith("-USD"):  # equities only (the IQFeed L1/L2 bridges are equity)
+    # These host bridges are equity-only. Reject every pair-shaped/hyphenated
+    # symbol (including *-USDC), not just the historical *-USD spelling.
+    if not sym or "-" in sym:
         return False
     sym = sym[:16]  # momentum_bridge_subscribe_requests.symbol is VARCHAR(16)
     _at = (now_utc or datetime.now(timezone.utc)).replace(tzinfo=None)
@@ -119,7 +121,7 @@ def select_fresh_subscribe_symbols(
     parsed: list[tuple[datetime, str]] = []
     for sym, ts in rows or []:
         s = str(sym or "").strip().upper()
-        if not s or s.endswith("-USD"):
+        if not s or "-" in s:
             continue
         t = _naive(ts)
         if t is None or t < cutoff:

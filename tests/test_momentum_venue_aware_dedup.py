@@ -4,6 +4,7 @@ robinhood_spot-real vs alpaca_spot-paper A/B enabler). Same-venue still dedups (
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.services.trading.momentum_neural.live_fsm import STATE_QUEUED_LIVE
@@ -12,6 +13,8 @@ from app.services.trading.momentum_neural.persistence import create_trading_auto
 
 from tests.test_momentum_live_runner import _uid
 from tests.test_momentum_paper_runner import _seed_live_eligible_row
+
+pytestmark = pytest.mark.usefixtures("stable_non_alpaca_account_identity")
 
 
 def _seed_live_session(db, *, uid, symbol, variant_id, execution_family):

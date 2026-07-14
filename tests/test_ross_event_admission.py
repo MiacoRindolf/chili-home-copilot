@@ -155,6 +155,102 @@ def test_event_admission_defaults_to_immediate_runner_tick(monkeypatch) -> None:
     assert [name for name, _ in calls] == ["begin", "confirm", "tick"]
 
 
+def test_iqfeed_new_arm_can_defer_all_ticks_until_caller_commit(monkeypatch) -> None:
+    _enable(monkeypatch)
+    calls = []
+
+    out = admission.admit_ross_event(
+        _FakeDB(),
+        symbol="DXTS",
+        signal=_signal("DXTS"),
+        source="iqfeed_l1",
+        refresh_viability=False,
+        begin_live_arm_fn=lambda _db, **_kwargs: {
+            "ok": True,
+            "arm_token": "tok",
+            "session_id": 777,
+        },
+        confirm_live_arm_fn=lambda _db, **_kwargs: {
+            "ok": True,
+            "state": "queued_live",
+            "session_id": 777,
+        },
+        tick_live_session_fn=lambda *_a, **_k: calls.append("broker_tick"),
+        append_event_fn=lambda *_a, **_k: None,
+        candidate_provider=lambda _db, sym, now: _candidate(sym),
+        market_open_fn=lambda _sym: True,
+        ignore_cooldown=True,
+        defer_live_ticks_until_commit=True,
+    )
+
+    assert out["admitted"] is True
+    assert out["ticks_deferred_until_commit"] is True
+    assert out["admission_tick_count"] == 0
+    assert out["tick_results"] == []
+    assert out["ticked"] == 0
+    assert calls == []
+
+
+def test_iqfeed_existing_active_session_can_defer_synchronous_tick(monkeypatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        admission,
+        "_active_live_session",
+        lambda *_a, **_k: SimpleNamespace(id=778, state="watching_live"),
+    )
+    calls = []
+
+    out = admission.admit_ross_event(
+        _FakeDB(),
+        symbol="DXTS",
+        signal=_signal("DXTS"),
+        source="iqfeed_l1",
+        refresh_viability=False,
+        tick_live_session_fn=lambda *_a, **_k: calls.append("broker_tick"),
+        market_open_fn=lambda _sym: True,
+        ignore_cooldown=True,
+        defer_live_ticks_until_commit=True,
+    )
+
+    assert out["skipped"] == "already_active"
+    assert out["session_id"] == 778
+    assert out["admission_tick_count"] == 0
+    assert out["ticked"] == 0
+    assert calls == []
+
+
+def test_iqfeed_deduped_arm_can_defer_synchronous_tick(monkeypatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(admission, "_active_live_session", lambda *_a, **_k: None)
+    calls = []
+
+    out = admission.admit_ross_event(
+        _FakeDB(),
+        symbol="DXTS",
+        signal=_signal("DXTS"),
+        source="iqfeed_l1",
+        refresh_viability=False,
+        begin_live_arm_fn=lambda _db, **_kwargs: {
+            "ok": True,
+            "deduped": True,
+            "session_id": 779,
+            "state": "watching_live",
+        },
+        confirm_live_arm_fn=lambda *_a, **_k: calls.append("confirm"),
+        tick_live_session_fn=lambda *_a, **_k: calls.append("broker_tick"),
+        candidate_provider=lambda _db, sym, now: _candidate(sym),
+        market_open_fn=lambda _sym: True,
+        ignore_cooldown=True,
+        defer_live_ticks_until_commit=True,
+    )
+
+    assert out["skipped"] == "already_active"
+    assert out["session_id"] == 779
+    assert out["admission_tick_count"] == 0
+    assert out["ticked"] == 0
+    assert calls == []
+
+
 def test_event_admission_rejects_mega_cap_even_if_live_candidate(monkeypatch) -> None:
     _enable(monkeypatch)
     begin_calls = []

@@ -7,12 +7,14 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.core import User
 from app.models.trading import TradingAutomationSession
 from app.services.trading.momentum_neural.automation_query import get_operator_session_focus, list_automation_sessions
 from app.services.trading.momentum_neural.persistence import create_trading_automation_session
 from app.services.trading.momentum_neural.paper_fsm import STATE_FINISHED
 from app.services.trading.momentum_neural.session_lifecycle import canonical_operator_state
+from app.services.trading.momentum_neural.viable_query import build_viable_strategies_payload
 from tests.test_momentum_automation_api import _variant
 
 
@@ -31,6 +33,32 @@ def _broker_patch(monkeypatch) -> None:
             "coinbase": {"connected": True, "configured": True},
             "metamask": {"connected": False},
         },
+    )
+    # This file tests operator workflow/lineage, not broker account transport.
+    # Give risk evaluation deterministic, positive policy/account inputs and
+    # prevent an accidental real account read from the test process.
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_risk_max_loss_per_trade_usd",
+        50.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.risk_policy._account_equity_usd",
+        lambda *_args, **_kwargs: 100_000.0,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.governance._peek_broker_breach",
+        lambda _db, family, **_kwargs: (
+            False,
+            {
+                "family": family,
+                "realized": 0.0,
+                "limit": 250.0,
+                "cap": 250.0,
+                "source": "test_stub",
+            },
+        ),
     )
 
 
@@ -63,7 +91,12 @@ def test_list_sessions_includes_canonical(db: Session) -> None:
     assert "next_action_required" in row
 
 
-def test_promote_paper_to_live_arm_lineage(paired_client, db: Session, monkeypatch) -> None:
+def test_promote_paper_to_live_arm_lineage(
+    paired_client,
+    db: Session,
+    monkeypatch,
+    stable_non_alpaca_account_identity,
+) -> None:
     _broker_patch(monkeypatch)
     from tests.test_momentum_operator_api import _seed_live_eligible_row
 
@@ -77,7 +110,7 @@ def test_promote_paper_to_live_arm_lineage(paired_client, db: Session, monkeypat
     paper_id = r0.json()["session_id"]
 
     r1 = c.post("/api/trading/momentum/promote-paper", json={"paper_session_id": paper_id})
-    assert r1.status_code == 200
+    assert r1.status_code == 200, r1.text
     j = r1.json()
     assert j.get("source_paper_session_id") == paper_id
     assert j.get("arm_token")
@@ -86,6 +119,79 @@ def test_promote_paper_to_live_arm_lineage(paired_client, db: Session, monkeypat
     live = db.query(TradingAutomationSession).filter(TradingAutomationSession.id == live_id).one()
     assert live.source_paper_session_id == paper_id
     assert live.state == "live_arm_pending"
+    assert live.venue == "coinbase"
+
+
+def test_promoted_alpaca_arm_persists_alpaca_venue(paired_client, db: Session, monkeypatch) -> None:
+    _broker_patch(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.viable_query.market_open_now",
+        lambda _symbol: True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_ross_equity_universe_required",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.operator_actions.settings.chili_alpaca_paper",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        "acct-operator-workflow",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.operator_actions._certified_alpaca_account_id",
+        lambda _family: ("acct-operator-workflow", None),
+    )
+    from tests.test_momentum_operator_api import _seed_live_eligible_row
+
+    vid, variant = _seed_live_eligible_row(db, symbol="PROA")
+    variant.execution_family = "alpaca_spot"
+    db.commit()
+    viability = build_viable_strategies_payload(
+        db,
+        symbol="PROA",
+        user_id=None,
+        enrich_coinbase=False,
+    )
+    assert any(
+        int(row["variant_id"]) == int(vid)
+        and row.get("actions", {}).get("can_run_paper")
+        for row in viability.get("strategies") or []
+    ), viability
+    c, _user = paired_client
+    paper_result = c.post(
+        "/api/trading/momentum/run-paper",
+        json={
+            "symbol": "PROA",
+            "variant_id": vid,
+            "execution_family": "alpaca_spot",
+        },
+    )
+    assert paper_result.status_code == 200, paper_result.text
+    promoted = c.post(
+        "/api/trading/momentum/promote-paper",
+        json={
+            "paper_session_id": paper_result.json()["session_id"],
+            "execution_family": "alpaca_spot",
+        },
+    )
+    assert promoted.status_code == 200, promoted.text
+    db.expire_all()
+    live = (
+        db.query(TradingAutomationSession)
+        .filter(TradingAutomationSession.id == promoted.json()["session_id"])
+        .one()
+    )
+    assert live.execution_family == "alpaca_spot"
+    assert live.venue == "alpaca"
+    assert live.risk_snapshot_json["alpaca_account_scope"] == "alpaca:paper"
 
 
 def test_promote_rejects_stale_finished_paper(paired_client, db: Session, monkeypatch) -> None:

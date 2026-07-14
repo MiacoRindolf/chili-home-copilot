@@ -141,6 +141,24 @@ class VenueAdapter(Protocol):
     def get_recent_trades(self, product_id: str, *, limit: int = 50) -> tuple[list[dict[str, Any]], FreshnessMeta]: ...
     def list_open_orders(self, *, product_id: Optional[str] = None, limit: int = 50) -> tuple[list[NormalizedOrder], FreshnessMeta]: ...
     def get_order(self, order_id: str) -> tuple[Optional[NormalizedOrder], FreshnessMeta]: ...
+    def list_open_orders_truth(self, *, product_id: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
+        """Strict order-absence read; ``readable=False`` on every transport failure."""
+        ...
+    def get_order_truth(self, order_id: str) -> dict[str, Any]:
+        """Strict identity read; never fold a failed read into ``found=False``."""
+        ...
+    def get_position_quantity_truth(self, product_id: str) -> dict[str, Any]:
+        """Strict position read; ``readable=True`` is required to certify flat."""
+        ...
+    def get_account_identity_truth(self) -> dict[str, Any]:
+        """Stable non-secret identity for the authenticated account generation.
+
+        Strict callers accept only
+        ``{"readable": True, "identity": <non-empty str>}``.  The value must
+        change when the account/portfolio generation changes and must not expose
+        credentials or a raw account number.
+        """
+        ...
     def get_fills(
         self,
         *,

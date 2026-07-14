@@ -101,6 +101,61 @@ def test_happy_path_arms(happy):
     assert out["state"] == "queued_live"
 
 
+def test_crypto_candidate_never_creates_alpaca_twin(happy):
+    """A Coinbase crypto primary must never spawn the equity-only Alpaca twin."""
+    calls: list[tuple[str, str]] = []
+
+    happy.setattr(
+        aa.settings,
+        "chili_momentum_crypto_execution_via_alpaca_paper",
+        False,
+        raising=False,
+    )
+    happy.setattr(aa.settings, "chili_momentum_alpaca_twin_arm_enabled", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_enabled", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_paper", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_api_key", "paper-test-key", raising=False)
+    happy.setattr(
+        aa,
+        "_alpaca_lists_symbol",
+        lambda _symbol: (_ for _ in ()).throw(AssertionError("crypto twin probe must not run")),
+    )
+
+    def _begin(_db, **kwargs):
+        calls.append((kwargs["symbol"], kwargs["execution_family"]))
+        return {"ok": True, "arm_token": "tok", "session_id": len(calls)}
+
+    happy.setattr(operator_actions, "begin_live_arm", _begin)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 1
+    assert calls == [("RSC-USD", "coinbase_spot")]
+    assert "alpaca_twin_session_id" not in out
+
+
+def test_crypto_resolution_defaults_away_from_alpaca_paper(monkeypatch):
+    from app.services.trading import execution_family_registry as registry
+    from app.services.trading.venue import alpaca_spot
+
+    monkeypatch.setattr(aa.settings, "chili_alpaca_enabled", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_alpaca_api_key", "paper-test-key", raising=False)
+    monkeypatch.setattr(
+        aa.settings,
+        "chili_momentum_crypto_execution_via_alpaca_paper",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        alpaca_spot,
+        "alpaca_lists_symbol",
+        lambda _symbol: (_ for _ in ()).throw(AssertionError("flag-off must not probe Alpaca")),
+    )
+
+    assert registry.resolve_execution_family_for_symbol("BTC-USD") == "coinbase_spot"
+
+
 def test_flag_off_skips(happy):
     happy.setattr(aa.settings, "chili_momentum_auto_arm_live_enabled", False, raising=False)
     assert aa.run_auto_arm_pass(_FakeDB())["skipped"] == "flag_off"

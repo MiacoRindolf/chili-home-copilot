@@ -72,22 +72,21 @@ _EQUITY_EXECUTION_FAMILIES: frozenset[str] = frozenset({
     EXECUTION_FAMILY_ALPACA_SHORT,
 })
 
-# Asset classes each family can actually TRADE. Alpaca serves BOTH (US equities
-# AND spot crypto — the paper crypto soak rides this, 2026-06-12); the legacy
-# single-class map above stays for asset_class_of_execution_family's primary
-# answer (alpaca's primary remains equity).
+# Asset classes each currently certified family can TRADE. Alpaca's broker may
+# offer crypto, but CHILI's recertification lane is explicitly equity-only; broker
+# capability must not be mistaken for execution authority.
 _EXECUTION_FAMILY_ASSET_CLASSES: dict[str, frozenset[str]] = {
     EXECUTION_FAMILY_COINBASE_SPOT: frozenset({"crypto"}),
     EXECUTION_FAMILY_ROBINHOOD_SPOT: frozenset({"equity"}),
     EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP: frozenset({"equity"}),
-    EXECUTION_FAMILY_ALPACA_SPOT: frozenset({"equity", "crypto"}),
+    EXECUTION_FAMILY_ALPACA_SPOT: frozenset({"equity"}),
     # The short lane is equity-only (Alpaca cannot short crypto).
     EXECUTION_FAMILY_ALPACA_SHORT: frozenset({"equity"}),
 }
 
 
 def execution_family_supports_asset_class(execution_family: str, asset_class: str) -> bool:
-    """True when the family can trade the asset class (alpaca: both). Unknown
+    """True when the certified family can trade the asset class. Unknown
     family -> False (fail closed at the cross-class gate)."""
     ef = normalize_execution_family(execution_family)
     return str(asset_class or "").strip().lower() in _EXECUTION_FAMILY_ASSET_CLASSES.get(ef, frozenset())
@@ -148,14 +147,13 @@ def execution_family_capabilities() -> list[dict[str, Any]]:
         ),
         EXECUTION_FAMILY_ALPACA_SPOT: (
             "Implemented: Alpaca US equities VenueAdapter (alpaca-py) — DMA-style limit-posting, "
-            "FREE paper sandbox. Active when chili_alpaca_enabled AND API keys are set "
-            "(paper until chili_alpaca_paper=False)."
+            "FREE paper sandbox. Recertification posture is PAPER-only; a non-paper "
+            "configuration is quarantined before any client or broker call."
         ),
         EXECUTION_FAMILY_ALPACA_SHORT: (
-            "Implemented (P0 adapter only): Alpaca SHORT lane — isolated execution family on the "
-            "same AlpacaSpotAdapter with SELL_TO_OPEN / BUY_TO_CLOSE position-intent. PAPER-only "
-            "(excluded from REAL_DAILY_LOSS_FAMILIES); gated behind chili_momentum_short_lane_enabled "
-            "(default OFF). No momentum-lane short triggers wired yet (P1+)."
+            "Uncertified/quarantined: Alpaca SHORT adapter primitives exist for tests, but "
+            "the runner permits no short entries. It remains PAPER-only, default-OFF, and "
+            "requires a separate recertification before momentum-lane use."
         ),
         EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE: (
             "Planned seam only — needs multi-venue intelligence, inventory, transfers, risk (not built)."
@@ -257,7 +255,7 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
             # SKIPS them (no accidental live-Coinbase arm; see auto_arm). The listing
             # probe is cached per process and FAIL-CLOSED (unlisted on error).
             if _alpaca_ready and bool(
-                getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", True)
+                getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", False)
             ):
                 try:
                     from .venue.alpaca_spot import alpaca_lists_symbol

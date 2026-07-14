@@ -7,10 +7,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_ROLE = "momentum_exec_only"
+EXPECTED_IQFEED_BRIDGE_BUILD = (
+    "iqfeed-l1-quote-provenance-v2+sha256:dc0185e65439364c"
+)
 
 REQUIRED_TRUE_ENV = {
     "CHILI_MOMENTUM_LIVE_RUNNER_ENABLED": "live_runner",
     "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_ENABLED": "event_loop",
+    "CHILI_AUTOPILOT_PRICE_BUS_ENABLED": "event_loop_price_bus",
     "CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED": "auto_arm",
     "CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED": "ross_universe",
 }
@@ -19,6 +23,12 @@ REQUIRED_FALSE_ENV = {
     "CHILI_MOMENTUM_LIVE_RUNNER_BATCH_FALLBACK_ENABLED": "batch_entry_fallback",
     "CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_ENABLED": "scheduled_auto_arm",
     "CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_FALLBACK_ENABLED": "auto_arm_scheduler_fallback",
+}
+REQUIRED_EXACT_ENV = {
+    "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+        "iqfeed_authoritative_bridge_build",
+        EXPECTED_IQFEED_BRIDGE_BUILD,
+    ),
 }
 
 
@@ -45,6 +55,9 @@ def evaluate_environment(env: Mapping[str, str]) -> tuple[bool, list[str]]:
     for key, label in REQUIRED_FALSE_ENV.items():
         if _truthy(env.get(key)):
             errors.append(f"forbidden_env_enabled:{label}:{key}={env.get(key, '')}")
+    for key, (label, expected) in REQUIRED_EXACT_ENV.items():
+        if str(env.get(key) or "").strip() != expected:
+            errors.append(f"required_env_mismatch:{label}:{key}")
     return not errors, errors
 
 

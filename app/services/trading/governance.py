@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -828,6 +829,25 @@ def check_trade_gate(
 # in depth. Use the MORE CONSERVATIVE of (usd, pct_of_equity) when both
 # are configured.
 
+# Daily-loss families are deliberately split by capital type. Alpaca is the
+# active PAPER broker, so it needs its own broker-local stop, but its simulated
+# PnL must never participate in a real-account aggregate kill switch.
+REAL_DAILY_LOSS_FAMILIES = (
+    "robinhood_spot",
+    "robinhood_agentic_mcp",
+    "coinbase_spot",
+)
+PAPER_DAILY_LOSS_FAMILIES = ("alpaca_spot", "alpaca_short")
+BROKER_DAILY_LOSS_FAMILIES = REAL_DAILY_LOSS_FAMILIES + PAPER_DAILY_LOSS_FAMILIES
+
+
+def _real_daily_loss_family_clause(session_model: Any) -> Any:
+    """Unknown/legacy NULL family is conservatively real, never invisible."""
+    return or_(
+        session_model.execution_family.is_(None),
+        session_model.execution_family.notin_(PAPER_DAILY_LOSS_FAMILIES),
+    )
+
 
 def global_realized_pnl_today_et(
     db: Session, user_id: int | None = None
@@ -869,10 +889,10 @@ def global_realized_pnl_today_et(
         if pnl is not None:
             trade_total += pnl
 
-    # Momentum automation outcomes. ALPACA PAPER EXCLUSION (2026-06-12): the
-    # alpaca_spot twin-soak sessions trade FAKE money against the paper API —
-    # their outcomes must never move the REAL daily-loss math (a fake -$300
-    # would trip the real kill switch).
+    # Momentum automation outcomes. ALPACA PAPER EXCLUSION (2026-06-12): both
+    # Alpaca execution families use the same simulated account, so neither may
+    # move the REAL daily-loss math (a paper loss must not trip a live-account
+    # kill switch).
     from ...models.trading import TradingAutomationSession as _TAS
 
     mq = db.query(
@@ -882,7 +902,7 @@ def global_realized_pnl_today_et(
     ).filter(
         MomentumAutomationOutcome.terminal_at >= start_utc,
         MomentumAutomationOutcome.terminal_at < end_utc,
-        _TAS.execution_family != "alpaca_spot",
+        _real_daily_loss_family_clause(_TAS),
     )
     if user_id is not None:
         mq = mq.filter(MomentumAutomationOutcome.user_id == user_id)
@@ -921,17 +941,84 @@ def check_daily_loss_breach(
         "breakdown": {"autotrader_usd": float, "momentum_usd": float},
       }
     """
-    usd_cap = float(getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0)
-    pct_cap = float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.0) or 0.0)
+    try:
+        usd_cap = float(
+            getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0
+        )
+        pct_cap = float(
+            getattr(
+                settings,
+                "chili_global_max_daily_loss_pct_of_equity",
+                0.0,
+            )
+            or 0.0
+        )
+    except (TypeError, ValueError, OverflowError):
+        usd_cap = pct_cap = math.nan
 
     pnl = global_realized_pnl_today_et(db, user_id)
-    realized = float(pnl["total_usd"])
+    try:
+        realized = float(pnl["total_usd"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        realized = math.nan
+
+    def _invalid_evidence(reason: str) -> dict[str, Any]:
+        if activate and not is_kill_switch_active():
+            activate_kill_switch(reason)
+            logger.critical(
+                "[governance] global daily-loss evidence invalid (%s) — kill switch",
+                reason,
+            )
+        return {
+            "breached": True,
+            "reason": reason,
+            "realized_usd": None if not math.isfinite(realized) else realized,
+            "limit_usd": 0.0,
+            "source": "invalid_evidence",
+            "transient": True,
+            "breakdown": {
+                "autotrader_usd": pnl.get("autotrader_usd"),
+                "momentum_usd": pnl.get("momentum_usd"),
+            },
+        }
+
+    if not math.isfinite(usd_cap) or not math.isfinite(pct_cap):
+        return _invalid_evidence(
+            "global_daily_loss_breach_invalid_cap_nonfinite"
+        )
+    # Explicitly disabled (both configured caps exactly zero/non-positive) keeps
+    # its historical no-op behavior.  This is the only path where an unreadable
+    # ledger is irrelevant because the operator has disabled this global gate.
+    if usd_cap <= 0.0 and pct_cap <= 0.0:
+        return {
+            "breached": False,
+            "reason": "no_daily_loss_limit_configured",
+            "realized_usd": realized if math.isfinite(realized) else None,
+            "limit_usd": 0.0,
+            "source": "none",
+            "breakdown": {
+                "autotrader_usd": pnl.get("autotrader_usd"),
+                "momentum_usd": pnl.get("momentum_usd"),
+            },
+        }
+    if not math.isfinite(realized):
+        return _invalid_evidence(
+            "global_daily_loss_breach_invalid_ledger_nonfinite"
+        )
 
     # ADAPTIVE CAP (operator 2026-06-11: "dapat adaptive siya"): when the caller
     # didn't supply equity, resolve it ourselves so the pct-of-equity leg governs
     # at EVERY call site (previously no caller passed equity, so the fixed $300
     # leg always won the more-conservative race).
-    if pct_cap > 0 and (equity_usd is None or float(equity_usd) <= 0):
+    try:
+        supplied_equity = (
+            None if equity_usd is None else float(equity_usd)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return _invalid_evidence(
+            "global_daily_loss_breach_invalid_equity"
+        )
+    if pct_cap > 0 and (supplied_equity is None or supplied_equity <= 0):
         try:
             from .momentum_neural.risk_policy import _account_equity_usd
             from .execution_family_registry import EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
@@ -952,6 +1039,18 @@ def check_daily_loss_breach(
         except Exception:
             equity_usd = None
 
+    if equity_usd is not None:
+        try:
+            equity_value = float(equity_usd)
+        except (TypeError, ValueError, OverflowError):
+            return _invalid_evidence(
+                "global_daily_loss_breach_invalid_equity"
+            )
+        if not math.isfinite(equity_value):
+            return _invalid_evidence(
+                "global_daily_loss_breach_invalid_equity_nonfinite"
+            )
+
     candidates: list[tuple[float, str]] = []
     if usd_cap > 0:
         candidates.append((usd_cap, "usd"))
@@ -960,10 +1059,18 @@ def check_daily_loss_breach(
     if pct_cap > 0 and not candidates:
         # Equity unresolvable AND no explicit usd override: fail CLOSED to the
         # documented fail-safe floor rather than trading uncapped.
-        candidates.append((
-            float(getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0) or 300.0),
-            "usd_failsafe",
-        ))
+        try:
+            failsafe = float(
+                getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0)
+                or 300.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            failsafe = math.nan
+        if not math.isfinite(failsafe) or failsafe <= 0.0:
+            return _invalid_evidence(
+                "global_daily_loss_breach_invalid_failsafe"
+            )
+        candidates.append((failsafe, "usd_failsafe"))
 
     if not candidates:
         return {
@@ -980,6 +1087,10 @@ def check_daily_loss_breach(
 
     # More conservative = smaller positive dollar amount
     limit_usd, source = min(candidates, key=lambda kv: kv[0])
+    if not math.isfinite(limit_usd) or limit_usd <= 0.0:
+        return _invalid_evidence(
+            "global_daily_loss_breach_invalid_cap"
+        )
     breached = realized <= -limit_usd
     reason = (
         f"global_daily_loss_breach_{source}_${limit_usd:.0f}"
@@ -1029,11 +1140,12 @@ def check_daily_loss_breach(
 # the drained legacy robinhood_spot (~$19) — that mis-attribution + tiny-account cap is what
 # produced the false "HALTED" on a -$4.72 agentic BLZE trade. Each rail caps off its OWN
 # account and a breach blocks only that rail. [[project_per_broker_daily_loss]]
-REAL_DAILY_LOSS_FAMILIES = ("robinhood_spot", "robinhood_agentic_mcp", "coinbase_spot")
-
 # {family: {"reason": str, "et_date": date, "realized": float, "limit": float, "set_at": datetime}}
 _per_broker_daily_loss: dict[str, dict[str, Any]] = {}
 _per_broker_lock = threading.Lock()
+_alpaca_day_change_cache: dict[str, Any] = {"ts": 0.0, "realized": None, "meta": {}}
+_alpaca_day_change_lock = threading.Lock()
+_ALPACA_DAY_CHANGE_TTL_S = 5.0
 
 
 def _et_today_date():
@@ -1049,9 +1161,10 @@ def realized_pnl_today_by_broker(
     """Today's (ET-day) realized PnL split BY BROKER (execution_family).
 
     Mirrors global_realized_pnl_today_et's window + sources but buckets per
-    broker so a per-broker cap can isolate a losing broker. alpaca_spot PAPER
-    twins are excluded from the real-money math. Returns
-    {"robinhood_spot": usd, "coinbase_spot": usd} (signed; negative == loss).
+    broker so a per-broker cap can isolate a losing broker. Alpaca PAPER rows
+    remain visible in this diagnostic ledger split, but Alpaca entry gating uses
+    the broker-authoritative account day change instead (equity-last_equity).
+    Paper families are excluded only from the real-account global aggregate.
     Trade rows (autotrader) split by Trade.broker_source ("coinbase" -> Coinbase,
     else Robinhood; reconcile_import always excluded; manual excluded unless
     chili_per_broker_count_manual_as_rh). Momentum outcomes split by the
@@ -1075,7 +1188,7 @@ def realized_pnl_today_by_broker(
     start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
-    out: dict[str, float] = {fam: 0.0 for fam in REAL_DAILY_LOSS_FAMILIES}
+    out: dict[str, float] = {fam: 0.0 for fam in BROKER_DAILY_LOSS_FAMILIES}
 
     # (A) Autotrader Trade rows, bucketed by broker_source.
     count_manual = bool(getattr(settings, "chili_per_broker_count_manual_as_rh", False))
@@ -1107,23 +1220,24 @@ def realized_pnl_today_by_broker(
     ).filter(
         MomentumAutomationOutcome.terminal_at >= start_utc,
         MomentumAutomationOutcome.terminal_at < end_utc,
-        _TAS.execution_family != "alpaca_spot",
     )
     if user_id is not None:
         mq = mq.filter(MomentumAutomationOutcome.user_id == user_id)
     for ef, total in mq.group_by(_TAS.execution_family).all():
         # Attribute each session to its OWN rail so the active agentic account's PnL is
         # NOT mis-booked onto the drained legacy robinhood_spot (the -$4.72 BLZE false-HALT
-        # cause, 2026-06-25). _normalize_real_family keeps robinhood_agentic_mcp first-class
-        # (in REAL_DAILY_LOSS_FAMILIES) and folds unknown/blank to robinhood_spot.
+        # cause, 2026-06-25). _normalize_real_family keeps every declared broker family
+        # first-class and folds only unknown/blank values to robinhood_spot.
         fam = _normalize_real_family(ef)
         out[fam] += float(total or 0.0)
 
     return out
 
 
-def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
-    """(positive_cap_usd, source) for ONE broker's daily-loss cap.
+def _per_broker_daily_loss_cap_detail(
+    family: str,
+) -> tuple[float, str, dict[str, Any]]:
+    """Detailed positive daily-loss cap for one broker.
 
     RISK basis = the broker's account CASH VALUE / total equity (operator 2026-06-25:
     base the daily-loss cap on cash value, NOT buying power). For robinhood_agentic_mcp
@@ -1136,6 +1250,12 @@ def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
     chili_global_max_daily_loss_pct_of_equity knob (no new magic number); conservative-wins
     with the optional usd cap. Fail-CLOSED to a documented floor when cash value is
     unavailable (Hard Rule #2: never an uncapped path).
+
+    Alpaca PAPER adds one venue-scoped conservative clamp: no runtime setting may
+    lift or disable the fixed $250 recertification ceiling. A lower positive
+    configured value remains valid. This keeps a large simulated account from
+    turning a 5%-of-equity budget into a multi-thousand-dollar paper loss. It does
+    not alter any live Robinhood/Coinbase cap. The returned detail exposes both bases.
     """
     from .momentum_neural.risk_policy import _account_equity_usd
 
@@ -1150,12 +1270,53 @@ def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
         candidates.append((pct * float(eq), "pct_cash_value"))
     if not candidates:
         floor = float(getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0) or 300.0)
-        return floor, "usd_failsafe"
-    return min(candidates, key=lambda kv: kv[0])
+        base_cap, base_source = floor, "usd_failsafe"
+    else:
+        base_cap, base_source = min(candidates, key=lambda kv: kv[0])
+
+    fam = _normalize_real_family(family)
+    detail: dict[str, Any] = {
+        "broker_equity_cap_usd": float(base_cap),
+        "broker_equity_cap_source": base_source,
+    }
+    selected_cap = float(base_cap)
+    selected_source = base_source
+    if fam in PAPER_DAILY_LOSS_FAMILIES:
+        from math import isfinite
+
+        failsafe_cap = 250.0
+        try:
+            configured_cap = float(
+                getattr(
+                    settings,
+                    "chili_momentum_risk_max_daily_loss_usd",
+                    failsafe_cap,
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            configured_cap = failsafe_cap
+        momentum_fixed = (
+            min(configured_cap, failsafe_cap)
+            if isfinite(configured_cap) and configured_cap > 0.0
+            else failsafe_cap
+        )
+        detail["momentum_fixed_cap_usd"] = momentum_fixed
+        detail["momentum_fixed_failsafe_ceiling_usd"] = failsafe_cap
+        if momentum_fixed < selected_cap:
+            selected_cap = momentum_fixed
+            selected_source = "alpaca_momentum_fixed_usd_clamp"
+    detail.update(selected_cap_usd=selected_cap, selected_source=selected_source)
+    return selected_cap, selected_source, detail
+
+
+def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
+    """Compatibility view: ``(positive_cap_usd, source)`` for one broker."""
+    cap, source, _detail = _per_broker_daily_loss_cap_detail(family)
+    return cap, source
 
 
 def _normalize_real_family(family: str | None) -> str:
-    """Resolve to one of REAL_DAILY_LOSS_FAMILIES; default robinhood_spot.
+    """Resolve to one of BROKER_DAILY_LOSS_FAMILIES; default robinhood_spot.
 
     robinhood_agentic_mcp is preserved as its own family (it is in
     REAL_DAILY_LOSS_FAMILIES) so the active agentic rail caps + accounts off its
@@ -1169,7 +1330,194 @@ def _normalize_real_family(family: str | None) -> str:
     if not family:
         return "robinhood_spot"
     fam = normalize_execution_family(family)
-    return fam if fam in REAL_DAILY_LOSS_FAMILIES else "robinhood_spot"
+    return fam if fam in BROKER_DAILY_LOSS_FAMILIES else "robinhood_spot"
+
+
+def _alpaca_account_daily_change_usd(
+    *, force_refresh: bool = False
+) -> tuple[float | None, dict[str, Any]]:
+    """Read Alpaca's broker-authoritative account day change.
+
+    ``equity - last_equity`` is the same account-level truth displayed as Daily
+    Change by the broker. It catches fills that the local outcome ledger missed
+    (for example, an orphan-reconciled position). No last-good fallback is used:
+    a missing current snapshot is a transient fail-closed condition, never a
+    fabricated zero and never a sticky loss breach.
+
+    ``force_refresh=True`` is reserved for the literal risk-increasing admission
+    boundary. It bypasses the short status/readiness cache so a just-confirmed
+    loss cannot leave a five-second healthy window in which another entry is
+    reserved or submitted. A successful forced read still replaces the cache so
+    every later observer immediately sees the newer broker truth.
+    """
+    from math import isfinite
+
+    # Check posture before consulting the short-lived cache. A process that was
+    # flipped from paper to live must not reuse a previously cached paper-account
+    # observation to make a new admission look healthy.
+    if not bool(getattr(settings, "chili_alpaca_paper", True)):
+        return None, {
+            "data_source": "alpaca_account_equity_delta",
+            "error": "alpaca_live_posture_quarantined",
+        }
+
+    now = time.monotonic()
+    if not force_refresh:
+        with _alpaca_day_change_lock:
+            cached_at = float(_alpaca_day_change_cache.get("ts") or 0.0)
+            cached_value = _alpaca_day_change_cache.get("realized")
+            if cached_value is not None and now - cached_at < _ALPACA_DAY_CHANGE_TTL_S:
+                return float(cached_value), dict(
+                    _alpaca_day_change_cache.get("meta") or {}
+                )
+
+    try:
+        from .venue.alpaca_spot import AlpacaSpotAdapter
+
+        snapshot = AlpacaSpotAdapter().get_account_snapshot() or {}
+    except Exception as exc:
+        return None, {
+            "data_source": "alpaca_account_equity_delta",
+            "error": f"snapshot_exception:{type(exc).__name__}",
+        }
+
+    if snapshot.get("ok") is not True:
+        return None, {
+            "data_source": "alpaca_account_equity_delta",
+            "error": str(snapshot.get("error") or "snapshot_unavailable")[:200],
+        }
+    try:
+        equity = float(snapshot.get("equity"))
+        last_equity = float(snapshot.get("last_equity"))
+    except (TypeError, ValueError):
+        return None, {
+            "data_source": "alpaca_account_equity_delta",
+            "error": "equity_or_last_equity_missing",
+        }
+    if not isfinite(equity) or not isfinite(last_equity) or equity < 0 or last_equity <= 0:
+        return None, {
+            "data_source": "alpaca_account_equity_delta",
+            "error": "equity_or_last_equity_invalid",
+        }
+    realized = equity - last_equity
+    meta = {
+        "data_source": "alpaca_account_equity_delta",
+        "equity": equity,
+        "last_equity": last_equity,
+    }
+    with _alpaca_day_change_lock:
+        _alpaca_day_change_cache.update(ts=now, realized=realized, meta=dict(meta))
+    return realized, meta
+
+
+def _broker_daily_loss_observation(
+    db: Session,
+    family: str,
+    *,
+    user_id: int | None = None,
+    force_refresh: bool = False,
+) -> tuple[bool, dict[str, Any]]:
+    """Return the current broker-local gate decision without mutating stickies."""
+    fam = _normalize_real_family(family)
+    cap, cap_source, cap_detail = _per_broker_daily_loss_cap_detail(fam)
+    try:
+        cap = float(cap)
+    except (TypeError, ValueError, OverflowError):
+        cap = math.nan
+    if not math.isfinite(cap) or cap <= 0.0:
+        return True, {
+            "family": fam,
+            "realized": None,
+            "cap": None,
+            "cap_detail": dict(cap_detail or {}),
+            "source": str(cap_source),
+            "sticky": False,
+            "transient": True,
+            "reason": "broker_daily_loss_cap_invalid",
+        }
+
+    if fam in PAPER_DAILY_LOSS_FAMILIES:
+        realized, source_meta = (
+            _alpaca_account_daily_change_usd(force_refresh=True)
+            if force_refresh
+            else _alpaca_account_daily_change_usd()
+        )
+        source_meta = dict(source_meta or {})
+        if force_refresh:
+            # Auditable proof that this admission did not authorize from the
+            # five-second status/readiness cache. This marker is returned only
+            # for this call; it is not stored in the shared cache metadata.
+            source_meta["broker_snapshot_cache_bypassed"] = True
+        if realized is None:
+            # Transient fail-closed: block this admission attempt, but do not arm
+            # the all-day sticky because no loss breach has been observed.
+            return True, {
+                "family": fam,
+                "realized": None,
+                "cap": cap,
+                "cap_detail": cap_detail,
+                "source": cap_source,
+                "sticky": False,
+                "transient": True,
+                "reason": "alpaca_account_daily_change_unavailable",
+                **source_meta,
+            }
+        try:
+            realized = float(realized)
+        except (TypeError, ValueError, OverflowError):
+            realized = math.nan
+        if not math.isfinite(realized):
+            return True, {
+                "family": fam,
+                "realized": None,
+                "cap": cap,
+                "cap_detail": cap_detail,
+                "source": cap_source,
+                "sticky": False,
+                "transient": True,
+                "reason": "alpaca_account_daily_change_nonfinite",
+                **source_meta,
+            }
+        breached = (realized <= -cap) if cap > 0 else (realized < 0.0)
+        return breached, {
+            "family": fam,
+            "realized": float(realized),
+            "cap": cap,
+            "cap_detail": cap_detail,
+            "source": cap_source,
+            "sticky": False,
+            "transient": False,
+            **source_meta,
+        }
+
+    by_broker = realized_pnl_today_by_broker(db, user_id)
+    try:
+        realized = float(by_broker.get(fam, 0.0))
+    except (TypeError, ValueError, OverflowError):
+        realized = math.nan
+    if not math.isfinite(realized):
+        return True, {
+            "family": fam,
+            "realized": None,
+            "cap": cap,
+            "cap_detail": cap_detail,
+            "source": cap_source,
+            "sticky": False,
+            "transient": True,
+            "reason": "broker_daily_loss_ledger_nonfinite",
+            "data_source": "local_realized_outcome_ledger",
+        }
+    breached = (realized <= -cap) if cap > 0 else (realized < 0.0)
+    return breached, {
+        "family": fam,
+        "realized": realized,
+        "cap": cap,
+        "cap_detail": cap_detail,
+        "source": cap_source,
+        "sticky": False,
+        "transient": False,
+        "data_source": "local_realized_outcome_ledger",
+    }
 
 
 def clear_stale_broker_daily_loss_blocks() -> None:
@@ -1185,18 +1533,31 @@ def clear_stale_broker_daily_loss_blocks() -> None:
         logger.info("[governance] per-broker daily-loss block auto-cleared at ET roll: %s", fam)
 
 
-def set_broker_daily_loss_block(family: str, *, reason: str, realized: float, limit: float) -> None:
+def set_broker_daily_loss_block(
+    family: str,
+    *,
+    reason: str,
+    realized: float,
+    limit: float,
+    cap_detail: dict[str, Any] | None = None,
+    data_source: str | None = None,
+) -> None:
     """Mark ONE broker daily-loss-blocked for today (sticky until ET roll). Loud."""
     fam = _normalize_real_family(family)
     with _per_broker_lock:
         already = fam in _per_broker_daily_loss
-        _per_broker_daily_loss[fam] = {
+        block = {
             "reason": reason,
             "et_date": _et_today_date(),
             "realized": float(realized),
             "limit": float(limit),
             "set_at": datetime.utcnow(),
         }
+        if cap_detail:
+            block["cap_detail"] = dict(cap_detail)
+        if data_source:
+            block["data_source"] = str(data_source)
+        _per_broker_daily_loss[fam] = block
     if not already:
         logger.warning(
             "[governance] PER-BROKER DAILY-LOSS BLOCK %s realized=%.2f limit=-%.2f (%s) — "
@@ -1208,16 +1569,17 @@ def set_broker_daily_loss_block(family: str, *, reason: str, realized: float, li
 def is_broker_daily_loss_blocked(family: str) -> bool:
     """True if THIS broker is sticky-blocked for today (registry read).
 
-    Consults chili_per_broker_daily_loss_enabled FIRST: when the feature is OFF the
-    gate must NOT block, even if a STALE in-memory block lingers from when it was ON
-    (2026-06-25: a stale block showed "HALTED" while the flag was already False —
-    lane_health surfaced a freeze the lane wasn't actually enforcing). Mirrors the
-    activating reader (broker_daily_loss_breached) which already early-returns on the flag.
+    The rollout flag may disable broker-local accounting for real-capital families,
+    but it never disables Alpaca PAPER's fixed recertification ceiling. Paper
+    stickies therefore remain authoritative even when the generic feature is OFF.
     """
-    if not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+    fam = _normalize_real_family(family)
+    if (
+        fam not in PAPER_DAILY_LOSS_FAMILIES
+        and not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True))
+    ):
         return False
     clear_stale_broker_daily_loss_blocks()
-    fam = _normalize_real_family(family)
     with _per_broker_lock:
         return fam in _per_broker_daily_loss
 
@@ -1237,7 +1599,11 @@ def get_broker_daily_loss_block(family: str) -> dict[str, Any] | None:
 
 
 def broker_daily_loss_breached(
-    db: Session, family: str, *, user_id: int | None = None
+    db: Session,
+    family: str,
+    *,
+    user_id: int | None = None,
+    force_refresh: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Authoritative per-broker daily-loss gate (self-healing + sticky).
 
@@ -1246,31 +1612,44 @@ def broker_daily_loss_breached(
     winning exit does not re-open the budget). Recomputes from live DB PnL when
     not yet blocked, and sets the sticky block on first breach so ANY gate that
     notices a breach protects the broker without relying on the monitor pass.
+
+    Alpaca callers at the literal risk-increasing boundary must pass
+    ``force_refresh=True``. Real-capital families keep their DB-ledger behavior;
+    the keyword only changes the paper broker-equity observation.
     """
     fam = _normalize_real_family(family)
-    # Honor the operator's per-broker disable flag. When OFF, this gate must NOT block —
-    # the momentum lane's equity-relative daily-loss cap (off the REAL account equity) +
-    # the global failsafe remain the daily breakers. Bug 2026-06-23: the agentic lane
-    # normalizes to robinhood_spot, whose tiny $38.92 buying power yields a ~$0.97 cap
-    # that HALTED the lane on a -$17 loss — while this flag was ALREADY False but never
-    # consulted here. Returning early also bypasses any in-memory sticky block.
-    if not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+    # The operator flag controls the real-capital per-broker rollout only. Alpaca
+    # PAPER's broker-equity observation is non-disableable: the global ledger
+    # deliberately excludes paper and therefore cannot replace this check.
+    if (
+        fam not in PAPER_DAILY_LOSS_FAMILIES
+        and not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True))
+    ):
         return False, {"family": fam, "disabled": True, "sticky": False}
     if is_broker_daily_loss_blocked(fam):
         with _per_broker_lock:
             blk = dict(_per_broker_daily_loss.get(fam, {}))
         return True, {"family": fam, "sticky": True, **blk}
-    by_broker = realized_pnl_today_by_broker(db, user_id)
-    realized = float(by_broker.get(fam, 0.0))
-    cap, src = per_broker_daily_loss_cap_usd(fam)
-    breached = (realized <= -cap) if cap > 0 else (realized < 0.0)
-    info = {"family": fam, "realized": realized, "cap": cap, "source": src, "sticky": False}
-    if breached:
+    breached, info = _broker_daily_loss_observation(
+        db,
+        fam,
+        user_id=user_id,
+        force_refresh=bool(force_refresh and fam in PAPER_DAILY_LOSS_FAMILIES),
+    )
+    # An unavailable broker snapshot blocks the current admission attempt but is
+    # not evidence that the cap was crossed. Only an observed loss may arm the
+    # all-day sticky.
+    if breached and not info.get("transient"):
+        realized = float(info["realized"])
+        cap = float(info["cap"])
+        src = str(info["source"])
         set_broker_daily_loss_block(
             fam,
             reason=f"broker_daily_loss_breach_{fam}_{src}_${cap:.0f}",
             realized=realized,
             limit=cap,
+            cap_detail=info.get("cap_detail"),
+            data_source=info.get("data_source"),
         )
     return breached, info
 
@@ -1286,15 +1665,18 @@ def check_per_broker_daily_loss(
     results: dict[str, Any] = {}
     agg_realized = 0.0
     agg_cap = 0.0
-    for fam in REAL_DAILY_LOSS_FAMILIES:
+    for fam in BROKER_DAILY_LOSS_FAMILIES:
         breached, info = (
             broker_daily_loss_breached(db, fam, user_id=user_id)
             if activate
             else _peek_broker_breach(db, fam, user_id=user_id)
         )
         results[fam] = {**info, "breached": breached}
-        agg_realized += float(info.get("realized", 0.0) or 0.0)
-        agg_cap += float(info.get("cap", 0.0) or 0.0)
+        # The catastrophic aggregate is a REAL-capital backstop. Paper broker
+        # losses retain their own local blocks but can never halt live accounts.
+        if fam in REAL_DAILY_LOSS_FAMILIES:
+            agg_realized += float(info.get("realized", 0.0) or 0.0)
+            agg_cap += float(info.get("cap", 0.0) or 0.0)
     mult = float(getattr(settings, "chili_per_broker_aggregate_backstop_mult", 1.0) or 1.0)
     backstop = agg_cap * max(1.0, mult)
     if activate and backstop > 0 and agg_realized <= -backstop and not is_kill_switch_active():
@@ -1311,17 +1693,16 @@ def _peek_broker_breach(
 ) -> tuple[bool, dict[str, Any]]:
     """Non-activating read of a broker's breach (for status/alerts)."""
     fam = _normalize_real_family(family)
-    if not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+    if (
+        fam not in PAPER_DAILY_LOSS_FAMILIES
+        and not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True))
+    ):
         return False, {"family": fam, "disabled": True, "sticky": False}
     if is_broker_daily_loss_blocked(fam):
         with _per_broker_lock:
             blk = dict(_per_broker_daily_loss.get(fam, {}))
         return True, {"family": fam, "sticky": True, **blk}
-    by_broker = realized_pnl_today_by_broker(db, user_id)
-    realized = float(by_broker.get(fam, 0.0))
-    cap, src = per_broker_daily_loss_cap_usd(fam)
-    breached = (realized <= -cap) if cap > 0 else (realized < 0.0)
-    return breached, {"family": fam, "realized": realized, "cap": cap, "source": src, "sticky": False}
+    return _broker_daily_loss_observation(db, fam, user_id=user_id)
 
 
 def _kill_switch_halts_exits() -> bool:

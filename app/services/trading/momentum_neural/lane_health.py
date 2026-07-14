@@ -35,12 +35,39 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ....config import settings
+from ....models.trading import BrainBatchJob
+from ..batch_job_constants import JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT
 
 logger = logging.getLogger(__name__)
+
+
+# Durable event-loop heartbeat contract.  This is deliberately a CONTROL-PLANE
+# signal: it proves that the generation-owned tracker refresh and price-bus callback
+# attachment completed.  It does not claim quote/feed freshness or that a broker
+# worker finished an individual tick; those need their own data/worker watchdogs.
+LIVE_LOOP_HEARTBEAT_SCHEMA = "momentum_live_loop_control_heartbeat_v1"
+LIVE_LOOP_HEARTBEAT_SCOPE = "tracker_refresh_and_callback_registration"
+LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_LIVE_LOOP_HEARTBEAT_MIN_STALE_SECONDS = 2.0 * LIVE_LOOP_HEARTBEAT_INTERVAL_SECONDS
+_LIVE_LOOP_HEARTBEAT_MAX_STALE_SECONDS = 300.0
+_LIVE_LOOP_HEARTBEAT_HISTORY_LIMIT = 64
+_LIVE_LOOP_HANDOFF_CLOCK_TOLERANCE_SECONDS = 2.0
+_LIVE_LOOP_HEARTBEAT_META_KEYS = frozenset(
+    {
+        "schema",
+        "scope",
+        "owner",
+        "owner_instance_id",
+        "generation",
+        "generation_identity",
+        "generation_started_at_utc",
+    }
+)
 
 # Process-start floor: a fresh scheduler process has no in-process auto-arm heartbeat
 # yet, so "stalled" must be measured from when this module loaded, not from epoch.
@@ -66,6 +93,82 @@ def record_auto_arm_run() -> None:
     with _heartbeat_lock:
         _auto_arm_last_run_monotonic = time.monotonic()
         _auto_arm_last_run_wall = datetime.utcnow()
+
+
+def record_live_runner_loop_run(
+    db,
+    *,
+    owner_instance_id: str,
+    generation: int,
+    generation_started_at: datetime,
+) -> str:
+    """Stage one completed, cross-process event-loop heartbeat.
+
+    The live-loop owner commits this row only after its generation has successfully
+    refreshed the tracker and attached the price-bus callbacks.  The caller owns the
+    transaction so it can re-check generation ownership immediately before commit.
+    """
+    owner_instance_id = str(owner_instance_id or "").strip().lower()
+    try:
+        parsed_owner = uuid.UUID(owner_instance_id)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("live-loop heartbeat requires a canonical owner UUID") from exc
+    if str(parsed_owner) != owner_instance_id:
+        raise ValueError("live-loop heartbeat requires a canonical owner UUID")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+        raise ValueError("live-loop heartbeat requires a positive owner generation")
+    if not isinstance(generation_started_at, datetime):
+        raise ValueError("live-loop heartbeat requires a generation start timestamp")
+    if (
+        generation_started_at.tzinfo is None
+        or generation_started_at.utcoffset() != timezone.utc.utcoffset(generation_started_at)
+    ):
+        raise ValueError("live-loop generation start must be timezone-aware UTC")
+    generation_started_at = generation_started_at.astimezone(timezone.utc)
+    generation_identity = f"{owner_instance_id}:{generation}"
+    from ..brain_batch_job_log import brain_batch_job_record_completed
+
+    job_id = brain_batch_job_record_completed(
+        db,
+        JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+        ok=True,
+        meta={
+            "schema": LIVE_LOOP_HEARTBEAT_SCHEMA,
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+            "owner": "momentum_live_runner_loop",
+            "owner_instance_id": owner_instance_id,
+            "generation": generation,
+            "generation_identity": generation_identity,
+            "generation_started_at_utc": (
+                generation_started_at.isoformat().replace("+00:00", "Z")
+            ),
+        },
+    )
+    # ``brain_batch_job_finish`` is intentionally best-effort for generic batch
+    # error reporting and may swallow a retry/missing-row failure.  A live-owner
+    # heartbeat cannot inherit that contract: startup must not turn green unless
+    # the exact completed row is present in this transaction and can be flushed.
+    db.flush()
+    row = (
+        db.query(BrainBatchJob)
+        .populate_existing()
+        .filter(
+            BrainBatchJob.id == job_id,
+            BrainBatchJob.job_type == JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+        )
+        .one_or_none()
+    )
+    persisted = _validated_live_loop_heartbeat_row(row) if row is not None else None
+    expected_started_at = generation_started_at.replace(tzinfo=None)
+    if (
+        persisted is None
+        or persisted.get("generation_identity") != generation_identity
+        or persisted.get("generation_started_at") != expected_started_at
+    ):
+        raise RuntimeError(
+            "live-loop heartbeat writer did not persist the exact completed row"
+        )
+    return job_id
 
 
 def _auto_arm_heartbeat_age_seconds() -> float | None:
@@ -99,15 +202,65 @@ def freeze_grace_seconds() -> float:
     return max(60.0, max_watch + extend)
 
 
-def _lane_enabled() -> bool:
-    """The lane is CONFIGURED to be running (so a silent empty lane is a freeze, not an
-    intentional off). Mirrors the auto-arm scheduler registration condition."""
-    return (
-        bool(getattr(settings, "chili_momentum_live_runner_enabled", False))
-        and bool(getattr(settings, "chili_momentum_live_runner_scheduler_enabled", True))
-        and bool(getattr(settings, "chili_momentum_auto_arm_live_enabled", True))
-        and bool(getattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True))
+def live_loop_stale_seconds() -> float:
+    """Tight timeout for the 30-second event-loop control heartbeat.
+
+    This must stay independent from the entry watch-and-extend patience used by
+    :func:`freeze_grace_seconds`: a held position cannot wait 15 minutes for a dead
+    exit owner to become visible.
+    """
+    try:
+        configured = float(
+            getattr(
+                settings,
+                "chili_lane_health_live_loop_stale_seconds",
+                75.0,
+            )
+            or 75.0
+        )
+    except (TypeError, ValueError):
+        configured = 75.0
+    return min(
+        _LIVE_LOOP_HEARTBEAT_MAX_STALE_SECONDS,
+        max(_LIVE_LOOP_HEARTBEAT_MIN_STALE_SECONDS, configured),
     )
+
+
+def live_runner_driver_configuration() -> tuple[str | None, str | None]:
+    """Return ``(mode, error)`` for the configured live-session owner.
+
+    New-entry admission may be intentionally paused while the event loop still owns
+    exits for held sessions.  Admission flags therefore cannot disable owner-health
+    monitoring.  A master-enabled ambiguous/broker-dark configuration is an explicit
+    frozen condition, never equivalent to an intentionally disabled lane.
+    """
+    if not bool(getattr(settings, "chili_momentum_live_runner_enabled", False)):
+        return None, None
+    batch_on = bool(getattr(settings, "chili_momentum_live_runner_scheduler_enabled", False))
+    loop_on = bool(getattr(settings, "chili_momentum_live_runner_loop_enabled", False))
+    if batch_on and loop_on:
+        return None, "live_runner_batch_and_event_loop_both_enabled"
+    if not batch_on and not loop_on:
+        return None, "live_runner_no_driver_enabled"
+    if loop_on:
+        if not bool(getattr(settings, "chili_autopilot_price_bus_enabled", False)):
+            return None, "live_runner_event_loop_price_bus_disabled"
+        return "event_loop", None
+    return "scheduled_auto_arm", None
+
+
+def _lane_driver_configuration() -> tuple[str | None, str | None]:
+    """Backward-compatible private alias for the shared posture contract."""
+    return live_runner_driver_configuration()
+
+
+def _lane_driver_mode() -> str | None:
+    mode, _error = _lane_driver_configuration()
+    return mode
+
+
+def _lane_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_live_runner_enabled", False))
 
 
 def _expected_trading_window_open() -> bool:
@@ -156,6 +309,257 @@ def _parse_iso(ts: Any) -> datetime | None:
         return None
 
 
+def _utc_naive_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _strict_aware_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if (
+        parsed.tzinfo is None
+        or parsed.utcoffset() != timezone.utc.utcoffset(parsed)
+    ):
+        return None
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _validated_live_loop_heartbeat_row(row: Any) -> dict[str, Any] | None:
+    """Validate the exact durable control-heartbeat schema for one completed row."""
+    if str(getattr(row, "status", "") or "").strip().lower() != "ok":
+        return None
+    started_at = _utc_naive_datetime(getattr(row, "started_at", None))
+    ended_at = _utc_naive_datetime(getattr(row, "ended_at", None))
+    meta = getattr(row, "meta_json", None)
+    if started_at is None or ended_at is None or not isinstance(meta, dict):
+        return None
+    if set(meta) != _LIVE_LOOP_HEARTBEAT_META_KEYS:
+        return None
+    if (
+        meta.get("schema") != LIVE_LOOP_HEARTBEAT_SCHEMA
+        or meta.get("scope") != LIVE_LOOP_HEARTBEAT_SCOPE
+        or meta.get("owner") != "momentum_live_runner_loop"
+    ):
+        return None
+    owner_instance_id = str(meta.get("owner_instance_id") or "").strip().lower()
+    try:
+        parsed_owner = uuid.UUID(owner_instance_id)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if str(parsed_owner) != owner_instance_id:
+        return None
+    generation = meta.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+        return None
+    generation_identity = str(meta.get("generation_identity") or "").strip()
+    if generation_identity != f"{owner_instance_id}:{generation}":
+        return None
+    generation_started_at = _strict_aware_utc(
+        meta.get("generation_started_at_utc")
+    )
+    if generation_started_at is None:
+        return None
+    tolerance = timedelta(seconds=_LIVE_LOOP_HANDOFF_CLOCK_TOLERANCE_SECONDS)
+    if (
+        ended_at + tolerance < started_at
+        or started_at + tolerance < generation_started_at
+    ):
+        return None
+    return {
+        "heartbeat_at": ended_at,
+        "row_started_at": started_at,
+        "generation_started_at": generation_started_at,
+        "owner_instance_id": owner_instance_id,
+        "generation": generation,
+        "generation_identity": generation_identity,
+        "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+    }
+
+
+def _latest_live_loop_heartbeat_status(
+    db,
+    *,
+    stale_seconds: float,
+) -> dict[str, Any]:
+    """Read the latest exact heartbeat and reject ambiguous concurrent owners.
+
+    The latest row is authoritative even when it is malformed/error/unfinished; an
+    older successful row must never hide a broken current writer.  For valid rows,
+    generation intervals make a clean handoff (old heartbeat before new start) distinct
+    from two owners whose independently completed heartbeat intervals overlap.
+    """
+    rows = (
+        db.query(BrainBatchJob)
+        .filter(BrainBatchJob.job_type == JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT)
+        .order_by(BrainBatchJob.started_at.desc(), BrainBatchJob.id.desc())
+        .limit(_LIVE_LOOP_HEARTBEAT_HISTORY_LIMIT)
+        .all()
+    )
+    if not rows:
+        return {
+            "ok": False,
+            "reason": "live_runner_loop_heartbeat_missing",
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        }
+
+    latest_row = rows[0]
+    latest_status = str(getattr(latest_row, "status", "") or "").strip().lower()
+    if latest_status == "running" or getattr(latest_row, "ended_at", None) is None:
+        return {
+            "ok": False,
+            "reason": "live_runner_loop_heartbeat_latest_unfinished",
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        }
+    if latest_status != "ok":
+        return {
+            "ok": False,
+            "reason": "live_runner_loop_heartbeat_latest_error",
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        }
+    latest = _validated_live_loop_heartbeat_row(latest_row)
+    if latest is None:
+        return {
+            "ok": False,
+            "reason": "live_runner_loop_heartbeat_latest_malformed",
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        }
+
+    generations: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        record = _validated_live_loop_heartbeat_row(row)
+        if record is None:
+            continue
+        identity = record["generation_identity"]
+        group = generations.get(identity)
+        if group is None:
+            generations[identity] = dict(record)
+            continue
+        group["generation_started_at"] = min(
+            group["generation_started_at"],
+            record["generation_started_at"],
+        )
+        group["heartbeat_at"] = max(
+            group["heartbeat_at"],
+            record["heartbeat_at"],
+        )
+
+    latest_identity = latest["generation_identity"]
+    latest_group = generations.get(latest_identity, latest)
+    recency_floor = latest["heartbeat_at"] - timedelta(seconds=float(stale_seconds))
+    tolerance = timedelta(seconds=_LIVE_LOOP_HANDOFF_CLOCK_TOLERANCE_SECONDS)
+    overlapping: list[str] = []
+    for identity, other in generations.items():
+        if identity == latest_identity or other["heartbeat_at"] < recency_floor:
+            continue
+        overlap_start = max(
+            latest_group["generation_started_at"],
+            other["generation_started_at"],
+        )
+        overlap_end = min(
+            latest_group["heartbeat_at"],
+            other["heartbeat_at"],
+        )
+        if overlap_end - overlap_start > tolerance:
+            overlapping.append(identity)
+    if overlapping:
+        return {
+            "ok": False,
+            "reason": "live_runner_loop_owner_overlap",
+            "heartbeat_at": latest["heartbeat_at"],
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+            "overlapping_owner_count": len(overlapping) + 1,
+        }
+    return {"ok": True, **latest}
+
+
+def _latest_live_loop_heartbeat_at(db) -> datetime | None:
+    """Compatibility wrapper for callers that only need the exact timestamp."""
+    truth = _latest_live_loop_heartbeat_status(
+        db,
+        stale_seconds=live_loop_stale_seconds(),
+    )
+    if truth.get("reason") == "live_runner_loop_heartbeat_missing":
+        return None
+    if truth.get("ok") is not True:
+        raise ValueError(str(truth.get("reason") or "live-loop heartbeat unreadable"))
+    return truth["heartbeat_at"]
+
+
+def live_runner_loop_control_health(
+    db,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Fail-closed durable health truth for live entry/exit ownership.
+
+    Scheduler admission and cockpit lane health intentionally share this exact
+    read.  That prevents a red/stale/overlapping control heartbeat from remaining
+    merely informational while a later auto-arm pass continues adding new risk.
+    """
+    checked_at = _utc_naive_datetime(now) if now is not None else datetime.utcnow()
+    if checked_at is None:
+        checked_at = datetime.utcnow()
+    stale_after = live_loop_stale_seconds()
+    try:
+        truth = _latest_live_loop_heartbeat_status(
+            db,
+            stale_seconds=stale_after,
+        )
+    except Exception:
+        logger.debug(
+            "[lane_health] durable live-loop heartbeat probe failed",
+            exc_info=True,
+        )
+        truth = {
+            "ok": False,
+            "reason": "live_runner_loop_heartbeat_unreadable",
+            "scope": LIVE_LOOP_HEARTBEAT_SCOPE,
+        }
+
+    heartbeat_at = _utc_naive_datetime(truth.get("heartbeat_at"))
+    heartbeat_age = (
+        (checked_at - heartbeat_at).total_seconds()
+        if heartbeat_at is not None
+        else None
+    )
+    reason = (
+        None
+        if truth.get("ok") is True
+        else str(
+            truth.get("reason")
+            or "live_runner_loop_heartbeat_unreadable"
+        )
+    )
+    if reason is None:
+        if heartbeat_age is None:
+            reason = "live_runner_loop_heartbeat_latest_malformed"
+        elif heartbeat_age < -_LIVE_LOOP_HANDOFF_CLOCK_TOLERANCE_SECONDS:
+            reason = "live_runner_loop_heartbeat_future"
+        elif heartbeat_age >= stale_after:
+            reason = "live_runner_loop_heartbeat_stale"
+
+    return {
+        **truth,
+        "ok": reason is None,
+        "reason": reason,
+        "heartbeat_at": heartbeat_at,
+        "heartbeat_age_seconds": heartbeat_age,
+        "stale_seconds": stale_after,
+        "scope": truth.get("scope") or LIVE_LOOP_HEARTBEAT_SCOPE,
+    }
+
+
 def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
     """Read-only assessment of whether the momentum lane is frozen.
 
@@ -175,6 +579,7 @@ def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
         "detail": None,
         "conditions": [],
         "grace_seconds": round(grace, 1),
+        "live_loop_stale_seconds": round(live_loop_stale_seconds(), 1),
         "as_of_utc": now.isoformat() + "Z",
     }
     if not enabled:
@@ -206,12 +611,12 @@ def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
     # (b) Per-broker daily-loss blocks (the 06-15 Coinbase-sized cap incident).
     try:
         from ..governance import (
-            REAL_DAILY_LOSS_FAMILIES,
+            BROKER_DAILY_LOSS_FAMILIES,
             get_broker_daily_loss_block,
             is_broker_daily_loss_blocked,
         )
 
-        for fam in REAL_DAILY_LOSS_FAMILIES:
+        for fam in BROKER_DAILY_LOSS_FAMILIES:
             if not is_broker_daily_loss_blocked(fam):
                 continue
             blk = get_broker_daily_loss_block(fam) or {}
@@ -231,21 +636,78 @@ def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
     except Exception:
         logger.debug("[lane_health] per-broker block probe failed", exc_info=True)
 
-    # (c) The lane is enabled + expected to trade, but the pass/scheduler is not
-    #     executing. Only meaningful when NO safety breaker is already the reason (a
-    #     breaker SHOULD leave the lane idle). Distinguishes a wedged job/dead worker
-    #     from a legitimately quiet market (which keeps the heartbeats fresh).
-    if not conditions and _lane_enabled() and _expected_trading_window_open():
-        # (c1) Whole scheduler-worker down (durable, cross-process).
+    # (c) The configured entry/exit owner is absent, ambiguous, or stale.  A safety
+    # breaker pauses NEW risk; it does not make the process that owns held-position
+    # exits optional.  Owner health is therefore additive to breaker conditions.
+    driver_mode, driver_error = _lane_driver_configuration()
+    if driver_error is not None:
+        conditions.append({
+            "kind": "driver_misconfigured",
+            "reason": driver_error,
+            "since_utc": None,
+            "elapsed_seconds": None,
+            "elapsed_human": _human(None),
+            "frozen": True,
+        })
+    elif driver_mode == "event_loop":
+        # The loop is a continuous exit owner, including overnight and while entry
+        # admission is paused.  Do not gate this on an ARM trading-hours predicate.
+        heartbeat_truth = live_runner_loop_control_health(db, now=now)
+        heartbeat_at = _utc_naive_datetime(heartbeat_truth.get("heartbeat_at"))
+        heartbeat_age = heartbeat_truth.get("heartbeat_age_seconds")
+        reason = (
+            None
+            if heartbeat_truth.get("ok") is True
+            else str(
+                heartbeat_truth.get("reason")
+                or "live_runner_loop_heartbeat_unreadable"
+                )
+            )
+        if reason is not None:
+            conditions.append({
+                "kind": "live_loop_stalled",
+                "reason": reason,
+                "scope": heartbeat_truth.get("scope") or LIVE_LOOP_HEARTBEAT_SCOPE,
+                "since_utc": (
+                    heartbeat_at.isoformat() + "Z"
+                    if heartbeat_at is not None
+                    else None
+                ),
+                "elapsed_seconds": (
+                    round(heartbeat_age, 1)
+                    if heartbeat_age is not None
+                    else None
+                ),
+                "elapsed_human": _human(heartbeat_age),
+                "frozen": True,
+                **(
+                    {
+                        "overlapping_owner_count": heartbeat_truth[
+                            "overlapping_owner_count"
+                        ]
+                    }
+                    if heartbeat_truth.get("overlapping_owner_count") is not None
+                    else {}
+                ),
+            })
+    elif driver_mode == "scheduled_auto_arm" and _expected_trading_window_open():
+        # Legacy batch ownership remains trading-window scoped.  Breakers do not
+        # suppress its scheduler health signal.
+        scheduler_fault = False
         try:
             from .automation_query import _latest_scheduler_heartbeat_at
 
             hb = _latest_scheduler_heartbeat_at(db)
             hb_age = (now - hb).total_seconds() if hb else None
             if hb is None or (hb_age is not None and hb_age >= grace):
+                scheduler_fault = True
                 conditions.append({
                     "kind": "scheduler_down",
-                    "reason": "scheduler_worker_heartbeat_missing" if hb is None else "scheduler_worker_stale",
+                    "reason": (
+                        "scheduler_worker_heartbeat_missing"
+                        if hb is None
+                        else "scheduler_worker_stale"
+                    ),
                     "since_utc": (hb.isoformat() + "Z") if hb else None,
                     "elapsed_seconds": round(hb_age, 1) if hb_age is not None else None,
                     "elapsed_human": _human(hb_age),
@@ -254,12 +716,17 @@ def evaluate_lane_health(db, *, user_id: int | None = None) -> dict[str, Any]:
         except Exception:
             logger.debug("[lane_health] scheduler-heartbeat probe failed", exc_info=True)
 
-        # (c2) Auto-arm pass specifically wedged (scheduler alive, job not firing).
-        if not conditions:
+        auto_arm_expected = bool(
+            getattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+            and getattr(
+                settings,
+                "chili_momentum_auto_arm_live_scheduler_enabled",
+                True,
+            )
+        )
+        if not scheduler_fault and auto_arm_expected:
             aa_age = _auto_arm_heartbeat_age_seconds()
             if aa_age is None:
-                # Never ran this process yet — only a freeze if the process has been up
-                # long enough that the 40s-delayed first pass should have fired.
                 uptime = time.monotonic() - _MODULE_LOADED_MONOTONIC
                 if uptime >= grace:
                     conditions.append({
@@ -302,6 +769,10 @@ def _headline_for(frozen: list[dict[str, Any]]) -> str:
         return f"MOMENTUM LANE FROZEN — scheduler worker not running ({c.get('elapsed_human')}){extra}"
     if kind == "auto_arm_stalled":
         return f"MOMENTUM LANE FROZEN — auto-arm pass not executing ({c.get('elapsed_human')}){extra}"
+    if kind == "live_loop_stalled":
+        return f"MOMENTUM LANE FROZEN — live event-loop control plane unhealthy ({c.get('elapsed_human')}){extra}"
+    if kind == "driver_misconfigured":
+        return f"MOMENTUM LANE FROZEN — live driver misconfigured{extra}"
     return f"MOMENTUM LANE FROZEN ({len(frozen)} condition(s))"
 
 
@@ -323,6 +794,12 @@ def _detail_for(frozen: list[dict[str, Any]]) -> str:
             parts.append(f"scheduler {c.get('reason')} {c.get('elapsed_human')}")
         elif kind == "auto_arm_stalled":
             parts.append(f"auto_arm {c.get('reason')} {c.get('elapsed_human')}")
+        elif kind == "live_loop_stalled":
+            parts.append(
+                f"live_loop_control[{c.get('reason')}] {c.get('elapsed_human')}"
+            )
+        elif kind == "driver_misconfigured":
+            parts.append(f"driver[{c.get('reason')}]")
     tail = (
         " — new entries halted (exits stay live); reset via the kill-switch runbook "
         "or wait for the ET-day roll if it is a daily-loss cap."
@@ -343,9 +820,14 @@ def _write_alert_row(db, *, headline: str, detail: str, signature: str) -> None:
     insert — does NOT itself dispatch SMS/email (that is a separate delivery path)."""
     try:
         from ....models.trading import AlertHistory
+        from ..alerts import _existing_user_id_for_alert
 
         row = AlertHistory(
-            user_id=_auto_arm_user_id(),
+            # A stale/default operator id must not make the durable alert vanish
+            # behind the broad notification guard. ``user_id`` is nullable, so
+            # preserve the audit row even when the configured principal is not
+            # present in this database generation.
+            user_id=_existing_user_id_for_alert(db, _auto_arm_user_id()),
             alert_type="lane_health_frozen",
             ticker=None,
             message=(headline + " — " + detail)[:4000],

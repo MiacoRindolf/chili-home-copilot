@@ -6,7 +6,9 @@ Symbol convention: plain tickers (``AAPL``), not crypto-style product IDs (``BTC
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -59,6 +61,87 @@ def _sf(x: Any) -> Optional[float]:
         return float(x)
     except (ValueError, TypeError):
         return None
+
+
+def _rh_strict_paginated_rows(
+    rh: Any,
+    url: str,
+    *,
+    payload: Optional[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """Read every Robinhood page without the library's partial-page fallback."""
+    rows: list[dict[str, Any]] = []
+    next_url = str(url or "").strip()
+    seen_urls: set[str] = set()
+    params = dict(payload or {})
+    for _page in range(100):
+        if not next_url or next_url in seen_urls:
+            raise VenueAdapterError("Robinhood pagination identity invalid")
+        seen_urls.add(next_url)
+        response = rh.helper.SESSION.get(next_url, params=params or None)
+        response.raise_for_status()
+        body = response.json()
+        if not (
+            isinstance(body, dict)
+            and isinstance(body.get("results"), list)
+            and "next" in body
+        ):
+            raise VenueAdapterError("Robinhood pagination payload malformed")
+        for row in body["results"]:
+            if not isinstance(row, dict):
+                raise VenueAdapterError("Robinhood row malformed")
+            rows.append(row)
+        raw_next = body.get("next")
+        if raw_next in (None, ""):
+            return rows
+        next_url = str(raw_next).strip()
+        params = {}
+    raise VenueAdapterError("Robinhood pagination exceeded safety bound")
+
+
+def _rh_strict_instrument_symbol(rh: Any, instrument_url: str) -> str:
+    url = str(instrument_url or "").strip()
+    if not url:
+        raise VenueAdapterError("Robinhood instrument identity missing")
+    response = rh.helper.SESSION.get(url)
+    response.raise_for_status()
+    body = response.json()
+    symbol = str(body.get("symbol") or "").strip().upper() if isinstance(body, dict) else ""
+    if not symbol:
+        raise VenueAdapterError("Robinhood instrument symbol unreadable")
+    return symbol
+
+
+def _rh_strict_account_snapshot(rh: Any) -> dict[str, Any]:
+    """Return the complete authenticated Robinhood account generation."""
+    rows = _rh_strict_paginated_rows(rh, rh.urls.account_profile_url())
+    if not rows:
+        raise VenueAdapterError("Robinhood account identity absent")
+    identities: list[tuple[str, str]] = []
+    seen_numbers: set[str] = set()
+    seen_urls: set[str] = set()
+    for row in rows:
+        number = str(row.get("account_number") or "").strip()
+        account_url = str(row.get("url") or "").strip()
+        if (
+            not number
+            or not account_url
+            or number in seen_numbers
+            or account_url in seen_urls
+        ):
+            raise VenueAdapterError("Robinhood account identity malformed")
+        seen_numbers.add(number)
+        seen_urls.add(account_url)
+        identities.append((number, account_url))
+    canonical = "\n".join(
+        f"account:{number}:{account_url}"
+        for number, account_url in sorted(identities)
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {
+        "identity": f"robinhood_spot:v1:{digest}",
+        "account_urls": seen_urls,
+    }
 
 
 def _to_ticker(product_id: str) -> str:
@@ -381,6 +464,56 @@ def _normalize_rh_order(od: dict[str, Any]) -> NormalizedOrder:
         average_filled_price=avg_price,
         created_time=od.get("created_at"),
         raw=od,
+    )
+
+
+def _normalize_rh_order_truth(
+    od: dict[str, Any],
+    *,
+    rh: Any | None = None,
+) -> Optional[NormalizedOrder]:
+    """Preserve broker order state for strict lifecycle proofs.
+
+    The legacy normalized surface maps a broker ``filled`` order to Chili trade
+    status ``open`` (meaning an open position).  Terminalization needs the broker
+    order lifecycle instead, otherwise a completed order looks like it is still
+    resting and cannot be proved terminal.
+    """
+    row = dict(od)
+    if not str(row.get("symbol") or row.get("chain_symbol") or "").strip():
+        instrument_url = str(row.get("instrument") or "").strip()
+        if not instrument_url:
+            return None
+        try:
+            resolved_symbol = _rh_strict_instrument_symbol(rh, instrument_url) if rh else ""
+        except Exception:
+            resolved_symbol = ""
+        if not resolved_symbol:
+            return None
+        row["symbol"] = resolved_symbol
+    broker_status = str(row.get("state") or row.get("status") or "").strip().lower()
+    raw_filled = row.get("cumulative_quantity")
+    filled = _sf(raw_filled)
+    if (
+        not str(row.get("id") or "").strip()
+        or not broker_status
+        or filled is None
+        or not math.isfinite(filled)
+        or filled < 0.0
+    ):
+        return None
+    normalized = _normalize_rh_order(row)
+    return NormalizedOrder(
+        order_id=normalized.order_id,
+        client_order_id=normalized.client_order_id,
+        product_id=normalized.product_id,
+        side=normalized.side,
+        status=broker_status or "unknown",
+        order_type=normalized.order_type,
+        filled_size=normalized.filled_size,
+        average_filled_price=normalized.average_filled_price,
+        created_time=normalized.created_time,
+        raw=normalized.raw,
     )
 
 
@@ -733,6 +866,144 @@ class RobinhoodSpotAdapter(VenueAdapter):
         except Exception as e:
             logger.warning("[rh_adapter] get_order(%s) failed: %s", order_id, e)
             return None, fresh
+
+    def list_open_orders_truth(
+        self,
+        *,
+        product_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Strict open-order read used only for fail-closed terminalization."""
+        try:
+            import robin_stocks.robinhood as rh
+            from ...broker_service import is_connected
+
+            if not is_connected():
+                return {"readable": False, "orders": None}
+            account_snapshot = _rh_strict_account_snapshot(rh)
+            raw_rows = _rh_strict_paginated_rows(rh, rh.urls.orders_url())
+            raw_orders: list[dict[str, Any]] = []
+            terminal = {"filled", "cancelled", "canceled", "rejected", "failed", "expired"}
+            for row in raw_rows:
+                state = str(row.get("state") or row.get("status") or "").strip().lower()
+                account_url = str(row.get("account") or "").strip()
+                if (
+                    not state
+                    or "cancel" not in row
+                    or account_url not in account_snapshot["account_urls"]
+                ):
+                    return {"readable": False, "orders": None}
+                if row.get("cancel") is not None:
+                    raw_orders.append(row)
+                elif state not in terminal:
+                    return {"readable": False, "orders": None}
+            orders: list[NormalizedOrder] = []
+            for row in raw_orders:
+                order = _normalize_rh_order_truth(row, rh=rh)
+                if order is None:
+                    return {"readable": False, "orders": None}
+                orders.append(order)
+            if product_id:
+                ticker = _to_ticker(product_id)
+                orders = [
+                    order
+                    for order in orders
+                    if str(order.product_id or "").upper() == ticker
+                ]
+            return {"readable": True, "orders": orders[:limit]}
+        except Exception as exc:
+            logger.warning("[rh_adapter] strict open-order read failed: %s", exc)
+            return {"readable": False, "orders": None}
+
+    def get_order_truth(self, order_id: str) -> dict[str, Any]:
+        """Strict order read; ``None`` is unknown, never certified absence."""
+        if not str(order_id or "").strip():
+            return {"readable": False, "found": False, "order": None}
+        try:
+            import robin_stocks.robinhood as rh
+            from ...broker_service import is_connected
+
+            if not is_connected():
+                return {"readable": False, "found": False, "order": None}
+            account_snapshot = _rh_strict_account_snapshot(rh)
+            response = rh.helper.SESSION.get(rh.urls.orders_url(str(order_id)))
+            response.raise_for_status()
+            raw = response.json()
+            if not isinstance(raw, dict) or not raw:
+                return {"readable": False, "found": False, "order": None}
+            if str(raw.get("account") or "").strip() not in account_snapshot["account_urls"]:
+                return {"readable": False, "found": False, "order": None}
+
+            order = _normalize_rh_order_truth(raw, rh=rh)
+            if order is None:
+                return {"readable": False, "found": False, "order": None}
+            if str(order.order_id or "").strip() != str(order_id).strip():
+                return {"readable": False, "found": False, "order": None}
+            return {"readable": True, "found": True, "order": order}
+        except Exception as exc:
+            logger.warning("[rh_adapter] strict get_order(%s) failed: %s", order_id, exc)
+            return {"readable": False, "found": False, "order": None}
+
+    def get_position_quantity_truth(self, product_id: str) -> dict[str, Any]:
+        """Direct, complete Robinhood position read; ambiguity is never flat."""
+        symbol = _to_ticker(product_id)
+        if not symbol:
+            return {"readable": False, "quantity": None}
+        try:
+            import robin_stocks.robinhood as rh
+            from ...broker_service import is_connected
+
+            if not is_connected():
+                return {"readable": False, "quantity": None}
+            account_snapshot = _rh_strict_account_snapshot(rh)
+            rows = _rh_strict_paginated_rows(
+                rh,
+                rh.urls.positions_url(),
+                payload={"nonzero": "true"},
+            )
+            quantity = 0.0
+            for row in rows:
+                qty = _sf(row.get("quantity"))
+                account_url = str(row.get("account") or "").strip()
+                if (
+                    qty is None
+                    or not math.isfinite(qty)
+                    or qty < 0.0
+                    or account_url not in account_snapshot["account_urls"]
+                ):
+                    return {"readable": False, "quantity": None}
+                row_symbol = str(
+                    row.get("symbol") or row.get("chain_symbol") or ""
+                ).strip().upper()
+                if not row_symbol:
+                    row_symbol = _rh_strict_instrument_symbol(
+                        rh,
+                        str(row.get("instrument") or ""),
+                    )
+                if row_symbol == symbol:
+                    quantity += qty
+            return {
+                "readable": True,
+                "quantity": quantity,
+                "account_identity": account_snapshot["identity"],
+            }
+        except Exception as exc:
+            logger.warning("[rh_adapter] strict position read failed: %s", exc)
+            return {"readable": False, "quantity": None}
+
+    def get_account_identity_truth(self) -> dict[str, Any]:
+        """Strict, complete fingerprint of the authenticated RH account set."""
+        try:
+            import robin_stocks.robinhood as rh
+            from ...broker_service import is_connected
+
+            if not is_connected():
+                return {"readable": False, "identity": None}
+            snapshot = _rh_strict_account_snapshot(rh)
+            return {"readable": True, "identity": snapshot["identity"]}
+        except Exception as exc:
+            logger.warning("[rh_adapter] strict account identity failed: %s", exc)
+            return {"readable": False, "identity": None}
 
     def get_fills(
         self,

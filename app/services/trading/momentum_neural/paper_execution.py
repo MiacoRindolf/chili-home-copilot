@@ -2791,7 +2791,10 @@ def classify_stop_breach(
 
     # ---- data-validity floor: never hold on bad data → BREAKDOWN ----
     if (age is None or age > float(max_age_s) or n < int(min_snaps)
-            or ofi is None or micro is None or pctile is None):
+            or ofi is None or micro is None or pctile is None
+            or spread is None or spread < 0.0):
+        if spread is not None and spread < 0.0:
+            out["reason"] = "crossed_l2_book"
         return out
 
     # ---- BREAKDOWN veto (evaluated FIRST; any one fires ⇒ sell now) ----

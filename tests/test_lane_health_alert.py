@@ -14,14 +14,17 @@ signal:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.config import settings
 from app.models.trading import AlertHistory, BrainBatchJob
 from app.services.trading import governance as gov
-from app.services.trading.batch_job_constants import JOB_SCHEDULER_WORKER_HEARTBEAT
+from app.services.trading.batch_job_constants import (
+    JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+    JOB_SCHEDULER_WORKER_HEARTBEAT,
+)
 from app.services.trading.momentum_neural import lane_health as lh
 
 
@@ -44,6 +47,12 @@ def _reset(monkeypatch):
     monkeypatch.setattr(settings, "chili_kill_switch_db_poll_enabled", False, raising=False)
     monkeypatch.setattr(settings, "chili_lane_health_alert_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_lane_health_freeze_alert_seconds", 60.0, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_lane_health_live_loop_stale_seconds",
+        75.0,
+        raising=False,
+    )
     # Default the lane OFF so condition (c) only fires when a test opts in via
     # _enable_lane — independent of the operator's ambient .env (where it may be on).
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", False, raising=False)
@@ -122,6 +131,7 @@ def test_alert_disabled_flag_off(db, monkeypatch):
 def _enable_lane(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", False, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_auto_arm_crypto_only", True, raising=False)  # 24/7
@@ -134,6 +144,58 @@ def _heartbeat(db, *, age_seconds: float) -> None:
         status="ok",
         started_at=datetime.utcnow() - timedelta(seconds=age_seconds + 1),
         ended_at=datetime.utcnow() - timedelta(seconds=age_seconds),
+    ))
+    db.commit()
+
+
+def _live_loop_heartbeat(
+    db,
+    *,
+    age_seconds: float,
+    status: str = "ok",
+    completed: bool = True,
+    owner_instance_id: str | None = None,
+    generation: int = 1,
+    generation_started_age_seconds: float | None = None,
+    malformed_meta: bool = False,
+) -> None:
+    now = datetime.utcnow()
+    heartbeat_at = now - timedelta(seconds=age_seconds)
+    ended_at = (
+        heartbeat_at
+        if completed
+        else None
+    )
+    owner_instance_id = owner_instance_id or str(uuid.uuid4())
+    generation_started_age_seconds = (
+        age_seconds + 120.0
+        if generation_started_age_seconds is None
+        else generation_started_age_seconds
+    )
+    generation_started_at = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=generation_started_age_seconds)
+    )
+    meta = {
+        "schema": lh.LIVE_LOOP_HEARTBEAT_SCHEMA,
+        "scope": lh.LIVE_LOOP_HEARTBEAT_SCOPE,
+        "owner": "momentum_live_runner_loop",
+        "owner_instance_id": owner_instance_id,
+        "generation": generation,
+        "generation_identity": f"{owner_instance_id}:{generation}",
+        "generation_started_at_utc": (
+            generation_started_at.isoformat().replace("+00:00", "Z")
+        ),
+    }
+    if malformed_meta:
+        meta.pop("generation_identity")
+    db.add(BrainBatchJob(
+        id=str(uuid.uuid4()),
+        job_type=JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT,
+        status=status,
+        started_at=heartbeat_at - timedelta(seconds=1),
+        ended_at=ended_at,
+        meta_json=meta,
     ))
     db.commit()
 
@@ -166,6 +228,365 @@ def test_auto_arm_stalled_frozen(db, monkeypatch):
     r = lh.evaluate_lane_health(db)
     assert r["frozen"] is True
     assert any(c["kind"] == "auto_arm_stalled" and c["frozen"] for c in r["conditions"])
+
+
+def _enable_event_lane(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_ross_event_admission_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_crypto_only", True, raising=False)
+
+
+def test_event_loop_heartbeat_keeps_quiet_lane_healthy(db, monkeypatch):
+    _enable_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2)
+    r = lh.evaluate_lane_health(db)
+    assert r["frozen"] is False
+    assert r["conditions"] == []
+
+
+def test_live_loop_owner_writes_completed_durable_heartbeat(db):
+    owner_instance_id = str(uuid.uuid4())
+    generation_started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    job_id = lh.record_live_runner_loop_run(
+        db,
+        owner_instance_id=owner_instance_id,
+        generation=7,
+        generation_started_at=generation_started_at,
+    )
+    db.commit()
+
+    row = db.query(BrainBatchJob).filter(BrainBatchJob.id == job_id).one()
+    assert row.job_type == JOB_MOMENTUM_LIVE_LOOP_HEARTBEAT
+    assert row.status == "ok"
+    assert row.ended_at is not None
+    assert row.meta_json == {
+        "schema": lh.LIVE_LOOP_HEARTBEAT_SCHEMA,
+        "scope": lh.LIVE_LOOP_HEARTBEAT_SCOPE,
+        "owner": "momentum_live_runner_loop",
+        "owner_instance_id": owner_instance_id,
+        "generation": 7,
+        "generation_identity": f"{owner_instance_id}:7",
+        "generation_started_at_utc": (
+            generation_started_at.isoformat().replace("+00:00", "Z")
+        ),
+    }
+
+
+def test_live_loop_heartbeat_rejects_missing_completed_row(db, monkeypatch):
+    from app.services.trading import brain_batch_job_log
+
+    missing_job_id = str(uuid.uuid4())
+    monkeypatch.setattr(
+        brain_batch_job_log,
+        "brain_batch_job_record_completed",
+        lambda *_args, **_kwargs: missing_job_id,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="did not persist the exact completed row",
+    ):
+        lh.record_live_runner_loop_run(
+            db,
+            owner_instance_id=str(uuid.uuid4()),
+            generation=1,
+            generation_started_at=datetime.now(timezone.utc),
+        )
+
+    assert (
+        db.query(BrainBatchJob)
+        .filter(BrainBatchJob.id == missing_job_id)
+        .one_or_none()
+        is None
+    )
+
+
+def test_missing_durable_heartbeat_is_loud_even_if_local_state_looks_fresh(
+    db,
+    monkeypatch,
+):
+    _enable_event_lane(monkeypatch)
+    monkeypatch.setattr(
+        lh,
+        "_live_loop_heartbeat_age_seconds",
+        lambda: 0.0,
+        raising=False,
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is True
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_missing"
+
+
+def test_event_loop_stale_durable_heartbeat_is_loud_without_auto_arm_scheduler(
+    db,
+    monkeypatch,
+):
+
+    _enable_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=600)
+    r = lh.evaluate_lane_health(db)
+    assert r["frozen"] is True
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_stale"
+
+
+def test_unreadable_durable_heartbeat_fails_closed_even_if_local_state_is_fresh(
+    db,
+    monkeypatch,
+):
+    _enable_event_lane(monkeypatch)
+    monkeypatch.setattr(
+        lh,
+        "_live_loop_heartbeat_age_seconds",
+        lambda: 0.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        lh,
+        "_latest_live_loop_heartbeat_status",
+        lambda _db, *, stale_seconds: (_ for _ in ()).throw(
+            RuntimeError("db unreadable")
+        ),
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is True
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_unreadable"
+
+
+def test_unfinished_live_loop_row_cannot_spoof_completed_heartbeat(db, monkeypatch):
+    _enable_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2, status="running", completed=False)
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is True
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_latest_unfinished"
+
+
+def test_event_loop_exit_owner_is_monitored_when_entry_admission_is_paused(
+    db,
+    monkeypatch,
+):
+    _enable_event_lane(monkeypatch)
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_ross_event_admission_enabled",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_enabled",
+        False,
+        raising=False,
+    )
+    _live_loop_heartbeat(db, age_seconds=600)
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is True
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_stale"
+
+
+@pytest.mark.parametrize("breaker", ("kill_switch", "broker_block"))
+def test_event_loop_stall_remains_loud_while_safety_breaker_is_active(
+    db,
+    monkeypatch,
+    breaker,
+):
+    _enable_event_lane(monkeypatch)
+    if breaker == "kill_switch":
+        gov.activate_kill_switch("manual_loss_halt")
+    else:
+        gov.set_broker_daily_loss_block(
+            "alpaca_spot",
+            reason="daily_loss_halt",
+            realized=-251.0,
+            limit=250.0,
+        )
+    _live_loop_heartbeat(db, age_seconds=90)
+
+    r = lh.evaluate_lane_health(db)
+
+    kinds = {c["kind"] for c in r["conditions"]}
+    expected_breaker_kind = (
+        "kill_switch" if breaker == "kill_switch" else "broker_block"
+    )
+    assert expected_breaker_kind in kinds
+    assert "live_loop_stalled" in kinds
+    assert next(
+        c for c in r["conditions"] if c["kind"] == "live_loop_stalled"
+    )["reason"] == "live_runner_loop_heartbeat_stale"
+
+
+def test_event_loop_uses_tight_timeout_and_is_monitored_outside_arm_window(
+    db,
+    monkeypatch,
+):
+    _enable_event_lane(monkeypatch)
+    monkeypatch.setattr(
+        settings,
+        "chili_lane_health_freeze_alert_seconds",
+        900.0,
+        raising=False,
+    )
+    monkeypatch.setattr(lh, "_expected_trading_window_open", lambda: False)
+    _live_loop_heartbeat(db, age_seconds=80)
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["live_loop_stale_seconds"] == 75.0
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_stale"
+
+
+def test_latest_malformed_live_loop_row_fails_closed(db, monkeypatch):
+    _enable_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=2, malformed_meta=True)
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_latest_malformed"
+
+
+def test_latest_error_row_cannot_fall_back_to_prior_ok_heartbeat(db, monkeypatch):
+    _enable_event_lane(monkeypatch)
+    owner = str(uuid.uuid4())
+    _live_loop_heartbeat(
+        db,
+        age_seconds=3,
+        owner_instance_id=owner,
+        generation=1,
+    )
+    _live_loop_heartbeat(
+        db,
+        age_seconds=1,
+        owner_instance_id=owner,
+        generation=1,
+        status="error",
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_latest_error"
+
+
+def test_overlapping_distinct_live_loop_owners_fail_closed(db, monkeypatch):
+    _enable_event_lane(monkeypatch)
+    _live_loop_heartbeat(
+        db,
+        age_seconds=10,
+        owner_instance_id=str(uuid.uuid4()),
+        generation=1,
+        generation_started_age_seconds=120,
+    )
+    _live_loop_heartbeat(
+        db,
+        age_seconds=2,
+        owner_instance_id=str(uuid.uuid4()),
+        generation=1,
+        generation_started_age_seconds=30,
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_owner_overlap"
+    assert cond["overlapping_owner_count"] == 2
+
+
+def test_clean_live_loop_owner_handoff_does_not_false_positive(db, monkeypatch):
+    _enable_event_lane(monkeypatch)
+    _live_loop_heartbeat(
+        db,
+        age_seconds=40,
+        owner_instance_id=str(uuid.uuid4()),
+        generation=1,
+        generation_started_age_seconds=120,
+    )
+    _live_loop_heartbeat(
+        db,
+        age_seconds=2,
+        owner_instance_id=str(uuid.uuid4()),
+        generation=1,
+        generation_started_age_seconds=30,
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    assert r["frozen"] is False
+    assert r["conditions"] == []
+
+
+def test_future_live_loop_heartbeat_fails_closed(db, monkeypatch):
+    _enable_event_lane(monkeypatch)
+    _live_loop_heartbeat(db, age_seconds=-10)
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "live_loop_stalled")
+    assert cond["reason"] == "live_runner_loop_heartbeat_future"
+
+
+@pytest.mark.parametrize(
+    ("batch_on", "loop_on", "bus_on", "reason"),
+    (
+        (True, True, True, "live_runner_batch_and_event_loop_both_enabled"),
+        (False, False, True, "live_runner_no_driver_enabled"),
+        (False, True, False, "live_runner_event_loop_price_bus_disabled"),
+    ),
+)
+def test_master_enabled_invalid_driver_configuration_is_loud(
+    db,
+    monkeypatch,
+    batch_on,
+    loop_on,
+    bus_on,
+    reason,
+):
+    _enable_event_lane(monkeypatch)
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_live_runner_scheduler_enabled",
+        batch_on,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_live_runner_loop_enabled",
+        loop_on,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_autopilot_price_bus_enabled",
+        bus_on,
+        raising=False,
+    )
+
+    r = lh.evaluate_lane_health(db)
+
+    cond = next(c for c in r["conditions"] if c["kind"] == "driver_misconfigured")
+    assert cond["reason"] == reason
 
 
 def test_lane_disabled_no_starvation_alert(db, monkeypatch):

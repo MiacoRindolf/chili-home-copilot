@@ -788,6 +788,45 @@ def test_maybe_wrap_chunking_on_inserts_wrapper():
     assert adapter.is_enabled() is True
 
 
+def test_live_runner_hard_bypasses_chunking_for_alpaca_entry_and_close():
+    """Flag-on still sends one exact claimed parent CID for both directions."""
+    from app.config import settings as _rs
+
+    base = FakeVenueAdapter(base_increment=1.0)
+
+    def factory():
+        return base
+
+    with patch.object(_rs, "chili_momentum_order_chunking_enabled", True), patch.object(
+        _rs, "chili_momentum_order_chunking_blocks", 4
+    ):
+        selected = lr._live_runner_order_factory(factory, "alpaca_spot")
+        adapter = selected()
+        entry = adapter.place_limit_order_gtc(
+            product_id="ACTU",
+            side="buy",
+            base_size="8",
+            limit_price="1.25",
+            client_order_id="claimed-entry-parent",
+        )
+        close = adapter.place_limit_order_gtc(
+            product_id="ACTU",
+            side="sell",
+            base_size="8",
+            limit_price="1.20",
+            client_order_id="claimed-close-parent",
+        )
+
+    assert selected is factory
+    assert entry["ok"] is True and close["ok"] is True
+    assert [row[4] for row in base.placed_orders] == [
+        "claimed-entry-parent",
+        "claimed-close-parent",
+    ]
+    assert [row[1] for row in base.placed_orders] == ["buy", "sell"]
+    assert all(CHUNK_RESULT_KEY not in result for result in (entry, close))
+
+
 def test_maybe_wrap_chunking_on_but_blocks_one_returns_base():
     # FLAG PARITY: flag ON but blocks<=1 ⇒ still byte-identical (base factory returned).
     sentinel = FakeVenueAdapter()

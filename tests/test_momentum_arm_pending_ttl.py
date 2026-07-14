@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, settings
 from app.models.core import User
+
+pytestmark = pytest.mark.usefixtures("stable_non_alpaca_account_identity")
 from app.models.trading import (
     MomentumStrategyVariant,
     TradingAutomationSession,

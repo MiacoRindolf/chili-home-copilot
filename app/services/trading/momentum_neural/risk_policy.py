@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, Optional
 
+from sqlalchemy import or_
+
 from ....config import settings
 from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
 
@@ -172,17 +174,79 @@ def _agentic_equity_cached() -> float | None:
     return None
 
 
-_ALPACA_ACCT_CACHE: dict[str, float] = {"equity": 0.0, "bp": 0.0, "ts": 0.0}
+_ALPACA_ACCT_CACHE: dict[str, Any] = {
+    "scope": None,
+    "expected_account_id": None,
+    "observed_account_id": None,
+    "equity": 0.0,
+    "bp": 0.0,
+    "ts": 0.0,
+}
+
+
+def _configured_alpaca_account_id() -> str:
+    return str(
+        getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+    ).strip()
+
+
+def _clear_alpaca_account_caches() -> None:
+    """Retire every capital-basis cache when the paper account generation changes."""
+    _ALPACA_ACCT_CACHE.update({
+        "scope": None,
+        "expected_account_id": None,
+        "observed_account_id": None,
+        "equity": 0.0,
+        "bp": 0.0,
+        "ts": 0.0,
+    })
+    # Keep legacy family-only keys in the deletion set so a process upgraded in
+    # place cannot resurrect a pre-generation last-good value.
+    for key in list(_ACCOUNT_EQUITY_LAST_GOOD):
+        if key in {"alpaca_spot", "alpaca_short"} or key.startswith(
+            ("alpaca_spot|", "alpaca_short|")
+        ):
+            _ACCOUNT_EQUITY_LAST_GOOD.pop(key, None)
+
+
+def _alpaca_cached_account_generation() -> str | None:
+    expected = _configured_alpaca_account_id()
+    cached_expected = str(
+        _ALPACA_ACCT_CACHE.get("expected_account_id") or ""
+    ).strip()
+    cached_observed = str(
+        _ALPACA_ACCT_CACHE.get("observed_account_id") or ""
+    ).strip()
+    if expected and cached_expected == expected and cached_observed == expected:
+        return expected
+    return None
 
 
 def _alpaca_account_cached() -> tuple[float | None, float | None]:
-    """(equity, buying_power) for the Alpaca account (paper or live), short-TTL cached like the
+    """(equity, buying_power) for the certified Alpaca paper account, short-TTL cached like the
     agentic reads so a burst of candidate sizings does not fire a get_account per name (rate
     limits). Fail-open to the last-good value on a transient miss. Alpaca's paper account reports
     ~4x day-trading buying power on its equity; the SIZING basis uses buying_power, the RISK cap
     uses equity. (2026-07-07, ALPACA_PAPER_ENABLE_PLAN.md)"""
     import time as _time
 
+    # The adapter and runner are paper-only.  This check must precede every
+    # cache read so a runtime paper→live posture flip cannot leak stale paper
+    # equity/buying power into sizing or loss-cap decisions.
+    if not bool(getattr(settings, "chili_alpaca_paper", True)):
+        _clear_alpaca_account_caches()
+        return None, None
+
+    scope = "alpaca:paper"
+    expected_account_id = _configured_alpaca_account_id()
+    if not expected_account_id:
+        _clear_alpaca_account_caches()
+        return None, None
+    if (
+        _ALPACA_ACCT_CACHE.get("scope") != scope
+        or _alpaca_cached_account_generation() != expected_account_id
+    ):
+        _clear_alpaca_account_caches()
     now = _time.monotonic()
     age = now - (_ALPACA_ACCT_CACHE.get("ts") or 0.0)
     _eq0 = _ALPACA_ACCT_CACHE.get("equity") or 0.0
@@ -193,14 +257,34 @@ def _alpaca_account_cached() -> tuple[float | None, float | None]:
         from ..venue.alpaca_spot import AlpacaSpotAdapter
 
         snap = AlpacaSpotAdapter().get_account_snapshot() or {}
-        eq = float(snap.get("equity") or 0.0)
-        bp = float(snap.get("buying_power") or 0.0)
     except Exception:
+        snap = {}
+    if snap.get("ok") is True:
+        observed_account_id = str(snap.get("account_id") or "").strip()
+        if (
+            snap.get("paper") is not True
+            or observed_account_id != expected_account_id
+        ):
+            # A positive wrong-account read is not a transient data miss.  It
+            # invalidates both the short account cache and the 180-second
+            # last-good layer, with no fallback to the prior generation.
+            _clear_alpaca_account_caches()
+            return None, None
+        try:
+            eq = float(snap.get("equity") or 0.0)
+            bp = float(snap.get("buying_power") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            eq = bp = 0.0
+    else:
+        observed_account_id = ""
         eq = bp = 0.0
     if eq > 0:
         _ALPACA_ACCT_CACHE["equity"] = eq
         _ALPACA_ACCT_CACHE["bp"] = bp
         _ALPACA_ACCT_CACHE["ts"] = now
+        _ALPACA_ACCT_CACHE["scope"] = scope
+        _ALPACA_ACCT_CACHE["expected_account_id"] = expected_account_id
+        _ALPACA_ACCT_CACHE["observed_account_id"] = observed_account_id
         return eq, bp
     if _eq0 > 0 and age < _AGENTIC_BP_STALE_GRACE:
         return _eq0, _bp0  # transient miss → recent cached value
@@ -235,7 +319,12 @@ _ACCOUNT_EQUITY_LAST_GOOD_TTL_SEC = 180.0  # reuse last-good across transient re
 _ACCOUNT_EQUITY_TINY_FRAC = 0.10  # a live read < 10% of a fresh last-good == implausible flake
 
 
-def _stabilize_account_equity(ef: str, eq: float | None) -> float | None:
+def _stabilize_account_equity(
+    ef: str,
+    eq: float | None,
+    *,
+    account_generation: str | None = None,
+) -> float | None:
     """LOW/failed-read stabilizer for the per-family account-equity basis.
 
     Returns the live ``eq`` when it is a plausible positive value (and refreshes the
@@ -245,7 +334,12 @@ def _stabilize_account_equity(ef: str, eq: float | None) -> float | None:
     import time as _time
 
     now = _time.monotonic()
-    slot = _ACCOUNT_EQUITY_LAST_GOOD.get(ef)
+    cache_key = (
+        f"{ef}|{account_generation}"
+        if account_generation
+        else ef
+    )
+    slot = _ACCOUNT_EQUITY_LAST_GOOD.get(cache_key)
     cached = float(slot["value"]) if slot else 0.0
     age = (now - float(slot["ts"])) if slot else 1e9
 
@@ -260,7 +354,7 @@ def _stabilize_account_equity(ef: str, eq: float | None) -> float | None:
     )
 
     if live_ok and not tiny_flake:
-        _ACCOUNT_EQUITY_LAST_GOOD[ef] = {"value": float(eq), "ts": now}
+        _ACCOUNT_EQUITY_LAST_GOOD[cache_key] = {"value": float(eq), "ts": now}
         return float(eq)
 
     # Degraded/failed/tiny read -> reuse the last REAL read within the grace window.
@@ -268,7 +362,7 @@ def _stabilize_account_equity(ef: str, eq: float | None) -> float | None:
         logger.warning(
             "[momentum_neural] account-equity read DEGRADED for %s (live=%s) — reusing last-good "
             "$%.2f (age=%.0fs, ttl=%.0fs) to avoid a spurious daily-loss-cap collapse",
-            ef, eq, cached, age, _ACCOUNT_EQUITY_LAST_GOOD_TTL_SEC,
+            cache_key, eq, cached, age, _ACCOUNT_EQUITY_LAST_GOOD_TTL_SEC,
         )
         return cached
     return None
@@ -405,7 +499,7 @@ def _account_equity_usd(
         bp = _agentic_buying_power_cached()
         return float(bp) if (bp is not None and bp > 0) else None
 
-    # Alpaca rail (paper or live): size against the ALPACA account, NOT the RH/Coinbase portfolio.
+    # Certified Alpaca paper rail: size against the ALPACA account, NOT the RH/Coinbase portfolio.
     # Without this branch alpaca_spot fell into the Coinbase `else` below and sized against the tiny
     # Coinbase balance (~$1.9k) => absurd ~$290 orders on a paper account with ~$100k equity / ~$400k
     # buying power. Alpaca's reported buying_power already includes its (paper 4x) margin, so use it
@@ -416,10 +510,30 @@ def _account_equity_usd(
         EXECUTION_FAMILY_ALPACA_SPOT,
     )
     if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
+        if not bool(getattr(settings, "chili_alpaca_paper", True)):
+            # Clear both cache layers before any stabilizer read. Otherwise a
+            # posture flip could resurrect paper equity for 180s from the
+            # family-scoped last-good cache even after the account cache cleared.
+            _clear_alpaca_account_caches()
+            return None
         _a_eq, _a_bp = _alpaca_account_cached()
         if prefer_equity:
-            return _stabilize_account_equity(ef, _a_eq if (_a_eq and _a_eq > 0) else None)
-        if use_bp and _a_bp and _a_bp > 0:
+            generation = _alpaca_cached_account_generation()
+            if generation is None:
+                return None
+            return _stabilize_account_equity(
+                ef,
+                _a_eq if (_a_eq and _a_eq > 0) else None,
+                account_generation=generation,
+            )
+        # Alpaca paper commonly exposes ~4x intraday buying power. The global
+        # buying-power preference predates this venue and amplified both size and
+        # max loss by that multiple. Alpaca therefore requires an explicit,
+        # venue-scoped opt-in before leverage can become the sizing basis.
+        _alpaca_use_bp = use_bp and bool(
+            getattr(settings, "chili_momentum_alpaca_size_use_buying_power", False)
+        )
+        if _alpaca_use_bp and _a_bp and _a_bp > 0:
             return float(_a_bp)
         return float(_a_eq) if (_a_eq and _a_eq > 0) else None
 
@@ -499,26 +613,88 @@ def equity_relative_notional_cap(fixed_fallback_usd: float, execution_family: st
     )
 
 
+def alpaca_paper_hard_loss_cap_usd(
+    execution_family: str | None,
+) -> float | None:
+    """Absolute per-position risk ceiling for the shared Alpaca paper account.
+
+    Frozen watcher snapshots can predate a policy change, and later sizing
+    multipliers may raise an equity-relative base. This current-config boundary is
+    therefore applied again immediately before any risk-increasing broker call and
+    by the live max-loss circuit. It never affects real-capital venues.
+    """
+    # Recertification boundary, not a tuning knob: stale snapshots and malformed
+    # runtime overrides must never lift the paper lane above the approved $50
+    # maximum.  A lower positive configured value remains valid; an invalid or
+    # larger value falls back/clamps to this fixed safety ceiling.
+    failsafe_cap = 50.0
+    try:
+        from ..execution_family_registry import normalize_execution_family
+
+        family = normalize_execution_family(execution_family)
+        if family not in {"alpaca_spot", "alpaca_short"}:
+            return None
+        if not bool(getattr(settings, "chili_alpaca_paper", True)):
+            return None
+        configured_cap = float(
+            getattr(
+                settings,
+                "chili_momentum_risk_max_loss_per_trade_usd",
+                failsafe_cap,
+            )
+        )
+        if not math.isfinite(configured_cap) or configured_cap <= 0.0:
+            return failsafe_cap
+        return min(configured_cap, failsafe_cap)
+    except (TypeError, ValueError, OverflowError):
+        return failsafe_cap
+
+
 def equity_relative_loss_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
     """Per-trade MAX-LOSS cap as a fraction of account equity (documented
     per-trade RISK knob). docs/DESIGN/MOMENTUM_LANE.md"""
-    return _equity_relative_cap(
+    cap = _equity_relative_cap(
         fixed_fallback_usd,
         getattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01),
         execution_family,
     )
+    # Alpaca is the paper recertification rail.  A large simulated balance must
+    # not silently turn the existing $ max-loss policy into a ~$700 one-trade
+    # budget while the broker-local daily stop is only $250.  Keep the normal
+    # equity-relative scaling for live-capital families; paper uses the lower of
+    # that value and the already-configured fixed per-trade ceiling.
+    hard_cap = alpaca_paper_hard_loss_cap_usd(execution_family)
+    if hard_cap is not None:
+        return min(float(cap), hard_cap)
+    return cap
 
 
 def equity_relative_daily_loss_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
     """Daily-loss cap as a fraction of account equity (documented DAILY risk knob).
     Evaluated live so the daily circuit-breaker adapts to current equity.
     docs/DESIGN/MOMENTUM_LANE.md"""
-    return _equity_relative_cap(
+    cap = _equity_relative_cap(
         fixed_fallback_usd,
         getattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05),
         execution_family,
         prefer_equity=True,  # daily-loss cap off STABLE account equity, not fluctuating BP
     )
+    family = ""
+    try:
+        from ..execution_family_registry import normalize_execution_family
+
+        family = normalize_execution_family(execution_family)
+        fixed = float(fixed_fallback_usd)
+        if (
+            family in {"alpaca_spot", "alpaca_short"}
+            and bool(getattr(settings, "chili_alpaca_paper", True))
+        ):
+            fixed_ceiling = fixed if math.isfinite(fixed) and fixed > 0.0 else 250.0
+            return min(float(cap), fixed_ceiling, 250.0)
+    except (TypeError, ValueError, OverflowError):
+        if family in {"alpaca_spot", "alpaca_short"}:
+            return min(float(cap), 250.0)
+    return cap
 
 
 def adaptive_max_concurrent_live_sessions() -> int:
@@ -673,7 +849,12 @@ def admit_by_aggregate_risk(
         bf = float(budget_fraction)
     except (TypeError, ValueError):
         bf = 0.0
-    if bf <= 0 or not math.isfinite(bf):
+    if not math.isfinite(bf):
+        return False, {
+            "reason": "budget_fraction_invalid",
+            "budget_fraction": budget_fraction,
+        }
+    if bf <= 0:
         return True, {"reason": "budget_disabled", "budget_fraction": bf}
     try:
         eq = float(equity_usd) if equity_usd is not None else 0.0
@@ -685,15 +866,18 @@ def admit_by_aggregate_risk(
         cand = float(candidate_risk_usd)
     except (TypeError, ValueError):
         cand = float("nan")
-    if not math.isfinite(cand) or cand < 0:
+    if not math.isfinite(cand) or cand <= 0:
         return False, {"reason": "candidate_risk_invalid",
                        "candidate_risk_usd": candidate_risk_usd}
     try:
         opn = float(open_risk_usd)
     except (TypeError, ValueError):
-        opn = 0.0
+        opn = float("nan")
     if not math.isfinite(opn) or opn < 0:
-        opn = 0.0
+        return False, {
+            "reason": "open_risk_invalid",
+            "open_risk_usd": open_risk_usd,
+        }
     cap = bf * eq
     projected = opn + cand
     admit = projected <= cap + 1e-9
@@ -968,7 +1152,7 @@ def account_wide_consecutive_losses(
         from ....models.trading import MomentumAutomationOutcome, TradingAutomationSession
         from .outcome_labels import is_real_entry_outcome
 
-        # TODAY's ET session only (auto new-day reset). Exclude the alpaca_spot paper twins
+        # TODAY's ET session only (auto new-day reset). Exclude both quarantined Alpaca paper families
         # (fake money) so their outcomes never trip the real-account tilt halt.
         start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
         rows = (
@@ -985,7 +1169,12 @@ def account_wide_consecutive_losses(
                 MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
                 MomentumAutomationOutcome.terminal_at >= start_utc,
                 MomentumAutomationOutcome.terminal_at < end_utc,
-                TradingAutomationSession.execution_family != "alpaca_spot",
+                or_(
+                    TradingAutomationSession.execution_family.is_(None),
+                    TradingAutomationSession.execution_family.notin_(
+                        ("alpaca_spot", "alpaca_short")
+                    ),
+                ),
             )
             .order_by(MomentumAutomationOutcome.terminal_at.desc())
             .limit(int(lookback))

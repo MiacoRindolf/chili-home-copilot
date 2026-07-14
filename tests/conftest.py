@@ -198,6 +198,7 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
         "brain_work_events",
         "broker_credentials",
         "broker_sessions",
+        "broker_symbol_action_claims",
         "brain_batch_jobs",
         "pattern_evidence_corrections",
         "scan_patterns",
@@ -209,6 +210,59 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
     }
 )
 _TRADING_DOMAIN_TARGETED_TESTS = (
+    # Broker-truth recertification suites are trading-only.  Route them through
+    # the scoped cleanup path so each invariant test does not TRUNCATE every
+    # unrelated application table in the dedicated test database.
+    "test_alpaca_account_risk_reservations.py",
+    "test_alpaca_close_only_claim_fencing.py",
+    "test_alpaca_crypto_paper.py",
+    "test_alpaca_deadman_close_handoff.py",
+    "test_alpaca_detached_claim_handoff.py",
+    "test_alpaca_governed_place_bbo.py",
+    "test_alpaca_orphan_outcome_repair.py",
+    "test_alpaca_posture_quarantine.py",
+    "test_alpaca_replacement_containment_claim.py",
+    "test_alpaca_spot_adapter.py",
+    "test_adopt_on_cancel_fill.py",
+    "test_aggregate_risk_cap.py",
+    "test_automation_operator_exit_truth.py",
+    "test_automation_runner_health.py",
+    "test_automation_stale_reaper_account_identity.py",
+    "test_broker_symbol_action_claim_concurrency.py",
+    "test_concurrency_decouple_helpers.py",
+    "test_dup_reference_reconcile.py",
+    "test_equity_broker_readiness.py",
+    "test_equity_venue_sizing.py",
+    "test_fail_closed_risk_and_arm_lock.py",
+    "test_iqfeed_trade_bridge_provenance.py",
+    "test_lane_health_alert.py",
+    "test_live_runner_exit_gating.py",
+    "test_live_arm_generation_fence.py",
+    "test_live_exit_phantom_reconcile.py",
+    "test_live_runner_loop.py",
+    "test_live_runner_non_alpaca_account_identity.py",
+    "test_mode_scoped_session_cap.py",
+    "test_momentum_atomic_admission.py",
+    "test_momentum_arm_pending_ttl.py",
+    "test_momentum_bridge_subscribe_on_alert.py",
+    "test_momentum_emergency_exit_recovery.py",
+    "test_momentum_limit_entry.py",
+    "test_momentum_live_runner.py",
+    "test_momentum_operator_workflow.py",
+    "test_momentum_order_path_dedupe.py",
+    "test_momentum_risk_phase6.py",
+    "test_momentum_venue_aware_dedup.py",
+    "test_momentum_viability_freshness_pair.py",
+    "test_non_alpaca_terminalization_truth.py",
+    "test_order_truth_bundle.py",
+    "test_paper_real_halt_isolation.py",
+    "test_per_broker_daily_loss.py",
+    "test_premarket_exit_hours_aware.py",
+    "test_risk_governance_fail_closed_invariants.py",
+    "test_ross_event_admission.py",
+    "test_stop_breach_l2_confirm.py",
+    "test_trading_scheduler.py",
+    "test_verify_momentum_exec_process_health.py",
     "test_alerts_options_skip.py",
     "test_alpha_portfolio_gate.py",
     "test_auto_trader_synergy.py",
@@ -641,3 +695,48 @@ def paired_client(db, client):
 
     client.cookies.set(DEVICE_COOKIE_NAME, token)
     return client, user
+
+
+@pytest.fixture()
+def stable_non_alpaca_account_identity(monkeypatch):
+    """Keep unrelated live-arm tests off real broker account-identity rails."""
+    from app.services.trading.momentum_neural import live_runner, operator_actions
+
+    identity = "test-non-alpaca-account-v1"
+    monkeypatch.setattr(
+        operator_actions,
+        "_certified_non_alpaca_account_identity",
+        lambda _family: (identity, None),
+    )
+
+    def _verify(session, *, adapter=None):
+        snapshot = (
+            session.risk_snapshot_json
+            if isinstance(session.risk_snapshot_json, dict)
+            else {}
+        )
+        frozen = str(
+            snapshot.get("non_alpaca_account_identity") or identity
+        ).strip()
+        return {
+            "ok": True,
+            "applicable": True,
+            "frozen_identity": frozen,
+            "current_identity": frozen,
+            "reason": None,
+        }
+
+    monkeypatch.setattr(
+        operator_actions,
+        "verify_frozen_non_alpaca_account_identity",
+        _verify,
+    )
+    # live_runner imports the verifier into its own module namespace, so patch
+    # that exact call site too. Dedicated account-rotation tests do not request
+    # this fixture and continue to exercise the real fail-closed verifier.
+    monkeypatch.setattr(
+        live_runner,
+        "verify_frozen_non_alpaca_account_identity",
+        _verify,
+    )
+    return identity

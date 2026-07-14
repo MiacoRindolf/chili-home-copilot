@@ -6,6 +6,7 @@ from typing import Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -34,6 +35,51 @@ class WatchlistItem(Base):
     )
     ticker: str = Column(String(20), nullable=False)
     added_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class BrokerSymbolActionClaim(Base):
+    """ORM registration for the migration-316 broker ownership primitive.
+
+    Runtime claim transitions intentionally use explicit SQL, but registering the
+    table in ``Base.metadata`` keeps schema/test tooling aware of it (especially
+    per-test truncation).  There is deliberately no session foreign key because a
+    real broker orphan can outlive its originating CHILI session.
+    """
+
+    __tablename__ = "broker_symbol_action_claims"
+    __table_args__ = (
+        CheckConstraint(
+            "phase IN ('claimed', 'submit_indeterminate', 'submitted', 'resolved')",
+            name="ck_broker_symbol_action_phase",
+        ),
+        Index("ix_broker_symbol_action_claims_phase", "phase", "updated_at"),
+    )
+
+    account_scope: str = Column(String(96), primary_key=True)
+    symbol: str = Column(String(36), primary_key=True)
+    claim_token: str = Column(String(64), nullable=False)
+    action: str = Column(String(32), nullable=False)
+    phase: str = Column(String(32), nullable=False)
+    owner_session_id: Optional[int] = Column(Integer, nullable=True)
+    client_order_id: Optional[str] = Column(String(96), nullable=True)
+    broker_order_id: Optional[str] = Column(String(128), nullable=True)
+    metadata_json: dict = Column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    claimed_at: datetime = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("NOW()"),
+    )
+    updated_at: datetime = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("NOW()"),
+    )
+    lease_expires_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    resolved_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
 
 
 # f-phase3-stop-bleed D6 — constants for the Trade.scan_pattern_id

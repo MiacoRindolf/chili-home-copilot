@@ -90,6 +90,13 @@ def test_missing_core_field_is_breakdown():
     assert _classify(_chop(depth_imbal_pctile=None))["cls"] == "BREAKDOWN"
 
 
+def test_crossed_l2_book_is_breakdown_not_hold():
+    """A negative spread is invalid book evidence and can never earn a hold."""
+    out = _classify(_chop(spread_bps=-72.0))
+    assert out["cls"] == "BREAKDOWN"
+    assert out["reason"] == "crossed_l2_book"
+
+
 def test_none_ladder_is_breakdown():
     out = classify_stop_breach(ladder=None, ofi_threshold=THR)
     assert out["cls"] == "BREAKDOWN"

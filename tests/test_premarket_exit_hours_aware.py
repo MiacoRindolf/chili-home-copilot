@@ -7,7 +7,7 @@ retry-cap → live_error → naked long with no working exit. The reactive exit
 the ext-hours overrides. These tests pin the fix AND the parity contract:
 
   * equity premarket   → marketable LIMIT carrying extended_hours=True +
-                         market_hours_override='all_day_hours' + extended_hours_override
+                         market_hours_override='extended_hours' + extended_hours_override
                          (NEVER a bare market order, even urgent / attempt-3+).
   * equity regular hrs → BYTE-IDENTICAL to before (no ext kwargs on the call).
   * crypto (coinbase)  → BYTE-IDENTICAL (the RH-only overrides are never passed —
@@ -89,9 +89,42 @@ def test_equity_premarket_exit_uses_extended_hours_limit(monkeypatch):
     kind, kwargs = adapter.calls[0]
     assert kind == "limit", "premarket equity exit must be a LIMIT (RH rejects market in ext-hours)"
     assert kwargs.get("extended_hours") is True
-    assert kwargs.get("market_hours_override") == "all_day_hours"
+    assert kwargs.get("market_hours_override") == "extended_hours"
     assert kwargs.get("extended_hours_override") is True
     assert le.get("exit_session_extended") is True
+
+
+@pytest.mark.parametrize(
+    ("family", "symbol", "session"),
+    (
+        (EXECUTION_FAMILY_ROBINHOOD_SPOT, "BEEM", "premarket"),
+        (EXECUTION_FAMILY_COINBASE_SPOT, "TAO-USD", "regular"),
+    ),
+)
+def test_non_alpaca_exit_never_reads_alpaca_deadman_owner_claim(
+    monkeypatch,
+    family,
+    symbol,
+    session,
+):
+    def _unexpected_alpaca_claim_read(*_args, **_kwargs):
+        raise AssertionError("non-Alpaca exit must not read Alpaca owner claims")
+
+    monkeypatch.setattr(
+        lr,
+        "_read_exact_alpaca_deadman_handoff",
+        _unexpected_alpaca_claim_read,
+    )
+
+    adapter, result, _le = _run_exit(
+        monkeypatch,
+        family=family,
+        symbol=symbol,
+        session=session,
+    )
+
+    assert result.get("ok")
+    assert len(adapter.calls) == 1
 
 
 def test_equity_premarket_urgent_flatten_still_limit_not_market(monkeypatch):

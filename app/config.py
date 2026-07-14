@@ -3825,6 +3825,25 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PER_TRADE_USD", "CHILI_MOMENTUM_RISK_MAX_LOSS_PER_TRADE_USD"),
     )
+    # Broker-boundary quote truth. The setup quote can be minutes old after the
+    # scoring/risk pipeline; an Alpaca entry must be re-priced from a BBO no older
+    # than this immediately before submit.
+    chili_momentum_entry_bbo_max_age_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        le=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_BBO_MAX_AGE_SECONDS"),
+    )
+    # Adaptive liquidity budget: crossing the spread may consume at most this
+    # fraction of the trade's structural entry-to-stop risk.
+    chili_momentum_entry_max_spread_fraction_of_risk: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ENTRY_MAX_SPREAD_FRACTION_OF_RISK"
+        ),
+    )
     chili_momentum_risk_max_concurrent_sessions: int = Field(
         default=10,
         ge=1,
@@ -4166,6 +4185,14 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SIZE_USE_BUYING_POWER"),
     )
+    # Alpaca paper reports roughly 4x day-trading buying power. Treating that as
+    # account equity made a nominal 1%-risk trade roughly 4% of actual equity.
+    # Keep Alpaca sizing on real equity unless an operator explicitly opts into
+    # leveraged sizing; other venues retain the existing global behavior above.
+    chili_momentum_alpaca_size_use_buying_power: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_SIZE_USE_BUYING_POWER"),
+    )
     # Extra MARGIN MULTIPLE on the buying-power sizing basis. The robin_stocks API
     # under-reports the displayed Gold/Reg-T margin buying power — it returns the ~1x base
     # ($11,276) in every buying_power field, while the app shows the 2x margin ($22,551 =
@@ -4228,17 +4255,25 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_SKIP_CAP_MEDIAN_GUARD"),
     )
-    # ALPACA ORPHAN RECONCILER (2026-07-09): the sub-penny reject storm stranded 6 positions
-    # (~$65k MV) + a stale resting buy with NO managing session (sessions terminalized while
-    # exits bounced); the broker-sync covers RH/Coinbase only, so they persisted silently and
-    # ate buying power ($399k -> $66k). Every pass: flatten LONG-EQUITY positions and cancel
-    # resting orders whose symbol has NO non-terminal alpaca session, none created inside the
-    # grace window, and no outcome terminalized inside it. PAPER-ONLY by construction
-    # (hard-gated on chili_alpaca_paper); flatten-only; crypto/shorts out of scope; fail-open
-    # on unreadable reads; per-pass action cap. (alpaca_reconcile.py)
+    # ALPACA ORPHAN RECONCILER (2026-07-09): the sub-penny reject storm stranded positions
+    # after their managing sessions terminalized. Cleanup is PAPER-ONLY by construction and
+    # may mutate only orders/positions with exact durable CHILI provenance. Unknown/manual
+    # broker state is quarantined for operator review. Unreadable or ambiguous broker/local
+    # truth fails closed; crypto/shorts remain out of scope; actions are capped per pass.
+    # (alpaca_reconcile.py)
     chili_momentum_alpaca_orphan_reconcile_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_ORPHAN_RECONCILE_ENABLED"),
+    )
+    # Broker-mutating cleanup normally inherits authority from the live runner.
+    # Emergency cleanup while that runner is disabled requires a separate,
+    # explicit opt-in so "runner off" cannot unexpectedly flatten manual paper
+    # positions or cancel their orders.
+    chili_momentum_alpaca_orphan_reconcile_standalone_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ALPACA_ORPHAN_RECONCILE_STANDALONE_ENABLED"
+        ),
     )
     chili_momentum_alpaca_orphan_grace_minutes: float = Field(
         default=15.0,
@@ -7518,6 +7553,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_LANE_HEALTH_FREEZE_ALERT_SECONDS"),
         description="Grace before a held safety state counts as FROZEN. 0 = ADAPTIVE (derive from the lane's own watch cadence: auto_arm max_watch + watch_extend) so there is no separate magic number; a positive value overrides it. The same value is reused as the re-remind cooldown so a long freeze keeps nagging without spamming.",
     )
+    chili_lane_health_live_loop_stale_seconds: float = Field(
+        default=75.0,
+        ge=60.0,
+        le=300.0,
+        validation_alias=AliasChoices(
+            "CHILI_LANE_HEALTH_LIVE_LOOP_STALE_SECONDS"
+        ),
+        description=(
+            "Cross-process event-loop control-plane heartbeat timeout. The owner "
+            "writes every 30s; the 75s default tolerates two intervals plus jitter "
+            "without reusing the much longer entry-watch grace. Bounded to 60-300s."
+        ),
+    )
 
     # Cross-process kill switch. API and scheduler run in separate processes,
     # so live paths re-read durable state instead of trusting process memory.
@@ -7848,6 +7896,39 @@ class Settings(BaseSettings):
     chili_momentum_live_runner_scheduler_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED"),
+    )
+    # Canonical real-time driver. This is deliberately independent from the legacy
+    # APScheduler batch path: production must be able to run exactly one entry/exit
+    # driver (the event loop) while keeping the scheduled path disabled.
+    chili_momentum_live_runner_loop_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_ENABLED"),
+    )
+    chili_momentum_live_runner_loop_iqfeed_notify_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_NOTIFY_ENABLED"
+        ),
+    )
+    chili_momentum_live_runner_loop_iqfeed_notify_channel: str = Field(
+        default="momentum_iqfeed_l1",
+        min_length=1,
+        max_length=63,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_NOTIFY_CHANNEL",
+            "IQFEED_NOTIFY_CHANNEL",
+        ),
+    )
+    # Exact content-addressed host bridge build allowed to provide authoritative
+    # IQFeed L1 BBOs. Empty by default: notifications fail closed and the Alpaca
+    # adapter uses a direct broker quote until an operator pins the reviewed v2 build.
+    chili_iqfeed_l1_authoritative_bridge_build: str = Field(
+        default="",
+        max_length=96,
+        validation_alias=AliasChoices(
+            "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD"
+        ),
     )
     chili_momentum_live_runner_dev_tick_enabled: bool = Field(
         default=False,
@@ -9450,6 +9531,14 @@ class Settings(BaseSettings):
     chili_alpaca_paper: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_ALPACA_PAPER"),
     )
+    chili_alpaca_expected_account_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_ALPACA_EXPECTED_ACCOUNT_ID"),
+        description=(
+            "Required stable Alpaca paper TradeAccount.id pin. Missing or mismatched "
+            "identity disables all Alpaca broker reads and mutations."
+        ),
+    )
     # Ortex short-mechanics API key (squeeze-fuel tilt). Trader plan: 1,000 credits/mo,
     # 1 req/s, single-stock only — the fetch is gated to top-N explosive low-float
     # candidates + cached 12h (see short_mechanics.py). Empty ⇒ no fetch ⇒ no tilt
@@ -9493,11 +9582,10 @@ class Settings(BaseSettings):
     chili_alpaca_api_secret: str = Field(
         default="", validation_alias=AliasChoices("CHILI_ALPACA_API_SECRET"),
     )
-    # LIVE key pair (2026-07-10): both key sets live side-by-side in the deploy .env so
-    # the paper->live switch is ONE flag flip (CHILI_ALPACA_PAPER=0) + worker restart —
-    # no credential edits at switch time. _keys() selects by posture: paper -> the base
-    # pair above; live -> this pair (falling back to the base pair only if unset, so a
-    # single-pair setup keeps working). The operator enters the values themselves.
+    # Legacy live-key fields are retained only for configuration compatibility.
+    # The current Alpaca adapter is paper-only and deliberately never reads these
+    # credentials. A future real-money lane requires a separate adapter, account-
+    # identity model, safety review, and explicit rollout; it is not a flag flip.
     chili_alpaca_live_api_key: str = Field(
         default="", validation_alias=AliasChoices("CHILI_ALPACA_LIVE_API_KEY"),
     )
@@ -11056,14 +11144,12 @@ class Settings(BaseSettings):
         default=0.30,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_SCALE_OUT_FRACTION"),
     )
-    # CRYPTO -> ALPACA PAPER routing (2026-07-09, operator option A): Alpaca-LISTED
-    # crypto majors route to the PAPER account (fake money, 24/7 — the repaired exit
-    # chain proves itself around the clock); unlisted low-cap alts keep the Coinbase
-    # default BUT the auto-arm readiness probe SKIPS them while this is ON (no
-    # accidental live-Coinbase arm during the paper posture). False => crypto routes
-    # Coinbase live as before.
+    # CRYPTO -> ALPACA PAPER routing. Deliberately default-OFF while the
+    # account-wide risk and close lifecycle are certified only for equities. A
+    # paper flag must never silently broaden the products an enabled runner may
+    # trade.
     chili_momentum_crypto_execution_via_alpaca_paper: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_EXECUTION_VIA_ALPACA_PAPER"),
     )
     # Optional per-venue notional cap (USD) for CHILI-managed Coinbase

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -27,17 +28,22 @@ from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import (
     EXECUTION_FAMILY_COINBASE_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
-    ExecutionFamilyNotImplementedError,
     normalize_execution_family,
-    resolve_live_spot_adapter_factory,
 )
 from ..execution_robustness import merge_repeatable_edge_robustness_into_readiness
 from ..governance import get_kill_switch_status
+from ..venue.account_identity import (
+    NON_ALPACA_ACCOUNT_IDENTITY_KEY,
+    frozen_non_alpaca_account_identity,
+    verify_frozen_non_alpaca_account_identity,
+)
 from .operator_actions import (
     STATE_ARMED_PENDING_RUNNER,
     STATE_DRAFT,
     STATE_LIVE_ARM_PENDING,
     STATE_QUEUED,
+    _alpaca_execution_quarantine_reason,
+    _lock_live_symbol_arm,
 )
 from .db_read_hygiene import detach_loaded_instances, end_read_only_transaction
 from .paper_fsm import (
@@ -78,8 +84,12 @@ from .live_fsm import (
     STATE_QUEUED_LIVE,
     STATE_WATCHING_LIVE,
 )
-from .live_runner import summarize_live_execution
-from .live_runner import summarize_live_execution, tick_live_session, _fmt_base_size
+from .live_runner import (
+    _is_exact_pre_http_alpaca_arm_claim,
+    _retire_confirmed_pre_http_alpaca_claim_before_terminal,
+    summarize_live_execution,
+    tick_live_session,
+)
 from .paper_runner import summarize_paper_execution, tick_paper_session
 from .market_profile import asset_class_for_symbol, market_open_now
 from .risk_evaluator import summarize_risk_from_snapshot
@@ -210,6 +220,173 @@ def _parse_expires(snap: dict[str, Any]) -> Optional[datetime]:
         return None
 
 
+def _frozen_alpaca_account_scope(
+    sess: TradingAutomationSession,
+) -> str | None:
+    if normalize_execution_family(sess.execution_family) not in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        return None
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    scope = str(snap.get("alpaca_account_scope") or "").strip().lower()
+    return scope or None
+
+
+def _frozen_alpaca_account_id(
+    sess: TradingAutomationSession,
+) -> str | None:
+    """Return the non-secret account UUID frozen with this execution generation."""
+    if normalize_execution_family(sess.execution_family) not in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        return None
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    account_id = str(snap.get("alpaca_account_id") or "").strip()
+    return account_id or None
+
+
+def _bind_persisted_alpaca_adapter(
+    sess: TradingAutomationSession,
+    adapter: Any,
+) -> bool:
+    """Bind an adapter instance to the frozen session account before trading I/O."""
+    if normalize_execution_family(sess.execution_family) not in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        return True
+    bind_account = getattr(adapter, "bind_account_id", None)
+    frozen_account_id = _frozen_alpaca_account_id(sess)
+    return bool(
+        callable(bind_account)
+        and frozen_account_id
+        and bind_account(frozen_account_id) is True
+    )
+
+
+def _persisted_alpaca_execution_quarantine_reason(
+    sess: TradingAutomationSession,
+) -> str | None:
+    reason = _alpaca_execution_quarantine_reason(
+        sess.execution_family,
+        sess.symbol,
+    )
+    if reason is not None:
+        return reason
+    if normalize_execution_family(sess.execution_family) in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        if _frozen_alpaca_account_scope(sess) != "alpaca:paper":
+            return "alpaca_account_scope_unfrozen_or_mismatched"
+        # The adapter independently verifies that the active credentials still
+        # resolve to this configured UUID.  This local generation check is also
+        # required before reading/cancelling broker state or terminalizing an old
+        # row: a newly configured account must never inherit cleanup authority over
+        # a session frozen under another (or unknown) account.
+        expected_account_id = str(
+            getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+        ).strip()
+        if not expected_account_id:
+            return "alpaca_expected_account_id_unconfigured"
+        if _frozen_alpaca_account_id(sess) != expected_account_id:
+            return "alpaca_account_generation_mismatch"
+    return None
+
+
+def _quarantine_persisted_alpaca_execution(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    reason: str,
+    context: str,
+) -> None:
+    """Persist a zero-broker-call quarantine for one unsupported stored row."""
+    snap = dict(sess.risk_snapshot_json or {})
+    le = dict(snap.get(KEY_LIVE_EXEC) or {})
+    quarantine = {
+        "reason": str(reason),
+        "context": str(context),
+        "execution_family": normalize_execution_family(sess.execution_family),
+        "symbol": str(sess.symbol or "").strip().upper(),
+    }
+    prior = le.get("alpaca_execution_quarantine")
+    if isinstance(prior, dict) and all(prior.get(k) == v for k, v in quarantine.items()):
+        return
+    quarantine["quarantined_at_utc"] = datetime.utcnow().isoformat()
+    le["alpaca_execution_quarantine"] = quarantine
+    snap[KEY_LIVE_EXEC] = le
+    sess.risk_snapshot_json = snap
+    sess.updated_at = datetime.utcnow()
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    append_trading_automation_event(
+        db,
+        int(sess.id),
+        "alpaca_execution_quarantined",
+        quarantine,
+        correlation_id=sess.correlation_id,
+        source_node_id="momentum_automation_monitor",
+    )
+
+
+def _stale_arm_claim_allows_terminalization(
+    db: Session,
+    sess: TradingAutomationSession,
+) -> bool:
+    """Resolve a pre-HTTP Alpaca arm permit in its frozen paper scope."""
+    if normalize_execution_family(sess.execution_family) not in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        return True
+    if _persisted_alpaca_execution_quarantine_reason(sess) is not None:
+        return False
+    scope = _frozen_alpaca_account_scope(sess)
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    token = str(snap.get("alpaca_symbol_claim_token") or "").strip()
+    from .alpaca_orphan_claims import read_action_claim, resolve_action_claim
+
+    readable, claim = read_action_claim(
+        db,
+        symbol=sess.symbol,
+        account_scope=scope,
+    )
+    if not readable:
+        return False
+    if claim is None or claim.get("phase") == "resolved":
+        return True
+    if (
+        not token
+        or claim.get("claim_token") != token
+        or claim.get("owner_session_id") != int(sess.id)
+        or claim.get("action") != "entry"
+        or claim.get("client_order_id")
+        or claim.get("broker_order_id")
+    ):
+        return False
+    # Re-read the ambient pin immediately before mutating durable claim state.
+    if _persisted_alpaca_execution_quarantine_reason(sess) is not None:
+        return False
+    return bool(resolve_action_claim(
+        db,
+        symbol=sess.symbol,
+        claim_token=token,
+        client_order_id=None,
+        broker_order_id=None,
+        broker_order_status="not_submitted",
+        proven_no_transport=True,
+        metadata={"reason": "stale_live_arm_expired_before_submit"},
+        account_scope=scope,
+    ))
+
+
 def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
     """Mark expired live_arm_pending rows as ``expired``; returns rows updated."""
     if not _tables_present(db):
@@ -233,7 +410,34 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
         .all()
     )
     n = 0
-    for sess in rows:
+    for candidate in rows:
+        # Use the same per-user/symbol transaction fence as confirm_live_arm.
+        # The first read above is only a cheap candidate scan; all claim reads and
+        # terminal mutations happen after this lock and a fresh row lock.
+        if not _lock_live_symbol_arm(
+            db,
+            user_id=int(user_id),
+            symbol=candidate.symbol,
+        ):
+            continue
+        locked_q = db.query(TradingAutomationSession).filter(
+            TradingAutomationSession.id == int(candidate.id),
+            TradingAutomationSession.user_id == int(user_id),
+        )
+        try:
+            locked_q = locked_q.with_for_update()
+        except Exception:
+            pass
+        try:
+            locked_q = locked_q.populate_existing()
+        except Exception:
+            pass
+        sess = locked_q.one_or_none()
+        if sess is None or sess.state != STATE_LIVE_ARM_PENDING:
+            continue
+
+        # Recompute expiry from the locked generation.  A concurrent confirmer
+        # may have replaced or advanced the candidate while we waited.
         snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
         exp = _parse_expires(snap)
         if exp is not None:
@@ -245,6 +449,35 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
             if _created is None or (now - _created).total_seconds() <= _stale_no_expiry_cutoff_s:
                 continue
             _reason = "stale_arm_no_expiry"
+        execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if execution_quarantine is not None:
+            _quarantine_persisted_alpaca_execution(
+                db,
+                sess,
+                reason=execution_quarantine,
+                context="stale_live_arm_expiry",
+            )
+            continue
+        # Claim inspection/resolution is now inside the shared generation fence.
+        if not _stale_arm_claim_allows_terminalization(db, sess):
+            # Missing/mismatched frozen scope, claim identity, or broker-side
+            # evidence keeps the arm non-terminal for explicit reconciliation.
+            continue
+        # A configuration reload may have changed the pin while the durable claim
+        # was being inspected.  Terminalization needs the same current generation.
+        execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if execution_quarantine is not None:
+            _quarantine_persisted_alpaca_execution(
+                db,
+                sess,
+                reason=execution_quarantine,
+                context="stale_live_arm_pre_terminal",
+            )
+            continue
+        # Final CAS under the row lock: never overwrite a generation that was
+        # advanced by confirmation or another expiry worker.
+        if sess.state != STATE_LIVE_ARM_PENDING:
+            continue
         sess.state = STATE_EXPIRED
         sess.ended_at = now
         sess.updated_at = now
@@ -268,8 +501,56 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
     return n
 
 
-def _reaper_broker_confirms_flat(sess: TradingAutomationSession) -> Optional[bool]:
-    """AREA C broker-truth gate — fail-safe flat check across ALL execution families.
+def _reaper_expected_side_long(
+    sess: TradingAutomationSession,
+) -> tuple[bool, str | None]:
+    """Return the frozen direction, or a session/family identity-drift reason."""
+    fam = normalize_execution_family(sess.execution_family)
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    le = snap.get(KEY_LIVE_EXEC) if isinstance(snap, dict) else None
+    le = le if isinstance(le, dict) else {}
+    explicit = le.get("side_long") if "side_long" in le else None
+    if fam == "alpaca_short":
+        if explicit is not None and explicit is not False:
+            return False, "alpaca_short_direction_metadata_mismatch"
+        return False, None
+    if fam == "alpaca_spot":
+        if explicit is False:
+            return True, "alpaca_spot_direction_metadata_mismatch"
+        return True, None
+    return explicit is not False, None
+
+
+def _normalize_reaper_position_quantity(
+    sess: TradingAutomationSession,
+    quantity: Any,
+) -> tuple[Optional[bool], dict[str, Any]]:
+    """Classify signed broker quantity without folding wrong-way exposure to flat."""
+    try:
+        qty = float(quantity)
+    except (TypeError, ValueError):
+        return None, {"reason": "broker_position_invalid"}
+    if not math.isfinite(qty):
+        return None, {"reason": "broker_position_invalid"}
+
+    side_long, metadata_error = _reaper_expected_side_long(sess)
+    detail = {
+        "broker_quantity": qty,
+        "expected_side": "long" if side_long else "short",
+    }
+    if metadata_error is not None:
+        return None, {**detail, "reason": metadata_error}
+    if abs(qty) <= 1e-6:
+        return True, detail
+    if (side_long and qty < 0.0) or (not side_long and qty > 0.0):
+        return None, {**detail, "reason": "broker_position_direction_mismatch"}
+    return False, detail
+
+
+def _reaper_broker_position_truth(
+    sess: TradingAutomationSession,
+) -> tuple[Optional[bool], dict[str, Any]]:
+    """AREA C broker-truth gate plus signed-direction quarantine detail.
 
     Returns:
       * ``True``  — a SUCCESSFUL broker read confirmed this symbol is held at 0 / dust.
@@ -281,6 +562,13 @@ def _reaper_broker_confirms_flat(sess: TradingAutomationSession) -> Optional[boo
     and any adapter exposing get_position_quantity (None=unknown / 0=flat / >0=held);
     robinhood_spot via broker_service.get_open_position_quantity; coinbase_spot via the
     momentum balance/dust check. Unhandled family -> None (fail safe)."""
+    quarantine_reason = _persisted_alpaca_execution_quarantine_reason(sess)
+    if quarantine_reason is not None:
+        return None, {
+            "reason": quarantine_reason,
+            "execution_quarantined": True,
+            "broker_calls": 0,
+        }
     fam = normalize_execution_family(sess.execution_family)
     sym = sess.symbol
     # Coinbase: balance/dust check (the proven momentum reconcile path).
@@ -294,10 +582,13 @@ def _reaper_broker_confirms_flat(sess: TradingAutomationSession) -> Optional[boo
             from ...coinbase_service import get_accounts_raw
 
             if not get_accounts_raw():
-                return None  # disconnected -> unknown
-            return True if _broker_balance_confirms_zero(sym) else False
+                return None, {"reason": "broker_position_unknown"}
+            return (
+                True if _broker_balance_confirms_zero(sym) else False,
+                {"reason": "coinbase_balance_truth"},
+            )
         except Exception:
-            return None
+            return None, {"reason": "broker_position_unknown"}
     # Robinhood spot: open-position quantity (None=unknown / 0=flat / >0=held).
     if fam == EXECUTION_FAMILY_ROBINHOOD_SPOT:
         try:
@@ -305,10 +596,10 @@ def _reaper_broker_confirms_flat(sess: TradingAutomationSession) -> Optional[boo
 
             q = get_open_position_quantity(sym)
         except Exception:
-            return None
+            return None, {"reason": "broker_position_unknown"}
         if q is None:
-            return None
-        return float(q) <= 1e-6
+            return None, {"reason": "broker_position_unknown"}
+        return _normalize_reaper_position_quantity(sess, q)
     # Robinhood agentic MCP (the live rail) + any adapter with get_position_quantity.
     try:
         from ..venue.factory import get_adapter
@@ -317,14 +608,1247 @@ def _reaper_broker_confirms_flat(sess: TradingAutomationSession) -> Optional[boo
     except Exception:
         adapter = None
     if adapter is None or not hasattr(adapter, "get_position_quantity"):
-        return None  # unknown family / no truth read -> fail safe
+        return None, {"reason": "broker_position_unknown"}
+    if not _bind_persisted_alpaca_adapter(sess, adapter):
+        return None, {
+            "reason": "alpaca_adapter_account_generation_bind_failed",
+            "execution_quarantined": True,
+            "broker_calls": 0,
+        }
+    quarantine_reason = _persisted_alpaca_execution_quarantine_reason(sess)
+    if quarantine_reason is not None:
+        return None, {
+            "reason": quarantine_reason,
+            "execution_quarantined": True,
+            "broker_calls": 0,
+        }
     try:
         q = adapter.get_position_quantity(sym)
     except Exception:
-        return None
+        return None, {"reason": "broker_position_unknown"}
     if q is None:
+        return None, {"reason": "broker_position_unknown"}
+    return _normalize_reaper_position_quantity(sess, q)
+
+
+def _reaper_broker_confirms_flat(sess: TradingAutomationSession) -> Optional[bool]:
+    """Compatibility wrapper for callers that need only the tri-state flat gate."""
+    flat, _detail = _reaper_broker_position_truth(sess)
+    return flat
+
+
+def _quarantine_reaper_direction_mismatch(
+    db: Session,
+    sess: TradingAutomationSession,
+    detail: dict[str, Any],
+) -> None:
+    """Persist one visible quarantine instead of hiding wrong-way exposure as flat."""
+    snap = dict(sess.risk_snapshot_json or {})
+    le = dict(snap.get(KEY_LIVE_EXEC) or {})
+    fingerprint = {
+        "reason": detail.get("reason"),
+        "broker_quantity": detail.get("broker_quantity"),
+        "expected_side": detail.get("expected_side"),
+    }
+    prior = le.get("stale_reaper_direction_quarantine")
+    if isinstance(prior, dict) and all(prior.get(k) == v for k, v in fingerprint.items()):
+        return
+    quarantine = {
+        **fingerprint,
+        "quarantined_at_utc": datetime.utcnow().isoformat(),
+    }
+    le["stale_reaper_direction_quarantine"] = quarantine
+    snap[KEY_LIVE_EXEC] = le
+    sess.risk_snapshot_json = snap
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    append_trading_automation_event(
+        db,
+        int(sess.id),
+        "stale_session_reaper_quarantined",
+        quarantine,
+        correlation_id=sess.correlation_id,
+        source_node_id="momentum_automation_monitor",
+    )
+
+
+_NON_ALPACA_TERMINAL_ORDER_STATUSES = frozenset({
+    "filled",
+    "cancelled",
+    "canceled",
+    "rejected",
+    "failed",
+    "expired",
+    "done",
+    "closed",
+})
+
+# A broker submit can be accepted before its order becomes visible to every read
+# surface.  Identity-loss terminalization therefore needs two identical complete
+# broker scans separated by the same conservative late-ack scale used elsewhere;
+# two back-to-back calls never constitute stable absence.
+_NON_ALPACA_IDENTITY_LOSS_VISIBILITY_GRACE_SECONDS = 30.0
+
+
+def _collect_non_alpaca_persisted_order_identities(
+    sess: TradingAutomationSession,
+) -> dict[str, Any]:
+    """Collect every persisted broker/client order identity without guessing."""
+    snapshot = sess.risk_snapshot_json
+    malformed = not isinstance(snapshot, dict)
+    live_exec = snapshot.get(KEY_LIVE_EXEC) if isinstance(snapshot, dict) else None
+    if live_exec is None:
+        live_exec = {}
+    elif not isinstance(live_exec, dict):
+        malformed = True
+        live_exec = {}
+    order_ids: list[str] = []
+    client_order_ids: list[str] = []
+    resolved_order_outcomes: dict[str, str] = {}
+    order_expectations: dict[str, dict[str, Any]] = {}
+    # These records are observations produced by this proof.  They must never
+    # become a new source of broker authority on a later pulse (for example, a
+    # quarantined ``detail.order_id`` must not repair otherwise-lost identity).
+    audit_only_keys = {
+        "non_alpaca_terminalization_quarantine",
+        "non_alpaca_terminalization_proof",
+        "non_alpaca_identity_loss_observation",
+    }
+
+    def _append(target: list[str], raw: Any) -> None:
+        nonlocal malformed
+        if raw is None:
+            return
+        if not isinstance(raw, (str, int)):
+            malformed = True
+            return
+        value = str(raw).strip()
+        if value and value not in target:
+            target.append(value)
+
+    def _walk(value: Any) -> None:
+        nonlocal malformed
+        if isinstance(value, dict):
+            for raw_key, raw_value in value.items():
+                key = str(raw_key or "").strip().lower()
+                if key in audit_only_keys:
+                    continue
+                if key.endswith("orders_resolved"):
+                    if isinstance(raw_value, dict):
+                        for resolved_oid, raw_outcome in raw_value.items():
+                            _append(order_ids, resolved_oid)
+                            oid = str(resolved_oid or "").strip()
+                            outcome = str(raw_outcome or "").strip().lower()
+                            if oid and outcome in {"adopted", "void"}:
+                                prior = resolved_order_outcomes.get(oid)
+                                if prior is not None and prior != outcome:
+                                    malformed = True
+                                resolved_order_outcomes[oid] = outcome
+                            else:
+                                malformed = True
+                    else:
+                        malformed = True
+                if "client_order_ids" in key:
+                    if isinstance(raw_value, (list, tuple, set)):
+                        for item in raw_value:
+                            _append(client_order_ids, item)
+                    elif raw_value not in (None, ""):
+                        malformed = True
+                elif "client_order_id" in key:
+                    _append(client_order_ids, raw_value)
+                elif key == "order_ids" or key.endswith("_order_ids") or key.endswith(
+                    "_order_ids_all"
+                ):
+                    if isinstance(raw_value, (list, tuple, set)):
+                        for item in raw_value:
+                            _append(order_ids, item)
+                    elif raw_value not in (None, ""):
+                        malformed = True
+                elif (
+                    key == "order_id"
+                    or key == "broker_order_id"
+                    or key.endswith("_order_id")
+                    or key.endswith("_broker_order_id")
+                ):
+                    _append(order_ids, raw_value)
+                if isinstance(raw_value, (dict, list, tuple)):
+                    _walk(raw_value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, (dict, list, tuple)):
+                    _walk(item)
+
+    side_long, direction_error = _reaper_expected_side_long(sess)
+
+    def _expect(
+        order_key: str,
+        client_key: str,
+        quantity_key: str,
+        *,
+        intent: str,
+        side: str,
+    ) -> None:
+        oid = str(live_exec.get(order_key) or "").strip()
+        if not oid:
+            return
+        cid = str(live_exec.get(client_key) or "").strip()
+        try:
+            quantity = float(live_exec.get(quantity_key))
+        except (TypeError, ValueError):
+            quantity = math.nan
+        order_expectations[oid] = {
+            "intent": intent,
+            "side": side if direction_error is None else None,
+            "client_order_id": cid or None,
+            "quantity": quantity if math.isfinite(quantity) and quantity > 0.0 else None,
+        }
+
+    _expect(
+        "entry_order_id",
+        "entry_client_order_id",
+        "entry_want_qty",
+        intent="entry",
+        side="buy" if side_long else "sell",
+    )
+    _expect(
+        "exit_order_id",
+        "exit_client_order_id",
+        "pending_exit_quantity",
+        intent="exit",
+        side="sell" if side_long else "buy",
+    )
+
+    _walk(live_exec)
+    return {
+        "order_ids": order_ids,
+        "client_order_ids": client_order_ids,
+        "resolved_order_outcomes": resolved_order_outcomes,
+        "order_expectations": order_expectations,
+        "malformed": malformed,
+        "identity_loss": not order_ids and not client_order_ids,
+    }
+
+
+def _non_alpaca_order_total_quantity(order: Any) -> float | None:
+    """Return one unambiguous positive submitted quantity from broker truth."""
+    raw = getattr(order, "raw", None)
+    if not isinstance(raw, dict):
         return None
-    return float(q) <= 1e-6
+    values: list[float] = []
+
+    def _walk(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip().lower()
+            if key in {"quantity", "qty", "base_size", "order_quantity"}:
+                try:
+                    parsed = float(raw_value)
+                except (TypeError, ValueError):
+                    parsed = math.nan
+                values.append(
+                    parsed
+                    if math.isfinite(parsed) and parsed > 0.0
+                    else math.nan
+                )
+            elif isinstance(raw_value, dict):
+                _walk(raw_value)
+
+    _walk(raw)
+    if not values or any(not math.isfinite(value) for value in values):
+        return None
+    unique: list[float] = []
+    for value in values:
+        if not any(
+            math.isclose(value, prior, rel_tol=1e-9, abs_tol=1e-9)
+            for prior in unique
+        ):
+            unique.append(value)
+    return unique[0] if len(unique) == 1 else None
+
+
+def _exact_non_alpaca_order_authority(
+    order: Any,
+    *,
+    order_expectations: dict[str, dict[str, Any]],
+    required_intent: str | None = None,
+    expected_symbol: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Match broker truth to the exact persisted OID/CID/side/total quantity."""
+    oid = str(getattr(order, "order_id", "") or "").strip()
+    expected = order_expectations.get(oid)
+    observed_cid = str(
+        getattr(order, "client_order_id", "") or ""
+    ).strip()
+    observed_side = str(getattr(order, "side", "") or "").strip().lower()
+    observed_symbol = str(
+        getattr(order, "product_id", "") or ""
+    ).strip().upper()
+    observed_quantity = _non_alpaca_order_total_quantity(order)
+    detail = {
+        "order_id": oid or None,
+        "required_intent": str(required_intent or "").strip().lower() or None,
+        "expected": dict(expected or {}),
+        "observed_client_order_id": observed_cid or None,
+        "observed_side": observed_side or None,
+        "observed_symbol": observed_symbol or None,
+        "observed_quantity": observed_quantity,
+    }
+    if not isinstance(expected, dict):
+        return False, detail
+    expected_cid = str(expected.get("client_order_id") or "").strip()
+    expected_side = str(expected.get("side") or "").strip().lower()
+    expected_intent = str(expected.get("intent") or "").strip().lower()
+    try:
+        expected_quantity = float(expected.get("quantity"))
+    except (TypeError, ValueError):
+        expected_quantity = math.nan
+    normalized_required_intent = str(required_intent or "").strip().lower()
+    normalized_expected_symbol = str(expected_symbol or "").strip().upper()
+    exact = bool(
+        oid
+        and expected_intent in {"entry", "exit"}
+        and (
+            not normalized_required_intent
+            or expected_intent == normalized_required_intent
+        )
+        and expected_cid
+        and observed_cid == expected_cid
+        and expected_side in {"buy", "sell"}
+        and observed_side == expected_side
+        and (
+            not normalized_expected_symbol
+            or observed_symbol == normalized_expected_symbol
+        )
+        and math.isfinite(expected_quantity)
+        and expected_quantity > 0.0
+        and observed_quantity is not None
+        and math.isclose(
+            observed_quantity,
+            expected_quantity,
+            rel_tol=1e-6,
+            abs_tol=1e-8,
+        )
+    )
+    return exact, detail
+
+
+def _canonical_non_alpaca_order_generation(
+    identities: dict[str, Any],
+) -> dict[str, Any]:
+    """Canonicalize every persisted order authority field for proof CAS/fingerprints."""
+    expectations = identities.get("order_expectations")
+    expectations = expectations if isinstance(expectations, dict) else {}
+    expectation_rows: list[tuple[Any, ...]] = []
+    for raw_oid, raw_expected in expectations.items():
+        expected = raw_expected if isinstance(raw_expected, dict) else {}
+        quantity = expected.get("quantity")
+        try:
+            quantity = float(quantity) if quantity is not None else None
+        except (TypeError, ValueError):
+            quantity = None
+        expectation_rows.append(
+            (
+                str(raw_oid or "").strip(),
+                str(expected.get("intent") or "").strip().lower() or None,
+                str(expected.get("client_order_id") or "").strip() or None,
+                str(expected.get("side") or "").strip().lower() or None,
+                quantity,
+            )
+        )
+    resolved = identities.get("resolved_order_outcomes")
+    resolved = resolved if isinstance(resolved, dict) else {}
+    return {
+        "order_ids": tuple(str(value) for value in identities.get("order_ids") or []),
+        "client_order_ids": tuple(
+            str(value) for value in identities.get("client_order_ids") or []
+        ),
+        "order_expectations": tuple(sorted(expectation_rows)),
+        "resolved_order_outcomes": tuple(
+            sorted(
+                (str(oid or "").strip(), str(outcome or "").strip().lower())
+                for oid, outcome in resolved.items()
+            )
+        ),
+        "malformed": bool(identities.get("malformed")),
+        "identity_loss": bool(identities.get("identity_loss")),
+    }
+
+
+def _json_non_alpaca_order_generation(generation: dict[str, Any]) -> dict[str, Any]:
+    """Make the canonical local generation explicit and JSON-safe."""
+    return {
+        "persisted_order_ids": list(generation.get("order_ids") or ()),
+        "persisted_client_order_ids": list(
+            generation.get("client_order_ids") or ()
+        ),
+        "persisted_order_expectations": [
+            list(row) for row in generation.get("order_expectations") or ()
+        ],
+        "persisted_resolved_order_outcomes": [
+            list(row) for row in generation.get("resolved_order_outcomes") or ()
+        ],
+        "malformed_identity_json": bool(generation.get("malformed")),
+        "identity_loss": bool(generation.get("identity_loss")),
+    }
+
+
+def _non_alpaca_terminal_generation(
+    sess: TradingAutomationSession,
+) -> dict[str, Any]:
+    """Immutable local authority compared before and after broker I/O."""
+    identities = _collect_non_alpaca_persisted_order_identities(sess)
+    order_generation = _canonical_non_alpaca_order_generation(identities)
+    return {
+        "session_id": int(sess.id),
+        "mode": str(sess.mode or ""),
+        "state": str(sess.state or ""),
+        "execution_family": normalize_execution_family(sess.execution_family),
+        "symbol": str(sess.symbol or "").strip().upper(),
+        "account_identity": frozen_non_alpaca_account_identity(sess),
+        **order_generation,
+    }
+
+
+def _non_alpaca_terminal_generation_matches(
+    sess: TradingAutomationSession,
+    expected: dict[str, Any] | None,
+) -> bool:
+    return bool(
+        isinstance(expected, dict)
+        and _non_alpaca_terminal_generation(sess) == expected
+    )
+
+
+def _non_alpaca_terminal_proof_matches_session(
+    sess: TradingAutomationSession,
+    proof: Any,
+) -> bool:
+    if not isinstance(proof, dict):
+        return False
+    current = _non_alpaca_terminal_generation(sess)
+    current_order_generation = _json_non_alpaca_order_generation(current)
+    return bool(
+        proof.get("execution_family") == current["execution_family"]
+        and proof.get("symbol") == current["symbol"]
+        and proof.get("account_identity") == current["account_identity"]
+        and proof.get("session_state") == current["state"]
+        and all(
+            proof.get(key) == value
+            for key, value in current_order_generation.items()
+        )
+    )
+
+
+def _persist_non_alpaca_terminalization_quarantine(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    reason: str,
+    context: str,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a visible pause/reconcile fence for uncertain terminal truth."""
+    snapshot = (
+        dict(sess.risk_snapshot_json)
+        if isinstance(sess.risk_snapshot_json, dict)
+        else {}
+    )
+    live_exec = snapshot.get(KEY_LIVE_EXEC)
+    live_exec = dict(live_exec) if isinstance(live_exec, dict) else {}
+    if str(reason) != "terminalization_identity_loss_stability_pending":
+        # Any unreadable/changed broker scan invalidates a prior absence timer.
+        # Only another complete, identical identity-loss scan may preserve it.
+        live_exec.pop("non_alpaca_identity_loss_observation", None)
+    fingerprint = {
+        "reason": str(reason),
+        "context": str(context),
+        "execution_family": normalize_execution_family(sess.execution_family),
+        "symbol": str(sess.symbol or "").strip().upper(),
+    }
+    prior = live_exec.get("non_alpaca_terminalization_quarantine")
+    changed = not (
+        isinstance(prior, dict)
+        and all(prior.get(key) == value for key, value in fingerprint.items())
+    )
+    quarantine = {
+        **fingerprint,
+        "detail": dict(detail or {}),
+        "quarantined_at_utc": (
+            datetime.utcnow().isoformat()
+            if changed
+            else prior.get("quarantined_at_utc")
+        ),
+    }
+    live_exec["non_alpaca_terminalization_quarantine"] = quarantine
+    snapshot[KEY_LIVE_EXEC] = live_exec
+    sess.risk_snapshot_json = apply_operator_pause(snapshot, state=sess.state)
+    sess.updated_at = datetime.utcnow()
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    if changed:
+        append_trading_automation_event(
+            db,
+            int(sess.id),
+            "live_terminalization_quarantined",
+            quarantine,
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_automation_monitor",
+        )
+    return {
+        "ok": True,
+        "pending": "broker_terminal_truth_reconcile",
+        "terminalization_deferred": True,
+        "session_id": int(sess.id),
+        "state": sess.state,
+        "quarantine_reason": str(reason),
+        "terminalization_truth": quarantine,
+    }
+
+
+def _final_non_alpaca_terminal_account_quarantine(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    context: str,
+) -> dict[str, Any] | None:
+    """Fresh account check immediately before a non-Alpaca terminal mutation."""
+    family = normalize_execution_family(sess.execution_family)
+    if sess.mode != "live" or family in {"alpaca_spot", "alpaca_short"}:
+        return None
+    account_truth = verify_frozen_non_alpaca_account_identity(sess)
+    if account_truth.get("ok") is True:
+        return None
+    return _persist_non_alpaca_terminalization_quarantine(
+        db,
+        sess,
+        reason=str(
+            account_truth.get("reason")
+            or "non_alpaca_account_identity_unknown"
+        ),
+        context=context,
+        detail={
+            "phase": "immediately_before_terminal_state_mutation",
+            "frozen_identity": account_truth.get("frozen_identity"),
+            "current_identity": account_truth.get("current_identity"),
+        },
+    )
+
+
+def _strict_non_alpaca_order_truth(adapter: Any, order_id: str) -> dict[str, Any]:
+    getter = getattr(adapter, "get_order_truth", None)
+    if not callable(getter):
+        return {"readable": False, "found": False, "order": None}
+    try:
+        truth = getter(str(order_id))
+    except Exception:
+        return {"readable": False, "found": False, "order": None}
+    if not isinstance(truth, dict) or truth.get("readable") is not True:
+        return {"readable": False, "found": False, "order": None}
+    found = truth.get("found") is True
+    order = truth.get("order") if found else None
+    if found and order is None:
+        return {"readable": False, "found": False, "order": None}
+    return {"readable": True, "found": found, "order": order}
+
+
+def _strict_non_alpaca_open_orders_truth(
+    adapter: Any,
+    *,
+    symbol: str,
+) -> dict[str, Any]:
+    getter = getattr(adapter, "list_open_orders_truth", None)
+    if not callable(getter):
+        return {"readable": False, "orders": None}
+    try:
+        truth = getter(product_id=symbol, limit=250)
+    except Exception:
+        return {"readable": False, "orders": None}
+    if not isinstance(truth, dict) or truth.get("readable") is not True:
+        return {"readable": False, "orders": None}
+    orders = truth.get("orders")
+    if not isinstance(orders, list):
+        return {"readable": False, "orders": None}
+    return {"readable": True, "orders": orders}
+
+
+def _strict_non_alpaca_position_truth(
+    adapter: Any,
+    sess: TradingAutomationSession,
+) -> tuple[Optional[bool], dict[str, Any]]:
+    getter = getattr(adapter, "get_position_quantity_truth", None)
+    if not callable(getter):
+        return None, {"reason": "broker_position_truth_adapter_missing"}
+    try:
+        truth = getter(str(sess.symbol or ""))
+    except Exception:
+        return None, {"reason": "broker_position_unknown"}
+    if not isinstance(truth, dict) or truth.get("readable") is not True:
+        return None, {"reason": "broker_position_unknown"}
+    if truth.get("quantity") is None:
+        return None, {"reason": "broker_position_unknown"}
+    return _normalize_reaper_position_quantity(sess, truth.get("quantity"))
+
+
+def _non_alpaca_live_terminalization_proof(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    context: str,
+    cancelled_by: str | None = None,
+) -> dict[str, Any]:
+    """Prove flat + terminal identities + symbol-order absence before death.
+
+    Reads are deliberately tri-state and strict.  Adapter methods that swallow a
+    transport failure into ``None``/``[]`` do not qualify; only the explicit
+    ``*_truth`` surfaces can certify absence.
+    """
+    family = normalize_execution_family(sess.execution_family)
+    if sess.mode != "live" or family in {"alpaca_spot", "alpaca_short"}:
+        return {"state": "not_applicable", "ok": True}
+    try:
+        from ..venue.factory import get_adapter
+
+        adapter = get_adapter(sess.execution_family)
+    except Exception:
+        adapter = None
+    if adapter is None:
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason="terminalization_adapter_missing",
+            context=context,
+        )
+
+    def _account_identity_fence(phase: str) -> dict[str, Any] | None:
+        account_truth = verify_frozen_non_alpaca_account_identity(
+            sess,
+            adapter=adapter,
+        )
+        if account_truth.get("ok") is True:
+            return None
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason=str(
+                account_truth.get("reason")
+                or "non_alpaca_account_identity_unknown"
+            ),
+            context=context,
+            detail={
+                "phase": str(phase),
+                "frozen_identity": account_truth.get("frozen_identity"),
+                "current_identity": account_truth.get("current_identity"),
+            },
+        )
+
+    account_quarantine = _account_identity_fence("before_terminal_proof")
+    if account_quarantine is not None:
+        return account_quarantine
+    initial_generation = _non_alpaca_terminal_generation(sess)
+    identities = _collect_non_alpaca_persisted_order_identities(sess)
+    symbol = str(sess.symbol or "").strip().upper()
+    flat_before, flat_before_detail = _strict_non_alpaca_position_truth(
+        adapter,
+        sess,
+    )
+    account_quarantine = _account_identity_fence("after_initial_position_read")
+    if account_quarantine is not None:
+        return account_quarantine
+    if flat_before is not True:
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason=(
+                "terminalization_position_held"
+                if flat_before is False
+                else "terminalization_position_unknown"
+            ),
+            context=context,
+            detail=dict(flat_before_detail or {}),
+        )
+    account_quarantine = _account_identity_fence("before_initial_open_order_read")
+    if account_quarantine is not None:
+        return account_quarantine
+    open_before = _strict_non_alpaca_open_orders_truth(adapter, symbol=symbol)
+    account_quarantine = _account_identity_fence("after_initial_open_order_read")
+    if account_quarantine is not None:
+        return account_quarantine
+    if open_before.get("readable") is not True:
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason="terminalization_symbol_orders_unknown",
+            context=context,
+            detail={"phase": "before_identity_reads"},
+        )
+
+    persisted_oids = list(identities["order_ids"])
+    persisted_cids = list(identities["client_order_ids"])
+    resolved_order_outcomes = dict(identities["resolved_order_outcomes"])
+    order_expectations = dict(identities["order_expectations"])
+    terminal_orders: dict[str, Any] = {}
+    cid_to_oid: dict[str, str] = {}
+    cancel_reread_orders: dict[str, Any] = {}
+
+    def _validate_order(order: Any, *, expected_oid: str | None = None) -> dict[str, Any]:
+        oid = str(getattr(order, "order_id", "") or "").strip()
+        cid = str(getattr(order, "client_order_id", "") or "").strip()
+        product = str(getattr(order, "product_id", "") or "").strip().upper()
+        status = str(getattr(order, "status", "") or "").strip().lower()
+        try:
+            filled = float(getattr(order, "filled_size", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            filled = math.nan
+        if not (
+            oid
+            and (expected_oid is None or oid == expected_oid)
+            and product == symbol
+            and status
+            and math.isfinite(filled)
+            and filled >= 0.0
+        ):
+            return {"state": "invalid", "order_id": oid}
+        if cid:
+            prior_oid = cid_to_oid.get(cid)
+            if prior_oid is not None and prior_oid != oid:
+                return {"state": "inconsistent", "order_id": oid, "client_order_id": cid}
+            cid_to_oid[cid] = oid
+        if status == "filled" or filled > 1e-12:
+            return {
+                "state": "filled",
+                "order_id": oid,
+                "client_order_id": cid or None,
+                "filled_size": filled,
+                "status": status,
+            }
+        if status in _NON_ALPACA_TERMINAL_ORDER_STATUSES:
+            terminal_orders[oid] = order
+            return {
+                "state": "terminal",
+                "order_id": oid,
+                "client_order_id": cid or None,
+            }
+        return {"state": "active", "order_id": oid, "client_order_id": cid or None}
+
+    def _cancel_authority(order: Any) -> tuple[bool, dict[str, Any]]:
+        return _exact_non_alpaca_order_authority(
+            order,
+            order_expectations=order_expectations,
+            expected_symbol=symbol,
+        )
+
+    def _cancel_then_require_terminal(order: Any) -> dict[str, Any]:
+        oid = str(getattr(order, "order_id", "") or "").strip()
+        authorized, authority_detail = _cancel_authority(order)
+        if not authorized:
+            return {
+                "state": "cancel_authority_unproven",
+                **authority_detail,
+            }
+        cancel = getattr(adapter, "cancel_order", None)
+        if not oid or not callable(cancel):
+            return {"state": "cancel_failed", "order_id": oid}
+        account_truth = verify_frozen_non_alpaca_account_identity(
+            sess,
+            adapter=adapter,
+        )
+        if account_truth.get("ok") is not True:
+            return {
+                "state": "account_identity_unproven",
+                "order_id": oid,
+                "phase": "immediately_before_cancel",
+                "account_identity_reason": account_truth.get("reason"),
+            }
+        try:
+            result = cancel(oid)
+        except Exception:
+            return {"state": "cancel_failed", "order_id": oid}
+        cancel_ok = bool(
+            result is True
+            or (isinstance(result, dict) and result.get("ok") is True)
+        )
+        if not cancel_ok:
+            return {"state": "cancel_failed", "order_id": oid}
+        account_truth = verify_frozen_non_alpaca_account_identity(
+            sess,
+            adapter=adapter,
+        )
+        if account_truth.get("ok") is not True:
+            return {
+                "state": "account_identity_unproven",
+                "order_id": oid,
+                "phase": "after_cancel_before_reread",
+                "account_identity_reason": account_truth.get("reason"),
+            }
+        reread = _strict_non_alpaca_order_truth(adapter, oid)
+        account_truth = verify_frozen_non_alpaca_account_identity(
+            sess,
+            adapter=adapter,
+        )
+        if account_truth.get("ok") is not True:
+            return {
+                "state": "account_identity_unproven",
+                "order_id": oid,
+                "phase": "after_cancel_reread",
+                "account_identity_reason": account_truth.get("reason"),
+            }
+        if reread.get("readable") is not True or reread.get("found") is not True:
+            return {"state": "cancel_terminal_unknown", "order_id": oid}
+        cancel_reread_orders[oid] = reread["order"]
+        return _validate_order(reread["order"], expected_oid=oid)
+
+    def _settle_previously_adopted_fill(
+        order: Any,
+        classified: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Require the remainder of a durably adopted entry to be terminal.
+
+        ``entry_orders_resolved[oid] == 'adopted'`` proves the fill was handed to
+        the management lifecycle.  It does not prove that an unfilled remainder
+        stopped resting, so an active remainder is cancelled and strictly reread.
+        """
+        oid = str(classified.get("order_id") or "").strip()
+        if resolved_order_outcomes.get(oid) != "adopted":
+            return classified
+        settled = classified
+        if str(classified.get("status") or "").strip().lower() not in (
+            _NON_ALPACA_TERMINAL_ORDER_STATUSES
+        ):
+            settled = _cancel_then_require_terminal(order)
+        if (
+            settled.get("state") == "filled"
+            and float(settled.get("filled_size") or 0.0) > 1e-12
+            and str(settled.get("status") or "").strip().lower()
+            in _NON_ALPACA_TERMINAL_ORDER_STATUSES
+        ):
+            terminal_orders[oid] = cancel_reread_orders.get(oid, order)
+            return {
+                "state": "terminal",
+                "order_id": oid,
+                "client_order_id": settled.get("client_order_id"),
+                "managed_fill": True,
+            }
+        return settled
+
+    def _manage_filled_order_or_quarantine(
+        order: Any,
+        classified: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adopt a positive entry fill; every other fill remains non-terminal."""
+        oid = str(classified.get("order_id") or "").strip()
+        try:
+            filled = float(classified.get("filled_size"))
+        except (TypeError, ValueError):
+            filled = math.nan
+        adopted = None
+        if (
+            math.isfinite(filled)
+            and filled > 1e-12
+            and sess.state in LIVE_CANCELLABLE_STATES
+            and bool(
+                getattr(
+                    settings,
+                    "chili_momentum_adopt_on_cancel_fill_enabled",
+                    True,
+                )
+            )
+        ):
+            adoption_authorized, adoption_detail = (
+                _exact_non_alpaca_order_authority(
+                    order,
+                    order_expectations=order_expectations,
+                    required_intent="entry",
+                    expected_symbol=symbol,
+                )
+            )
+            if not adoption_authorized:
+                return _persist_non_alpaca_terminalization_quarantine(
+                    db,
+                    sess,
+                    reason=(
+                        "terminalization_filled_entry_adoption_authority_unproven"
+                    ),
+                    context=context,
+                    detail={**classified, **adoption_detail},
+                )
+            account_truth = verify_frozen_non_alpaca_account_identity(
+                sess,
+                adapter=adapter,
+            )
+            if account_truth.get("ok") is not True:
+                return _persist_non_alpaca_terminalization_quarantine(
+                    db,
+                    sess,
+                    reason=str(
+                        account_truth.get("reason")
+                        or "non_alpaca_account_identity_unknown"
+                    ),
+                    context=context,
+                    detail={"phase": "before_filled_entry_adoption", **classified},
+                )
+            adopted = _try_adopt_filled_entry_on_cancel(
+                db,
+                sess,
+                cancelled_by=str(cancelled_by or context),
+                adapter_override=adapter,
+                strict_filled_order=order,
+            )
+        if isinstance(adopted, dict) and adopted.get("adopted") is True:
+            return {"state": "managed", "ok": True, "result": adopted}
+        if isinstance(adopted, dict) and adopted.get("terminalization_deferred"):
+            return adopted
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason="terminalization_filled_order_requires_management",
+            context=context,
+            detail={**classified, "order_id": oid or None},
+        )
+
+    for oid in persisted_oids:
+        account_quarantine = _account_identity_fence(
+            "before_persisted_order_read"
+        )
+        if account_quarantine is not None:
+            return account_quarantine
+        truth = _strict_non_alpaca_order_truth(adapter, oid)
+        account_quarantine = _account_identity_fence(
+            "after_persisted_order_read"
+        )
+        if account_quarantine is not None:
+            return account_quarantine
+        if truth.get("readable") is not True or truth.get("found") is not True:
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason="terminalization_persisted_order_unknown",
+                context=context,
+                detail={"order_id": oid},
+            )
+        classified = _validate_order(truth["order"], expected_oid=oid)
+        if classified["state"] == "filled":
+            classified = _settle_previously_adopted_fill(
+                truth["order"],
+                classified,
+            )
+        if classified["state"] == "filled":
+            return _manage_filled_order_or_quarantine(
+                truth["order"],
+                classified,
+            )
+        if classified["state"] == "active":
+            classified = _cancel_then_require_terminal(truth["order"])
+        if classified["state"] == "filled":
+            return _manage_filled_order_or_quarantine(
+                cancel_reread_orders.get(oid, truth["order"]),
+                classified,
+            )
+        if classified["state"] != "terminal":
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason=f"terminalization_order_{classified['state']}",
+                context=context,
+                detail=classified,
+            )
+
+    open_orders = list(open_before.get("orders") or [])
+    for order in open_orders:
+        classified = _validate_order(order)
+        oid = str(classified.get("order_id") or "").strip()
+        cid = str(classified.get("client_order_id") or "").strip()
+        if oid in terminal_orders:
+            # The initial OPEN snapshot can predate the successful cancel+reread
+            # above.  The final strict OPEN snapshot below is the absence proof.
+            continue
+        owned = bool(oid in persisted_oids or (cid and cid in persisted_cids))
+        if classified["state"] == "filled":
+            if owned:
+                classified = _settle_previously_adopted_fill(order, classified)
+            if classified["state"] == "filled":
+                if owned:
+                    return _manage_filled_order_or_quarantine(
+                        cancel_reread_orders.get(oid, order),
+                        classified,
+                    )
+                return _persist_non_alpaca_terminalization_quarantine(
+                    db,
+                    sess,
+                    reason="terminalization_open_order_fill_inconsistent",
+                    context=context,
+                    detail=classified,
+                )
+        if classified["state"] == "active" and owned:
+            classified = _cancel_then_require_terminal(order)
+        if classified["state"] == "filled" and owned:
+            return _manage_filled_order_or_quarantine(
+                cancel_reread_orders.get(oid, order),
+                classified,
+            )
+        if classified["state"] == "terminal":
+            continue
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason=(
+                f"terminalization_order_{classified['state']}"
+                if owned
+                else "terminalization_unowned_symbol_order_working"
+            ),
+            context=context,
+            detail=classified,
+        )
+
+    for cid in persisted_cids:
+        if cid in cid_to_oid:
+            continue
+        # The process-global idempotency cache is deliberately not authority: it
+        # is unscoped by venue/account generation.  A CID-only session can proceed
+        # only through an adapter's exact broker CID lookup.
+        getter = getattr(adapter, "get_order_by_client_order_id_truth", None)
+        account_quarantine = _account_identity_fence("before_client_order_read")
+        if account_quarantine is not None:
+            return account_quarantine
+        try:
+            cid_truth = getter(cid) if callable(getter) else None
+        except Exception:
+            cid_truth = None
+        account_quarantine = _account_identity_fence("after_client_order_read")
+        if account_quarantine is not None:
+            return account_quarantine
+        if not isinstance(cid_truth, dict) or cid_truth.get("readable") is not True:
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason="terminalization_client_order_unknown",
+                context=context,
+                detail={"client_order_id": cid},
+            )
+        if cid_truth.get("found") is not True or cid_truth.get("order") is None:
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason="terminalization_client_order_absence_unproven",
+                context=context,
+                detail={"client_order_id": cid},
+            )
+        cid_order = cid_truth["order"]
+        observed_cid = str(getattr(cid_order, "client_order_id", "") or "").strip()
+        if observed_cid != cid:
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason="terminalization_client_order_generation_mismatch",
+                context=context,
+                detail={
+                    "client_order_id": cid,
+                    "observed_client_order_id": observed_cid,
+                },
+            )
+        classified = _validate_order(cid_order)
+        oid = str(classified.get("order_id") or "").strip()
+        if classified["state"] == "filled":
+            classified = _settle_previously_adopted_fill(cid_order, classified)
+        if classified["state"] == "filled":
+            return _manage_filled_order_or_quarantine(
+                cancel_reread_orders.get(oid, cid_order),
+                classified,
+            )
+        if classified["state"] == "active":
+            classified = _cancel_then_require_terminal(cid_order)
+        if classified["state"] == "filled":
+            return _manage_filled_order_or_quarantine(
+                cancel_reread_orders.get(oid, cid_order),
+                classified,
+            )
+        if classified["state"] != "terminal":
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason=f"terminalization_client_order_{classified['state']}",
+                context=context,
+                detail={**classified, "client_order_id": cid},
+            )
+        cid_to_oid[cid] = oid
+
+    account_quarantine = _account_identity_fence("before_final_open_order_read")
+    if account_quarantine is not None:
+        return account_quarantine
+    open_after = _strict_non_alpaca_open_orders_truth(adapter, symbol=symbol)
+    account_quarantine = _account_identity_fence("after_final_open_order_read")
+    if account_quarantine is not None:
+        return account_quarantine
+    if open_after.get("readable") is not True:
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason="terminalization_symbol_orders_unknown",
+            context=context,
+            detail={"phase": "after_identity_reads"},
+        )
+    if open_after.get("orders"):
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason="terminalization_symbol_order_still_working",
+            context=context,
+            detail={"working_order_count": len(open_after["orders"])},
+        )
+    account_quarantine = _account_identity_fence("before_final_position_read")
+    if account_quarantine is not None:
+        return account_quarantine
+    flat_after, flat_after_detail = _strict_non_alpaca_position_truth(
+        adapter,
+        sess,
+    )
+    account_quarantine = _account_identity_fence("after_final_position_read")
+    if account_quarantine is not None:
+        return account_quarantine
+    if flat_after is not True:
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason=(
+                "terminalization_position_changed"
+                if flat_after is False
+                else "terminalization_position_recheck_unknown"
+            ),
+            context=context,
+            detail=dict(flat_after_detail or {}),
+        )
+    if not _non_alpaca_terminal_generation_matches(sess, initial_generation):
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason="terminalization_session_generation_changed",
+            context=context,
+            detail={"phase": "before_terminal_proof_persist"},
+        )
+    snapshot = (
+        dict(sess.risk_snapshot_json)
+        if isinstance(sess.risk_snapshot_json, dict)
+        else {}
+    )
+    live_exec = snapshot.get(KEY_LIVE_EXEC)
+    live_exec = dict(live_exec) if isinstance(live_exec, dict) else {}
+    json_order_generation = _json_non_alpaca_order_generation(initial_generation)
+    if identities["identity_loss"] or identities["malformed"]:
+        observed_at = datetime.utcnow()
+        grace_seconds = max(
+            1.0,
+            float(_NON_ALPACA_IDENTITY_LOSS_VISIBILITY_GRACE_SECONDS),
+        )
+        observation = {
+            "identity_contract": "non_alpaca_identity_loss_observation_v2",
+            "session_id": initial_generation["session_id"],
+            "mode": initial_generation["mode"],
+            "session_state": initial_generation["state"],
+            "execution_family": family,
+            "symbol": symbol,
+            "account_identity": initial_generation["account_identity"],
+            **json_order_generation,
+            "broker_flat_confirmed": True,
+            "working_symbol_orders_absent": True,
+        }
+        prior_observation = live_exec.get(
+            "non_alpaca_identity_loss_observation"
+        )
+        prior_exact = bool(
+            isinstance(prior_observation, dict)
+            and all(
+                prior_observation.get(key) == value
+                for key, value in observation.items()
+            )
+        )
+        first_observed_at: datetime | None = None
+        if prior_exact:
+            raw_first_observed_at = prior_observation.get(
+                "first_observed_at_utc"
+            )
+            if isinstance(raw_first_observed_at, str):
+                try:
+                    first_observed_at = datetime.fromisoformat(
+                        raw_first_observed_at.replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                except Exception:
+                    first_observed_at = None
+            if (
+                first_observed_at is not None
+                and first_observed_at > observed_at
+            ):
+                first_observed_at = None
+        elapsed_seconds = (
+            max(0.0, (observed_at - first_observed_at).total_seconds())
+            if first_observed_at is not None
+            else 0.0
+        )
+        visibility_stable = bool(
+            prior_exact
+            and first_observed_at is not None
+            and elapsed_seconds >= grace_seconds
+        )
+        if not visibility_stable:
+            if not prior_exact or first_observed_at is None:
+                first_observed_at = observed_at
+                elapsed_seconds = 0.0
+            live_exec["non_alpaca_identity_loss_observation"] = {
+                **observation,
+                "first_observed_at_utc": first_observed_at.isoformat(),
+                "visibility_grace_seconds": grace_seconds,
+            }
+            snapshot[KEY_LIVE_EXEC] = live_exec
+            sess.risk_snapshot_json = snapshot
+            try:
+                from sqlalchemy.orm.attributes import flag_modified
+
+                flag_modified(sess, "risk_snapshot_json")
+            except Exception:
+                pass
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason="terminalization_identity_loss_stability_pending",
+                context=context,
+                detail={
+                    "identity_loss": bool(identities["identity_loss"]),
+                    "malformed_identity_json": bool(identities["malformed"]),
+                    "elapsed_seconds": elapsed_seconds,
+                    "visibility_grace_seconds": grace_seconds,
+                },
+            )
+    proof = {
+        "identity_contract": "non_alpaca_live_terminalization_v2",
+        "context": str(context),
+        "execution_family": family,
+        "symbol": symbol,
+        "account_identity": initial_generation["account_identity"],
+        "session_state": initial_generation["state"],
+        **json_order_generation,
+        "broker_flat_confirmed": True,
+        "working_symbol_orders_absent": True,
+        "proven_at_utc": datetime.utcnow().isoformat(),
+    }
+    live_exec["non_alpaca_terminalization_proof"] = proof
+    live_exec.pop("non_alpaca_terminalization_quarantine", None)
+    live_exec.pop("non_alpaca_identity_loss_observation", None)
+    snapshot[KEY_LIVE_EXEC] = live_exec
+    sess.risk_snapshot_json = snapshot
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    return {"state": "safe", "ok": True, "proof": proof}
 
 
 def _reaper_has_working_entry_order(sess: TradingAutomationSession) -> Optional[bool]:
@@ -332,6 +1856,8 @@ def _reaper_has_working_entry_order(sess: TradingAutomationSession) -> Optional[
     working at the broker (must NOT reap), False if all are terminal / none exist, or
     None if the broker read is UNKNOWN (fail safe -> caller skips). Mirrors the order
     sweep in cancel_automation_session (same _oids extraction + adapter.get_order)."""
+    if _persisted_alpaca_execution_quarantine_reason(sess) is not None:
+        return None
     snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
     le = snap.get(KEY_LIVE_EXEC) if isinstance(snap, dict) else None
     le = le if isinstance(le, dict) else {}
@@ -350,7 +1876,11 @@ def _reaper_has_working_entry_order(sess: TradingAutomationSession) -> Optional[
         adapter = None
     if adapter is None:
         return None  # unknown -> fail safe
+    if not _bind_persisted_alpaca_adapter(sess, adapter):
+        return None
     for oid in oids:
+        if _persisted_alpaca_execution_quarantine_reason(sess) is not None:
+            return None
         try:
             no, _ = adapter.get_order(oid)
         except Exception:
@@ -376,7 +1906,15 @@ def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
     concurrent live_runner tick. live_arm_pending is handled separately by
     expire_stale_live_arm_sessions. Bounded: only CONFIRMED-stale (>TTL) rows, capped
     batch. Kill-switch chili_momentum_stale_session_reaper_enabled=False -> no-op."""
-    out: dict[str, Any] = {"reaped": 0, "skipped_unknown": 0, "skipped_held": 0, "skipped_in_flight": 0, "candidates": 0}
+    out: dict[str, Any] = {
+        "reaped": 0,
+        "skipped_unknown": 0,
+        "skipped_held": 0,
+        "skipped_in_flight": 0,
+        "skipped_direction_mismatch": 0,
+        "skipped_execution_quarantine": 0,
+        "candidates": 0,
+    }
     if not bool(getattr(settings, "chili_momentum_stale_session_reaper_enabled", True)):
         return out
     if not _tables_present(db):
@@ -412,6 +1950,10 @@ def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
             q = q.with_for_update()
         except Exception:
             pass
+        try:
+            q = q.populate_existing()
+        except Exception:
+            pass
         sess = q.one_or_none()
         if sess is None:
             continue
@@ -421,29 +1963,117 @@ def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
         _upd = sess.updated_at or sess.started_at or now
         if _upd >= cutoff:
             continue
-        # GATE 1 — no working entry order (fail safe on unknown).
-        in_flight = _reaper_has_working_entry_order(sess)
-        if in_flight is None:
-            out["skipped_unknown"] += 1
+        locked_generation_state = sess.state
+        execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if execution_quarantine is not None:
+            out["skipped_execution_quarantine"] += 1
+            _quarantine_persisted_alpaca_execution(
+                db,
+                sess,
+                reason=execution_quarantine,
+                context="stale_live_session_reaper",
+            )
             continue
-        if in_flight is True:
-            out["skipped_in_flight"] += 1
+        non_alpaca_live = normalize_execution_family(sess.execution_family) not in {
+            "alpaca_spot",
+            "alpaca_short",
+        }
+        if non_alpaca_live:
+            terminal_truth = _non_alpaca_live_terminalization_proof(
+                db,
+                sess,
+                context="stale_live_session_reaper_pre_terminal",
+                cancelled_by="automation_monitor",
+            )
+            if terminal_truth.get("state") != "safe":
+                reason = str(terminal_truth.get("quarantine_reason") or "")
+                if "position_held" in reason:
+                    out["skipped_held"] += 1
+                elif "working" in reason or "active" in reason or "filled" in reason:
+                    out["skipped_in_flight"] += 1
+                else:
+                    out["skipped_unknown"] += 1
+                continue
+            flat = True
+            flat_detail = {"broker_quantity": 0.0, "strict_terminal_proof": True}
+        else:
+            # GATE 1 — no working entry order (fail safe on unknown).
+            in_flight = _reaper_has_working_entry_order(sess)
+            if in_flight is None:
+                out["skipped_unknown"] += 1
+                continue
+            if in_flight is True:
+                out["skipped_in_flight"] += 1
+                continue
+            # GATE 2 — broker CONFIRMS flat (fail safe on unknown / real holding).
+            flat, flat_detail = _reaper_broker_position_truth(sess)
+            if flat is None:
+                flat_reason = str(flat_detail.get("reason") or "")
+                if "direction" in flat_reason and "mismatch" in flat_reason:
+                    out["skipped_direction_mismatch"] += 1
+                    _quarantine_reaper_direction_mismatch(db, sess, flat_detail)
+                else:
+                    out["skipped_unknown"] += 1
+                continue
+            if flat is False:
+                out["skipped_held"] += 1
+                continue
+        # Broker-flat truth belongs only to the account generation under which it
+        # was read.  Re-check the configured pin immediately before either the
+        # production cancel path or a direct terminal transition.
+        execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if execution_quarantine is not None:
+            out["skipped_execution_quarantine"] += 1
+            _quarantine_persisted_alpaca_execution(
+                db,
+                sess,
+                reason=execution_quarantine,
+                context="stale_live_session_reaper_pre_terminal",
+            )
             continue
-        # GATE 2 — broker CONFIRMS flat (fail safe on unknown / real holding).
-        flat = _reaper_broker_confirms_flat(sess)
-        if flat is None:
-            out["skipped_unknown"] += 1
-            continue
-        if flat is False:
-            out["skipped_held"] += 1
-            continue
+        # A crash-surviving Alpaca entry claim is broker-side authority even when
+        # session JSON lost its CID/OID.  Direct live_error terminalization is
+        # permitted only after that durable seam is readable and clear.
+        if sess.state == STATE_LIVE_ERROR:
+            claim_readable, durable_claim = _owned_unresolved_alpaca_entry_claim(
+                db,
+                sess,
+            )
+            if not claim_readable:
+                out["skipped_unknown"] += 1
+                _quarantine_persisted_alpaca_execution(
+                    db,
+                    sess,
+                    reason="alpaca_entry_claim_unreadable",
+                    context="stale_live_session_reaper_pre_terminal",
+                )
+                continue
+            if durable_claim is not None:
+                out["skipped_in_flight"] += 1
+                _quarantine_persisted_alpaca_execution(
+                    db,
+                    sess,
+                    reason="alpaca_entry_claim_unresolved",
+                    context="stale_live_session_reaper_pre_terminal",
+                )
+                continue
+            execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+            if execution_quarantine is not None:
+                out["skipped_execution_quarantine"] += 1
+                _quarantine_persisted_alpaca_execution(
+                    db,
+                    sess,
+                    reason=execution_quarantine,
+                    context="stale_live_session_reaper_claim_post_read",
+                )
+                continue
         prev = sess.state
         if prev == STATE_LIVE_BAILOUT:
             # live_bailout is in LIVE_CANCELLABLE_STATES -> route through the
             # production terminalizer (adopt-on-cancel-fill is a safe no-op here
             # since the broker is confirmed flat + no order in flight).
             res = cancel_automation_session(db, user_id=user_id, session_id=sid)
-            if res.get("ok"):
+            if res.get("ok") and sess.state == STATE_LIVE_CANCELLED:
                 out["reaped"] += 1
                 append_trading_automation_event(
                     db, sid, "stale_session_reaped",
@@ -451,9 +2081,43 @@ def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
                      "ttl_seconds": ttl_s, "terminal_state": res.get("state")},
                     correlation_id=sess.correlation_id, source_node_id="momentum_automation_monitor",
                 )
+            else:
+                out["skipped_unknown"] += 1
         else:
             # live_error has NO legal outgoing FSM edge — terminalize the row directly
             # (the same pattern expire_stale_live_arm_sessions uses for arm_pending).
+            if non_alpaca_live and (
+                sess.state != locked_generation_state
+                or not _non_alpaca_terminal_proof_matches_session(
+                    sess,
+                    terminal_truth.get("proof"),
+                )
+            ):
+                out["skipped_unknown"] += 1
+                _persist_non_alpaca_terminalization_quarantine(
+                    db,
+                    sess,
+                    reason="terminalization_session_generation_changed",
+                    context="stale_live_session_reaper_pre_terminal_mutation",
+                    detail={
+                        "expected_state": locked_generation_state,
+                        "current_state": sess.state,
+                    },
+                )
+                continue
+            if non_alpaca_live:
+                final_account_quarantine = (
+                    _final_non_alpaca_terminal_account_quarantine(
+                        db,
+                        sess,
+                        context=(
+                            "stale_live_session_reaper_final_account_fence"
+                        ),
+                    )
+                )
+                if final_account_quarantine is not None:
+                    out["skipped_execution_quarantine"] += 1
+                    continue
             sess.state = STATE_LIVE_CANCELLED
             sess.ended_at = now
             sess.updated_at = now
@@ -473,7 +2137,37 @@ def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
     return out
 
 
+def _live_runner_driver_posture() -> dict[str, Any]:
+    """Expose the shared live-session owner contract without starting it."""
+    from .lane_health import live_runner_driver_configuration
+
+    master_on = bool(settings.chili_momentum_live_runner_enabled)
+    batch_on = bool(settings.chili_momentum_live_runner_scheduler_enabled)
+    loop_on = bool(
+        getattr(settings, "chili_momentum_live_runner_loop_enabled", False)
+    )
+    price_bus_on = bool(
+        getattr(settings, "chili_autopilot_price_bus_enabled", False)
+    )
+
+    mode, configuration_error = live_runner_driver_configuration()
+    blocked_reason = (
+        "live_runner_disabled" if not master_on else configuration_error
+    )
+
+    return {
+        "master_enabled": master_on,
+        "driver_mode": mode,
+        "driver_enabled": mode is not None and blocked_reason is None,
+        "blocked_reason": blocked_reason,
+        "legacy_batch_enabled": batch_on,
+        "event_loop_enabled": loop_on,
+        "price_bus_enabled": price_bus_on,
+    }
+
+
 def neural_config_strip() -> dict[str, Any]:
+    live_driver = _live_runner_driver_posture()
     return {
         "mesh_enabled": bool(mesh_enabled()),
         "momentum_neural_enabled": bool(settings.chili_momentum_neural_enabled),
@@ -487,6 +2181,13 @@ def neural_config_strip() -> dict[str, Any]:
         ),
         "live_runner_enabled": bool(settings.chili_momentum_live_runner_enabled),
         "live_runner_scheduler_enabled": bool(settings.chili_momentum_live_runner_scheduler_enabled),
+        "live_runner_loop_enabled": bool(
+            getattr(settings, "chili_momentum_live_runner_loop_enabled", False)
+        ),
+        "live_runner_driver_mode": live_driver["driver_mode"],
+        "live_runner_driver_enabled": live_driver["driver_enabled"],
+        "live_runner_driver_blocked_reason": live_driver["blocked_reason"],
+        "autopilot_price_bus_enabled": live_driver["price_bus_enabled"],
         "live_runner_scheduler_interval_minutes": int(
             settings.chili_momentum_live_runner_scheduler_interval_minutes
         ),
@@ -641,61 +2342,164 @@ def _runner_health_for_mode(
 ) -> dict[str, Any]:
     now = datetime.utcnow()
     m = (mode or "paper").strip().lower()
+    driver_mode: str | None
+    driver_enabled: bool
+    legacy_batch_enabled = False
+    event_loop_enabled = False
+    price_bus_enabled = bool(
+        getattr(settings, "chili_autopilot_price_bus_enabled", False)
+    )
+    driver_blocked_reason: str | None = None
+    event_loop_truth: dict[str, Any] | None = None
+    event_loop_stale_seconds: float | None = None
     if m == "live":
-        enabled = bool(settings.chili_momentum_live_runner_enabled)
-        scheduler_enabled = bool(settings.chili_momentum_live_runner_scheduler_enabled)
+        posture = _live_runner_driver_posture()
+        enabled = bool(posture["master_enabled"])
+        driver_mode = posture["driver_mode"]
+        driver_enabled = bool(posture["driver_enabled"])
+        driver_blocked_reason = posture["blocked_reason"]
+        legacy_batch_enabled = bool(posture["legacy_batch_enabled"])
+        event_loop_enabled = bool(posture["event_loop_enabled"])
+        price_bus_enabled = bool(posture["price_bus_enabled"])
+        # Compatibility for the current cockpit: this field means an automated
+        # session driver is configured, not specifically the legacy batch job.
+        scheduler_enabled = driver_enabled
         interval_minutes = int(settings.chili_momentum_live_runner_scheduler_interval_minutes)
     else:
         enabled = bool(settings.chili_momentum_paper_runner_enabled)
         scheduler_enabled = bool(settings.chili_momentum_paper_runner_scheduler_enabled)
+        driver_mode = "scheduled_batch" if scheduler_enabled else None
+        driver_enabled = scheduler_enabled
+        legacy_batch_enabled = scheduler_enabled
+        driver_blocked_reason = (
+            None if scheduler_enabled else "paper_runner_scheduler_disabled"
+        )
         interval_minutes = int(settings.chili_momentum_paper_runner_scheduler_interval_minutes)
 
-    hb_at = _latest_scheduler_heartbeat_at(db)
-    hb_age = (now - hb_at).total_seconds() if hb_at else None
-    kill = get_kill_switch_status()
-    kill_active = bool(kill.get("active"))
-    blocked_reason = None
-    if not enabled:
-        blocked_reason = f"{m}_runner_disabled"
-    elif not scheduler_enabled:
-        blocked_reason = f"{m}_runner_scheduler_disabled"
-    elif hb_age is None:
-        blocked_reason = "scheduler_worker_heartbeat_missing"
-    elif hb_age > max(420.0, float(interval_minutes) * 120.0):
-        blocked_reason = "scheduler_worker_stale"
-    elif kill_active:
-        blocked_reason = "kill_switch_active"
-    elif m == "live":
-        # Live runner is only truly "Ready" if the execution venue is actually connected.
-        try:
-            live_readiness = build_momentum_operator_readiness(execution_family="coinbase_spot")
-        except Exception:
-            live_readiness = {}
-        if not live_readiness.get("broker_coinbase_connected"):
-            blocked_reason = "broker_not_connected"
-        elif not live_readiness.get("runnable_live_now"):
-            blocked_reason = "live_execution_not_ready"
-
-    last_tick = _last_tick_from_snapshot(sess) if sess is not None else None
-    if last_tick is None:
-        latest = (
+    health_sess = sess
+    if health_sess is None:
+        health_sess = (
             db.query(TradingAutomationSession)
             .filter(TradingAutomationSession.mode == m)
             .order_by(TradingAutomationSession.updated_at.desc())
             .first()
         )
-        last_tick = _last_tick_from_snapshot(latest) if latest is not None else None
 
-    # When no session has ticked yet, fall back to the scheduler heartbeat so the
-    # UI shows that the scheduler is actually running instead of a misleading "n/a".
+    hb_at: datetime | None = None
+    heartbeat_source: str | None = None
+    if m == "live" and driver_mode == "event_loop":
+        try:
+            from .lane_health import (
+                _latest_live_loop_heartbeat_status,
+                live_loop_stale_seconds,
+            )
+
+            event_loop_stale_seconds = live_loop_stale_seconds()
+            event_loop_truth = _latest_live_loop_heartbeat_status(
+                db,
+                stale_seconds=event_loop_stale_seconds,
+            )
+        except Exception:
+            event_loop_truth = {
+                "ok": False,
+                "reason": "live_runner_loop_heartbeat_unreadable",
+            }
+        if event_loop_truth.get("ok") is True:
+            value = event_loop_truth.get("heartbeat_at")
+            hb_at = value if isinstance(value, datetime) else None
+            if hb_at is None:
+                event_loop_truth = {
+                    "ok": False,
+                    "reason": "live_runner_loop_heartbeat_unreadable",
+                }
+            else:
+                heartbeat_source = "live_loop_heartbeat"
+    elif (
+        m == "live" and driver_mode == "scheduled_auto_arm"
+    ) or m != "live":
+        hb_at = _latest_scheduler_heartbeat_at(db)
+        heartbeat_source = "scheduler_heartbeat" if hb_at is not None else None
+
+    hb_age = (now - hb_at).total_seconds() if hb_at else None
+    kill = get_kill_switch_status()
+    kill_active = bool(kill.get("active"))
+    blocked_reason = driver_blocked_reason
+    if not enabled:
+        blocked_reason = f"{m}_runner_disabled"
+    elif not driver_enabled:
+        blocked_reason = driver_blocked_reason or f"{m}_runner_driver_disabled"
+    elif m == "live" and driver_mode == "event_loop" and (
+        not isinstance(event_loop_truth, dict)
+        or event_loop_truth.get("ok") is not True
+    ):
+        blocked_reason = str(
+            (event_loop_truth or {}).get("reason")
+            or "live_runner_loop_heartbeat_unreadable"
+        )
+    elif hb_age is None:
+        blocked_reason = (
+            "live_runner_loop_heartbeat_missing"
+            if m == "live" and driver_mode == "event_loop"
+            else "scheduler_worker_heartbeat_missing"
+        )
+    elif m == "live" and driver_mode == "event_loop" and hb_age < -1.0:
+        blocked_reason = "live_runner_loop_heartbeat_future"
+    elif (
+        m == "live"
+        and driver_mode == "event_loop"
+        and event_loop_stale_seconds is not None
+        and hb_age >= event_loop_stale_seconds
+    ):
+        blocked_reason = "live_runner_loop_heartbeat_stale"
+    elif (
+        driver_mode in {"scheduled_auto_arm", "scheduled_batch"}
+        and hb_age > max(
+            420.0,
+            float(interval_minutes) * 120.0,
+        )
+    ):
+        blocked_reason = "scheduler_worker_stale"
+    elif kill_active:
+        blocked_reason = "kill_switch_active"
+    elif m == "live" and health_sess is not None:
+        # Session health is venue-specific.  Never let an unrelated Coinbase
+        # connection decide whether an Alpaca or Robinhood session is ready.
+        execution_family = str(
+            getattr(health_sess, "execution_family", "") or ""
+        ).strip()
+        symbol = str(getattr(health_sess, "symbol", "") or "").strip()
+        try:
+            live_readiness = build_momentum_operator_readiness(
+                execution_family=execution_family,
+                symbol=symbol or None,
+            )
+        except Exception:
+            live_readiness = {}
+        if not live_readiness.get("broker_ready_for_live"):
+            blocked_reason = "broker_not_ready"
+        elif not live_readiness.get("runnable_live_now"):
+            blocked_reason = "live_execution_not_ready"
+
+    last_tick = (
+        _last_tick_from_snapshot(health_sess)
+        if health_sess is not None
+        else None
+    )
+
+    # When no session has ticked yet, fall back to the configured driver's durable
+    # heartbeat so the UI shows liveness instead of a misleading "n/a".
     last_tick_source = "session" if last_tick else None
     if last_tick is None and hb_at is not None:
         last_tick = hb_at.isoformat()
-        last_tick_source = "scheduler_heartbeat"
+        last_tick_source = heartbeat_source
 
     next_tick_eta_seconds: int | None = None
     next_tick_overdue_seconds: int | None = None
-    if enabled and scheduler_enabled and hb_at is not None:
+    if (
+        enabled
+        and driver_mode in {"scheduled_auto_arm", "scheduled_batch"}
+        and hb_at is not None
+    ):
         remaining = int(interval_minutes * 60 - max(0.0, hb_age or 0.0))
         if remaining >= 0:
             next_tick_eta_seconds = remaining
@@ -706,10 +2510,27 @@ def _runner_health_for_mode(
         "mode": m,
         "enabled": enabled,
         "scheduler_enabled": scheduler_enabled,
+        "driver_mode": driver_mode,
+        "driver_enabled": driver_enabled,
+        "legacy_batch_scheduler_enabled": legacy_batch_enabled,
+        "event_loop_enabled": event_loop_enabled,
+        "price_bus_enabled": price_bus_enabled,
+        "execution_family": (
+            str(getattr(health_sess, "execution_family", "") or "").strip()
+            if health_sess is not None
+            else None
+        ),
         "interval_minutes": interval_minutes,
         "last_tick_utc": last_tick,
         "last_tick_source": last_tick_source,
-        "scheduler_heartbeat_utc": hb_at.isoformat() if hb_at else None,
+        "scheduler_heartbeat_utc": (
+            hb_at.isoformat() if hb_at and heartbeat_source == "scheduler_heartbeat" else None
+        ),
+        "live_loop_heartbeat_utc": (
+            hb_at.isoformat() if hb_at and heartbeat_source == "live_loop_heartbeat" else None
+        ),
+        "heartbeat_age_seconds": round(hb_age, 1) if hb_age is not None else None,
+        "live_loop_stale_seconds": event_loop_stale_seconds,
         "next_tick_eta_seconds": next_tick_eta_seconds,
         "next_tick_overdue_seconds": next_tick_overdue_seconds,
         "blocked_reason": blocked_reason,
@@ -797,6 +2618,7 @@ def _fresh_run_snapshot(sess: TradingAutomationSession) -> dict[str, Any]:
         "expires_at_utc",
         "arm_confirmed_at_utc",
         "arm_confirmed",
+        "alpaca_symbol_claim_token",
     ):
         snap.pop(key, None)
     return snap
@@ -1693,6 +3515,18 @@ def run_automation_session(db: Session, *, user_id: int, session_id: int) -> dic
     if not sess:
         return {"ok": False, "error": "not_found"}
 
+    # A terminal LIVE row is historical broker identity, not a reusable template.
+    # Re-arming must mint a fresh token/claim/session through the live-arm flow.
+    if sess.mode == "live" and (
+        sess.state in TERMINAL_STATES or sess.state == STATE_ARCHIVED
+    ):
+        return {
+            "ok": False,
+            "error": "live_rearm_required",
+            "state": sess.state,
+            "message": "Terminal live sessions require a fresh live-arm confirmation.",
+        }
+
     runner_health = _runner_health_for_mode(db, mode=sess.mode, sess=sess)
     if not runner_health.get("enabled"):
         return {"ok": False, "error": "runner_disabled", "runner_health": runner_health}
@@ -1740,7 +3574,13 @@ def run_automation_session(db: Session, *, user_id: int, session_id: int) -> dic
     elif sess.mode == "live" and sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
         return {"ok": False, "error": "not_runnable", "state": sess.state}
 
-    if target.mode == "paper":
+    if target.id != sess.id:
+        # The clone and its fresh broker-ownership identity are not durable until
+        # the API transaction commits. Never let a newly cloned live row cross a
+        # broker boundary while it is invisible to independent claim transactions.
+        db.flush()
+        tick_result = {"ok": True, "skipped": "cloned_session_awaiting_commit"}
+    elif target.mode == "paper":
         tick_result = tick_paper_session(db, int(target.id))
     else:
         tick_result = tick_live_session(db, int(target.id))
@@ -1773,6 +3613,17 @@ def request_flatten_session(db: Session, *, user_id: int, session_id: int) -> di
         "live_entered", "live_scaling_out", "live_trailing", "live_bailout",
     ):
         return {"ok": False, "error": "not_flattenable", "state": sess.state}
+    if normalize_execution_family(sess.execution_family) in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        quarantine_reason = _persisted_alpaca_execution_quarantine_reason(sess)
+        if quarantine_reason is not None:
+            return _quarantine_operator_stop_execution(
+                db,
+                sess,
+                reason=quarantine_reason,
+            )
     snap = dict(sess.risk_snapshot_json or {})
     le = dict(snap.get("momentum_live_execution") or {})
     le["operator_flatten_requested_utc"] = datetime.utcnow().isoformat()
@@ -1841,75 +3692,497 @@ def resume_automation_session(db: Session, *, user_id: int, session_id: int) -> 
     return run_automation_session(db, user_id=user_id, session_id=int(sess.id))
 
 
-def _flatten_live_session_for_stop(sess: TradingAutomationSession) -> dict[str, Any]:
+def _quarantine_operator_stop_execution(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Durably pause an uncertified Alpaca row without touching the broker.
+
+    The HTTP Stop/Cancel routes commit this deferred result.  The quarantine
+    annotation alone is not an execution fence: a later config correction could
+    make the still-runnable row eligible again.  Persist the operator pause on
+    every call so no new entry work can resume without a new explicit Run action.
+    """
     snap = dict(sess.risk_snapshot_json or {})
-    le = snap.get("momentum_live_execution")
+    le = dict(snap.get(KEY_LIVE_EXEC) or {})
+    prior = le.get("operator_stop_execution_quarantine")
+    changed = not isinstance(prior, dict) or prior.get("reason") != reason
+    if changed:
+        quarantine = {
+            "reason": str(reason),
+            "execution_family": normalize_execution_family(sess.execution_family),
+            "symbol": str(sess.symbol or "").upper(),
+            "quarantined_at_utc": datetime.utcnow().isoformat(),
+        }
+        le["operator_stop_execution_quarantine"] = quarantine
+    else:
+        quarantine = dict(prior)
+    snap[KEY_LIVE_EXEC] = le
+    sess.risk_snapshot_json = apply_operator_pause(snap, state=sess.state)
+    sess.updated_at = datetime.utcnow()
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    if changed:
+        append_trading_automation_event(
+            db,
+            int(sess.id),
+            "operator_stop_execution_quarantined",
+            quarantine,
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_automation_monitor",
+        )
+    return {
+        "ok": True,
+        "pending": "execution_quarantine",
+        "terminalization_deferred": True,
+        "session_id": int(sess.id),
+        "state": sess.state,
+        "quarantine_reason": str(reason),
+        "message": "No broker execution was attempted for this uncertified Alpaca execution shape.",
+    }
+
+
+def _flatten_live_session_for_stop(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    request_kind: str = "stop",
+) -> dict[str, Any]:
+    """Route operator STOP through the crash-safe emergency exit state machine.
+
+    This helper deliberately performs no direct cancel/sell.  It first persists the
+    same request consumed by ``tick_live_session``; the runner then owns exact-CID
+    recovery, signed broker quantity, close intent, fill accounting, and the final
+    broker-zero proof.  A live session with no local exposure may terminalize only
+    after an independent successful broker-flat read.
+    """
+    quarantine_reason = _persisted_alpaca_execution_quarantine_reason(sess)
+    if quarantine_reason is not None:
+        quarantined = _quarantine_operator_stop_execution(
+            db,
+            sess,
+            reason=quarantine_reason,
+        )
+        return {
+            **quarantined,
+            "action": "execution_quarantined",
+            "terminalization_deferred": True,
+        }
+    snap = dict(sess.risk_snapshot_json or {})
+    le = snap.get(KEY_LIVE_EXEC)
     le = dict(le) if isinstance(le, dict) else {}
     pos = le.get("position")
-    entry_order_id = le.get("entry_order_id")
-    if not entry_order_id and not isinstance(pos, dict):
-        return {"ok": True, "action": "no_live_orders"}
+    entry_order_id = str(le.get("entry_order_id") or "").strip()
+    entry_client_order_id = str(le.get("entry_client_order_id") or "").strip()
+    reconcile_client_order_id = str(
+        le.get("entry_reconcile_pending_client_order_id") or ""
+    ).strip()
+    resolved_entry_orders = le.get("entry_orders_resolved")
+    resolved_entry_orders = (
+        resolved_entry_orders if isinstance(resolved_entry_orders, dict) else {}
+    )
+    entry_order_ids_all = [
+        str(value or "").strip()
+        for value in (le.get("entry_order_ids_all") or [])
+        if str(value or "").strip()
+        and str(value or "").strip() not in resolved_entry_orders
+    ]
+    unresolved_entry_order_id = bool(
+        entry_order_id and entry_order_id not in resolved_entry_orders
+    )
+    pre_entry_state = sess.state in {
+        STATE_ARMED_PENDING_RUNNER,
+        STATE_QUEUED_LIVE,
+        STATE_WATCHING_LIVE,
+        STATE_LIVE_ENTRY_CANDIDATE,
+        STATE_LIVE_PENDING_ENTRY,
+    }
+    emergency_service_state = sess.state in {
+        STATE_LIVE_PENDING_ENTRY,
+        STATE_LIVE_ENTERED,
+        STATE_LIVE_SCALING_OUT,
+        STATE_LIVE_TRAILING,
+        STATE_LIVE_BAILOUT,
+    }
+    unresolved_entry_identity = bool(
+        unresolved_entry_order_id
+        or entry_order_ids_all
+        or (
+            pre_entry_state
+            and (
+                entry_client_order_id
+                or reconcile_client_order_id
+                or le.get("entry_submitted")
+            )
+        )
+    )
+    local_exposure_possible = bool(unresolved_entry_identity or isinstance(pos, dict))
 
-    ef = normalize_execution_family(sess.execution_family)
-    try:
-        adapter = resolve_live_spot_adapter_factory(ef)()
-    except ExecutionFamilyNotImplementedError:
-        return {"ok": False, "error": "execution_family_not_implemented"}
-    if not adapter.is_enabled():
+    if emergency_service_state or local_exposure_possible:
+        request_kind = "cancel" if str(request_kind).lower() == "cancel" else "stop"
+        marker_key = f"operator_{request_kind}_reconcile_requested_utc"
+        newly_requested = not bool(le.get(marker_key))
+        if newly_requested:
+            le[marker_key] = datetime.utcnow().isoformat()
+        le.setdefault("operator_flatten_requested_utc", datetime.utcnow().isoformat())
+        le[f"operator_{request_kind}_requested"] = True
+        snap[KEY_LIVE_EXEC] = le
+        # Freeze every pre-entry route while the exact legacy CID/OID is unknown.
+        # Held/pending-entry sessions remain exit-serviceable because the runner's
+        # paused-session gate explicitly permits durable emergency authority.
+        sess.risk_snapshot_json = apply_operator_pause(snap, state=sess.state)
+        try:
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(sess, "risk_snapshot_json")
+        except Exception:
+            pass
+        if newly_requested:
+            sess.updated_at = datetime.utcnow()
+            append_trading_automation_event(
+                db,
+                int(sess.id),
+                f"operator_{request_kind}_emergency_requested",
+                {
+                    "state": sess.state,
+                    "entry_order_id": entry_order_id or None,
+                    "entry_client_order_id": entry_client_order_id or None,
+                    "entry_reconcile_pending_client_order_id": (
+                        reconcile_client_order_id or None
+                    ),
+                    "entry_order_ids_all": entry_order_ids_all,
+                    "local_position_present": isinstance(pos, dict),
+                },
+                correlation_id=sess.correlation_id,
+                source_node_id="momentum_automation_monitor",
+            )
+        db.flush()
+        if not emergency_service_state:
+            return {
+                "ok": True,
+                "action": "entry_order_reconcile_requested",
+                "pending": "entry_order_truth_reconcile",
+                "terminalization_deferred": True,
+                "request_created": newly_requested,
+                "service_result": {
+                    "ok": True,
+                    "skipped": "paused_preentry_identity_requires_exact_reconcile",
+                },
+                "state": sess.state,
+            }
+        try:
+            service_result = tick_live_session(db, int(sess.id))
+        except Exception as exc:
+            logger.warning(
+                "[automation_query] operator-stop emergency service failed session=%s",
+                sess.id,
+                exc_info=True,
+            )
+            service_result = {"ok": False, "error": type(exc).__name__}
         return {
-            "ok": False,
-            "error": "live_adapter_unavailable",
-            # STEP-D #14: surface WHY the rail is dark (auth error / transport reason /
-            # remaining latch) so a venue-unavailable read is diagnosable, not opaque.
-            "venue_unavailable_detail": _rh_venue_unavailable_detail(ef),
+            "ok": True,
+            "action": "emergency_exit_requested",
+            "pending": "broker_flat_confirmation",
+            "terminalization_deferred": True,
+            "request_created": newly_requested,
+            "service_result": service_result,
+            "state": sess.state,
         }
 
-    if entry_order_id and not isinstance(pos, dict):
-        adapter.cancel_order(str(entry_order_id))
-        return {"ok": True, "action": "cancelled_entry_order", "order_id": str(entry_order_id)}
-
-    if isinstance(pos, dict) and float(pos.get("quantity") or 0.0) > 0:
-        product_id = str(pos.get("product_id") or sess.symbol)
-        qty = _fmt_base_size(float(pos.get("quantity") or 0.0))
-        client_order_id = f"chili_ml_stop_{sess.id}_{uuid.uuid4().hex[:10]}"
-        result = adapter.place_market_order(
-            product_id=product_id,
-            side="sell",
-            base_size=qty,
-            client_order_id=client_order_id,
+    if normalize_execution_family(sess.execution_family) not in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        terminal_truth = _non_alpaca_live_terminalization_proof(
+            db,
+            sess,
+            context=f"operator_{str(request_kind).lower()}_pre_terminal",
+            cancelled_by="operator",
         )
-        le["exit_order_id"] = result.get("order_id")
-        le["exit_client_order_id"] = result.get("client_order_id")
-        le["last_exit_reason"] = "operator_stop"
-        le["position"] = None
-        snap["momentum_live_execution"] = le
-        sess.risk_snapshot_json = snap
-        return {"ok": True, "action": "flattened_live_position", "order_result": result}
-    return {"ok": True, "action": "no_live_orders"}
+        if terminal_truth.get("state") == "safe":
+            return {
+                "ok": True,
+                "action": "strict_broker_terminal_truth",
+                "broker_flat_confirmed": True,
+                "terminalization_truth": terminal_truth.get("proof"),
+            }
+        if terminal_truth.get("state") == "managed":
+            return {
+                "ok": True,
+                "action": "filled_entry_adopted",
+                "pending": "filled_entry_management",
+                "terminalization_deferred": True,
+                "management_result": terminal_truth.get("result"),
+            }
+        return {
+            **terminal_truth,
+            "action": "strict_broker_terminal_truth_pending",
+            "terminalization_deferred": True,
+        }
+
+    flat, detail = _reaper_broker_position_truth(sess)
+    if flat is True:
+        return {
+            "ok": True,
+            "action": "no_live_orders",
+            "broker_flat_confirmed": True,
+        }
+    if flat is None and "mismatch" in str(detail.get("reason") or ""):
+        _quarantine_reaper_direction_mismatch(db, sess, detail)
+    return {
+        "ok": True,
+        "action": "broker_flat_unconfirmed",
+        "pending": "broker_flat_confirmation",
+        "terminalization_deferred": True,
+        "broker_truth": detail,
+    }
+
+
+def _owned_unresolved_alpaca_entry_claim(
+    db: Session,
+    sess: TradingAutomationSession,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Read crash-surviving entry ownership independently of session JSON."""
+    if normalize_execution_family(sess.execution_family) not in {
+        "alpaca_spot", "alpaca_short",
+    }:
+        return True, None
+    from .alpaca_orphan_claims import read_action_claim
+
+    scope = _frozen_alpaca_account_scope(sess)
+    if scope != "alpaca:paper":
+        return False, None
+    readable, claim = read_action_claim(
+        db,
+        symbol=sess.symbol,
+        account_scope=scope,
+    )
+    if not readable:
+        return False, None
+    if not claim or claim.get("phase") == "resolved" or claim.get("action") != "entry":
+        return True, None
+    if claim.get("owner_session_id") != int(sess.id):
+        return True, None
+    return True, claim
+
+
+def _pause_operator_terminalization(
+    sess: TradingAutomationSession,
+) -> None:
+    """Durably fence new entry work while operator terminal truth is pending.
+
+    Stop/cancel endpoints commit ``ok=True`` deferred results.  Every such result
+    must therefore carry the operator pause in the same transaction; otherwise a
+    still-runnable pre-entry session can reserve a fresh broker CID after the human
+    already asked it to stop.
+    """
+    sess.risk_snapshot_json = apply_operator_pause(
+        sess.risk_snapshot_json,
+        state=sess.state,
+    )
+    sess.updated_at = datetime.utcnow()
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+
+
+def _exact_pre_http_operator_claim(
+    sess: TradingAutomationSession,
+    claim: dict[str, Any],
+) -> bool:
+    snapshot = (
+        sess.risk_snapshot_json
+        if isinstance(sess.risk_snapshot_json, dict)
+        else {}
+    )
+    live_exec = snapshot.get(KEY_LIVE_EXEC)
+    live_exec = live_exec if isinstance(live_exec, dict) else {}
+    return _is_exact_pre_http_alpaca_arm_claim(
+        sess,
+        claim,
+        le=live_exec,
+    )
 
 
 def stop_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
     if not _tables_present(db):
         return {"ok": False, "error": "tables_missing"}
-    sess = (
+    _q = (
         db.query(TradingAutomationSession)
         .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
-        .one_or_none()
     )
+    try:
+        _q = _q.with_for_update()
+    except Exception:
+        pass
+    try:
+        _q = _q.populate_existing()
+    except Exception:
+        pass
+    sess = _q.one_or_none()
     if not sess:
         return {"ok": False, "error": "not_found"}
     if sess.state == STATE_ARCHIVED or sess.state in TERMINAL_STATES:
         return {"ok": False, "error": "already_terminal", "state": sess.state}
+    initial_state = sess.state
 
     live_stop = None
     if sess.mode == "live":
-        live_stop = _flatten_live_session_for_stop(sess)
+        _execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if _execution_quarantine is not None:
+            return _quarantine_operator_stop_execution(
+                db,
+                sess,
+                reason=_execution_quarantine,
+            )
+        _claim_readable, _durable_claim = _owned_unresolved_alpaca_entry_claim(db, sess)
+        if not _claim_readable:
+            return {
+                "ok": False,
+                "error": "alpaca_entry_claim_unreadable",
+                "message": "Durable broker-entry ownership is unreadable; the session was not terminalized.",
+            }
+        if _durable_claim is not None:
+            if (
+                _durable_claim.get("client_order_id")
+                or _durable_claim.get("broker_order_id")
+            ):
+                _pause_operator_terminalization(sess)
+                db.flush()
+                return {
+                    "ok": True,
+                    "pending": "durable_alpaca_entry_claim_reconcile",
+                    "terminalization_deferred": True,
+                    "session_id": int(sess.id),
+                    "state": sess.state,
+                    "message": (
+                        "Broker entry truth is unresolved; new entry work is paused "
+                        "and the session remains non-terminal."
+                    ),
+                }
+            if not _exact_pre_http_operator_claim(
+                sess,
+                _durable_claim,
+            ):
+                _pause_operator_terminalization(sess)
+                db.flush()
+                return {
+                    "ok": True,
+                    "pending": "durable_alpaca_entry_claim_reconcile",
+                    "terminalization_deferred": True,
+                    "session_id": int(sess.id),
+                    "state": sess.state,
+                    "message": (
+                        "The CID-less broker permit is not exact no-transport proof; "
+                        "new entry work is paused pending reconciliation."
+                    ),
+                }
+            _retire_confirmed_pre_http_alpaca_claim_before_terminal(
+                db,
+                sess,
+                new_state=STATE_LIVE_CANCELLED,
+            )
+            live_stop = {
+                "ok": True,
+                "action": "confirmed_pre_http_no_transport",
+                "terminalization_no_transport_proven": True,
+            }
+        else:
+            live_stop = _flatten_live_session_for_stop(db, sess)
         if not live_stop.get("ok"):
             return live_stop
+        if live_stop.get("terminalization_deferred"):
+            _pause_operator_terminalization(sess)
+            db.flush()
+            return {
+                "ok": True,
+                "pending": live_stop.get("pending") or "broker_flat_confirmation",
+                "session_id": int(sess.id),
+                "state": sess.state,
+                "live_stop": live_stop,
+                "message": (
+                    "Emergency exit is durable and remains under broker reconciliation; "
+                    "the session was not terminalized early."
+                ),
+            }
+        if not (
+            live_stop.get("broker_flat_confirmed")
+            or live_stop.get("terminalization_no_transport_proven")
+        ):
+            return {
+                "ok": False,
+                "error": "broker_flat_unconfirmed",
+                "session_id": int(sess.id),
+                "state": sess.state,
+                "live_stop": live_stop,
+            }
+
+        # Flat/order truth is valid only for the still-configured frozen account.
+        _execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if _execution_quarantine is not None:
+            return _quarantine_operator_stop_execution(
+                db,
+                sess,
+                reason=_execution_quarantine,
+            )
+        if normalize_execution_family(sess.execution_family) not in {
+            "alpaca_spot",
+            "alpaca_short",
+        } and (
+            sess.state != initial_state
+            or not _non_alpaca_terminal_proof_matches_session(
+                sess,
+                live_stop.get("terminalization_truth"),
+            )
+        ):
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason="terminalization_session_generation_changed",
+                context="stop_automation_session_pre_terminal_mutation",
+                detail={
+                    "expected_state": initial_state,
+                    "current_state": sess.state,
+                },
+            )
 
     now = datetime.utcnow()
     prev = sess.state
-    sess.state = STATE_LIVE_CANCELLED if sess.mode == "live" else STATE_CANCELLED
+
+    final_account_quarantine = _final_non_alpaca_terminal_account_quarantine(
+        db,
+        sess,
+        context="stop_automation_session_final_account_fence",
+    )
+    if final_account_quarantine is not None:
+        return {
+            **final_account_quarantine,
+            "live_stop": final_account_quarantine,
+        }
+
+    terminal_state = (
+        STATE_LIVE_CANCELLED if sess.mode == "live" else STATE_CANCELLED
+    )
+    if (
+        sess.mode == "live"
+        and normalize_execution_family(sess.execution_family)
+        in {"alpaca_spot", "alpaca_short"}
+    ):
+        _retire_confirmed_pre_http_alpaca_claim_before_terminal(
+            db,
+            sess,
+            new_state=terminal_state,
+        )
+    sess.state = terminal_state
     sess.ended_at = now
     sess.updated_at = now
     sess.risk_snapshot_json = clear_operator_pause(sess.risk_snapshot_json)
@@ -1935,7 +4208,12 @@ def delete_automation_session(db: Session, *, user_id: int, session_id: int) -> 
 
 
 def _try_adopt_filled_entry_on_cancel(
-    db: Session, sess: TradingAutomationSession, *, cancelled_by: str = "automation_monitor"
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    cancelled_by: str = "automation_monitor",
+    adapter_override: Any | None = None,
+    strict_filled_order: Any | None = None,
 ) -> Optional[dict[str, Any]]:
     """If a LIVE session being cancelled has an entry order that actually FILLED at
     the broker, ADOPT it instead of orphaning the position. Mirrors
@@ -1948,19 +4226,22 @@ def _try_adopt_filled_entry_on_cancel(
     NOT mark the session terminal); returns ``None`` to fall through to the normal
     cancel path (no fill, indeterminate broker I/O, or nothing to adopt).
 
-    FAIL-OPEN: if ``adapter.get_order`` raises (indeterminate), that order is left
-    UNRESOLVED and we do NOT adopt — the cancel proceeds and the legacy reconciler
-    still backstops the broker position, so the position is never left with NEITHER
-    manager. IDEMPOTENT: orders the runner already resolved are skipped, so a
-    runner-vs-cancel race cannot double-adopt.
+    For a known broker order id, an indeterminate ``get_order`` keeps the legacy
+    cleanup/reconciler behavior. For an ack-lost submit that has only a deterministic
+    client id, an indeterminate lookup defers terminal cancellation: labeling it
+    pre-entry while a fill may exist would recreate the orphan. IDEMPOTENT: orders
+    the runner already resolved are skipped, so a runner-vs-cancel race cannot
+    double-adopt.
     """
     # Lazy imports (live_runner imports from this module transitively — keep the
     # dependency one-directional at module load, matching the file's convention).
     from .live_runner import (
         KEY_LIVE_EXEC,
+        _bind_recovered_entry_order,
         _commit_le,
         _emit,
         _mark_entry_order_resolved,
+        _recover_entry_order_by_client_id,
         _safe_transition,
     )
 
@@ -1977,36 +4258,196 @@ def _try_adopt_filled_entry_on_cancel(
         _os = str(_o or "").strip()
         if _os and _os not in candidates and _os not in resolved:
             candidates.append(_os)
-    if not candidates:
-        return None
-
     from ..venue.factory import get_adapter
 
-    adapter = get_adapter(sess.execution_family)
+    adapter = adapter_override or get_adapter(sess.execution_family)
     if adapter is None:
         return None  # no adapter -> cannot confirm a fill -> normal cancel path
 
-    for oid in candidates:
-        try:
-            no, _ = adapter.get_order(str(oid))
-        except Exception:
-            # FAIL-OPEN: indeterminate -> leave unresolved, do not adopt this order.
-            logger.debug(
-                "[automation_query] adopt-on-cancel get_order failed for %s",
-                oid, exc_info=True,
+    def _generation_quarantine() -> Optional[dict[str, Any]]:
+        """Fail closed if this stored account generation no longer owns reads."""
+        family = normalize_execution_family(sess.execution_family)
+        if family in {"alpaca_spot", "alpaca_short"}:
+            reason = _persisted_alpaca_execution_quarantine_reason(sess)
+            if reason is None:
+                return None
+            return _quarantine_operator_stop_execution(db, sess, reason=reason)
+        truth = verify_frozen_non_alpaca_account_identity(
+            sess,
+            adapter=adapter,
+        )
+        if truth.get("ok") is True:
+            return None
+        return _persist_non_alpaca_terminalization_quarantine(
+            db,
+            sess,
+            reason=str(
+                truth.get("reason") or "non_alpaca_account_identity_unknown"
+            ),
+            context=f"{cancelled_by}_filled_entry_adoption",
+            detail={"phase": "filled_entry_adoption_generation_fence"},
+        )
+
+    # This helper is also exercised directly by reconciliation tests/callers; do
+    # not rely solely on cancel_automation_session's earlier account-pin gate.
+    generation_quarantine = _generation_quarantine()
+    if generation_quarantine is not None:
+        return generation_quarantine
+    if normalize_execution_family(sess.execution_family) in {
+        "alpaca_spot",
+        "alpaca_short",
+    }:
+        if not _bind_persisted_alpaca_adapter(sess, adapter):
+            return _quarantine_operator_stop_execution(
+                db,
+                sess,
+                reason="alpaca_adapter_account_generation_bind_failed",
             )
-            continue
+        generation_quarantine = _generation_quarantine()
+        if generation_quarantine is not None:
+            return generation_quarantine
+
+    # An ack-lost Alpaca submit can have only the deterministic client id in the
+    # session.  Recover the broker order before allowing cancellation to label the
+    # session "pre-entry".  If broker truth is temporarily unavailable, defer the
+    # terminal transition: cancelling blind can orphan a real fill.
+    if not candidates:
+        reconcile_cid = (
+            le.get("entry_reconcile_pending_client_order_id")
+            or le.get("entry_client_order_id")
+        )
+        generation_quarantine = _generation_quarantine()
+        if generation_quarantine is not None:
+            return generation_quarantine
+        recovered = _recover_entry_order_by_client_id(adapter, reconcile_cid)
+        # The configured account may rotate while the CID read is in flight.
+        # Re-check before binding any returned identity into this generation.
+        generation_quarantine = _generation_quarantine()
+        if generation_quarantine is not None:
+            return generation_quarantine
+        if recovered is not None:
+            recovered_le = dict(le)
+            recovered_le["entry_orders_resolved"] = dict(
+                recovered_le.get("entry_orders_resolved") or {}
+            )
+            recovered_le["entry_order_ids_all"] = list(
+                recovered_le.get("entry_order_ids_all") or []
+            )
+            recovered_oid = _bind_recovered_entry_order(
+                recovered_le, recovered, client_order_id=reconcile_cid
+            )
+            generation_quarantine = _generation_quarantine()
+            if generation_quarantine is not None:
+                return generation_quarantine
+            _commit_le(sess, recovered_le)
+            le = recovered_le
+            _emit(db, sess, "entry_client_id_recovered_on_cancel", {
+                "client_order_id": le.get("entry_client_order_id") or reconcile_cid,
+                "order_id": recovered_oid,
+                "venue_status": getattr(recovered, "status", None),
+            })
+            candidates.append(recovered_oid)
+        elif le.get("entry_submitted") and reconcile_cid:
+            pending_le = dict(le)
+            pending_le["entry_reconcile_pending_client_order_id"] = str(reconcile_cid)
+            generation_quarantine = _generation_quarantine()
+            if generation_quarantine is not None:
+                return generation_quarantine
+            _commit_le(sess, pending_le)
+            le = pending_le
+            _emit(db, sess, "entry_cancel_deferred_client_id_reconcile", {
+                "client_order_id": str(reconcile_cid),
+                "by": cancelled_by,
+            })
+            db.flush()
+            return {
+                "ok": True,
+                "pending": "entry_client_id_reconcile",
+                "session_id": int(sess.id),
+                "state": sess.state,
+            }
+    if not candidates:
+        return None
+
+    for oid in candidates:
+        generation_quarantine = _generation_quarantine()
+        if generation_quarantine is not None:
+            return generation_quarantine
+        strict_oid = str(
+            getattr(strict_filled_order, "order_id", "") or ""
+        ).strip()
+        if strict_filled_order is not None and strict_oid == str(oid):
+            no = strict_filled_order
+        else:
+            try:
+                no, _ = adapter.get_order(str(oid))
+            except Exception:
+                generation_quarantine = _generation_quarantine()
+                if generation_quarantine is not None:
+                    return generation_quarantine
+                # FAIL-OPEN: indeterminate -> leave unresolved, do not adopt this order.
+                logger.debug(
+                    "[automation_query] adopt-on-cancel get_order failed for %s",
+                    oid, exc_info=True,
+                )
+                continue
         if no is None:
+            generation_quarantine = _generation_quarantine()
+            if generation_quarantine is not None:
+                return generation_quarantine
             continue
+        # Broker truth belongs only to the configured account generation under
+        # which it was read.  Never adopt a fill after an in-flight pin rotation.
+        generation_quarantine = _generation_quarantine()
+        if generation_quarantine is not None:
+            return generation_quarantine
         filled = float(getattr(no, "filled_size", 0) or 0)
         if filled <= 0:
             continue
+        if normalize_execution_family(sess.execution_family) not in {
+            "alpaca_spot",
+            "alpaca_short",
+        }:
+            adoption_identities = _collect_non_alpaca_persisted_order_identities(
+                sess
+            )
+            adoption_authorized, adoption_detail = (
+                _exact_non_alpaca_order_authority(
+                    no,
+                    order_expectations=dict(
+                        adoption_identities.get("order_expectations") or {}
+                    ),
+                    required_intent="entry",
+                    expected_symbol=str(sess.symbol or ""),
+                )
+            )
+            if not adoption_authorized:
+                return _persist_non_alpaca_terminalization_quarantine(
+                    db,
+                    sess,
+                    reason=(
+                        "terminalization_filled_entry_adoption_authority_unproven"
+                    ),
+                    context=f"{cancelled_by}_filled_entry_adoption",
+                    detail=adoption_detail,
+                )
         # LATE/RACED FILL — ADOPT. Re-point + walk the legal FSM to pending-entry.
         venue_status = str(getattr(no, "status", "") or "")
-        le["entry_order_id"] = str(oid)
-        le["entry_submitted"] = True
-        _mark_entry_order_resolved(le, oid, "adopted")
-        _commit_le(sess, le)
+        adopted_le = dict(le)
+        adopted_le["entry_orders_resolved"] = dict(
+            adopted_le.get("entry_orders_resolved") or {}
+        )
+        adopted_le["entry_order_ids_all"] = list(
+            adopted_le.get("entry_order_ids_all") or []
+        )
+        adopted_le["entry_order_id"] = str(oid)
+        adopted_le["entry_submitted"] = True
+        _mark_entry_order_resolved(adopted_le, oid, "adopted")
+        generation_quarantine = _generation_quarantine()
+        if generation_quarantine is not None:
+            return generation_quarantine
+        _commit_le(sess, adopted_le)
+        le = adopted_le
         _emit(
             db, sess, "entry_adopted_on_cancel",
             {
@@ -2020,8 +4461,14 @@ def _try_adopt_filled_entry_on_cancel(
         # Guarded by state so an already-pending/entered session is left as-is
         # (the runner's normal handler owns it from there).
         if sess.state == STATE_WATCHING_LIVE:
+            generation_quarantine = _generation_quarantine()
+            if generation_quarantine is not None:
+                return generation_quarantine
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
         if sess.state == STATE_LIVE_ENTRY_CANDIDATE:
+            generation_quarantine = _generation_quarantine()
+            if generation_quarantine is not None:
+                return generation_quarantine
             _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
         db.flush()
         return {
@@ -2059,12 +4506,15 @@ def cancel_automation_session(
         db.query(TradingAutomationSession)
         .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
     )
-    if bool(getattr(settings, "chili_momentum_adopt_on_cancel_fill_enabled", True)):
-        try:
-            _q = _q.with_for_update()
-        except Exception:
-            # SQLite / unsupported dialect in some test paths — degrade to no lock.
-            pass
+    try:
+        _q = _q.with_for_update()
+    except Exception:
+        # SQLite / unsupported dialect in some test paths — degrade to no lock.
+        pass
+    try:
+        _q = _q.populate_existing()
+    except Exception:
+        pass
     sess = _q.one_or_none()
     if not sess:
         return {"ok": False, "error": "not_found"}
@@ -2072,6 +4522,111 @@ def cancel_automation_session(
         return {"ok": False, "error": "not_cancellable", "state": sess.state}
 
     prev = sess.state
+    _is_alpaca_live = bool(
+        sess.mode == "live"
+        and normalize_execution_family(sess.execution_family)
+        in {"alpaca_spot", "alpaca_short"}
+    )
+    if _is_alpaca_live:
+        execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if execution_quarantine is not None:
+            return _quarantine_operator_stop_execution(
+                db,
+                sess,
+                reason=execution_quarantine,
+            )
+
+    _pre_http_no_transport_terminal = False
+
+    # A committed Alpaca permit can survive a crash that rolled every session
+    # pointer back. Pause and defer terminalization until the claim-aware runner
+    # has cancelled/reread/adopted the exact broker identity.
+    _claim_readable, _durable_claim = _owned_unresolved_alpaca_entry_claim(db, sess)
+    if not _claim_readable:
+        return {
+            "ok": False,
+            "error": "alpaca_entry_claim_unreadable",
+            "message": "Durable broker-entry ownership is unreadable; the session was not terminalized.",
+        }
+    if _durable_claim is not None:
+        if (
+            _durable_claim.get("client_order_id")
+            or _durable_claim.get("broker_order_id")
+        ):
+            snap = dict(sess.risk_snapshot_json or {})
+            le = dict(snap.get("momentum_live_execution") or {})
+            snap["alpaca_symbol_claim_token"] = _durable_claim.get("claim_token")
+            le["entry_submitted"] = True
+            if _durable_claim.get("client_order_id"):
+                le["entry_client_order_id"] = _durable_claim["client_order_id"]
+                le["entry_reconcile_pending_client_order_id"] = _durable_claim[
+                    "client_order_id"
+                ]
+            if _durable_claim.get("broker_order_id"):
+                le["entry_order_id"] = _durable_claim["broker_order_id"]
+            snap["momentum_live_execution"] = le
+            sess.risk_snapshot_json = apply_operator_pause(snap, state=sess.state)
+            sess.updated_at = datetime.utcnow()
+            db.flush()
+            return {
+                "ok": True,
+                "pending": "durable_alpaca_entry_claim_reconcile",
+                "session_id": int(sess.id),
+                "state": sess.state,
+                "message": "Broker entry truth is unresolved; the session remains non-terminal.",
+            }
+        if not _exact_pre_http_operator_claim(
+            sess,
+            _durable_claim,
+        ):
+            _pause_operator_terminalization(sess)
+            db.flush()
+            return {
+                "ok": True,
+                "pending": "durable_alpaca_entry_claim_reconcile",
+                "terminalization_deferred": True,
+                "session_id": int(sess.id),
+                "state": sess.state,
+                "message": (
+                    "The CID-less broker permit is not exact no-transport proof; "
+                    "new entry work is paused pending reconciliation."
+                ),
+            }
+        _retire_confirmed_pre_http_alpaca_claim_before_terminal(
+            db,
+            sess,
+            new_state=STATE_LIVE_CANCELLED,
+        )
+        _pre_http_no_transport_terminal = True
+
+    if _is_alpaca_live and not _pre_http_no_transport_terminal:
+        cancel_truth = _flatten_live_session_for_stop(
+            db,
+            sess,
+            request_kind="cancel",
+        )
+        if cancel_truth.get("terminalization_deferred"):
+            _pause_operator_terminalization(sess)
+            db.flush()
+            return {
+                "ok": True,
+                "pending": cancel_truth.get("pending") or "broker_flat_confirmation",
+                "session_id": int(sess.id),
+                "state": sess.state,
+                "cancel_reconcile": cancel_truth,
+                "message": (
+                    "Exact Alpaca order/position truth remains under reconciliation; "
+                    "the session was not terminalized early."
+                ),
+            }
+        if not cancel_truth.get("broker_flat_confirmed"):
+            return {
+                "ok": False,
+                "error": "broker_flat_unconfirmed",
+                "session_id": int(sess.id),
+                "state": sess.state,
+                "cancel_reconcile": cancel_truth,
+            }
 
     # ── ADOPT-ON-CANCEL-FILL (the momentum-orphan root fix) ──────────────────
     # BEFORE we mark the session terminal: if a LIVE session is being cancelled
@@ -2088,16 +4643,78 @@ def cancel_automation_session(
         bool(getattr(settings, "chili_momentum_adopt_on_cancel_fill_enabled", True))
         and sess.mode == "live"
         and prev in LIVE_CANCELLABLE_STATES
+        and _is_alpaca_live
+        and not _pre_http_no_transport_terminal
     ):
         _adopt = _try_adopt_filled_entry_on_cancel(db, sess, cancelled_by=cancelled_by)
         if _adopt is not None:
             return _adopt
 
+    if (
+        sess.mode == "live"
+        and prev in LIVE_CANCELLABLE_STATES
+        and not _is_alpaca_live
+    ):
+        terminal_truth = _non_alpaca_live_terminalization_proof(
+            db,
+            sess,
+            context="cancel_automation_session_pre_terminal",
+            cancelled_by=cancelled_by,
+        )
+        if terminal_truth.get("state") == "managed":
+            return dict(terminal_truth.get("result") or terminal_truth)
+        if terminal_truth.get("state") != "safe":
+            return {
+                **terminal_truth,
+                "message": (
+                    "Broker order/position truth remains under reconciliation; "
+                    "the live session was not terminalized."
+                ),
+            }
+        if (
+            sess.state != prev
+            or not _non_alpaca_terminal_proof_matches_session(
+                sess,
+                terminal_truth.get("proof"),
+            )
+        ):
+            return _persist_non_alpaca_terminalization_quarantine(
+                db,
+                sess,
+                reason="terminalization_session_generation_changed",
+                context="cancel_automation_session_pre_terminal_mutation",
+                detail={"expected_state": prev, "current_state": sess.state},
+            )
+
+    if _is_alpaca_live:
+        # Broker reads/adoption can span a configuration reload.  Never inherit
+        # cancellation or terminalization authority across account generations.
+        execution_quarantine = _persisted_alpaca_execution_quarantine_reason(sess)
+        if execution_quarantine is not None:
+            return _quarantine_operator_stop_execution(
+                db,
+                sess,
+                reason=execution_quarantine,
+            )
+
     now = datetime.utcnow()
-    if sess.mode == "live" and prev in LIVE_CANCELLABLE_STATES:
-        sess.state = STATE_LIVE_CANCELLED
-    else:
-        sess.state = STATE_CANCELLED
+    final_account_quarantine = _final_non_alpaca_terminal_account_quarantine(
+        db,
+        sess,
+        context="cancel_automation_session_final_account_fence",
+    )
+    if final_account_quarantine is not None:
+        return final_account_quarantine
+    terminal_state = (
+        STATE_LIVE_CANCELLED if sess.mode == "live" else STATE_CANCELLED
+    )
+    if _is_alpaca_live:
+        _retire_confirmed_pre_http_alpaca_claim_before_terminal(
+            db,
+            sess,
+            new_state=terminal_state,
+        )
+    sess.state = terminal_state
     sess.ended_at = now
     sess.updated_at = now
     sess.risk_snapshot_json = clear_operator_pause(sess.risk_snapshot_json)
@@ -2112,47 +4729,17 @@ def cancel_automation_session(
     # reaper land here): best-effort cancel every unresolved entry order; if one
     # already FILLED, surface it loudly so the adoption is visible.
     _order_cleanup = None
-    if sess.mode == "live":
-        try:
-            _snap = sess.risk_snapshot_json or {}
-            _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
-            _le = _le if isinstance(_le, dict) else {}
-            _oids: list[str] = []
-            for _o in [_le.get("entry_order_id")] + list(_le.get("entry_order_ids_all") or []):
-                _os = str(_o or "").strip()
-                if _os and _os not in _oids:
-                    _oids.append(_os)
-            if _oids:
-                from ..venue.factory import get_adapter
-
-                _adapter = get_adapter(sess.execution_family)
-                _results = []
-                for _oid in _oids:
-                    _row: dict[str, Any] = {"order_id": _oid}
-                    if _adapter is None:
-                        _row["result"] = "no_adapter"
-                    else:
-                        try:
-                            _no, _ = _adapter.get_order(_oid)
-                            _filled = float(getattr(_no, "filled_size", 0) or 0) if _no else 0.0
-                            _status = str(getattr(_no, "status", "") or "") if _no else "unknown"
-                            _row["status"] = _status
-                            if _filled > 0:
-                                _row["result"] = "FILLED_NEEDS_ADOPTION"
-                                _row["filled_size"] = _filled
-                            elif _status.lower() in (
-                                "filled", "cancelled", "canceled", "rejected", "failed", "expired", "done",
-                            ):
-                                _row["result"] = "already_terminal"
-                            else:
-                                _adapter.cancel_order(_oid)
-                                _row["result"] = "cancelled"
-                        except Exception as _exc:  # pragma: no cover - broker I/O
-                            _row["result"] = f"error:{str(_exc)[:80]}"
-                    _results.append(_row)
-                _order_cleanup = {"orders": _results}
-        except Exception:
-            logger.debug("[automation_query] session-death order sweep failed", exc_info=True)
+    if sess.mode == "live" and _is_alpaca_live:
+        # Alpaca can reach this terminal chokepoint only after the exact-flatten
+        # path above proved broker-flat with the frozen account generation.  A
+        # second unbound best-effort sweep would add cross-generation authority
+        # without adding safety, so make the zero-broker-call skip explicit.
+        _order_cleanup = {"skipped": "alpaca_exact_flatten_completed"}
+    elif sess.mode == "live":
+        # Non-Alpaca live rows reached here only after the strict pre-terminal
+        # proof canceled/reread every saved identity and proved symbol-open-order
+        # absence.  Never perform a second best-effort sweep after death.
+        _order_cleanup = {"skipped": "strict_preterminal_order_proof_completed"}
 
     append_trading_automation_event(
         db,
@@ -2174,7 +4761,7 @@ def cancel_automation_session(
             correlation_id=sess.correlation_id,
             source_node_id="momentum_automation_monitor",
         )
-    if sess.mode == "live" and prev in LIVE_CANCELLABLE_STATES:
+    if sess.mode == "live":
         append_trading_automation_event(
             db,
             sess.id,

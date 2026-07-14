@@ -21155,6 +21155,115 @@ def _migration_314_momentum_outcome_code_version(conn) -> None:
     )
 
 
+def _migration_315_iqfeed_bridge_timestamp_provenance(conn) -> None:
+    """Make IQFeed BBO/trade clocks explicit instead of overloading ``observed_at``.
+
+    The Level-1 default frame exposes Most-Recent-Trade-Time, but no quote-event time.
+    Therefore new quote rows persist a nullable ``provider_event_at`` (NULL for this
+    layout), an explicit host ``received_at``, a timestamp-basis label, and the bridge
+    source build. Existing rows are intentionally *not* backfilled: copying
+    ``observed_at`` into either new clock would fabricate provenance. The adapter fails
+    closed on those legacy rows and falls back to a direct broker quote.  The
+    production tape is large, so this migration deliberately creates no new
+    index: the execution read stays on the existing
+    ``(symbol, observed_at DESC)`` index and validates the explicit
+    receive clock after selection.
+    """
+    tables = _tables(conn)
+    # Nullable ADD COLUMN is metadata-only on supported PostgreSQL versions,
+    # but still needs a brief ACCESS EXCLUSIVE lock. Never wait behind a
+    # long-running tape transaction during a deploy.
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    if "momentum_nbbo_spread_tape" in tables:
+        conn.execute(text(
+            "ALTER TABLE momentum_nbbo_spread_tape "
+            "ADD COLUMN IF NOT EXISTS provider_event_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS timestamp_basis VARCHAR(48), "
+            "ADD COLUMN IF NOT EXISTS bridge_version VARCHAR(96)"
+        ))
+
+    # The host bridge owns this standalone table, so it may not exist in a fresh app DB.
+    # When present, apply the same two-clock contract to the trade stream as well.
+    if "iqfeed_trade_ticks" in tables:
+        conn.execute(text(
+            "ALTER TABLE iqfeed_trade_ticks "
+            "ADD COLUMN IF NOT EXISTS provider_event_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS timestamp_basis VARCHAR(48), "
+            "ADD COLUMN IF NOT EXISTS bridge_version VARCHAR(96)"
+        ))
+    conn.commit()
+    logger.info(
+        "[mig315] ensured explicit IQFeed provider/receive clocks + bridge version "
+        "without fabricating legacy provenance or indexing the historical tape"
+    )
+
+
+def _migration_316_broker_symbol_action_claims(conn) -> None:
+    """Durable broker-account/symbol ownership across entry and orphan workers.
+
+    This table deliberately has no session FK: a genuine broker orphan may have no
+    surviving CHILI session.  The primary key is the concurrency primitive.  Rows in
+    submitted/indeterminate phases never expire by time alone; only exact broker
+    reconciliation may resolve them.
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS broker_symbol_action_claims ("
+        "  account_scope VARCHAR(96) NOT NULL,"
+        "  symbol VARCHAR(36) NOT NULL,"
+        "  claim_token VARCHAR(64) NOT NULL,"
+        "  action VARCHAR(32) NOT NULL,"
+        "  phase VARCHAR(32) NOT NULL,"
+        "  owner_session_id INTEGER NULL,"
+        "  client_order_id VARCHAR(96) NULL,"
+        "  broker_order_id VARCHAR(128) NULL,"
+        "  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,"
+        "  claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+        "  lease_expires_at TIMESTAMPTZ NULL,"
+        "  resolved_at TIMESTAMPTZ NULL,"
+        "  PRIMARY KEY (account_scope, symbol),"
+        "  CONSTRAINT ck_broker_symbol_action_phase CHECK ("
+        "    phase IN ('claimed', 'submit_indeterminate', 'submitted', 'resolved')"
+        "  )"
+        ")"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_broker_symbol_action_claims_phase "
+        "ON broker_symbol_action_claims (phase, updated_at)"
+    ))
+    conn.commit()
+    logger.info("[mig316] ensured durable broker account/symbol action claims")
+
+
+def _migration_317_iqfeed_bridge_v2_causal_provenance(conn) -> None:
+    """Add nullable v2 IQFeed causal-fence metadata without touching tape data.
+
+    Migration 315 may already be recorded in production, so the dedicated trade
+    reference, message type, process run, and socket generation need a new migration.
+    Existing rows remain intentionally NULL and therefore non-authoritative. This is
+    metadata-only: no backfill and no index build over the historical NBBO tape.
+    """
+    tables = _tables(conn)
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    for table_name in ("momentum_nbbo_spread_tape", "iqfeed_trade_ticks"):
+        if table_name not in tables:
+            continue
+        conn.execute(text(
+            f"ALTER TABLE {table_name} "
+            "ADD COLUMN IF NOT EXISTS provider_trade_reference_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS message_type VARCHAR(1), "
+            "ADD COLUMN IF NOT EXISTS bridge_run_id VARCHAR(36), "
+            "ADD COLUMN IF NOT EXISTS connection_generation BIGINT"
+        ))
+    conn.commit()
+    logger.info(
+        "[mig317] ensured nullable IQFeed v2 causal provenance metadata "
+        "without tape backfill or indexes"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21545,6 +21654,12 @@ MIGRATIONS = [
      _migration_313_momentum_bridge_subscribe_requests),
     ("314_momentum_outcome_code_version",
      _migration_314_momentum_outcome_code_version),
+    ("315_iqfeed_bridge_timestamp_provenance",
+     _migration_315_iqfeed_bridge_timestamp_provenance),
+    ("316_broker_symbol_action_claims",
+     _migration_316_broker_symbol_action_claims),
+    ("317_iqfeed_bridge_v2_causal_provenance",
+     _migration_317_iqfeed_bridge_v2_causal_provenance),
 ]
 
 

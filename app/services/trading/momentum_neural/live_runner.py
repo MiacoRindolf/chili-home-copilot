@@ -24,7 +24,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from ....config import settings
-from ....models.trading import MomentumSymbolViability, TradingAutomationSession
+from ....models.trading import (
+    BrokerSymbolActionClaim,
+    MomentumSymbolViability,
+    TradingAutomationSession,
+)
 from ..execution_family_registry import (
     EXECUTION_FAMILY_COINBASE_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
@@ -46,7 +50,44 @@ from ..venue.protocol import (
     NormalizedTicker,
     is_fresh_enough,
 )
+from ..venue.account_identity import verify_frozen_non_alpaca_account_identity
+from ..venue.alpaca_spot import quantize_alpaca_equity_limit_price
 from .persistence import append_trading_automation_event
+from .alpaca_orphan_claims import (
+    ALPACA_EXECUTION_FAMILIES,
+    CLAIMED as ALPACA_CLAIMED,
+    SUBMIT_INDETERMINATE as ALPACA_SUBMIT_INDETERMINATE,
+    SUBMITTED as ALPACA_SUBMITTED,
+    acquire_action_claim,
+    acquire_action_claim_committed,
+    advance_owner_transport_committed,
+    lease_owner_transport_committed,
+    mark_entry_transport_started_committed,
+    lease_deadman_handoff_replacement_committed,
+    certify_deadman_handoff_reprotected_committed,
+    reconcile_deadman_replacement_successor_committed,
+    advance_deadman_replacement_quarantine_baseline_committed,
+    prepare_deadman_replacement_containment_committed,
+    activate_deadman_replacement_containment_committed,
+    retire_deadman_handoff_reprotected_committed,
+    prepare_deadman_close_handoff_committed,
+    finalize_deadman_close_handoff_request_committed,
+    reserve_alpaca_entry_risk_committed,
+    release_entry_claim_pre_post_committed,
+    release_owner_transport_pre_post_committed,
+    read_action_claim,
+    bind_orphan_close_request_committed,
+    mark_orphan_close_transport_started_committed,
+    release_orphan_close_pre_post_committed,
+    advance_orphan_close_claim_phase_committed,
+    read_action_claim_committed,
+    resolve_action_claim,
+    resolve_action_claim_committed,
+    resolve_owner_transport_terminal_committed,
+    retire_deadman_close_handoff_committed,
+    retire_deadman_handoff_for_fractional_day_close_committed,
+    update_action_claim_phase_committed,
+)
 from ..decision_ledger import (
     finalize_packet_after_simulated_exit,
     mark_packet_executed,
@@ -64,6 +105,7 @@ from .risk_policy import (
     policy_float_cap,
     policy_int_cap,
     adaptive_reentry_cooldown_seconds,
+    alpaca_paper_hard_loss_cap_usd,
     reentry_after_stop_allowed,
     reentry_escalation_decision,
     reentry_escalation_level_update,
@@ -96,8 +138,10 @@ from .paper_execution import (
     tape_accel_reversal_exit,
     utc_iso,
 )
+from .paper_fsm import STATE_LIVE_ARM_PENDING
 from .persistence import variant_for_id
 from .live_fsm import (
+    LIVE_POSITION_HOLDING_STATES,
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_ARMED_PENDING_RUNNER,
     STATE_LIVE_BAILOUT,
@@ -115,7 +159,7 @@ from .live_fsm import (
     STATE_WATCHING_LIVE,
     assert_transition_live,
 )
-from .session_lifecycle import is_operator_paused
+from .session_lifecycle import apply_operator_pause, is_operator_paused
 from .strategy_params import normalize_strategy_params
 from .entry_gates import (
     _entry_extension_veto,
@@ -436,7 +480,2014 @@ def _fast_ack_poll_entry(adapter, oid, *, sess, interval_window_s: float):
     return no, fr
 
 
-def _governed_place(adapter, place_fn, *, sess=None, **kwargs):
+def _alpaca_place_instruction_kind(sess: Any, kwargs: dict[str, Any]) -> str:
+    """Classify the only Alpaca instructions certified at the submit boundary.
+
+    Alpaca ``SELL`` is intrinsically ambiguous without position intent.  Treating an
+    unknown/mismatched pair as risk-decreasing is unsafe because the adapter could
+    otherwise open a short.  The paper lane is deliberately long-only: a DAY long
+    entry or a long close are the complete allowlist.
+    """
+    if sess is None:
+        return "non_alpaca"
+    if normalize_execution_family(getattr(sess, "execution_family", None)) not in ALPACA_EXECUTION_FAMILIES:
+        return "non_alpaca"
+    side = str(kwargs.get("side") or "").strip().lower()
+    intent = str(kwargs.get("position_intent") or "").strip().lower()
+    if side == "sell" and intent == "sell_to_close":
+        return "close"
+    if side == "buy" and intent == "buy_to_open":
+        tif = str(kwargs.get("time_in_force") or "").strip().lower()
+        if tif not in {"day", "gfd"}:
+            return "invalid_entry_tif"
+        # RTH-only entry authority is frozen before the broker boundary.  A
+        # premarket generation must not cross 09:30 with ``extended_hours=True``
+        # and silently become an RTH order that remains eligible again postmarket.
+        # Require the literal frozen value; missing/truthy values are both a new
+        # instruction and must be regenerated upstream.
+        if kwargs.get("extended_hours") is not False:
+            return "invalid_entry_extended_hours"
+        return "entry"
+    return "invalid"
+
+
+def _alpaca_risk_increasing_place(sess: Any, kwargs: dict[str, Any]) -> bool:
+    return _alpaca_place_instruction_kind(sess, kwargs) == "entry"
+
+
+def _alpaca_execution_quarantine_reason(sess: Any) -> str | None:
+    """Repeat the paper/equity/long-only certification at the broker boundary."""
+    if sess is None:
+        return None
+    family = normalize_execution_family(getattr(sess, "execution_family", None))
+    if family not in ALPACA_EXECUTION_FAMILIES:
+        return None
+    if not bool(getattr(settings, "chili_alpaca_paper", True)):
+        return "alpaca_live_posture_not_certified"
+    symbol = str(getattr(sess, "symbol", "") or "").strip().upper()
+    if symbol.endswith("-USD") or "/" in symbol:
+        return "alpaca_crypto_execution_not_certified"
+    if family == "alpaca_short":
+        return "alpaca_short_execution_not_certified"
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    le = snapshot.get(KEY_LIVE_EXEC)
+    le = le if isinstance(le, dict) else {}
+    position = le.get("position")
+    position = position if isinstance(position, dict) else {}
+    explicit_asset_values = (
+        snapshot.get("asset_class"),
+        snapshot.get("asset_type"),
+        snapshot.get("asset_kind"),
+        le.get("asset_class"),
+        le.get("asset_type"),
+        le.get("asset_kind"),
+        position.get("asset_class"),
+        position.get("asset_type"),
+        position.get("asset_kind"),
+    )
+    explicit_crypto_values = {
+        "crypto",
+        "cryptocurrency",
+        "digital_asset",
+        "digital_assets",
+    }
+    if any(
+        str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        in explicit_crypto_values
+        for value in explicit_asset_values
+    ):
+        return "alpaca_crypto_execution_not_certified"
+    if str(snapshot.get("alpaca_account_scope") or "").strip() != "alpaca:paper":
+        return "alpaca_account_scope_unfrozen_or_mismatched"
+    frozen_account_id = str(snapshot.get("alpaca_account_id") or "").strip()
+    expected_account_id = str(
+        getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+    ).strip()
+    if not frozen_account_id:
+        return "alpaca_account_id_unfrozen"
+    if not expected_account_id or frozen_account_id != expected_account_id:
+        return "alpaca_account_generation_mismatch"
+    if not _le_side_long(le):
+        return "alpaca_long_direction_not_certified"
+    return None
+
+
+def _confirmed_alpaca_arm_generation_reason(sess: Any) -> str | None:
+    """Validate the final-lock admission proof for a risk-increasing generation.
+
+    This proof is intentionally separate from the account/direction quarantine:
+    a legacy held position must retain exit authority even when it predates the
+    marker, while every new entry must match the exact generation confirmed under
+    the operator row/advisory lock.
+    """
+    if sess is None or normalize_execution_family(
+        getattr(sess, "execution_family", None)
+    ) not in ALPACA_EXECUTION_FAMILIES:
+        return None
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    marker = snapshot.get("confirmed_arm_generation")
+    if not isinstance(marker, dict):
+        return "alpaca_confirmed_arm_generation_missing"
+    try:
+        version = int(marker.get("version"))
+        marker_session_id = int(marker.get("session_id"))
+        session_id = int(getattr(sess, "id"))
+    except (TypeError, ValueError):
+        return "alpaca_confirmed_arm_generation_mismatch"
+    if version != 1 or marker_session_id != session_id:
+        return "alpaca_confirmed_arm_generation_mismatch"
+    exact_fields = {
+        "arm_token": "arm_token",
+        "expires_at_utc": "expires_at_utc",
+        "alpaca_symbol_claim_token": "alpaca_symbol_claim_token",
+        "alpaca_account_scope": "alpaca_account_scope",
+        "alpaca_account_id": "alpaca_account_id",
+        "confirmed_at_utc": "arm_confirmed_at_utc",
+    }
+    for marker_key, snapshot_key in exact_fields.items():
+        marker_value = marker.get(marker_key)
+        snapshot_value = snapshot.get(snapshot_key)
+        if (
+            not isinstance(marker_value, str)
+            or not marker_value
+            or not isinstance(snapshot_value, str)
+            or not snapshot_value
+            or marker_value != snapshot_value
+        ):
+            return "alpaca_confirmed_arm_generation_mismatch"
+    return None
+
+
+def _frozen_alpaca_account_scope(sess: Any) -> str | None:
+    """Return the session-frozen certified account scope, never ambient config."""
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    scope = str(snapshot.get("alpaca_account_scope") or "").strip().lower()
+    return scope if scope == "alpaca:paper" else None
+
+
+def _frozen_alpaca_account_id(sess: Any) -> str | None:
+    """Stable non-secret Alpaca UUID frozen with this execution generation."""
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    account_id = str(snapshot.get("alpaca_account_id") or "").strip()
+    return account_id or None
+
+
+def _strict_alpaca_account_identity(
+    adapter: Any,
+    sess: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Re-read the broker UUID before a mutation; scope/config are insufficient."""
+    if normalize_execution_family(
+        getattr(sess, "execution_family", None)
+    ) not in ALPACA_EXECUTION_FAMILIES:
+        return True, {"not_applicable": True}
+    frozen = _frozen_alpaca_account_id(sess)
+    if not frozen or _frozen_alpaca_account_scope(sess) != "alpaca:paper":
+        return False, {"reason": "alpaca_account_identity_unfrozen"}
+    try:
+        snap = adapter.get_account_snapshot()
+    except Exception as exc:
+        return False, {
+            "reason": "alpaca_account_identity_unavailable",
+            "exception_type": type(exc).__name__,
+        }
+    snap = snap if isinstance(snap, dict) else {}
+    observed = str(snap.get("account_id") or "").strip()
+    if not (
+        snap.get("ok") is True
+        and snap.get("paper") is True
+        and observed
+        and observed == frozen
+    ):
+        return False, {
+            "reason": (
+                "alpaca_account_identity_mismatch"
+                if observed and frozen and observed != frozen
+                else "alpaca_account_identity_unavailable"
+            ),
+            "frozen_account_id": frozen,
+            "observed_account_id": observed or None,
+            "paper": snap.get("paper"),
+        }
+    return True, {
+        "account_id": frozen,
+        "paper": True,
+        "checked_at_utc": _utcnow().isoformat(),
+    }
+
+
+def _strict_alpaca_clock_truth(
+    adapter: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Return one fresh broker calendar/clock snapshot with parsed close time."""
+    if not hasattr(adapter, "get_market_clock_snapshot"):
+        return None, {"reason": "alpaca_broker_clock_unavailable"}
+    try:
+        raw = adapter.get_market_clock_snapshot()
+    except Exception as exc:
+        return None, {
+            "reason": "alpaca_broker_clock_unavailable",
+            "exception_type": type(exc).__name__,
+        }
+    raw = raw if isinstance(raw, dict) else {}
+    try:
+        broker_now = datetime.fromisoformat(
+            str(raw.get("timestamp") or "").replace("Z", "+00:00")
+        )
+        next_close = datetime.fromisoformat(
+            str(raw.get("next_close") or "").replace("Z", "+00:00")
+        )
+        if broker_now.tzinfo is None:
+            broker_now = broker_now.replace(tzinfo=timezone.utc)
+        else:
+            broker_now = broker_now.astimezone(timezone.utc)
+        if next_close.tzinfo is None:
+            next_close = next_close.replace(tzinfo=timezone.utc)
+        else:
+            next_close = next_close.astimezone(timezone.utc)
+        local_now = datetime.now(timezone.utc)
+        clock_age = (local_now - broker_now).total_seconds()
+        seconds_to_close = (next_close - broker_now).total_seconds()
+        if not (
+            raw.get("ok") is True
+            and raw.get("paper") is True
+            and math.isfinite(clock_age)
+            and -1.0 <= clock_age <= 30.0
+            and math.isfinite(seconds_to_close)
+            and seconds_to_close >= 0.0
+        ):
+            raise ValueError("broker clock is stale, future, or contradictory")
+    except Exception:
+        return None, {
+            "reason": "alpaca_broker_close_clock_unreadable",
+            "broker_clock_ok": raw.get("ok"),
+            "broker_timestamp": raw.get("timestamp"),
+            "broker_next_close": raw.get("next_close"),
+        }
+    return {
+        **raw,
+        "_broker_now": broker_now,
+        "_next_close": next_close,
+        "_seconds_to_close": seconds_to_close,
+        "_clock_age_seconds": clock_age,
+    }, {
+        "broker_clock_ok": True,
+        "broker_is_open": raw.get("is_open"),
+        "broker_timestamp": raw.get("timestamp"),
+        "broker_next_close": raw.get("next_close"),
+        "broker_clock_age_seconds": clock_age,
+        "seconds_to_close": seconds_to_close,
+    }
+
+
+def _strict_alpaca_rth_entry_window(
+    adapter: Any,
+    sess: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Require both local calendar classification and fresh broker-open truth."""
+    if normalize_execution_family(
+        getattr(sess, "execution_family", None)
+    ) not in ALPACA_EXECUTION_FAMILIES:
+        return True, {"not_applicable": True}
+    try:
+        from .market_profile import market_session_now
+
+        local_session = str(market_session_now(str(sess.symbol))).strip().lower()
+    except Exception:
+        local_session = "unknown"
+    clock, clock_evidence = _strict_alpaca_clock_truth(adapter)
+    if clock is None:
+        return False, {
+            **clock_evidence,
+            "local_market_session": local_session,
+        }
+    if not (
+        local_session == "regular"
+        and clock.get("ok") is True
+        and clock.get("paper") is True
+        and clock.get("is_open") is True
+    ):
+        return False, {
+            "reason": "alpaca_new_entries_rth_only",
+            "local_market_session": local_session,
+            "broker_clock_ok": clock.get("ok"),
+            "broker_is_open": clock.get("is_open"),
+            "broker_timestamp": clock.get("timestamp"),
+        }
+    try:
+        broker_now = clock["_broker_now"]
+        next_close = clock["_next_close"]
+        seconds_to_close = float(clock["_seconds_to_close"])
+        snapshot = getattr(sess, "risk_snapshot_json", None)
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        live = snapshot.get(KEY_LIVE_EXEC)
+        live = live if isinstance(live, dict) else {}
+        max_hold_seconds = float(live.get("effective_max_hold_seconds"))
+        if not math.isfinite(max_hold_seconds) or max_hold_seconds <= 0.0:
+            raise ValueError("effective max hold unavailable")
+        eod_lead_seconds = 60.0 * float(
+            getattr(settings, "chili_momentum_eod_flatten_lead_min", 5.0) or 0.0
+        )
+        required_seconds = max(
+            30.0 * 60.0,
+            max_hold_seconds + eod_lead_seconds + 5.0 * 60.0,
+        )
+        if (
+            not math.isfinite(seconds_to_close)
+            or not math.isfinite(required_seconds)
+            or seconds_to_close < required_seconds
+        ):
+            return False, {
+                "reason": "alpaca_entry_too_close_to_regular_close",
+                "seconds_to_close": seconds_to_close,
+                "required_seconds_to_close": required_seconds,
+                "max_hold_seconds": max_hold_seconds,
+                "eod_flatten_lead_seconds": eod_lead_seconds,
+                "broker_timestamp": clock.get("timestamp"),
+                "broker_next_close": clock.get("next_close"),
+            }
+    except Exception:
+        return False, {
+            "reason": "alpaca_broker_close_clock_unreadable",
+            "broker_timestamp": clock.get("timestamp"),
+            "broker_next_close": clock.get("next_close"),
+        }
+    return True, {
+        "local_market_session": local_session,
+        "broker_is_open": True,
+        "broker_timestamp": clock.get("timestamp"),
+        "broker_next_close": clock.get("next_close"),
+        "seconds_to_close": seconds_to_close,
+        "required_seconds_to_close": required_seconds,
+        "checked_at_utc": _utcnow().isoformat(),
+    }
+
+
+def _alpaca_entries_quarantined(sess: Any) -> bool:
+    """Close-only recertification may never regain an entry transport path."""
+    if normalize_execution_family(
+        getattr(sess, "execution_family", None)
+    ) not in ALPACA_EXECUTION_FAMILIES:
+        return False
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    marker = snapshot.get("alpaca_close_only_recertification")
+    marker = marker if isinstance(marker, dict) else {}
+    le = snapshot.get(KEY_LIVE_EXEC)
+    le = le if isinstance(le, dict) else {}
+    return bool(
+        snapshot.get("entries_quarantined")
+        or marker.get("entries_quarantined")
+        or le.get("alpaca_entries_quarantined")
+    )
+
+
+def _alpaca_close_only_marker(sess: Any) -> dict[str, Any] | None:
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    marker = snapshot.get("alpaca_close_only_recertification")
+    if not isinstance(marker, dict) or not marker.get("entries_quarantined"):
+        return None
+    return marker
+
+
+def _validated_alpaca_close_only_marker(
+    sess: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    marker = _alpaca_close_only_marker(sess)
+    if marker is None:
+        return None, None
+    try:
+        max_close_qty = float(marker.get("max_close_qty"))
+        broker_qty = float(marker.get("broker_position_qty_at_recertification"))
+    except (TypeError, ValueError):
+        return None, "alpaca_close_only_quantity_proof_missing"
+    if not (
+        str(marker.get("scope") or "").strip().lower() == "alpaca:paper"
+        and str(marker.get("close_claim_action") or "").strip()
+        == "orphan_flatten"
+        and str(marker.get("close_claim_token") or "").strip()
+        and str(marker.get("close_client_order_id") or "").strip()
+        and math.isfinite(max_close_qty)
+        and max_close_qty > 0.0
+        and math.isfinite(broker_qty)
+        and abs(broker_qty - max_close_qty)
+        <= max(1e-9, max_close_qty * 1e-8)
+    ):
+        return None, "alpaca_close_only_proof_invalid"
+    return {
+        **dict(marker),
+        "max_close_qty": max_close_qty,
+        "broker_position_qty_at_recertification": broker_qty,
+        "unattributed_quantity_floor": max(0.0, broker_qty - max_close_qty),
+    }, None
+
+
+def _claim_lease_elapsed(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value <= datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def _exact_alpaca_claim_order(adapter: Any, kwargs: dict[str, Any], cid: str) -> Any | None:
+    if not hasattr(adapter, "get_order_by_client_order_id"):
+        return None
+    try:
+        order, _ = adapter.get_order_by_client_order_id(cid)
+    except Exception:
+        return None
+    if order is None:
+        return None
+    if str(getattr(order, "client_order_id", "") or "") != cid:
+        return None
+    expected_symbol = str(kwargs.get("product_id") or "").strip().upper()
+    actual_symbol = str(getattr(order, "product_id", "") or "").strip().upper()
+    if expected_symbol and actual_symbol != expected_symbol:
+        return None
+    if str(getattr(order, "side", "") or "").strip().lower() != str(kwargs.get("side") or "").strip().lower():
+        return None
+    return order
+
+
+def _claim_order_result(order: Any, cid: str) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "order_id": str(getattr(order, "order_id", "") or ""),
+        "client_order_id": cid,
+        "status": str(getattr(order, "status", "") or ""),
+        "recovered_by_client_order_id": True,
+    }
+
+
+def _fresh_alpaca_broker_daily_loss_admission(
+    sess: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Force broker truth at the literal Alpaca risk-increasing seam.
+
+    Earlier arm/fill-boundary checks may intentionally share the five-second
+    account day-change cache. They are useful preliminary gates, but they cannot
+    authorize a POST: a just-confirmed exit may have crossed the paper $250 stop
+    after that cached healthy observation. This seam therefore bypasses the
+    cache immediately before the durable reservation. Any unavailable/malformed
+    observation fails closed without creating a claim or touching order HTTP.
+    """
+    family = normalize_execution_family(getattr(sess, "execution_family", None))
+    if family not in ALPACA_EXECUTION_FAMILIES:
+        return True, {"family": family, "not_applicable": True}
+    try:
+        raw_user_id = getattr(sess, "user_id", None)
+        user_id = int(raw_user_id) if raw_user_id is not None else None
+    except (TypeError, ValueError):
+        user_id = None
+    try:
+        from ..governance import broker_daily_loss_breached
+
+        blocked, raw_info = broker_daily_loss_breached(
+            None,
+            family,
+            user_id=user_id,
+            force_refresh=True,
+        )
+        info = dict(raw_info or {})
+    except Exception as exc:
+        return False, {
+            "family": family,
+            "reason": "alpaca_account_daily_change_unavailable",
+            "transient": True,
+            "error": f"force_refresh_exception:{type(exc).__name__}",
+        }
+    info["breached"] = bool(blocked)
+    if blocked:
+        # A sticky already-proven breach does not need another network read.
+        # A transient fresh-read failure is also a block, but never arms sticky.
+        return False, info
+    try:
+        realized = float(info.get("realized"))
+        cap = float(info.get("cap"))
+    except (TypeError, ValueError):
+        realized = cap = float("nan")
+    if (
+        info.get("broker_snapshot_cache_bypassed") is not True
+        or not math.isfinite(realized)
+        or not math.isfinite(cap)
+        or cap <= 0.0
+        or info.get("transient") is True
+    ):
+        return False, {
+            **info,
+            "family": family,
+            "reason": "alpaca_account_daily_change_unavailable",
+            "transient": True,
+            "error": "forced_broker_snapshot_evidence_invalid",
+        }
+    return True, info
+
+
+def _prepare_alpaca_place_claim(
+    adapter: Any,
+    sess: Any,
+    kwargs: dict[str, Any],
+    *,
+    order_role: str | None = None,
+    role_metadata: dict[str, Any] | None = None,
+    risk_stop_price: float | None = None,
+    account_equity_usd: float | None = None,
+) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
+    """Commit the exact risk-increasing permit before the adapter submit seam."""
+    if not _alpaca_risk_increasing_place(sess, kwargs):
+        return None, "", None
+    cid = str(kwargs.get("client_order_id") or "").strip()
+    generation_reason = _confirmed_alpaca_arm_generation_reason(sess)
+    if generation_reason:
+        return None, cid, {
+            "ok": False,
+            "error": generation_reason,
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid or None,
+        }
+    if not cid:
+        return None, "", {
+            "ok": False,
+            "error": "alpaca_risk_order_missing_client_id",
+            "deferred": True,
+            "pre_place_blocked": True,
+        }
+    snap = dict(getattr(sess, "risk_snapshot_json", None) or {})
+    account_scope = _frozen_alpaca_account_scope(sess)
+    if account_scope is None:
+        return None, cid, {
+            "ok": False,
+            "error": "alpaca_account_scope_unfrozen_or_mismatched",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+        }
+    account_id = _frozen_alpaca_account_id(sess)
+    if account_id is None:
+        return None, cid, {
+            "ok": False,
+            "error": "alpaca_account_id_unfrozen",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+        }
+    claim_token = str(snap.get("alpaca_symbol_claim_token") or f"entry-{int(sess.id)}")
+    side = str(kwargs.get("side") or "").strip().lower()
+    if side == "buy":
+        try:
+            canonical_limit = quantize_alpaca_equity_limit_price(
+                kwargs.get("limit_price"),
+                side,
+            )
+        except ValueError:
+            canonical_limit = None
+        if canonical_limit is None:
+            return None, cid, {
+                "ok": False,
+                "error": "alpaca_candidate_risk_unavailable",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+            }
+        if str(kwargs.get("limit_price")).strip() != canonical_limit:
+            return None, cid, {
+                "ok": False,
+                "error": "alpaca_entry_limit_not_canonical",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+                "canonical_limit_price": canonical_limit,
+            }
+    try:
+        qty = float(kwargs.get("base_size"))
+        limit_price = float(kwargs.get("limit_price"))
+        stop_price = float(risk_stop_price)
+        if side == "buy":
+            reserved_risk = max(0.0, limit_price - stop_price) * qty
+            intent = "buy_to_open"
+        elif side == "sell":
+            reserved_risk = max(0.0, stop_price - limit_price) * qty
+            intent = "sell_to_open"
+        else:
+            raise ValueError("side")
+        if not all(
+            math.isfinite(value) and value > 0.0
+            for value in (qty, limit_price, stop_price, reserved_risk)
+        ):
+            raise ValueError("risk")
+    except (TypeError, ValueError):
+        return None, cid, {
+            "ok": False,
+            "error": "alpaca_candidate_risk_unavailable",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+        }
+
+    kwargs["position_intent"] = intent
+    tif_raw = str(kwargs.get("time_in_force") or "day").strip().lower()
+    kwargs["extended_hours"] = bool(kwargs.get("extended_hours", False))
+    kwargs["time_in_force"] = (
+        "day"
+        if kwargs["extended_hours"] or tif_raw in {"day", "gfd"}
+        else tif_raw
+    )
+    order_request = {
+        "account_scope": account_scope,
+        "alpaca_account_id": account_id,
+        "product_id": str(kwargs.get("product_id") or "").strip().upper(),
+        "side": side,
+        "base_size": str(kwargs.get("base_size")),
+        "limit_price": str(kwargs.get("limit_price")),
+        "client_order_id": cid,
+        "position_intent": intent,
+        "order_type": "limit",
+        "time_in_force": str(kwargs.get("time_in_force")),
+        "extended_hours": bool(kwargs.get("extended_hours")),
+    }
+    post_bind_token = uuid.uuid4().hex
+    acquired = reserve_alpaca_entry_risk_committed(
+        symbol=str(getattr(sess, "symbol", "") or kwargs.get("product_id") or ""),
+        claim_token=claim_token,
+        owner_session_id=int(sess.id),
+        client_order_id=cid,
+        order_request=order_request,
+        order_role=str(order_role or "primary"),
+        reserved_risk_usd=reserved_risk,
+        account_equity_usd=account_equity_usd,
+        post_bind_token=post_bind_token,
+        role_metadata={
+            **dict(role_metadata or {}),
+            "alpaca_account_id": account_id,
+        },
+        account_scope=account_scope,
+        per_symbol_cap_usd=alpaca_paper_hard_loss_cap_usd(
+            getattr(sess, "execution_family", None)
+        ),
+    )
+    if not acquired.get("ok"):
+        return None, cid, {
+            "ok": False,
+            "error": acquired.get("reason") or "alpaca_symbol_action_claimed",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+        }
+    claim = dict(acquired["claim"])
+    # Keep the exact just-committed request in this call frame as well as in the
+    # durable claim.  The literal transport seam compares its adapter kwargs to
+    # this immutable decimal generation before consuming POST authority.
+    claim["_frozen_order_request"] = dict(order_request)
+    creator_generation = bool(
+        acquired.get("created")
+        or acquired.get("replaced")
+        or acquired.get("client_order_id_bound")
+    )
+    claim_metadata = claim.get("metadata")
+    claim_metadata = claim_metadata if isinstance(claim_metadata, dict) else {}
+    exact_creator_generation = bool(
+        creator_generation
+        and str(claim_metadata.get("entry_post_bind_token") or "").strip()
+        == post_bind_token
+    )
+    claim["_no_transport_proven"] = exact_creator_generation
+    claim["_post_bind_token"] = post_bind_token if exact_creator_generation else None
+    snap["alpaca_symbol_claim_token"] = claim["claim_token"]
+    sess.risk_snapshot_json = snap
+    try:
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+
+    if not exact_creator_generation:
+        strict_state, known = _strict_client_order_id_truth(adapter, cid)
+        if strict_state == "found" and known is not None:
+            if not _alpaca_claim_order_matches(known, claim, order_request):
+                return claim, cid, {
+                    "ok": False,
+                    "error": "alpaca_claim_identity_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                    "client_order_id": cid,
+                }
+            known_oid = str(getattr(known, "order_id", "") or "")
+            if known_oid:
+                update_action_claim_phase_committed(
+                    symbol=claim["symbol"],
+                    claim_token=claim["claim_token"],
+                    phase=ALPACA_SUBMITTED,
+                    client_order_id=cid,
+                    broker_order_id=known_oid,
+                    metadata={"recovered_before_submit": True},
+                    account_scope=claim["account_scope"],
+                )
+                return claim, cid, _claim_order_result(known, cid)
+            return claim, cid, {
+                "ok": False,
+                "error": "alpaca_claim_identity_mismatch",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+            }
+        if strict_state != "absent":
+            return claim, cid, {
+                "ok": False,
+                "error": "alpaca_claim_reconcile_pending",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+            }
+        # Risk-increasing entry requests are quote-bound. Never replay an aged,
+        # absent bound CID after its original worker may have paused before HTTP.
+        # Exact terminal broker truth or explicit process-stop/operator recovery
+        # is required; same-CID replay is reserved for risk-reducing closes.
+        return claim, cid, {
+            "ok": False,
+            "error": "alpaca_bound_entry_cid_absent_operator_recovery_required",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+        }
+    return claim, cid, None
+
+
+_ALPACA_ROLE_ORDER_FIELDS: dict[str, tuple[str, str | None]] = {
+    "primary": ("entry_order_id", "entry_limit_price"),
+    "repeg": ("entry_order_id", "entry_limit_price"),
+    "anticipation": ("anticipation_add_order_id", "anticipation_add_limit_px"),
+    "pyramid": ("pyramid_order_id", "pyramid_limit_px"),
+    "micro": ("micropullback_reentry_order_id", "micropullback_reentry_limit_px"),
+    "pullback": ("pullback_add_order_id", "pullback_add_limit_px"),
+    "flag": ("flag_breakout_add_order_id", "flag_breakout_add_limit_px"),
+}
+
+_ALPACA_ROLE_METADATA_KEYS = frozenset({
+    "entry_place_count",
+    "entry_repeg_count",
+    "entry_limit_price",
+    "entry_stop_atr_pct",
+    "entry_stop_model",
+    "entry_sizing",
+    "entry_resize_basis",
+    "entry_trigger_reason",
+    "entry_trigger_debug",
+    "structural_stop_price",
+    "structural_stop_atr_pct",
+    "entry_notional_guard",
+    "entry_expected_move_bps",
+    "entry_want_qty",
+    "entry_decision_packet_id",
+    "entry_final_bbo",
+    "entry_spread_risk_gate",
+    "entry_spread_bps_at_decision",
+    "entry_l2_snapshot",
+    "entry_features",
+    "entry_regime_snapshot_json",
+    "anticipation_remainder_qty",
+    "anticipation_place_count",
+    "pyramid_pending_R0",
+    "pyramid_prev_stop",
+    "pyramid_confirm_ofi",
+    "pyramid_place_count",
+    "micropullback_reentry_pending_R0",
+    "micropullback_reentry_place_count",
+    "micropullback_prev_stop",
+    "micropullback_pending_dip_low",
+    "micropullback_confirm_ofi",
+    "micropullback_confirm_trade_flow",
+    "pullback_add_pending_R0",
+    "pullback_add_place_count",
+    "pullback_add_prev_stop",
+    "pullback_add_pending_low",
+    "pullback_add_confirm_strength",
+    "pullback_add_confirm_ofi",
+    "flag_breakout_add_pending_R0",
+    "flag_breakout_add_place_count",
+    "flag_breakout_add_prev_stop",
+    "flag_breakout_add_pending_high",
+    "flag_breakout_add_confirm_strength",
+    "flag_breakout_add_confirm_ofi",
+})
+
+
+def _alpaca_claim_role(claim: dict[str, Any]) -> str:
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    role = str(metadata.get("order_role") or "").strip().lower()
+    if role in _ALPACA_ROLE_ORDER_FIELDS:
+        return role
+    cid = str(claim.get("client_order_id") or "").lower()
+    for prefix, inferred in (
+        ("chili_ml_ant_", "anticipation"),
+        ("chili_ml_pyr_", "pyramid"),
+        ("chili_ml_mpr_", "micro"),
+        ("chili_ml_pba_", "pullback"),
+        ("chili_ml_fba_", "flag"),
+    ):
+        if cid.startswith(prefix):
+            return inferred
+    return "primary"
+
+
+def _alpaca_claim_order_request(
+    claim: dict[str, Any],
+    sess: TradingAutomationSession,
+    product_id: str,
+) -> dict[str, Any]:
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    request = metadata.get("order_request")
+    request = dict(request) if isinstance(request, dict) else {}
+    request.setdefault("product_id", product_id)
+    request.setdefault("side", "buy" if _le_side_long(_live_exec(dict(sess.risk_snapshot_json or {}))) else "sell")
+    if request.get("side") == "sell":
+        request.setdefault("position_intent", "sell_to_open")
+    return request
+
+
+def _alpaca_claim_order_matches(
+    order: Any,
+    claim: dict[str, Any],
+    request: dict[str, Any],
+) -> bool:
+    cid = str(claim.get("client_order_id") or "").strip()
+    oid = str(claim.get("broker_order_id") or "").strip()
+    if not cid or str(getattr(order, "client_order_id", "") or "") != cid:
+        return False
+    if oid and str(getattr(order, "order_id", "") or "") != oid:
+        return False
+    if str(getattr(order, "product_id", "") or "").strip().upper() != str(
+        request.get("product_id") or ""
+    ).strip().upper():
+        return False
+    if str(getattr(order, "side", "") or "").strip().lower() != str(
+        request.get("side") or ""
+    ).strip().lower():
+        return False
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    broker_qty = _float_or_none(raw.get("qty"))
+    requested_qty = _float_or_none(request.get("base_size"))
+    if broker_qty is None or requested_qty is None:
+        return False
+    if abs(broker_qty - requested_qty) > max(1e-9, requested_qty * 1e-8):
+        return False
+    expected_type = str(request.get("order_type") or "").strip().lower()
+    if str(getattr(order, "order_type", "") or "").strip().lower() != expected_type:
+        return False
+    broker_tif = str(raw.get("time_in_force") or "").strip().lower()
+    if not broker_tif or broker_tif != str(request.get("time_in_force") or "").strip().lower():
+        return False
+    if raw.get("extended_hours") is None or bool(raw.get("extended_hours")) != bool(
+        request.get("extended_hours")
+    ):
+        return False
+    broker_intent = str(raw.get("position_intent") or "").strip().lower()
+    if not broker_intent or broker_intent != str(request.get("position_intent") or "").strip().lower():
+        return False
+    if expected_type == "limit":
+        try:
+            expected_limit = quantize_alpaca_equity_limit_price(
+                request.get("limit_price"),
+                request.get("side"),
+            )
+            broker_limit = quantize_alpaca_equity_limit_price(
+                raw.get("limit_price"),
+                request.get("side"),
+            )
+        except ValueError:
+            return False
+        # New claims must already carry the public canonical representation;
+        # the broker echo may vary textually (for example trailing zeroes) but
+        # must describe exactly the same executable tick.
+        if (
+            str(request.get("limit_price")).strip() != expected_limit
+            or broker_limit != expected_limit
+        ):
+            return False
+    return bool(str(getattr(order, "order_id", "") or "").strip())
+
+
+def _alpaca_frozen_entry_request_matches_transport(
+    claim: dict[str, Any],
+    kwargs: dict[str, Any],
+) -> bool:
+    """Prove the adapter kwargs are the exact request frozen by reservation."""
+    request = claim.get("_frozen_order_request")
+    if not isinstance(request, dict):
+        metadata = claim.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        request = metadata.get("order_request")
+    if not isinstance(request, dict):
+        return False
+    transport = {
+        "product_id": str(kwargs.get("product_id") or "").strip().upper(),
+        "side": str(kwargs.get("side") or "").strip().lower(),
+        "base_size": str(kwargs.get("base_size")),
+        "limit_price": str(kwargs.get("limit_price")),
+        "client_order_id": str(kwargs.get("client_order_id") or "").strip(),
+        "position_intent": str(kwargs.get("position_intent") or "").strip().lower(),
+        "order_type": "limit",
+        "time_in_force": str(kwargs.get("time_in_force") or "").strip().lower(),
+        "extended_hours": bool(kwargs.get("extended_hours")),
+    }
+    for key, value in transport.items():
+        if request.get(key) != value:
+            return False
+    try:
+        canonical = quantize_alpaca_equity_limit_price(
+            transport["limit_price"],
+            transport["side"],
+        )
+    except ValueError:
+        return False
+    return canonical == transport["limit_price"]
+
+
+def _attach_alpaca_owner_claim_order(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    claim: dict[str, Any],
+    order: Any,
+    request: dict[str, Any],
+    role: str,
+) -> None:
+    oid = str(getattr(order, "order_id", "") or "")
+    cid = str(getattr(order, "client_order_id", "") or claim.get("client_order_id") or "")
+    order_field, limit_field = _ALPACA_ROLE_ORDER_FIELDS[role]
+    le[order_field] = oid
+    if limit_field and _float_or_none(request.get("limit_price")) is not None:
+        le[limit_field] = float(request["limit_price"])
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    role_metadata = metadata.get("role_metadata")
+    role_metadata = role_metadata if isinstance(role_metadata, dict) else {}
+    for key, value in role_metadata.items():
+        if key in _ALPACA_ROLE_METADATA_KEYS and value is not None:
+            le[key] = value
+    if role in {"primary", "repeg"}:
+        le["entry_client_order_id"] = cid
+        le["entry_submitted"] = True
+        # The independently committed owner claim is now the authoritative
+        # recovery identity.  Do not leave the legacy ack-loss markers behind:
+        # they would make a later tick re-enter the old reconciliation path even
+        # though this exact CID/OID has already been attached.
+        le.pop("entry_reconcile_pending_client_order_id", None)
+        le.pop("entry_reconcile_pending_since_utc", None)
+        le["entry_submit_utc"] = (
+            getattr(order, "created_time", None) or _utcnow().isoformat()
+        )
+        _record_entry_order_placed(le, oid)
+    le["alpaca_owner_claim_recovered"] = {
+        "claim_token": claim.get("claim_token"),
+        "client_order_id": cid,
+        "broker_order_id": oid,
+        "order_role": role,
+        "status": getattr(order, "status", None),
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    _commit_le(sess, le)
+
+
+def _transition_recovered_primary_to_pending(
+    db: Session,
+    sess: TradingAutomationSession,
+) -> bool:
+    chain = {
+        STATE_ARMED_PENDING_RUNNER: STATE_QUEUED_LIVE,
+        STATE_QUEUED_LIVE: STATE_WATCHING_LIVE,
+        STATE_WATCHING_LIVE: STATE_LIVE_ENTRY_CANDIDATE,
+        STATE_LIVE_ENTRY_CANDIDATE: STATE_LIVE_PENDING_ENTRY,
+    }
+    for _ in range(4):
+        if sess.state == STATE_LIVE_PENDING_ENTRY:
+            return True
+        next_state = chain.get(sess.state)
+        if next_state is None:
+            return False
+        _safe_transition(db, sess, next_state)
+    return sess.state == STATE_LIVE_PENDING_ENTRY
+
+
+def _adopt_recovered_primary_fill_for_safety(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    order: Any,
+    product_id: str,
+) -> bool:
+    """Durably attach a crash-recovered primary fill without scanner inputs.
+
+    A broker fill already exists and therefore outranks viability/risk/scanner
+    availability.  This intentionally creates only the minimum truthful position
+    record and requests the quote-independent emergency path; it does not invent a
+    stop, target, or cost basis from the old limit instruction.
+    """
+    filled = max(0.0, float(getattr(order, "filled_size", 0.0) or 0.0))
+    if filled <= 1e-12 or _order_open(order):
+        return False
+    avg = _float_or_none(getattr(order, "average_filled_price", None))
+    if avg is None or avg <= 0.0:
+        _broker_signed, broker_avg = _broker_position_basis_for_emergency(
+            adapter,
+            product_id,
+        )
+        avg = broker_avg if broker_avg is not None and broker_avg > 0.0 else None
+    le["position"] = {
+        "product_id": product_id,
+        "side": "long" if _le_side_long(le) else "short",
+        "quantity": filled,
+        "original_quantity": filled,
+        "avg_entry_price": avg,
+        "notional_usd": filled * avg if avg is not None else None,
+        "opened_at_utc": _utcnow().isoformat(),
+        "high_water_mark": avg,
+        "stop_price": None,
+        "target_price": None,
+        "emergency_accounting_basis_unknown": avg is None,
+        "recovered_from_owner_claim": True,
+    }
+    le["operator_flatten_requested_utc"] = _utcnow().isoformat()
+    if avg is None:
+        le["alpaca_owner_recovery_accounting_pending"] = {
+            "broker_order_id": getattr(order, "order_id", None),
+            "filled_size": filled,
+            "reason": "entry_fill_missing_broker_cost_basis",
+        }
+    _mark_entry_order_resolved(le, getattr(order, "order_id", None), "adopted")
+    _resolve_alpaca_entry_claim_from_terminal_order(
+        sess,
+        order,
+        le=le,
+        durable_adopted=True,
+    )
+    if not _transition_recovered_primary_to_pending(db, sess):
+        return False
+    _safe_transition(db, sess, STATE_LIVE_ENTERED)
+    _commit_le(sess, le)
+    _emit(db, sess, "alpaca_owner_claim_primary_fill_adopted", {
+        "order_id": getattr(order, "order_id", None),
+        "client_order_id": getattr(order, "client_order_id", None),
+        "filled_size": filled,
+        "average_filled_price": avg,
+        "safety_action": "quote_independent_flatten",
+    })
+    return True
+
+
+def _adopt_recovered_terminal_add(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    claim: dict[str, Any],
+    order: Any,
+    request: dict[str, Any],
+    role: str,
+) -> bool:
+    filled = max(0.0, float(getattr(order, "filled_size", 0.0) or 0.0))
+    order_field, limit_field = _ALPACA_ROLE_ORDER_FIELDS[role]
+    if filled <= 1e-12:
+        le.pop(order_field, None)
+        if limit_field:
+            le.pop(limit_field, None)
+        _mark_entry_order_resolved(le, getattr(order, "order_id", None), "void")
+        _commit_le(sess, le)
+        return _resolve_alpaca_entry_claim_from_terminal_order(
+            sess,
+            order,
+            le=le,
+            durable_adopted=False,
+        )
+
+    pos = le.get("position")
+    pos = dict(pos) if isinstance(pos, dict) else {}
+    q0 = _float_or_none(pos.get("quantity"))
+    a0 = _float_or_none(pos.get("avg_entry_price"))
+    fill_price = _float_or_none(getattr(order, "average_filled_price", None))
+    broker_signed, broker_avg = _broker_position_basis_for_emergency(
+        adapter,
+        str(request.get("product_id") or sess.symbol),
+    )
+    broker_qty, broker_error = _normalize_emergency_broker_quantity(
+        broker_signed,
+        side_long=_le_side_long(le),
+    )
+    if q0 is None or q0 <= 0.0:
+        return False
+    if fill_price is not None and fill_price > 0.0 and a0 is not None and a0 > 0.0:
+        blended = pyramid_blend_on_fill(
+            q0=q0,
+            a0=a0,
+            qa_f=filled,
+            Pa_f=fill_price,
+            stop_px=_float_or_none(pos.get("stop_price")) or a0,
+            original_quantity=_float_or_none(pos.get("original_quantity")),
+        )
+        pos["quantity"] = blended["q1"]
+        pos["avg_entry_price"] = blended["a1"]
+        pos["original_quantity"] = blended["original_quantity"]
+        pos["notional_usd"] = blended["q1"] * blended["a1"]
+        pos["stop_price"] = blended["s1"]
+    elif broker_error is None and broker_qty is not None and broker_qty > 0.0 and broker_avg:
+        pos["quantity"] = broker_qty
+        pos["avg_entry_price"] = broker_avg
+        pos["original_quantity"] = max(
+            broker_qty,
+            _float_or_none(pos.get("original_quantity")) or broker_qty,
+        )
+        pos["notional_usd"] = broker_qty * broker_avg
+    else:
+        # Quantity is real but cost basis is not. Keep it physically managed only
+        # long enough for the quote-independent emergency flatten; never blend at
+        # the intended limit or book synthetic P&L.
+        pos["quantity"] = (
+            broker_qty
+            if broker_error is None and broker_qty is not None and broker_qty > 0.0
+            else q0 + filled
+        )
+        pos["avg_entry_price"] = None
+        pos["notional_usd"] = None
+        pos["emergency_accounting_basis_unknown"] = True
+        le["operator_flatten_requested_utc"] = _utcnow().isoformat()
+        le["alpaca_owner_recovery_accounting_pending"] = {
+            "claim_token": claim.get("claim_token"),
+            "client_order_id": claim.get("client_order_id"),
+            "broker_order_id": getattr(order, "order_id", None),
+            "filled_size": filled,
+            "reason": "recovered_add_missing_broker_cost_basis",
+        }
+    fee = _order_total_fees_usd(order) or 0.0
+    if fee > 0.0:
+        le["entry_fee_usd_unbooked"] = float(
+            le.get("entry_fee_usd_unbooked") or 0.0
+        ) + fee
+    le["position"] = pos
+    le.pop(order_field, None)
+    if limit_field:
+        le.pop(limit_field, None)
+    counter_key = {
+        "pyramid": "pyramid_add_count",
+        "micro": "micropullback_reentry_count",
+        "pullback": "pullback_add_count",
+        "flag": "flag_breakout_add_count",
+    }.get(role)
+    if counter_key:
+        le[counter_key] = int(le.get(counter_key) or 0) + 1
+    pending_r0_key = {
+        "pyramid": "pyramid_pending_R0",
+        "micro": "micropullback_reentry_pending_R0",
+        "pullback": "pullback_add_pending_R0",
+        "flag": "flag_breakout_add_pending_R0",
+    }.get(role)
+    pending_r0 = _float_or_none(le.get(pending_r0_key)) if pending_r0_key else None
+    if pending_r0 is not None and pending_r0 > 0.0:
+        le["pyramid_risk_anchor_usd"] = pending_r0
+    if role == "micro":
+        shelf = _float_or_none(le.get("micropullback_pending_dip_low"))
+        if shelf is not None and shelf > 0.0:
+            le["micropullback_last_shelf"] = shelf
+        cooldown_s = max(
+            float(getattr(settings, "chili_momentum_micropullback_reentry_cooldown_seconds", 30.0) or 30.0),
+            2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
+        )
+        le["micropullback_reentry_cooldown_until_utc"] = (
+            _utcnow() + timedelta(seconds=cooldown_s)
+        ).isoformat()
+    elif role == "pullback":
+        low = _float_or_none(le.get("pullback_add_pending_low"))
+        if low is not None and low > 0.0:
+            le["pullback_add_last_low"] = low
+        cooldown_s = max(
+            float(getattr(settings, "chili_momentum_pullback_add_cooldown_seconds", 30.0) or 30.0),
+            2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
+        )
+        le["pullback_add_cooldown_until_utc"] = (
+            _utcnow() + timedelta(seconds=cooldown_s)
+        ).isoformat()
+    elif role == "flag":
+        high = _float_or_none(le.get("flag_breakout_add_pending_high"))
+        if high is not None and high > 0.0:
+            le["flag_breakout_add_last_high"] = high
+        cooldown_s = max(
+            float(getattr(settings, "chili_momentum_flag_breakout_add_cooldown_seconds", 30.0) or 30.0),
+            2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
+        )
+        le["flag_breakout_add_cooldown_until_utc"] = (
+            _utcnow() + timedelta(seconds=cooldown_s)
+        ).isoformat()
+    for pending_key in {
+        "pyramid": (
+            "pyramid_pending_R0", "pyramid_prev_stop", "pyramid_confirm_ofi",
+        ),
+        "micro": (
+            "micropullback_reentry_pending_R0", "micropullback_pending_dip_low",
+            "micropullback_prev_stop", "micropullback_confirm_ofi",
+            "micropullback_confirm_trade_flow",
+        ),
+        "pullback": (
+            "pullback_add_pending_R0", "pullback_add_pending_low",
+            "pullback_add_prev_stop", "pullback_add_confirm_strength",
+            "pullback_add_confirm_ofi",
+        ),
+        "flag": (
+            "flag_breakout_add_pending_R0", "flag_breakout_add_pending_high",
+            "flag_breakout_add_prev_stop", "flag_breakout_add_confirm_strength",
+            "flag_breakout_add_confirm_ofi",
+        ),
+    }.get(role, ()):
+        le.pop(pending_key, None)
+    if role == "anticipation":
+        le["anticipation_completed"] = True
+        le.pop("anticipation_armed", None)
+        le.pop("anticipation_remainder_qty", None)
+    _mark_entry_order_resolved(le, getattr(order, "order_id", None), "adopted")
+    _resolve_alpaca_entry_claim_from_terminal_order(
+        sess,
+        order,
+        le=le,
+        durable_adopted=True,
+    )
+    le["alpaca_owner_claim_adoption"] = {
+        "claim_token": claim.get("claim_token"),
+        "client_order_id": claim.get("client_order_id"),
+        "broker_order_id": getattr(order, "order_id", None),
+        "order_role": role,
+        "filled_size": filled,
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    _commit_le(sess, le)
+    _emit(db, sess, "alpaca_owner_claim_add_adopted", le["alpaca_owner_claim_adoption"])
+    return True
+
+
+def _is_confirmed_pre_http_alpaca_arm_claim(
+    sess: TradingAutomationSession,
+    claim: dict[str, Any],
+    *,
+    le: dict[str, Any],
+) -> bool:
+    """Recognize only the exact claim created by a confirmed operator arm.
+
+    The operator reserves the account/symbol before it can know the deterministic
+    order CID.  That one pre-HTTP generation must be allowed to reach the later
+    risk reservation, which atomically binds the CID.  Every other CID-less claim
+    remains ambiguous and fail-closed.
+    """
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    stage = str(metadata.get("stage") or "").strip()
+    if stage == "live_arm_reserved":
+        exact_metadata = {"stage", "variant_id", "alpaca_account_id"}
+        try:
+            stage_identity_ok = int(metadata.get("variant_id")) == int(sess.variant_id)
+        except (TypeError, ValueError):
+            stage_identity_ok = False
+    elif stage == "promoted_live_arm_reserved":
+        exact_metadata = {"stage", "paper_session_id", "alpaca_account_id"}
+        try:
+            stage_identity_ok = int(metadata.get("paper_session_id")) == int(
+                sess.source_paper_session_id
+            )
+        except (TypeError, ValueError):
+            stage_identity_ok = False
+    else:
+        return False
+
+    claim_token = str(claim.get("claim_token") or "").strip()
+    arm_token = str(snapshot.get("arm_token") or "").strip()
+    account_id = _frozen_alpaca_account_id(sess)
+    pre_entry_state = sess.state in {
+        STATE_ARMED_PENDING_RUNNER,
+        STATE_QUEUED_LIVE,
+        STATE_WATCHING_LIVE,
+        STATE_LIVE_ENTRY_CANDIDATE,
+        STATE_LIVE_PENDING_ENTRY,
+    }
+    no_local_transport = bool(
+        ("entry_submitted" not in le or le.get("entry_submitted") is False)
+        and ("entry_order_id" not in le or le.get("entry_order_id") is None)
+        and (
+            "entry_client_order_id" not in le
+            or le.get("entry_client_order_id") is None
+        )
+        and (
+            "entry_reconcile_pending_client_order_id" not in le
+            or le.get("entry_reconcile_pending_client_order_id") is None
+        )
+        # Active pointers can be cleared by ack-timeout/recovery while durable
+        # order history remains late-fill capable.  Any historical transport
+        # identity means this is not a never-submitted arm permit.
+        and (
+            "entry_order_ids_all" not in le
+            or le.get("entry_order_ids_all") == []
+        )
+        and (
+            "entry_orders_resolved" not in le
+            or le.get("entry_orders_resolved") == {}
+        )
+        and ("position" not in le or le.get("position") is None)
+    )
+    return bool(
+        _confirmed_alpaca_arm_generation_reason(sess) is None
+        and pre_entry_state
+        and no_local_transport
+        and claim.get("phase") == ALPACA_CLAIMED
+        and claim.get("action") == "entry"
+        and str(claim.get("account_scope") or "").strip().lower() == "alpaca:paper"
+        and str(claim.get("symbol") or "").strip().upper()
+        == str(sess.symbol or "").strip().upper()
+        and claim.get("owner_session_id") == int(sess.id)
+        and claim.get("client_order_id") is None
+        and claim.get("broker_order_id") is None
+        and claim.get("resolved_at") is None
+        and claim.get("lease_expires_at") is not None
+        and arm_token
+        and claim_token == f"arm-{arm_token}"
+        and claim_token
+        == str(snapshot.get("alpaca_symbol_claim_token") or "").strip()
+        and set(metadata) == exact_metadata
+        and stage_identity_ok
+        and account_id is not None
+        and str(metadata.get("alpaca_account_id") or "").strip() == account_id
+    )
+
+
+def _is_unconfirmed_pre_http_alpaca_arm_claim(
+    sess: TradingAutomationSession,
+    claim: dict[str, Any],
+    *,
+    le: dict[str, Any],
+) -> bool:
+    """Recognize the exact reservation owned by an unconfirmed arm request.
+
+    ``begin_live_arm`` binds this claim before ``confirm_live_arm`` can succeed.
+    A confirmation veto must be able to retire that never-submitted reservation
+    immediately, but only for the exact arm generation/account/session shape.
+    """
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    stage = str(metadata.get("stage") or "").strip()
+    if stage == "live_arm_reserved":
+        exact_metadata = {"stage", "variant_id", "alpaca_account_id"}
+        try:
+            stage_identity_ok = int(metadata.get("variant_id")) == int(
+                sess.variant_id
+            )
+        except (TypeError, ValueError):
+            stage_identity_ok = False
+    elif stage == "promoted_live_arm_reserved":
+        exact_metadata = {
+            "stage",
+            "paper_session_id",
+            "alpaca_account_id",
+        }
+        try:
+            paper_session_id = int(sess.source_paper_session_id)
+            stage_identity_ok = bool(
+                paper_session_id > 0
+                and int(metadata.get("paper_session_id")) == paper_session_id
+                and int(snapshot.get("promoted_from_paper_session_id"))
+                == paper_session_id
+            )
+        except (TypeError, ValueError):
+            stage_identity_ok = False
+    else:
+        return False
+
+    claim_token = str(claim.get("claim_token") or "").strip()
+    arm_token = str(snapshot.get("arm_token") or "").strip()
+    account_id = _frozen_alpaca_account_id(sess)
+    no_local_transport = bool(
+        ("entry_submitted" not in le or le.get("entry_submitted") is False)
+        and ("entry_order_id" not in le or le.get("entry_order_id") is None)
+        and (
+            "entry_client_order_id" not in le
+            or le.get("entry_client_order_id") is None
+        )
+        and (
+            "entry_reconcile_pending_client_order_id" not in le
+            or le.get("entry_reconcile_pending_client_order_id") is None
+        )
+        and (
+            "entry_order_ids_all" not in le
+            or le.get("entry_order_ids_all") == []
+        )
+        and (
+            "entry_orders_resolved" not in le
+            or le.get("entry_orders_resolved") == {}
+        )
+        and ("position" not in le or le.get("position") is None)
+    )
+    return bool(
+        sess.state == STATE_LIVE_ARM_PENDING
+        and not isinstance(snapshot.get("confirmed_arm_generation"), dict)
+        and snapshot.get("arm_confirmed") is not True
+        and no_local_transport
+        and claim.get("phase") == ALPACA_CLAIMED
+        and claim.get("action") == "entry"
+        and str(claim.get("account_scope") or "").strip().lower()
+        == "alpaca:paper"
+        and str(claim.get("symbol") or "").strip().upper()
+        == str(sess.symbol or "").strip().upper()
+        and claim.get("owner_session_id") == int(sess.id)
+        and claim.get("client_order_id") is None
+        and claim.get("broker_order_id") is None
+        and claim.get("resolved_at") is None
+        and claim.get("lease_expires_at") is not None
+        and arm_token
+        and claim_token == f"arm-{arm_token}"
+        and claim_token
+        == str(snapshot.get("alpaca_symbol_claim_token") or "").strip()
+        and set(metadata) == exact_metadata
+        and stage_identity_ok
+        and account_id is not None
+        and str(metadata.get("alpaca_account_id") or "").strip() == account_id
+    )
+
+
+def _is_exact_pre_http_alpaca_arm_claim(
+    sess: TradingAutomationSession,
+    claim: dict[str, Any],
+    *,
+    le: dict[str, Any],
+) -> bool:
+    return bool(
+        _is_confirmed_pre_http_alpaca_arm_claim(sess, claim, le=le)
+        or _is_unconfirmed_pre_http_alpaca_arm_claim(sess, claim, le=le)
+    )
+
+
+def _recover_owner_alpaca_entry_claim(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    operator_paused: bool,
+) -> dict[str, Any]:
+    """Recover independently committed entry ownership before any strategy work."""
+    if normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES:
+        return {"active": False, "block_new_entries": False}
+    account_scope = _frozen_alpaca_account_scope(sess)
+    if account_scope is None:
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "reason": "account_scope_unfrozen_or_mismatched",
+        }
+    readable, claim = read_action_claim(
+        db,
+        symbol=sess.symbol,
+        account_scope=account_scope,
+    )
+    if not readable:
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "reason": "claim_unreadable",
+        }
+    if not claim or claim.get("phase") == "resolved" or claim.get("action") != "entry":
+        return {"active": False, "block_new_entries": False}
+    if claim.get("owner_session_id") != int(sess.id):
+        return {"active": False, "block_new_entries": True, "reason": "different_owner"}
+    account_ok, account_evidence = _strict_alpaca_account_identity(adapter, sess)
+    if not account_ok:
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "reason": account_evidence.get("reason")
+            or "alpaca_account_identity_blocked",
+            "alpaca_account_identity": account_evidence,
+        }
+    cid = str(claim.get("client_order_id") or "").strip()
+    if not cid:
+        if _is_confirmed_pre_http_alpaca_arm_claim(sess, claim, le=le):
+            return {
+                "active": False,
+                "block_new_entries": False,
+                "pre_http_arm_claim": True,
+                "reason": "confirmed_pre_http_arm_claim",
+            }
+        return {"active": True, "block_new_entries": True, "reason": "claim_without_cid"}
+    recovered_snapshot = dict(sess.risk_snapshot_json or {})
+    recovered_snapshot["alpaca_symbol_claim_token"] = claim.get("claim_token")
+    recovered_snapshot[KEY_LIVE_EXEC] = le
+    sess.risk_snapshot_json = recovered_snapshot
+    try:
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    retained = le.get("alpaca_entry_claim_resolution_pending")
+    retained = retained if isinstance(retained, dict) else {}
+    if retained.get("retain_until_broker_flat") is True:
+        exact_retained_owner = bool(
+            retained.get("runner_exit_guard") is True
+            and retained.get("claim_token") == claim.get("claim_token")
+            and str(retained.get("client_order_id") or "").strip() == cid
+            and _retry_cap_certified_alpaca_long(sess, le) is not None
+        )
+        if not exact_retained_owner:
+            le["alpaca_retry_cap_claim_owner_block"] = {
+                "reason": "retained_entry_claim_or_local_position_mismatch",
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "active": True,
+                "block_new_entries": True,
+                "reason": "retained_entry_claim_or_local_position_mismatch",
+            }
+        # The terminal entry fill was already adopted and its claim now guards
+        # the still-held position. Do not re-adopt the historical fill on every
+        # tick (which would overwrite a partially closed broker remainder).
+        le.pop("alpaca_retry_cap_claim_owner_block", None)
+        _commit_le(sess, le)
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "attached": True,
+            "reason": "retained_entry_claim_until_broker_flat",
+        }
+    retry_cap_block = le.get("exit_retry_cap_emergency_block")
+    if (
+        isinstance(retry_cap_block, dict)
+        and retry_cap_block.get("active") is True
+        and _retry_cap_certified_alpaca_long(sess, le) is not None
+    ):
+        # Exact recovery certification will be retried by the emergency-priority
+        # service lane. Historical entry recovery must not overwrite local exit
+        # state while that read-only proof is pending.
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "attached": True,
+            "reason": "retry_cap_emergency_certification_pending",
+        }
+    role = _alpaca_claim_role(claim)
+    request = _alpaca_claim_order_request(claim, sess, product_id)
+
+    strict_state = "unknown"
+    order = None
+    claim_oid = str(claim.get("broker_order_id") or "").strip()
+    if claim_oid:
+        try:
+            order, _ = adapter.get_order(claim_oid)
+        except Exception:
+            order = None
+        if order is not None:
+            strict_state = "found"
+    if order is None:
+        strict_state, order = _strict_client_order_id_truth(adapter, cid)
+    if strict_state != "found":
+        legacy = _exact_alpaca_claim_order(adapter, request, cid)
+        if legacy is not None:
+            order = legacy
+            strict_state = "found"
+    if strict_state == "found":
+        if not _alpaca_claim_order_matches(order, claim, request):
+            le["alpaca_owner_claim_identity_mismatch"] = {
+                "claim_token": claim.get("claim_token"),
+                "client_order_id": cid,
+                "broker_order_id": getattr(order, "order_id", None),
+                "order_role": role,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {"active": True, "block_new_entries": True, "reason": "identity_mismatch"}
+        oid = str(getattr(order, "order_id", "") or "")
+        update_action_claim_phase_committed(
+            symbol=claim["symbol"],
+            claim_token=claim["claim_token"],
+            phase=ALPACA_SUBMITTED,
+            client_order_id=cid,
+            broker_order_id=oid,
+            metadata={"tick_start_owner_recovered": True, "order_role": role},
+            account_scope=claim["account_scope"],
+        )
+        _attach_alpaca_owner_claim_order(
+            sess,
+            le,
+            claim=claim,
+            order=order,
+            request=request,
+            role=role,
+        )
+        if _order_open(order) and (
+            role in {"primary", "repeg"}
+            or operator_paused
+            or float(getattr(order, "filled_size", 0.0) or 0.0) > 0.0
+        ):
+            pre_cancel_ok, pre_cancel_identity = _strict_alpaca_account_identity(
+                adapter,
+                sess,
+            )
+            if not pre_cancel_ok:
+                return {
+                    "active": True,
+                    "block_new_entries": True,
+                    "reason": pre_cancel_identity.get("reason")
+                    or "alpaca_account_identity_changed_pre_cancel",
+                    "alpaca_account_identity": pre_cancel_identity,
+                }
+            try:
+                adapter.cancel_order(oid)
+            except Exception:
+                pass
+            post_cancel_ok, post_cancel_identity = _strict_alpaca_account_identity(
+                adapter,
+                sess,
+            )
+            if not post_cancel_ok:
+                return {
+                    "active": True,
+                    "block_new_entries": True,
+                    "reason": post_cancel_identity.get("reason")
+                    or "alpaca_account_identity_changed_post_cancel",
+                    "alpaca_account_identity": post_cancel_identity,
+                }
+            try:
+                reread, _ = adapter.get_order(oid)
+            except Exception:
+                reread = None
+            if reread is None or not _alpaca_claim_order_matches(reread, claim, request):
+                return {"active": True, "block_new_entries": True, "reason": "cancel_reread_unknown"}
+            order = reread
+        if role in {"primary", "repeg"}:
+            if _order_open(order):
+                # Do not let missing risk/viability terminalize the session while
+                # this exact recovered order can still fill.  Poll/cancel recovery
+                # owns the tick until Alpaca reports a terminal state.
+                _commit_le(sess, le)
+                return {
+                    "active": True,
+                    "block_new_entries": True,
+                    "attached": True,
+                    "must_return_early": True,
+                    "reason": "recovered_entry_cancel_pending",
+                    "order_role": role,
+                }
+            recovered_filled = max(
+                0.0,
+                float(getattr(order, "filled_size", 0.0) or 0.0),
+            )
+            recovered_status = str(getattr(order, "status", "") or "").lower()
+            if (
+                not _order_open(order)
+                and recovered_status in _ORDER_TERMINAL_STATUSES
+                and recovered_filled <= 1e-12
+            ):
+                _mark_entry_order_resolved(le, oid, "void")
+                le.pop("entry_order_id", None)
+                le.pop("entry_client_order_id", None)
+                le.pop("entry_submitted", None)
+                resolved = _resolve_alpaca_entry_claim_from_terminal_order(
+                    sess,
+                    order,
+                    le=le,
+                    durable_adopted=False,
+                )
+                if sess.state == STATE_LIVE_PENDING_ENTRY:
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                elif sess.state == STATE_LIVE_ENTRY_CANDIDATE:
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                _commit_le(sess, le)
+                return {
+                    "active": not resolved,
+                    "block_new_entries": not resolved,
+                    "resolved": resolved,
+                    "terminal_zero_fill": True,
+                    "order_role": role,
+                }
+            if recovered_filled > 1e-12:
+                adopted = _adopt_recovered_primary_fill_for_safety(
+                    db,
+                    sess,
+                    adapter,
+                    le=le,
+                    order=order,
+                    product_id=str(request.get("product_id") or product_id),
+                )
+                return {
+                    "active": True,
+                    "block_new_entries": True,
+                    "attached": True,
+                    "adopted_fill": adopted,
+                    "must_return_early": not adopted,
+                    "reason": (
+                        "recovered_entry_fill_adopted"
+                        if adopted else "recovered_entry_fill_adoption_pending"
+                    ),
+                    "order_role": role,
+                }
+            if not _transition_recovered_primary_to_pending(db, sess):
+                return {"active": True, "block_new_entries": True, "reason": "owner_state_not_attachable"}
+            if operator_paused:
+                le["operator_flatten_requested_utc"] = _utcnow().isoformat()
+                _commit_le(sess, le)
+            return {
+                "active": True,
+                "block_new_entries": True,
+                "attached": True,
+                "order_role": role,
+            }
+        if not _order_open(order):
+            adopted = _adopt_recovered_terminal_add(
+                db,
+                sess,
+                adapter,
+                le=le,
+                claim=claim,
+                order=order,
+                request=request,
+                role=role,
+            )
+            return {
+                "active": True,
+                "block_new_entries": not adopted,
+                "attached": True,
+                "adopted": adopted,
+                "order_role": role,
+            }
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "attached": True,
+            "order_role": role,
+        }
+
+    lease_elapsed = _claim_lease_elapsed(claim.get("lease_expires_at"))
+    if strict_state != "absent" or not lease_elapsed:
+        le["alpaca_owner_claim_reconcile_pending"] = {
+            "claim_token": claim.get("claim_token"),
+            "client_order_id": cid,
+            "order_role": role,
+            "lookup_state": strict_state,
+            "lease_expires_at": str(claim.get("lease_expires_at") or ""),
+        }
+        _commit_le(sess, le)
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "reason": "reconcile_pending",
+            "order_role": role,
+        }
+
+    # A 404 after lease expiry is still not proof that a process paused between
+    # its durable claim commit and literal POST will never resume.  Keep this
+    # exact CID/owner claim unresolved; never open a new-symbol account slot from
+    # timing plus absence alone.
+    le["alpaca_owner_claim_reconcile_pending"] = {
+        "claim_token": claim.get("claim_token"),
+        "client_order_id": cid,
+        "order_role": role,
+        "lookup_state": "absent_after_lease",
+        "lease_expires_at": str(claim.get("lease_expires_at") or ""),
+        "requires_explicit_terminal_proof": True,
+    }
+    _commit_le(sess, le)
+    return {
+        "active": True,
+        "block_new_entries": True,
+        "resolved": False,
+        "aged_instruction_replayed": False,
+        "reason": "expired_claim_cid_absence_not_terminal_proof",
+    }
+
+
+def _final_alpaca_execution_bbo_check(
+    adapter: Any,
+    kwargs: dict[str, Any],
+    *,
+    freshness: Any,
+    configured_max_age: Any,
+    risk_stop_price: float | None,
+) -> tuple[bool, dict[str, Any]]:
+    """Revalidate an Alpaca risk order against an execution BBO no older than 2s."""
+    try:
+        configured = float(configured_max_age) if configured_max_age is not None else 2.0
+        max_age = min(2.0, max(0.0, configured))
+    except Exception:
+        return False, {"reason": "alpaca_final_bbo_time_invalid"}
+    product_id = str(kwargs.get("product_id") or "")
+    tick, evidence = _final_entry_bbo(
+        adapter,
+        product_id,
+        max_age_seconds=max_age,
+    )
+    if tick is None:
+        return False, dict(evidence or {"reason": "alpaca_final_bbo_unreadable"})
+    tick_meta = getattr(tick, "freshness", None)
+    try:
+        age = float(tick_meta.age_seconds())
+        bid = float(tick.bid)
+        ask = float(tick.ask)
+        if not math.isfinite(age) or age > max_age:
+            raise ValueError("execution BBO expired at final instruction")
+    except Exception:
+        return False, {
+            **dict(evidence or {}),
+            "reason": "alpaca_final_bbo_stale_at_place",
+            "max_age_seconds": max_age,
+        }
+
+    # Clamp, never chase, the caller's risk-increasing limit against the exact
+    # execution snapshot. A fresh quote can lower a BUY ceiling or raise a short
+    # SELL floor; it may never make the instruction more aggressive than the
+    # strategy's already-computed limit.
+    side = str(kwargs.get("side") or "").strip().lower()
+    try:
+        original_limit = float(kwargs.get("limit_price"))
+    except (TypeError, ValueError):
+        return False, {
+            **dict(evidence or {}),
+            "reason": "alpaca_risk_increase_limit_missing",
+        }
+    if side == "buy":
+        safe_limit = min(original_limit, ask)
+        try:
+            kwargs["limit_price"] = quantize_alpaca_equity_limit_price(
+                safe_limit,
+                side,
+            )
+        except ValueError:
+            return False, {
+                **dict(evidence or {}),
+                "reason": "alpaca_risk_increase_limit_invalid",
+            }
+    elif side == "sell":
+        safe_limit = max(original_limit, bid)
+        try:
+            kwargs["limit_price"] = quantize_alpaca_equity_limit_price(
+                safe_limit,
+                side,
+            )
+        except ValueError:
+            return False, {
+                **dict(evidence or {}),
+                "reason": "alpaca_risk_increase_limit_invalid",
+            }
+    else:
+        return False, {
+            **dict(evidence or {}),
+            "reason": "alpaca_risk_increase_side_invalid",
+        }
+    try:
+        final_limit = float(kwargs["limit_price"])
+        stop_price = float(risk_stop_price)
+        stop_distance = (
+            final_limit - stop_price
+            if side == "buy"
+            else stop_price - final_limit
+        )
+        max_spread_fraction = float(
+            getattr(
+                settings,
+                "chili_momentum_entry_max_spread_fraction_of_risk",
+                0.25,
+            )
+        )
+        if not (
+            math.isfinite(bid)
+            and math.isfinite(ask)
+            and ask >= bid > 0.0
+            and math.isfinite(stop_distance)
+            and stop_distance > 0.0
+            and math.isfinite(max_spread_fraction)
+            and 0.0 <= max_spread_fraction <= 1.0
+        ):
+            raise ValueError("invalid spread-risk inputs")
+    except (TypeError, ValueError):
+        return False, {
+            **dict(evidence or {}),
+            "reason": "alpaca_final_spread_risk_unavailable",
+        }
+    spread_ok, spread_gate = _entry_spread_risk_decision(
+        bid=bid,
+        ask=ask,
+        quantity=1.0,
+        stop_distance=stop_distance,
+        max_fraction=max_spread_fraction,
+    )
+    if not spread_ok:
+        return False, {
+            **dict(evidence or {}),
+            "reason": "alpaca_final_spread_risk_blocked",
+            "spread_risk_gate": spread_gate,
+            "original_limit_price": original_limit,
+            "final_limit_price": kwargs["limit_price"],
+            "risk_stop_price": stop_price,
+        }
+    return True, {
+        **dict(evidence or {}),
+        "_execution_freshness": tick_meta,
+        "age_seconds": age,
+        "max_age_seconds": max_age,
+        "original_limit_price": original_limit,
+        "final_limit_price": kwargs["limit_price"],
+        "risk_stop_price": stop_price,
+        "spread_risk_gate": spread_gate,
+    }
+
+
+def _strict_alpaca_empty_entry_posture(
+    adapter: Any,
+    *,
+    max_age_seconds: float = 2.0,
+) -> tuple[bool, dict[str, Any]]:
+    """Require a fresh, account-wide broker-flat snapshot before a new entry.
+
+    This is intentionally more conservative than the local risk ledger.  Manual
+    positions, orphan orders, or an unreadable account surface all block entries and
+    adds.  The committed account claim then closes the race between two CHILI workers
+    that both observed the broker flat.
+    """
+    try:
+        max_age = float(max_age_seconds)
+        if not math.isfinite(max_age) or max_age <= 0.0:
+            raise ValueError("invalid max age")
+        list_positions = getattr(adapter, "list_positions", None)
+        list_open_orders = getattr(adapter, "list_open_orders", None)
+        if not callable(list_positions) or not callable(list_open_orders):
+            raise AttributeError("strict account posture capability missing")
+        positions, positions_meta = list_positions()
+        orders, orders_meta = list_open_orders(strict=True)
+        if not isinstance(positions, list) or not isinstance(orders, list):
+            return False, {"reason": "alpaca_account_posture_unreadable"}
+        position_age = float(positions_meta.age_seconds())
+        order_age = float(orders_meta.age_seconds())
+        if not all(
+            math.isfinite(age) and 0.0 <= age <= max_age
+            for age in (position_age, order_age)
+        ):
+            return False, {
+                "reason": "alpaca_account_posture_stale",
+                "positions_age_seconds": position_age,
+                "open_orders_age_seconds": order_age,
+                "max_age_seconds": max_age,
+            }
+    except Exception:
+        return False, {"reason": "alpaca_account_posture_unreadable"}
+    if positions:
+        return False, {
+            "reason": "alpaca_account_position_exposure_present",
+            "position_count": len(positions),
+            "open_order_count": len(orders),
+            "positions_age_seconds": position_age,
+            "open_orders_age_seconds": order_age,
+        }
+    if orders:
+        return False, {
+            "reason": "alpaca_account_open_orders_present",
+            "position_count": 0,
+            "open_order_count": len(orders),
+            "positions_age_seconds": position_age,
+            "open_orders_age_seconds": order_age,
+        }
+    return True, {
+        "reason": "broker_account_strictly_flat",
+        "position_count": 0,
+        "open_order_count": 0,
+        "positions_age_seconds": position_age,
+        "open_orders_age_seconds": order_age,
+        "max_age_seconds": max_age,
+    }
+
+
+def _governed_place(
+    adapter,
+    place_fn,
+    *,
+    sess=None,
+    rail_reservation=None,
+    execution_bbo_freshness=None,
+    execution_bbo_max_age_seconds=None,
+    alpaca_order_role: str | None = None,
+    alpaca_role_metadata: dict[str, Any] | None = None,
+    alpaca_risk_stop_price: float | None = None,
+    **kwargs,
+):
     """Rate-governed wrapper around an order PLACE (place_limit_order_gtc /
     place_market_order). Acquires a token (flag-OFF ⇒ instant pass-through,
     byte-identical), times the call into the RTT EMA, and feeds the place result back to
@@ -448,7 +2499,99 @@ def _governed_place(adapter, place_fn, *, sess=None, **kwargs):
 
     from .rail_governor import acquire_rail, note_rail_outcome
 
-    res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
+    _alpaca_instruction = _alpaca_place_instruction_kind(sess, kwargs)
+    if _alpaca_instruction in {
+        "invalid",
+        "invalid_entry_tif",
+        "invalid_entry_extended_hours",
+    }:
+        return {
+            "ok": False,
+            "error": (
+                "alpaca_entry_tif_not_day"
+                if _alpaca_instruction == "invalid_entry_tif"
+                else (
+                    "alpaca_entry_extended_hours_not_false"
+                    if _alpaca_instruction == "invalid_entry_extended_hours"
+                    else "alpaca_instruction_side_intent_not_certified"
+                )
+            ),
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": kwargs.get("client_order_id"),
+        }
+    if _alpaca_instruction == "entry":
+        try:
+            _canonical_entry_limit = quantize_alpaca_equity_limit_price(
+                kwargs.get("limit_price"),
+                "buy",
+            )
+        except ValueError:
+            return {
+                "ok": False,
+                "error": "alpaca_entry_limit_invalid",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+        if str(kwargs.get("limit_price")).strip() != _canonical_entry_limit:
+            return {
+                "ok": False,
+                "error": "alpaca_entry_limit_not_canonical",
+                "canonical_limit_price": _canonical_entry_limit,
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+    _alpaca_quarantine = _alpaca_execution_quarantine_reason(sess)
+    if _alpaca_quarantine:
+        return {
+            "ok": False,
+            "error": _alpaca_quarantine,
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": kwargs.get("client_order_id"),
+        }
+    if _alpaca_risk_increasing_place(sess, kwargs):
+        side = str(kwargs.get("side") or "").strip().lower()
+        intent = str(kwargs.get("position_intent") or "").strip().lower()
+        if side == "sell" or intent == "sell_to_open":
+            return {
+                "ok": False,
+                "error": "alpaca_long_direction_not_certified",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+    if _alpaca_risk_increasing_place(sess, kwargs) and _alpaca_entries_quarantined(sess):
+        return {
+            "ok": False,
+            "error": "alpaca_close_only_entries_quarantined",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": kwargs.get("client_order_id"),
+        }
+    if _alpaca_entries_quarantined(sess):
+        if not (
+            str(kwargs.get("side") or "").strip().lower() == "sell"
+            and str(kwargs.get("position_intent") or "").strip().lower()
+            == "sell_to_close"
+        ):
+            return {
+                "ok": False,
+                "error": "alpaca_close_only_instruction_not_certified",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+
+    # An entry may reserve its rail token BEFORE fetching the execution BBO. That
+    # ordering prevents the governor's bounded wait from ageing a just-fetched quote
+    # before the broker call. Other place paths retain the original acquire-here
+    # behaviour.
+    res = rail_reservation
+    if res is None:
+        res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
     if not res.acquired:
         _log.info(
             "[momentum_s4] rail governor DEFER place waited=%.3fs rps=%.3f",
@@ -460,15 +2603,455 @@ def _governed_place(adapter, place_fn, *, sess=None, **kwargs):
             "deferred": True,
             "client_order_id": kwargs.get("client_order_id"),
         }
+
+    # Last instruction before the actual adapter call: fail closed if the explicit
+    # execution BBO expired while the runner persisted its audit evidence or crossed
+    # any remaining in-process seam. This is deliberately checked after rail acquire
+    # (or against the pre-acquired reservation), so governor wait can never turn into
+    # a stale-price submit.
+    if execution_bbo_freshness is not None:
+        try:
+            _bbo_age_s = float(execution_bbo_freshness.age_seconds())
+            _bbo_max_age_s = float(execution_bbo_max_age_seconds)
+            if (
+                not math.isfinite(_bbo_age_s)
+                or not math.isfinite(_bbo_max_age_s)
+                or _bbo_max_age_s < 0.0
+            ):
+                raise ValueError("non-finite execution BBO freshness")
+        except Exception:
+            return {
+                "ok": False,
+                "error": "execution_bbo_time_invalid_at_place",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+        if _bbo_age_s > _bbo_max_age_s:
+            return {
+                "ok": False,
+                "error": "execution_bbo_stale_at_place",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "execution_bbo_age_seconds": _bbo_age_s,
+                "execution_bbo_max_age_seconds": _bbo_max_age_s,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+    _alpaca_claim = None
+    _alpaca_cid = ""
+    _alpaca_final_freshness = None
+    _alpaca_final_max_age = None
+    _alpaca_account_equity = None
+
+    def _release_bound_entry_before_http(reason: str) -> bool:
+        if _alpaca_claim is None:
+            return True
+        binder = str(_alpaca_claim.get("_post_bind_token") or "").strip()
+        account_id = _frozen_alpaca_account_id(sess)
+        if not binder or not account_id:
+            return False
+        return bool(
+            release_entry_claim_pre_post_committed(
+                symbol=_alpaca_claim["symbol"],
+                claim_token=_alpaca_claim["claim_token"],
+                owner_session_id=int(sess.id),
+                client_order_id=_alpaca_cid,
+                post_bind_token=binder,
+                account_scope=_alpaca_claim["account_scope"],
+                alpaca_account_id=account_id,
+                reason=reason,
+            )
+        )
+
+    if _alpaca_risk_increasing_place(sess, kwargs):
+        _account_identity_ok, _account_identity = _strict_alpaca_account_identity(
+            adapter,
+            sess,
+        )
+        if not _account_identity_ok:
+            return {
+                "ok": False,
+                "error": _account_identity.get("reason")
+                or "alpaca_account_identity_blocked",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+                "alpaca_account_identity": _account_identity,
+            }
+        _rth_ok, _rth_evidence = _strict_alpaca_rth_entry_window(adapter, sess)
+        if not _rth_ok:
+            return {
+                "ok": False,
+                "error": _rth_evidence.get("reason")
+                or "alpaca_new_entries_rth_only",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+                "alpaca_entry_window": _rth_evidence,
+            }
+        # Account equity is fetched before the literal execution quote and before
+        # the short reservation transaction. No DB/account lock crosses network I/O.
+        try:
+            from .risk_policy import _account_equity_usd
+
+            _alpaca_account_equity = _account_equity_usd(
+                normalize_execution_family(getattr(sess, "execution_family", None)),
+                apply_margin_multiple=False,
+                prefer_equity=True,
+            )
+        except Exception:
+            _alpaca_account_equity = None
+        if execution_bbo_freshness is not None:
+            try:
+                _approved_age = float(execution_bbo_freshness.age_seconds())
+                _approved_max = min(
+                    2.0,
+                    max(0.0, float(execution_bbo_max_age_seconds)),
+                )
+                _final_bbo_ok = bool(
+                    math.isfinite(_approved_age) and _approved_age <= _approved_max
+                )
+            except Exception:
+                _approved_age = float("inf")
+                _approved_max = 0.0
+                _final_bbo_ok = False
+            _final_bbo_meta = {
+                "reason": (
+                    None if _final_bbo_ok else "alpaca_final_bbo_stale_at_place"
+                ),
+                "age_seconds": _approved_age,
+                "max_age_seconds": _approved_max,
+                "approved_entry_bbo_reused": True,
+                "_execution_freshness": execution_bbo_freshness,
+            }
+        else:
+            _final_bbo_ok, _final_bbo_meta = _final_alpaca_execution_bbo_check(
+                adapter,
+                kwargs,
+                freshness=None,
+                configured_max_age=execution_bbo_max_age_seconds,
+                risk_stop_price=alpaca_risk_stop_price,
+            )
+        if not _final_bbo_ok:
+            return {
+                "ok": False,
+                "error": _final_bbo_meta.get("reason") or "alpaca_final_bbo_blocked",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                **_final_bbo_meta,
+            }
+        _alpaca_final_freshness = _final_bbo_meta.pop("_execution_freshness", None)
+        _alpaca_final_max_age = _final_bbo_meta.get("max_age_seconds")
+        _broker_flat, _broker_posture = _strict_alpaca_empty_entry_posture(adapter)
+        if not _broker_flat:
+            return {
+                "ok": False,
+                "error": _broker_posture.get("reason") or "alpaca_account_posture_blocked",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+                "broker_account_posture": _broker_posture,
+            }
+        # Literal financial admission: the arm/fill-boundary checks may have
+        # reused a healthy five-second account cache. Force a new broker-equity
+        # snapshot now, after all potentially slow quote/posture work and before
+        # the durable risk reservation or order POST. Any uncertainty is zero
+        # reservation + zero transport.
+        _daily_loss_ok, _daily_loss_admission = (
+            _fresh_alpaca_broker_daily_loss_admission(sess)
+        )
+        if not _daily_loss_ok:
+            _daily_loss_error = (
+                "alpaca_broker_daily_loss_snapshot_unavailable"
+                if _daily_loss_admission.get("transient")
+                else "alpaca_broker_daily_loss_limit_breached"
+            )
+            return {
+                "ok": False,
+                "error": _daily_loss_error,
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+                "broker_daily_loss_admission": dict(_daily_loss_admission),
+            }
+        _role_metadata = {
+            **dict(alpaca_role_metadata or {}),
+            "alpaca_account_identity": dict(_account_identity),
+            "alpaca_rth_entry_window": dict(_rth_evidence),
+            "final_execution_bbo": dict(_final_bbo_meta),
+            "broker_account_posture": dict(_broker_posture),
+            "broker_daily_loss_admission": dict(_daily_loss_admission),
+        }
+        _alpaca_claim, _alpaca_cid, _claim_early_result = _prepare_alpaca_place_claim(
+            adapter,
+            sess,
+            kwargs,
+            order_role=alpaca_order_role,
+            role_metadata=_role_metadata,
+            risk_stop_price=alpaca_risk_stop_price,
+            account_equity_usd=_alpaca_account_equity,
+        )
+        if _claim_early_result is not None:
+            return _claim_early_result
+        # The reservation transaction is a slow gate. Credentials can change
+        # between the preliminary account read and this literal seam, so repeat
+        # the UUID check before allowing the frozen CID to cross HTTP.
+        _literal_account_ok, _literal_account_identity = (
+            _strict_alpaca_account_identity(adapter, sess)
+        )
+        if not _literal_account_ok:
+            _released = _release_bound_entry_before_http(
+                "alpaca_account_identity_changed_pre_post"
+            )
+            return {
+                "ok": False,
+                "error": _literal_account_identity.get("reason")
+                or "alpaca_account_identity_blocked",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "alpaca_account_identity": _literal_account_identity,
+                "entry_claim_pre_post_released": _released,
+            }
+        _literal_rth_ok, _literal_rth = _strict_alpaca_rth_entry_window(
+            adapter,
+            sess,
+        )
+        if not _literal_rth_ok:
+            _released = _release_bound_entry_before_http(
+                "alpaca_entry_window_changed_pre_post"
+            )
+            return {
+                "ok": False,
+                "error": _literal_rth.get("reason")
+                or "alpaca_new_entries_rth_only",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "alpaca_entry_window": _literal_rth,
+                "entry_claim_pre_post_released": _released,
+            }
+        try:
+            _literal_age = float(_alpaca_final_freshness.age_seconds())
+            _literal_max = float(_alpaca_final_max_age)
+        except Exception:
+            _literal_age = float("inf")
+            _literal_max = 0.0
+        if not math.isfinite(_literal_age) or _literal_age > _literal_max:
+            _released = _release_bound_entry_before_http(
+                "alpaca_final_bbo_stale_after_reservation"
+            )
+            return {
+                "ok": False,
+                "error": "alpaca_final_bbo_stale_after_reservation",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "execution_bbo_age_seconds": _literal_age,
+                "execution_bbo_max_age_seconds": _literal_max,
+                "client_order_id": _alpaca_cid,
+                "entry_claim_pre_post_released": _released,
+            }
+        # The reservation transaction deliberately does not hold a database lock
+        # across broker I/O.  Re-read account-wide exposure at the literal POST
+        # seam so a manual position/order created after the preliminary posture
+        # cannot be stacked by this entry.
+        _literal_flat, _literal_posture = _strict_alpaca_empty_entry_posture(
+            adapter
+        )
+        if not _literal_flat:
+            _released = _release_bound_entry_before_http(
+                "alpaca_account_posture_changed_pre_post"
+            )
+            return {
+                "ok": False,
+                "error": _literal_posture.get("reason")
+                or "alpaca_account_posture_blocked",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "broker_account_posture": _literal_posture,
+                "entry_claim_pre_post_released": _released,
+            }
+        # Force a second broker-equity delta after reservation.  A loss from a
+        # concurrent/manual fill may have crossed the paper cap since the first
+        # admission and must retire this exact no-HTTP generation.
+        _literal_daily_ok, _literal_daily = (
+            _fresh_alpaca_broker_daily_loss_admission(sess)
+        )
+        if not _literal_daily_ok:
+            _released = _release_bound_entry_before_http(
+                "alpaca_daily_loss_changed_pre_post"
+            )
+            return {
+                "ok": False,
+                "error": (
+                    "alpaca_broker_daily_loss_snapshot_unavailable"
+                    if _literal_daily.get("transient")
+                    else "alpaca_broker_daily_loss_limit_breached"
+                ),
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "broker_daily_loss_admission": dict(_literal_daily),
+                "entry_claim_pre_post_released": _released,
+            }
+        # Fence the posture/daily-loss reads to the same UUID that authorized the
+        # reservation.  Credential rotation during either read is unreadable
+        # truth, never permission to POST against a different paper account.
+        _final_account_ok, _final_account_identity = (
+            _strict_alpaca_account_identity(adapter, sess)
+        )
+        _frozen_account_id = _frozen_alpaca_account_id(sess)
+        if not (
+            _final_account_ok
+            and _frozen_account_id
+            and _literal_account_identity.get("account_id") == _frozen_account_id
+            and _final_account_identity.get("account_id") == _frozen_account_id
+        ):
+            _released = _release_bound_entry_before_http(
+                "alpaca_account_identity_changed_during_pre_post_truth"
+            )
+            return {
+                "ok": False,
+                "error": _final_account_identity.get("reason")
+                or "alpaca_account_identity_mismatch",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "alpaca_account_identity": _final_account_identity,
+                "entry_claim_pre_post_released": _released,
+            }
+        if not _alpaca_frozen_entry_request_matches_transport(
+            _alpaca_claim,
+            kwargs,
+        ):
+            _released = _release_bound_entry_before_http(
+                "alpaca_frozen_request_transport_mismatch"
+            )
+            return {
+                "ok": False,
+                "error": "alpaca_frozen_request_transport_mismatch",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "entry_claim_pre_post_released": _released,
+            }
+        # The posture, daily-loss, and final UUID reads above are network calls
+        # and can themselves age the approved quote.  Recompute its age as the
+        # last non-database gate immediately before consuming POST authority.
+        try:
+            _post_seam_bbo_age = float(_alpaca_final_freshness.age_seconds())
+            _post_seam_bbo_max = float(_alpaca_final_max_age)
+        except Exception:
+            _post_seam_bbo_age = float("inf")
+            _post_seam_bbo_max = 0.0
+        if (
+            not math.isfinite(_post_seam_bbo_age)
+            or _post_seam_bbo_age > _post_seam_bbo_max
+        ):
+            _released = _release_bound_entry_before_http(
+                "alpaca_final_bbo_stale_at_literal_post"
+            )
+            return {
+                "ok": False,
+                "error": "alpaca_final_bbo_stale_after_reservation",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "execution_bbo_age_seconds": _post_seam_bbo_age,
+                "execution_bbo_max_age_seconds": _post_seam_bbo_max,
+                "client_order_id": _alpaca_cid,
+                "entry_claim_pre_post_released": _released,
+            }
+        binder = str(_alpaca_claim.get("_post_bind_token") or "").strip()
+        account_id = _frozen_alpaca_account_id(sess)
+        if not (
+            binder
+            and account_id
+            and mark_entry_transport_started_committed(
+                symbol=_alpaca_claim["symbol"],
+                claim_token=_alpaca_claim["claim_token"],
+                owner_session_id=int(sess.id),
+                client_order_id=_alpaca_cid,
+                post_bind_token=binder,
+                account_scope=_alpaca_claim["account_scope"],
+                alpaca_account_id=account_id,
+            )
+        ):
+            return {
+                "ok": False,
+                "error": "alpaca_entry_transport_start_fence_failed",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+            }
     _t0 = _time.monotonic()
     try:
         out = place_fn(**kwargs)
     except Exception as exc:
+        if _alpaca_claim is not None:
+            update_action_claim_phase_committed(
+                symbol=_alpaca_claim["symbol"],
+                claim_token=_alpaca_claim["claim_token"],
+                phase=ALPACA_SUBMIT_INDETERMINATE,
+                client_order_id=_alpaca_cid,
+                broker_order_id=None,
+                metadata={"exception_type": type(exc).__name__},
+                account_scope=_alpaca_claim["account_scope"],
+            )
         note_rail_outcome(settings, exc, lane_key=_rail_lane_key(sess))
         raise
     _place_rtt_s = _time.monotonic() - _t0
     _note_rail_rtt(_place_rtt_s)
     note_rail_outcome(settings, out, lane_key=_rail_lane_key(sess))
+    if _alpaca_claim is not None:
+        _oid = str((out or {}).get("order_id") or "") if isinstance(out, dict) else ""
+        if isinstance(out, dict) and out.get("ok") and _oid:
+            update_action_claim_phase_committed(
+                symbol=_alpaca_claim["symbol"],
+                claim_token=_alpaca_claim["claim_token"],
+                phase=ALPACA_SUBMITTED,
+                client_order_id=_alpaca_cid,
+                broker_order_id=_oid,
+                metadata={"submit_status": out.get("status")},
+                account_scope=_alpaca_claim["account_scope"],
+            )
+        else:
+            # Preserve the adapter/downstream reconciliation contract.  A failed
+            # or indeterminate return may still represent an accepted order, but a
+            # second same-tick CID lookup here duplicates the caller's exact lookup
+            # and changes its result shape.  Persist indeterminate ownership now;
+            # tick-start owner recovery (and the existing caller) perform the one
+            # exact reconciliation read.
+            if isinstance(out, dict) and out.get("submit_outcome") == "broker_rejected":
+                # A call-local 4xx is not global terminal truth for a shared,
+                # bound same-CID authority. Another replay worker can already be
+                # paused at HTTP, so retain the immutable claim for exact lookup.
+                update_action_claim_phase_committed(
+                    symbol=_alpaca_claim["symbol"],
+                    claim_token=_alpaca_claim["claim_token"],
+                    phase=ALPACA_SUBMIT_INDETERMINATE,
+                    client_order_id=_alpaca_cid,
+                    broker_order_id=None,
+                    metadata={"reason": "explicit_pre_accept_broker_rejection"},
+                    account_scope=_alpaca_claim["account_scope"],
+                )
+            else:
+                update_action_claim_phase_committed(
+                    symbol=_alpaca_claim["symbol"],
+                    claim_token=_alpaca_claim["claim_token"],
+                    phase=ALPACA_SUBMIT_INDETERMINATE,
+                    client_order_id=_alpaca_cid,
+                    broker_order_id=None,
+                    metadata={
+                        "submit_outcome": (
+                            (out or {}).get("submit_outcome")
+                            if isinstance(out, dict)
+                            else None
+                        )
+                    },
+                    account_scope=_alpaca_claim["account_scope"],
+                )
     # DIAG (2026-07-06): surface the ACTUAL broker place-call RTT into the result dict so
     # the live_entry_submitted event (which carries "result": res) records it. This splits
     # the pending->submitted latency into CHILI-code-time vs the REAL RH agentic place-call
@@ -1093,9 +3676,47 @@ def _le_side_long(le: Any) -> bool:
     every existing session (regression-gated on the hermetic replay). Fail-LONG:
     a malformed envelope behaves exactly like today."""
     try:
-        return (le or {}).get("side_long") is not False
-    except Exception:
+        envelope = le if isinstance(le, dict) else {}
+        position_raw = envelope.get("position")
+        position = position_raw if isinstance(position_raw, dict) else {}
+        long_evidence = False
+        short_evidence = False
+
+        for value in (envelope.get("side_long"), position.get("side_long")):
+            if value is True:
+                long_evidence = True
+            elif value is False:
+                short_evidence = True
+            elif value is not None:
+                return False
+
+        for container in (envelope, position):
+            if "side" in container and container.get("side") is not None:
+                side = str(container.get("side") or "").strip().lower()
+                if side in {"long", "buy"}:
+                    long_evidence = True
+                elif side in {"short", "sell"}:
+                    short_evidence = True
+                elif side:
+                    return False
+            for key in ("position_intent", "intent"):
+                if key not in container or container.get(key) is None:
+                    continue
+                intent = str(container.get(key) or "").strip().lower()
+                if intent in {"buy_to_open", "sell_to_close"}:
+                    long_evidence = True
+                elif intent in {"sell_to_open", "buy_to_close"}:
+                    short_evidence = True
+                else:
+                    return False
+
+        # Any explicit short marker, including a nested ``position.side_long=False``,
+        # wins. Contradictory long+short evidence is likewise not certified long.
+        if short_evidence:
+            return False
         return True
+    except Exception:
+        return False
 
 
 def _safe_mult(x: Any) -> float:
@@ -1134,6 +3755,3582 @@ def _order_total_fees_usd(no: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return fee if math.isfinite(fee) and fee >= 0.0 else None
+
+
+def _alpaca_owner_transport_context(
+    sess: TradingAutomationSession,
+) -> dict[str, Any] | None:
+    """Exact retained entry owner that fences every paper-Alpaca sell POST."""
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    scope = str(snapshot.get("alpaca_account_scope") or "").strip().lower()
+    account_id = str(snapshot.get("alpaca_account_id") or "").strip()
+    token = str(snapshot.get("alpaca_symbol_claim_token") or "").strip()
+    if not (
+        normalize_execution_family(getattr(sess, "execution_family", None))
+        in ALPACA_EXECUTION_FAMILIES
+        and scope == "alpaca:paper"
+        and account_id
+        and token
+        and getattr(settings, "chili_alpaca_paper", True) is True
+    ):
+        return None
+    return {
+        "account_scope": scope,
+        "alpaca_account_id": account_id,
+        "symbol": str(getattr(sess, "symbol", "") or "").strip().upper(),
+        "claim_token": token,
+        "owner_session_id": int(sess.id),
+    }
+
+
+def _read_exact_alpaca_deadman_handoff(
+    sess: TradingAutomationSession,
+) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    str | None,
+]:
+    """Read one active handoff only when the full retained-owner generation matches.
+
+    The independently committed claim is authoritative after a crash.  Session
+    JSON is deliberately not allowed to select another session's handoff or to
+    substitute the claim's *current* successor transport for the immutable old
+    deadman generation.
+    """
+    context = _alpaca_owner_transport_context(sess)
+    if context is None:
+        return None, None, None, None, "alpaca_owner_transport_context_missing"
+    readable, claim = read_action_claim_committed(
+        symbol=context["symbol"],
+        account_scope=context["account_scope"],
+    )
+    if not readable or not isinstance(claim, dict):
+        return context, None, None, None, "alpaca_owner_claim_unreadable"
+    metadata = claim.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    entry_request = metadata.get("order_request")
+    entry_request = entry_request if isinstance(entry_request, dict) else {}
+    if not (
+        claim.get("action") == "entry"
+        and str(claim.get("phase") or "").strip().lower() != "resolved"
+        and claim.get("claim_token") == context["claim_token"]
+        and claim.get("owner_session_id") == context["owner_session_id"]
+        and str(claim.get("account_scope") or "").strip().lower()
+        == context["account_scope"]
+        and str(claim.get("symbol") or "").strip().upper() == context["symbol"]
+        and str(
+            metadata.get("alpaca_account_id")
+            or entry_request.get("alpaca_account_id")
+            or ""
+        ).strip()
+        == context["alpaca_account_id"]
+    ):
+        return context, claim, metadata, None, "alpaca_owner_claim_generation_mismatch"
+    raw_handoff = metadata.get("deadman_close_handoff")
+    if raw_handoff is None:
+        return context, claim, metadata, None, None
+    if not isinstance(raw_handoff, dict):
+        return context, claim, metadata, None, "deadman_close_handoff_unreadable"
+    handoff = dict(raw_handoff)
+    deadman_request = handoff.get("deadman_order_request")
+    deadman_request = (
+        deadman_request if isinstance(deadman_request, dict) else {}
+    )
+    successor_intent = handoff.get("successor_intent")
+    successor_intent = (
+        successor_intent if isinstance(successor_intent, dict) else {}
+    )
+    successor_kind = str(
+        handoff.get("successor_transport_kind") or ""
+    ).strip().lower()
+    successor_type = str(successor_intent.get("order_type") or "").strip().lower()
+    successor_limit = _float_or_none(successor_intent.get("limit_price"))
+    try:
+        deadman_qty = float(deadman_request.get("base_size"))
+        successor_qty = float(successor_intent.get("base_size"))
+    except (TypeError, ValueError):
+        deadman_qty = successor_qty = math.nan
+    exact = bool(
+        handoff.get("identity_contract") == "alpaca_deadman_close_handoff_v1"
+        and str(handoff.get("handoff_token") or "").strip()
+        and handoff.get("owner_session_id") == context["owner_session_id"]
+        and str(handoff.get("alpaca_account_id") or "").strip()
+        == context["alpaca_account_id"]
+        and str(handoff.get("symbol") or "").strip().upper() == context["symbol"]
+        and str(handoff.get("reason") or "").strip()
+        and str(handoff.get("deadman_client_order_id") or "").strip()
+        == str(deadman_request.get("client_order_id") or "").strip()
+        and str(handoff.get("deadman_broker_order_id") or "").strip()
+        and str(deadman_request.get("alpaca_account_id") or "").strip()
+        == context["alpaca_account_id"]
+        and str(deadman_request.get("product_id") or "").strip().upper()
+        == context["symbol"]
+        and str(deadman_request.get("side") or "").strip().lower() == "sell"
+        and str(deadman_request.get("position_intent") or "").strip().lower()
+        == "sell_to_close"
+        and str(deadman_request.get("order_type") or "").strip().lower() == "stop"
+        and str(deadman_request.get("time_in_force") or "").strip().lower() == "gtc"
+        and math.isfinite(deadman_qty)
+        and deadman_qty > 0.0
+        and successor_kind in {"ordinary_exit", "emergency_exit"}
+        and str(handoff.get("successor_client_order_id") or "").strip()
+        == str(successor_intent.get("client_order_id") or "").strip()
+        and str(successor_intent.get("alpaca_account_id") or "").strip()
+        == context["alpaca_account_id"]
+        and str(successor_intent.get("product_id") or "").strip().upper()
+        == context["symbol"]
+        and str(successor_intent.get("side") or "").strip().lower() == "sell"
+        and str(successor_intent.get("position_intent") or "").strip().lower()
+        == "sell_to_close"
+        and successor_type in {"market", "limit"}
+        and str(successor_intent.get("time_in_force") or "").strip().lower()
+        in {"day", "gtc"}
+        and isinstance(successor_intent.get("extended_hours"), bool)
+        and math.isfinite(successor_qty)
+        and successor_qty > 0.0
+        and (
+            (successor_type == "market" and successor_intent.get("limit_price") is None)
+            or (
+                successor_type == "limit"
+                and successor_limit is not None
+                and successor_limit > 0.0
+            )
+        )
+    )
+    if not exact:
+        return context, claim, metadata, None, "deadman_close_handoff_generation_mismatch"
+    final_request = handoff.get("successor_order_request")
+    if final_request is not None:
+        if not isinstance(final_request, dict):
+            return context, claim, metadata, None, "deadman_close_handoff_final_request_unreadable"
+        final_request = dict(final_request)
+        immutable_keys = (
+            "account_scope",
+            "alpaca_account_id",
+            "product_id",
+            "side",
+            "client_order_id",
+            "position_intent",
+            "order_type",
+            "time_in_force",
+            "extended_hours",
+            "limit_price",
+        )
+        final_qty = _float_or_none(final_request.get("base_size"))
+        if not (
+            all(final_request.get(key) == successor_intent.get(key) for key in immutable_keys)
+            and final_qty is not None
+            and 0.0 < final_qty <= successor_qty + max(1e-9, successor_qty * 1e-8)
+        ):
+            return context, claim, metadata, None, "deadman_close_handoff_final_request_mismatch"
+    return context, claim, metadata, handoff, None
+
+
+def _owner_transport_lease_expired(transport: dict[str, Any]) -> bool:
+    try:
+        expiry = datetime.fromisoformat(
+            str(transport.get("lease_expires_at_utc") or "").replace("Z", "+00:00")
+        )
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry <= datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def _owner_transport_order_matches(order: Any, transport: dict[str, Any]) -> bool:
+    """Match one broker order to the outbox's immutable long-close envelope.
+
+    Alpaca's normalized stop payload omits ``stop_price``.  The deterministic CID
+    includes a digest of the complete request, while every broker-echoed field is
+    still checked here; no order lacking that exact CID can be adopted.
+    """
+    request = transport.get("order_request")
+    request = request if isinstance(request, dict) else {}
+    cid = str(transport.get("client_order_id") or "").strip()
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    try:
+        expected_qty = float(request.get("base_size"))
+        broker_qty = float(raw.get("qty"))
+        filled = float(getattr(order, "filled_size", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    expected_type = str(request.get("order_type") or "").strip().lower()
+    if not (
+        cid
+        and str(getattr(order, "client_order_id", "") or "").strip() == cid
+        and str(getattr(order, "order_id", "") or "").strip()
+        and str(getattr(order, "product_id", "") or "").strip().upper()
+        == str(request.get("product_id") or "").strip().upper()
+        and str(getattr(order, "side", "") or "").strip().lower() == "sell"
+        and str(getattr(order, "order_type", "") or "").strip().lower()
+        == expected_type
+        and str(raw.get("time_in_force") or "").strip().lower()
+        == str(request.get("time_in_force") or "").strip().lower()
+        and str(raw.get("position_intent") or "").strip().lower()
+        == "sell_to_close"
+        and math.isfinite(expected_qty)
+        and expected_qty > 0.0
+        and math.isfinite(broker_qty)
+        and abs(broker_qty - expected_qty) <= max(1e-9, expected_qty * 1e-8)
+        and math.isfinite(filled)
+        and 0.0 <= filled <= expected_qty + max(1e-9, expected_qty * 1e-8)
+    ):
+        return False
+    if expected_type == "limit":
+        expected_limit = _float_or_none(request.get("limit_price"))
+        broker_limit = _float_or_none(raw.get("limit_price"))
+        if (
+            expected_limit is None
+            or broker_limit is None
+            or abs(broker_limit - expected_limit)
+            > max(1e-9, expected_limit * 1e-8)
+        ):
+            return False
+    if expected_type == "market" and raw.get("limit_price") is not None:
+        return False
+    if expected_type == "stop":
+        expected_stop = _float_or_none(request.get("stop_price"))
+        broker_stop = _float_or_none(raw.get("stop_price"))
+        if (
+            expected_stop is None
+            or expected_stop <= 0.0
+            or broker_stop is None
+            or abs(broker_stop - expected_stop)
+            > max(1e-9, expected_stop * 1e-8)
+        ):
+            return False
+    expected_extended = request.get("extended_hours")
+    broker_extended = raw.get("extended_hours")
+    if isinstance(expected_extended, bool) and broker_extended is not expected_extended:
+        return False
+    return True
+
+
+def _alpaca_replacement_successor_order_matches(
+    order: Any,
+    *,
+    predecessor_broker_order_id: str,
+    successor_broker_order_id: str,
+    successor_order_request: dict[str, Any],
+) -> bool:
+    """Require the complete bidirectional Alpaca replacement envelope."""
+    request = dict(successor_order_request or {})
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    expected_stop = _float_or_none(request.get("stop_price"))
+    broker_stop = _float_or_none(raw.get("stop_price"))
+    transport = {
+        "identity_contract": "alpaca_owner_transport_v1",
+        "transport_kind": "deadman",
+        "client_order_id": str(request.get("client_order_id") or "").strip(),
+        "broker_order_id": str(successor_broker_order_id or "").strip(),
+        "order_request": request,
+    }
+    return bool(
+        str(getattr(order, "order_id", "") or "").strip()
+        == str(successor_broker_order_id or "").strip()
+        and str(raw.get("replaces") or "").strip()
+        == str(predecessor_broker_order_id or "").strip()
+        and expected_stop is not None
+        and expected_stop > 0.0
+        and broker_stop is not None
+        and abs(broker_stop - expected_stop)
+        <= max(1e-9, expected_stop * 1e-8)
+        and request.get("extended_hours") is False
+        and _owner_transport_order_matches(order, transport)
+    )
+
+
+_ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES = frozenset({
+    "new",
+    "partially_filled",
+    "accepted",
+    "pending_new",
+    "accepted_for_bidding",
+    "stopped",
+})
+
+
+def _alpaca_protective_order_lifecycle(order: Any) -> str:
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    return str(raw.get("alpaca_status") or "").strip().lower()
+
+
+def _alpaca_protective_order_is_certifiably_active(order: Any) -> bool:
+    return bool(
+        str(getattr(order, "status", "") or "").strip().lower()
+        not in _ORDER_TERMINAL_STATUSES
+        and _alpaca_protective_order_lifecycle(order)
+        in _ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES
+    )
+
+
+def _resolve_exact_owner_transport_terminal(
+    sess: TradingAutomationSession,
+    transport: dict[str, Any],
+    order: Any,
+    *,
+    remaining_quantity: float | None = None,
+    broker_status_override: str | None = None,
+) -> bool:
+    context = _alpaca_owner_transport_context(sess)
+    if context is None or not _owner_transport_order_matches(order, transport):
+        return False
+    cid = str(transport["client_order_id"])
+    oid = str(getattr(order, "order_id", "") or "")
+    status = str(
+        broker_status_override
+        if broker_status_override is not None
+        else (getattr(order, "status", "") or "")
+    ).strip().lower()
+    try:
+        filled = float(getattr(order, "filled_size", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    # Crash recovery: owner transport is committed independently before local
+    # fill accounting. If the local transaction failed, the exact resolved
+    # outbox is affirmative evidence and must be replayable for accounting—never
+    # mistaken for permission to submit another sell.
+    readable, claim = read_action_claim_committed(
+        symbol=context["symbol"],
+        account_scope=context["account_scope"],
+    )
+    claim = claim if readable and isinstance(claim, dict) else {}
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    entry_request = metadata.get("order_request")
+    entry_request = entry_request if isinstance(entry_request, dict) else {}
+    if not (
+        claim.get("action") == "entry"
+        and claim.get("claim_token") == context["claim_token"]
+        and claim.get("owner_session_id") == context["owner_session_id"]
+        and str(claim.get("account_scope") or "").strip().lower()
+        == context["account_scope"]
+        and str(claim.get("symbol") or "").strip().upper() == context["symbol"]
+        and str(
+            metadata.get("alpaca_account_id")
+            or entry_request.get("alpaca_account_id")
+            or ""
+        ).strip()
+        == context["alpaca_account_id"]
+    ):
+        return False
+
+    transport_kind = str(transport.get("transport_kind") or "").strip().lower()
+    request = transport.get("order_request")
+    request = request if isinstance(request, dict) else {}
+    handoff = metadata.get("deadman_close_handoff")
+    handoff = handoff if isinstance(handoff, dict) else None
+    if handoff is not None:
+        if transport_kind == "deadman":
+            original_deadman = bool(
+                str(handoff.get("deadman_client_order_id") or "").strip() == cid
+                and str(handoff.get("deadman_broker_order_id") or "").strip() == oid
+                and handoff.get("deadman_order_request") == request
+            )
+            replacement_deadman = bool(
+                str(
+                    handoff.get("replacement_deadman_client_order_id") or ""
+                ).strip()
+                == cid
+                and str(
+                    handoff.get("replacement_deadman_broker_order_id") or ""
+                ).strip()
+                == oid
+                and handoff.get("replacement_deadman_order_request") == request
+            )
+            intermediate_deadman = False
+            if not (original_deadman or replacement_deadman):
+                # A crash may leave child N active while local accounting for
+                # terminal child N-1 rolled back.  Permit replay of N-1 only
+                # when the non-evictable protective ledger contains exactly one
+                # identical resolved generation.  Legacy rows without that
+                # ledger still require both handoff lineage and rolling history.
+                # This never grants POST authority; it only makes the
+                # predecessor's local fill watermark replayable.
+                lineage = handoff.get("protective_terminal_generations")
+                lineage = lineage if isinstance(lineage, list) else []
+                protective_ledger = metadata.get("protective_terminal_ledger")
+                ledger_available = isinstance(protective_ledger, list)
+                owner_history = (
+                    protective_ledger
+                    if ledger_available
+                    else metadata.get("owner_transport_history")
+                )
+                owner_history = owner_history if isinstance(owner_history, list) else []
+
+                def _exact_intermediate(candidate: Any, *, history: bool) -> bool:
+                    if not isinstance(candidate, dict):
+                        return False
+                    try:
+                        candidate_fill = float(candidate.get("filled_size"))
+                        candidate_remaining = float(
+                            candidate.get("remaining_quantity")
+                        )
+                    except (TypeError, ValueError):
+                        return False
+                    identity_ok = bool(
+                        str(candidate.get("client_order_id") or "").strip()
+                        == cid
+                        and str(candidate.get("broker_order_id") or "").strip()
+                        == oid
+                        and candidate.get("order_request") == request
+                        and str(
+                            candidate.get("broker_order_status") or ""
+                        ).strip().lower()
+                        == status
+                        and abs(candidate_fill - filled)
+                        <= max(1e-9, abs(filled) * 1e-8)
+                        and remaining_quantity is not None
+                        and abs(
+                            candidate_remaining - float(remaining_quantity)
+                        )
+                        <= max(1e-9, abs(float(remaining_quantity)) * 1e-8)
+                    )
+                    if not identity_ok:
+                        return False
+                    return bool(
+                        not history
+                        or (
+                            str(candidate.get("phase") or "").strip().lower()
+                            == "resolved"
+                            and str(
+                                candidate.get("transport_kind") or ""
+                            ).strip().lower()
+                            == "deadman"
+                        )
+                    )
+
+                lineage_matches = [
+                    candidate
+                    for candidate in lineage
+                    if _exact_intermediate(candidate, history=False)
+                ]
+                history_matches = [
+                    candidate
+                    for candidate in owner_history
+                    if _exact_intermediate(candidate, history=True)
+                ]
+                intermediate_deadman = bool(
+                    len(history_matches) == 1
+                    and (
+                        len(lineage_matches) <= 1
+                        if ledger_available
+                        else len(lineage_matches) == 1
+                    )
+                )
+            if not (
+                original_deadman
+                or replacement_deadman
+                or intermediate_deadman
+            ):
+                return False
+        if transport_kind in {"ordinary_exit", "emergency_exit"} and not (
+            str(handoff.get("successor_client_order_id") or "").strip() == cid
+            and str(handoff.get("successor_transport_kind") or "").strip().lower()
+            == transport_kind
+            and handoff.get("successor_order_request") == request
+        ):
+            return False
+
+    def _same_terminal_generation(candidate: Any) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+        try:
+            same_fill = abs(float(candidate.get("filled_size")) - filled) <= max(
+                1e-9, abs(filled) * 1e-8
+            )
+            candidate_remaining = candidate.get("remaining_quantity")
+            same_remaining = (
+                remaining_quantity is None and candidate_remaining is None
+            ) or (
+                remaining_quantity is not None
+                and candidate_remaining is not None
+                and abs(float(candidate_remaining) - float(remaining_quantity))
+                <= max(1e-9, abs(float(remaining_quantity)) * 1e-8)
+            )
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            str(candidate.get("phase") or "").strip().lower() == "resolved"
+            and str(candidate.get("transport_kind") or "").strip().lower()
+            == transport_kind
+            and str(candidate.get("client_order_id") or "").strip() == cid
+            and str(candidate.get("broker_order_id") or "").strip() == oid
+            and str(candidate.get("broker_order_status") or "").strip().lower()
+            == status
+            and candidate.get("order_request") == request
+            and same_fill
+            and same_remaining
+        )
+
+    candidates: list[Any] = [metadata.get("owner_transport")]
+    history = metadata.get("owner_transport_history")
+    if isinstance(history, list):
+        candidates.extend(history)
+    protective_ledger = metadata.get("protective_terminal_ledger")
+    if isinstance(protective_ledger, list):
+        candidates.extend(protective_ledger)
+    if any(_same_terminal_generation(candidate) for candidate in candidates):
+        return True
+
+    return bool(
+        resolve_owner_transport_terminal_committed(
+            **context,
+            client_order_id=cid,
+            broker_order_id=oid,
+            broker_order_status=status,
+            filled_size=filled,
+            remaining_quantity=remaining_quantity,
+        )
+    )
+
+
+def _apply_replacement_attribution_quarantine(
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    claim_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay exact exposure quantity without inventing realized P&L."""
+    rows = claim_metadata.get("protective_attribution_quarantine_ledger")
+    rows = rows if isinstance(rows, list) else []
+    markers = le.get("deadman_attribution_quarantine_watermarks")
+    markers = list(markers) if isinstance(markers, list) else []
+    applied = False
+    last_remaining: float | None = None
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            return {"ok": False, "error": "replacement_attribution_quarantine_invalid"}
+        row = dict(raw_row)
+        containment_id = str(row.get("containment_id") or "").strip()
+        predecessor_request = row.get("predecessor_order_request")
+        predecessor_request = (
+            predecessor_request if isinstance(predecessor_request, dict) else {}
+        )
+        try:
+            requested = float(predecessor_request.get("base_size"))
+            remaining = float(row.get("broker_remaining_quantity"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "replacement_attribution_quarantine_invalid"}
+        if not (
+            row.get("identity_contract")
+            == "alpaca_replacement_attribution_quarantine_v1"
+            and containment_id
+            and math.isfinite(requested)
+            and requested > 0.0
+            and math.isfinite(remaining)
+            and 0.0 <= remaining <= requested + max(1e-9, requested * 1e-8)
+        ):
+            return {"ok": False, "error": "replacement_attribution_quarantine_invalid"}
+        identity_indexes = [
+            index
+            for index, marker in enumerate(markers)
+            if isinstance(marker, dict)
+            and marker.get("containment_id") == containment_id
+        ]
+        if len(identity_indexes) > 1:
+            return {
+                "ok": False,
+                "error": "replacement_attribution_quarantine_watermark_ambiguous",
+            }
+        prior_marker = (
+            dict(markers[identity_indexes[0]])
+            if identity_indexes
+            else {}
+        )
+        prior_remaining = _float_or_none(
+            prior_marker.get("broker_remaining_quantity")
+        )
+        if (
+            identity_indexes
+            and prior_remaining is not None
+            and abs(prior_remaining - remaining)
+            <= max(1e-9, max(remaining, 1.0) * 1e-8)
+        ):
+            last_remaining = remaining
+            continue
+        successor_baseline = _float_or_none(
+            row.get("successor_applied_fill_baseline")
+        )
+        successor_request = row.get("successor_order_request")
+        successor_request = (
+            dict(successor_request)
+            if isinstance(successor_request, dict)
+            else {}
+        )
+        successor_cid = str(
+            row.get("successor_client_order_id") or ""
+        ).strip()
+        successor_oid = str(
+            row.get("successor_broker_order_id") or ""
+        ).strip()
+        if successor_baseline is not None and not (
+            successor_baseline >= 0.0
+            and successor_cid
+            and successor_oid
+            and successor_request
+            and abs((requested - successor_baseline) - remaining)
+            <= max(1e-9, requested * 1e-8)
+        ):
+            return {
+                "ok": False,
+                "error": "replacement_attribution_quarantine_baseline_invalid",
+            }
+        if identity_indexes:
+            prior_baseline = _float_or_none(
+                prior_marker.get("successor_applied_fill_baseline")
+            )
+            if prior_baseline is None and prior_remaining is not None:
+                prior_baseline = requested - prior_remaining
+            if not (
+                prior_remaining is not None
+                and prior_baseline is not None
+                and successor_baseline is not None
+                and successor_baseline
+                + max(1e-9, requested * 1e-8)
+                >= prior_baseline
+                and remaining
+                <= prior_remaining + max(1e-9, requested * 1e-8)
+            ):
+                return {
+                    "ok": False,
+                    "error": "replacement_attribution_quarantine_baseline_regressed",
+                }
+        position = le.get("position")
+        position = dict(position) if isinstance(position, dict) else {}
+        local_qty = _float_or_none(position.get("quantity"))
+        tol = max(1e-9, requested * 1e-8)
+        if local_qty is None or not (
+            abs(local_qty - requested) <= tol
+            or abs(local_qty - remaining) <= max(tol, remaining * 1e-8)
+            or (
+                prior_remaining is not None
+                and abs(local_qty - prior_remaining)
+                <= max(tol, prior_remaining * 1e-8)
+            )
+        ):
+            return {
+                "ok": False,
+                "error": "replacement_attribution_quarantine_local_quantity_mismatch",
+                "local_quantity": local_qty,
+                "expected_predecessor_quantity": requested,
+                "broker_remaining_quantity": remaining,
+            }
+        position["quantity"] = remaining
+        position["fill_attribution_quarantined"] = True
+        position["fill_attribution_containment_id"] = containment_id
+        le["position"] = position
+        if successor_baseline is not None:
+            deadman_markers = le.get("deadman_applied_fill_watermarks")
+            deadman_markers = (
+                list(deadman_markers)
+                if isinstance(deadman_markers, list)
+                else []
+            )
+            baseline_indexes = [
+                index
+                for index, candidate in enumerate(deadman_markers)
+                if isinstance(candidate, dict)
+                and str(candidate.get("client_order_id") or "").strip()
+                == successor_cid
+                and str(candidate.get("order_id") or "").strip()
+                == successor_oid
+            ]
+            if len(baseline_indexes) > 1:
+                return {
+                    "ok": False,
+                    "error": "replacement_attribution_quarantine_baseline_ambiguous",
+                }
+            next_baseline = {
+                    **(
+                        dict(deadman_markers[baseline_indexes[0]])
+                        if baseline_indexes
+                        else {}
+                    ),
+                    "identity_contract": "alpaca_deadman_applied_fill_v1",
+                    "order_id": successor_oid,
+                    "client_order_id": successor_cid,
+                    "owner_transport": {
+                        "identity_contract": "alpaca_owner_transport_v1",
+                        "transport_kind": "deadman",
+                        "client_order_id": successor_cid,
+                        "broker_order_id": successor_oid,
+                        "order_request": successor_request,
+                    },
+                    "applied_filled_size": successor_baseline,
+                    "broker_remaining_quantity": remaining,
+                    "fill_attribution_quarantined": True,
+                    "containment_id": containment_id,
+                }
+            if baseline_indexes:
+                deadman_markers[baseline_indexes[0]] = next_baseline
+            else:
+                deadman_markers.append(next_baseline)
+            le["deadman_applied_fill_watermarks"] = deadman_markers
+        marker = {
+            "identity_contract": "alpaca_replacement_attribution_quarantine_watermark_v1",
+            "containment_id": containment_id,
+            "predecessor_client_order_id": row.get(
+                "predecessor_client_order_id"
+            ),
+            "predecessor_broker_order_id": row.get(
+                "predecessor_broker_order_id"
+            ),
+            "successor_broker_order_id": row.get("successor_broker_order_id"),
+            "successor_applied_fill_baseline": successor_baseline,
+            "broker_remaining_quantity": remaining,
+            "quantity_delta_quarantined": row.get(
+                "quantity_delta_quarantined"
+            ),
+            "applied_at_utc": _utcnow().isoformat(),
+        }
+        if identity_indexes:
+            markers[identity_indexes[0]] = marker
+        else:
+            markers.append(marker)
+        le["deadman_attribution_quarantine_watermarks"] = markers
+        le["alpaca_entries_quarantined"] = True
+        le["alpaca_replacement_fill_attribution_quarantine"] = row
+        applied = True
+        last_remaining = remaining
+    if applied:
+        _commit_le(sess, le)
+    return {
+        "ok": True,
+        "applied": applied,
+        "broker_flat": last_remaining is not None and last_remaining <= 1e-9,
+        "broker_remaining_quantity": last_remaining,
+    }
+
+
+def _service_deadman_replacement_containment(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    predecessor_transport: dict[str, Any],
+    predecessor_order: Any,
+    successor_order: Any,
+    successor_order_request: dict[str, Any],
+    avg_entry_price: float,
+    software_stop_price: float,
+    prepared: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Crash-resumable exact-B containment for ambiguous replacement lineage."""
+    context = _alpaca_owner_transport_context(sess)
+    if context is None:
+        return {"ok": False, "pending": True, "error": "alpaca_deadman_owner_context_missing"}
+    predecessor_request = predecessor_transport.get("order_request")
+    predecessor_request = (
+        dict(predecessor_request)
+        if isinstance(predecessor_request, dict)
+        else {}
+    )
+    predecessor_cid = str(predecessor_transport.get("client_order_id") or "").strip()
+    predecessor_oid = str(predecessor_transport.get("broker_order_id") or "").strip()
+    successor_oid = str(getattr(successor_order, "order_id", "") or "").strip()
+    successor_cid = str(
+        getattr(successor_order, "client_order_id", "") or ""
+    ).strip()
+    try:
+        requested_qty = float(predecessor_request["base_size"])
+    except (KeyError, TypeError, ValueError):
+        return {"ok": False, "pending": True, "error": "replacement_containment_quantity_invalid"}
+    if not (
+        predecessor_cid
+        and predecessor_oid
+        and successor_oid
+        and successor_cid
+        and requested_qty > 0.0
+    ):
+        return {"ok": False, "pending": True, "error": "replacement_containment_identity_invalid"}
+    prepared_row = dict(prepared) if isinstance(prepared, dict) else None
+    if prepared_row is None:
+        digest = hashlib.sha256(
+            (
+                f"{context['account_scope']}|{context['alpaca_account_id']}|"
+                f"{context['symbol']}|{predecessor_cid}|{predecessor_oid}|"
+                f"{successor_cid}|{successor_oid}|replacement-containment"
+            ).encode("utf-8")
+        ).hexdigest()
+        close_cid = f"chili_rc_{int(sess.id)}_{digest[:24]}"[:48]
+        close_intent = {
+            "account_scope": context["account_scope"],
+            "alpaca_account_id": context["alpaca_account_id"],
+            "product_id": str(product_id).strip().upper(),
+            "side": "sell",
+            "base_size": _fmt_base_size(requested_qty),
+            "client_order_id": close_cid,
+            "position_intent": "sell_to_close",
+            "order_type": "market",
+            "time_in_force": "day",
+            "extended_hours": False,
+            "limit_price": None,
+        }
+        prepared_result = prepare_deadman_replacement_containment_committed(
+            **context,
+            predecessor_client_order_id=predecessor_cid,
+            predecessor_broker_order_id=predecessor_oid,
+            predecessor_order_request=predecessor_request,
+            predecessor_reported_filled_size=float(
+                getattr(predecessor_order, "filled_size", 0.0) or 0.0
+            ),
+            successor_client_order_id=successor_cid,
+            successor_broker_order_id=successor_oid,
+            successor_order_request=successor_order_request,
+            successor_broker_status=str(
+                getattr(successor_order, "status", "") or ""
+            ).strip().lower(),
+            successor_broker_lifecycle=_alpaca_protective_order_lifecycle(
+                successor_order
+            ),
+            successor_reported_filled_size=float(
+                getattr(successor_order, "filled_size", 0.0) or 0.0
+            ),
+            close_intent=close_intent,
+        )
+        if not prepared_result.get("ok"):
+            return {
+                "ok": False,
+                "pending": True,
+                "error": str(
+                    prepared_result.get("reason")
+                    or "replacement_containment_prepare_failed"
+                ),
+            }
+        prepared_row = prepared_result.get("containment")
+        prepared_row = (
+            dict(prepared_row) if isinstance(prepared_row, dict) else {}
+        )
+
+    # Only after the claim-side prepared authority commits may a live successor
+    # be canceled.  A terminal successor skips the cancel but still receives the
+    # same fresh two-sided verification below.
+    successor_status = str(
+        getattr(successor_order, "status", "") or ""
+    ).strip().lower()
+    if successor_status not in _ORDER_TERMINAL_STATUSES:
+        cancel = getattr(adapter, "cancel_order_by_id", None)
+        if not callable(cancel):
+            return {
+                "ok": False,
+                "pending": True,
+                "active_successor_retained": True,
+                "error": "replacement_containment_cancel_unsupported",
+            }
+        try:
+            cancel(successor_oid)
+        except Exception:
+            logger.warning(
+                "[live_runner] replacement containment successor cancel failed",
+                exc_info=True,
+            )
+
+    predecessor_state, predecessor_after = _strict_client_order_id_truth(
+        adapter,
+        predecessor_cid,
+    )
+    successor_state, successor_after = _strict_broker_order_id_truth(
+        adapter,
+        successor_oid,
+    )
+    predecessor_after_raw = getattr(predecessor_after, "raw", None)
+    predecessor_after_raw = (
+        predecessor_after_raw if isinstance(predecessor_after_raw, dict) else {}
+    )
+    successor_after_status = str(
+        getattr(successor_after, "status", "") or ""
+    ).strip().lower()
+    if not (
+        predecessor_state == "found"
+        and predecessor_after is not None
+        and str(getattr(predecessor_after, "order_id", "") or "").strip()
+        == predecessor_oid
+        and _owner_transport_order_matches(
+            predecessor_after,
+            predecessor_transport,
+        )
+        and _alpaca_protective_order_lifecycle(predecessor_after) == "replaced"
+        and str(predecessor_after_raw.get("replaced_by") or "").strip()
+        == successor_oid
+        and successor_state == "found"
+        and successor_after is not None
+        and successor_after_status in _ORDER_TERMINAL_STATUSES
+        and _alpaca_replacement_successor_order_matches(
+            successor_after,
+            predecessor_broker_order_id=predecessor_oid,
+            successor_broker_order_id=successor_oid,
+            successor_order_request=successor_order_request,
+        )
+    ):
+        return {
+            "ok": False,
+            "pending": True,
+            "containment_prepared": True,
+            "error": "replacement_containment_post_cancel_two_sided_truth_unproven",
+        }
+    try:
+        broker_remaining = float(adapter.get_position_quantity(product_id))
+        predecessor_fill_after = float(
+            getattr(predecessor_after, "filled_size", 0.0) or 0.0
+        )
+        successor_fill_after = float(
+            getattr(successor_after, "filled_size", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "pending": True,
+            "containment_prepared": True,
+            "error": "replacement_containment_post_cancel_position_unreadable",
+        }
+    if not (
+        math.isfinite(broker_remaining)
+        and 0.0
+        <= broker_remaining
+        <= requested_qty + max(1e-9, requested_qty * 1e-8)
+    ):
+        return {
+            "ok": False,
+            "pending": True,
+            "containment_prepared": True,
+            "error": "replacement_containment_post_cancel_position_invalid",
+        }
+    activated = activate_deadman_replacement_containment_committed(
+        **context,
+        containment_id=str(prepared_row.get("containment_id") or ""),
+        predecessor_broker_lifecycle="replaced",
+        successor_broker_status=successor_after_status,
+        successor_broker_lifecycle=_alpaca_protective_order_lifecycle(
+            successor_after
+        ),
+        predecessor_reported_filled_size=predecessor_fill_after,
+        successor_reported_filled_size=successor_fill_after,
+        broker_remaining_quantity=broker_remaining,
+    )
+    if not activated.get("ok"):
+        return {
+            "ok": False,
+            "pending": True,
+            "containment_prepared": True,
+            "error": str(
+                activated.get("reason")
+                or "replacement_containment_activate_failed"
+            ),
+        }
+    readable, claim = read_action_claim_committed(
+        symbol=context["symbol"],
+        account_scope=context["account_scope"],
+    )
+    claim_meta = (
+        claim.get("metadata")
+        if readable and isinstance(claim, dict)
+        else {}
+    )
+    claim_meta = claim_meta if isinstance(claim_meta, dict) else {}
+    quarantine_replay = _apply_replacement_attribution_quarantine(
+        sess,
+        le=le,
+        claim_metadata=claim_meta,
+    )
+    if not quarantine_replay.get("ok"):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": quarantine_replay.get("error"),
+        }
+    if broker_remaining <= 1e-9:
+        le.pop("deadman_stop", None)
+        _commit_le(sess, le)
+        return {
+            "ok": True,
+            "position_closed": True,
+            "accounting_quarantined": True,
+            "broker_remaining_quantity": 0.0,
+        }
+    handoff = activated.get("handoff")
+    handoff = dict(handoff) if isinstance(handoff, dict) else {}
+    final_request = handoff.get("successor_order_request")
+    final_request = final_request if isinstance(final_request, dict) else {}
+    final_qty = _float_or_none(final_request.get("base_size"))
+    if final_qty is None or abs(final_qty - broker_remaining) > max(
+        1e-9,
+        broker_remaining * 1e-8,
+    ):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_containment_final_quantity_mismatch",
+        }
+    result = _submit_live_market_exit(
+        db,
+        sess,
+        adapter,
+        le=le,
+        product_id=product_id,
+        quantity=broker_remaining,
+        client_order_id=str(final_request.get("client_order_id") or ""),
+        reason="replacement_lineage_ambiguous_close_only_containment",
+        bid=None,
+        ask=None,
+        mid=None,
+        extra={"replacement_lineage_containment": True},
+        quote_independent_authority=True,
+        emergency_exit_authority=None,
+        alpaca_handoff_recovery=handoff,
+    )
+    if result.get("order_id"):
+        _live_exit_submit_succeeded(
+            db,
+            sess,
+            adapter=adapter,
+            le=le,
+            result=result,
+            reason="replacement_lineage_ambiguous_close_only_containment",
+        )
+    return {
+        "ok": bool(result.get("ok") or result.get("order_id")),
+        "pending": True,
+        "pending_exit": bool(result.get("order_id")),
+        "containment_active": bool(result.get("order_id")),
+        "error": result.get("error"),
+    }
+
+
+def _dispatch_alpaca_replaced_deadman_successor(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    predecessor_transport: dict[str, Any],
+    predecessor_order: Any,
+    avg_entry_price: float,
+    software_stop_price: float,
+    rearm_after_terminal: bool,
+) -> dict[str, Any]:
+    """Adopt or retire one exact broker replacement edge without guessing.
+
+    ``pending_replace`` never enters here.  The predecessor must be freshly read
+    as raw ``replaced`` and the successor must prove both OID links plus the full
+    immutable stop envelope.  A zero-fill active successor is adopted directly;
+    an exact partially-filled open remainder is retained with attribution and
+    P&L quarantined while its cumulative broker baseline advances durably.
+    """
+    context = _alpaca_owner_transport_context(sess)
+    if context is None:
+        return {"ok": False, "pending": True, "error": "alpaca_deadman_owner_context_missing"}
+    predecessor_request = predecessor_transport.get("order_request")
+    predecessor_request = (
+        dict(predecessor_request)
+        if isinstance(predecessor_request, dict)
+        else {}
+    )
+    predecessor_cid = str(
+        predecessor_transport.get("client_order_id") or ""
+    ).strip()
+    read_predecessor_oid = str(
+        getattr(predecessor_order, "order_id", "") or ""
+    ).strip()
+    durable_predecessor_oid = str(
+        predecessor_transport.get("broker_order_id") or ""
+    ).strip()
+    predecessor_raw = getattr(predecessor_order, "raw", None)
+    predecessor_raw = predecessor_raw if isinstance(predecessor_raw, dict) else {}
+    if not (
+        predecessor_cid
+        and read_predecessor_oid
+        and _owner_transport_order_matches(
+            predecessor_order,
+            predecessor_transport,
+        )
+        and _alpaca_protective_order_lifecycle(predecessor_order) == "replaced"
+    ):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_predecessor_identity_unproven",
+        }
+    if durable_predecessor_oid and durable_predecessor_oid != read_predecessor_oid:
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_predecessor_broker_id_mismatch",
+        }
+    if not durable_predecessor_oid:
+        lease_token = str(predecessor_transport.get("lease_token") or "").strip()
+        if not lease_token or not advance_owner_transport_committed(
+            **context,
+            client_order_id=predecessor_cid,
+            lease_token=lease_token,
+            phase="submitted",
+            broker_order_id=read_predecessor_oid,
+            metadata={"replacement_predecessor_oid_bound_from_strict_cid": True},
+        ):
+            return {
+                "ok": False,
+                "pending": True,
+                "error": "replacement_deadman_predecessor_broker_id_bind_failed",
+            }
+        predecessor_transport = {
+            **predecessor_transport,
+            "phase": "submitted",
+            "broker_order_id": read_predecessor_oid,
+        }
+        durable_predecessor_oid = read_predecessor_oid
+
+    successor_oid = str(predecessor_raw.get("replaced_by") or "").strip()
+    successor_state, successor_order = _strict_broker_order_id_truth(
+        adapter,
+        successor_oid,
+    )
+    successor_cid = str(
+        getattr(successor_order, "client_order_id", "") or ""
+    ).strip()
+    successor_request = {
+        **predecessor_request,
+        "client_order_id": successor_cid,
+    }
+    if not (
+        successor_state == "found"
+        and successor_order is not None
+        and successor_oid
+        and successor_cid
+        and successor_cid != predecessor_cid
+        and _alpaca_replacement_successor_order_matches(
+            successor_order,
+            predecessor_broker_order_id=durable_predecessor_oid,
+            successor_broker_order_id=successor_oid,
+            successor_order_request=successor_request,
+        )
+    ):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_successor_lineage_unproven",
+        }
+
+    # Re-read the predecessor after the successor read.  Adoption requires both
+    # sides of the edge to be true in the same pulse; pending/reactivated old
+    # orders are never synthesized as terminal.
+    predecessor_state_2, predecessor_order_2 = _strict_client_order_id_truth(
+        adapter,
+        predecessor_cid,
+    )
+    predecessor_raw_2 = getattr(predecessor_order_2, "raw", None)
+    predecessor_raw_2 = (
+        predecessor_raw_2 if isinstance(predecessor_raw_2, dict) else {}
+    )
+    if not (
+        predecessor_state_2 == "found"
+        and predecessor_order_2 is not None
+        and str(getattr(predecessor_order_2, "order_id", "") or "").strip()
+        == durable_predecessor_oid
+        and _owner_transport_order_matches(
+            predecessor_order_2,
+            predecessor_transport,
+        )
+        and _alpaca_protective_order_lifecycle(predecessor_order_2) == "replaced"
+        and str(predecessor_raw_2.get("replaced_by") or "").strip()
+        == successor_oid
+    ):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_predecessor_not_inert",
+        }
+    predecessor_order = predecessor_order_2
+
+    try:
+        requested_qty = float(predecessor_request["base_size"])
+        broker_qty = float(adapter.get_position_quantity(product_id))
+        predecessor_fill = float(
+            getattr(predecessor_order, "filled_size", 0.0) or 0.0
+        )
+        successor_fill = float(
+            getattr(successor_order, "filled_size", 0.0) or 0.0
+        )
+    except (KeyError, TypeError, ValueError):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_successor_quantity_unreadable",
+        }
+    local_position = le.get("position")
+    local_position = local_position if isinstance(local_position, dict) else {}
+    local_qty = _float_or_none(local_position.get("quantity"))
+    tol = max(1e-9, abs(requested_qty) * 1e-8)
+    if not (
+        math.isfinite(requested_qty)
+        and requested_qty > 0.0
+        and math.isfinite(broker_qty)
+        and 0.0 <= broker_qty <= requested_qty + tol
+        and math.isfinite(predecessor_fill)
+        and predecessor_fill >= 0.0
+        and math.isfinite(successor_fill)
+        and successor_fill >= 0.0
+        and local_qty is not None
+        and abs(local_qty - requested_qty) <= tol
+    ):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_successor_quantity_generation_mismatch",
+        }
+
+    successor_status = str(
+        getattr(successor_order, "status", "") or ""
+    ).strip().lower()
+    successor_lifecycle = _alpaca_protective_order_lifecycle(successor_order)
+    successor_active = _alpaca_protective_order_is_certifiably_active(successor_order)
+    quantity_delta = requested_qty - broker_qty
+    attributable_fill = 0.0
+    fill_source: str | None = None
+    attributable_avg: float | None = None
+    quarantine_active_adoption = False
+    if successor_active:
+        conserved = bool(
+            predecessor_fill <= 1e-12
+            and successor_fill <= 1e-12
+            and abs(quantity_delta) <= tol
+            and abs(broker_qty - requested_qty) <= tol
+        )
+        if not conserved:
+            open_remainder_exact = bool(
+                successor_fill > 1e-12
+                and broker_qty > 1e-9
+                and abs((requested_qty - successor_fill) - broker_qty) <= tol
+            )
+            if not open_remainder_exact:
+                return {
+                    "ok": False,
+                    "pending": True,
+                    "active_successor_retained": True,
+                    "error": "replacement_deadman_active_successor_remainder_unproven",
+                }
+            quarantine_active_adoption = True
+    elif successor_status in _ORDER_TERMINAL_STATUSES:
+        positive = [
+            ("predecessor", predecessor_fill, predecessor_order),
+            ("successor", successor_fill, successor_order),
+        ]
+        positive = [row for row in positive if row[1] > 1e-12]
+        if abs(quantity_delta) <= tol and not positive:
+            attributable_fill = 0.0
+        elif len(positive) == 1 and abs(positive[0][1] - quantity_delta) <= tol:
+            fill_source, attributable_fill, fill_order = positive[0]
+            attributable_avg = _float_or_none(
+                getattr(fill_order, "average_filled_price", None)
+            )
+            if attributable_avg is None or attributable_avg <= 0.0:
+                return {
+                    "ok": False,
+                    "pending": True,
+                    "error": "replacement_deadman_attributable_fill_basis_unavailable",
+                }
+        else:
+            return _service_deadman_replacement_containment(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                predecessor_transport=predecessor_transport,
+                predecessor_order=predecessor_order,
+                successor_order=successor_order,
+                successor_order_request=successor_request,
+                avg_entry_price=avg_entry_price,
+                software_stop_price=software_stop_price,
+            )
+    else:
+        return {
+            "ok": False,
+            "pending": True,
+            "error": "replacement_deadman_successor_not_active_or_terminal",
+        }
+
+    reconciled = reconcile_deadman_replacement_successor_committed(
+        **context,
+        predecessor_client_order_id=predecessor_cid,
+        predecessor_broker_order_id=durable_predecessor_oid,
+        predecessor_order_request=predecessor_request,
+        predecessor_broker_lifecycle="replaced",
+        predecessor_reported_filled_size=predecessor_fill,
+        successor_client_order_id=successor_cid,
+        successor_broker_order_id=successor_oid,
+        successor_order_request=successor_request,
+        successor_broker_status=successor_status,
+        successor_broker_lifecycle=successor_lifecycle,
+        successor_reported_filled_size=successor_fill,
+        successor_average_filled_price=attributable_avg,
+        attributable_filled_size=attributable_fill,
+        attributable_fill_source=fill_source,
+        broker_remaining_quantity=broker_qty,
+        successor_active=successor_active,
+        fill_attribution_quarantined=quarantine_active_adoption,
+    )
+    if not reconciled.get("ok"):
+        return {
+            "ok": False,
+            "pending": True,
+            "error": str(
+                reconciled.get("reason")
+                or "replacement_deadman_successor_claim_reconcile_failed"
+            ),
+        }
+    next_transport = reconciled.get("transport")
+    next_transport = (
+        dict(next_transport) if isinstance(next_transport, dict) else {}
+    )
+    le["deadman_stop"] = {
+        "order_id": (
+            successor_oid if successor_active else durable_predecessor_oid
+        ),
+        "client_order_id": (
+            successor_cid if successor_active else predecessor_cid
+        ),
+        "stop_price": predecessor_request.get("stop_price"),
+        "qty": requested_qty,
+        "phase": "submitted",
+        "owner_transport": next_transport,
+    }
+    if quarantine_active_adoption:
+        readable, claim = read_action_claim_committed(
+            symbol=context["symbol"],
+            account_scope=context["account_scope"],
+        )
+        claim_meta = (
+            claim.get("metadata")
+            if readable and isinstance(claim, dict)
+            else {}
+        )
+        claim_meta = claim_meta if isinstance(claim_meta, dict) else {}
+        quarantine_replay = _apply_replacement_attribution_quarantine(
+            sess,
+            le=le,
+            claim_metadata=claim_meta,
+        )
+        if not quarantine_replay.get("ok"):
+            return {
+                "ok": False,
+                "pending": True,
+                "active_successor_retained": True,
+                "error": quarantine_replay.get("error"),
+            }
+    _commit_le(sess, le)
+    db.flush()
+    return _ensure_alpaca_deadman_stop(
+        db,
+        sess,
+        adapter,
+        le=le,
+        product_id=product_id,
+        quantity=(
+            broker_qty
+            if quarantine_active_adoption or not successor_active
+            else requested_qty
+        ),
+        avg_entry_price=avg_entry_price,
+        software_stop_price=software_stop_price,
+        rearm_after_terminal=rearm_after_terminal,
+    )
+
+
+def _ensure_alpaca_deadman_stop(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    quantity: float,
+    avg_entry_price: float,
+    software_stop_price: float,
+    rearm_after_terminal: bool = True,
+    terminal_remaining_override: float | None = None,
+    _skip_predecessor_replay: bool = False,
+) -> dict[str, Any]:
+    """Durably place/reconcile the one full-position Alpaca protective sell."""
+    if normalize_execution_family(sess.execution_family) != "alpaca_spot":
+        return {"ok": True, "not_applicable": True}
+
+    def _queue_full_close(error: str, **extra: Any) -> dict[str, Any]:
+        le["deadman_protection_unavailable"] = {
+            "error": error,
+            "full_close_queued": True,
+            "recorded_at_utc": _utcnow().isoformat(),
+            **extra,
+        }
+        le["operator_flatten_requested_utc"] = str(
+            le.get("operator_flatten_requested_utc") or _utcnow().isoformat()
+        )
+        _commit_le(sess, le)
+        _emit(db, sess, "live_deadman_protection_unavailable_full_close_queued", {
+            "error": error,
+            **extra,
+        })
+        return {"ok": False, "unprotected": True, "full_close_queued": True, "error": error}
+
+    if le.get("scale_limit_order_id"):
+        return _queue_full_close("alpaca_legacy_scale_order_conflicts_with_deadman")
+    context = _alpaca_owner_transport_context(sess)
+    if context is None:
+        return _queue_full_close("alpaca_deadman_owner_context_missing")
+    account_ok, account_identity = _strict_alpaca_account_identity(adapter, sess)
+    if not account_ok:
+        return _queue_full_close(
+            str(account_identity.get("reason") or "alpaca_account_identity_blocked"),
+            alpaca_account_identity=account_identity,
+        )
+    if not _skip_predecessor_replay:
+        # Claim-side terminal resolution and child POSTs commit independently of
+        # local PnL.  Replay every positive-fill predecessor oldest-first before
+        # any current child may be certified as protection.  This applies with
+        # or without a close handoff and supports arbitrary G1..Gn chains.
+        readable_history, history_claim = read_action_claim_committed(
+            symbol=context["symbol"],
+            account_scope=context["account_scope"],
+        )
+        history_claim = (
+            history_claim
+            if readable_history and isinstance(history_claim, dict)
+            else {}
+        )
+        history_metadata = history_claim.get("metadata")
+        history_metadata = (
+            history_metadata if isinstance(history_metadata, dict) else {}
+        )
+        quarantine_replay = _apply_replacement_attribution_quarantine(
+            sess,
+            le=le,
+            claim_metadata=history_metadata,
+        )
+        if not quarantine_replay.get("ok"):
+            return _queue_full_close(
+                str(
+                    quarantine_replay.get("error")
+                    or "replacement_attribution_quarantine_replay_failed"
+                ),
+                **{
+                    key: value
+                    for key, value in quarantine_replay.items()
+                    if key not in {"ok", "error"}
+                },
+            )
+        if quarantine_replay.get("broker_flat"):
+            le.pop("deadman_stop", None)
+            _commit_le(sess, le)
+            return {
+                "ok": True,
+                "position_closed": True,
+                "accounting_quarantined": True,
+                "broker_remaining_quantity": 0.0,
+            }
+        owner_history = history_metadata.get("protective_terminal_ledger")
+        if not isinstance(owner_history, list) or not owner_history:
+            owner_history = history_metadata.get("owner_transport_history")
+        owner_history = owner_history if isinstance(owner_history, list) else []
+        resolved_deadmen = []
+        seen_generations: set[tuple[str, str]] = set()
+        for candidate in owner_history:
+            if not isinstance(candidate, dict):
+                continue
+            replacement_lineage = candidate.get("replacement_lineage_evidence")
+            exact_replacement_terminal = bool(
+                isinstance(replacement_lineage, dict)
+                and replacement_lineage.get("identity_contract")
+                == "alpaca_replacement_lineage_v1"
+                and str(candidate.get("broker_order_status") or "").strip().lower()
+                == "replaced"
+                and str(candidate.get("broker_order_lifecycle") or "").strip().lower()
+                == "replaced"
+            )
+            if not (
+                str(candidate.get("transport_kind") or "").strip().lower()
+                == "deadman"
+                and str(candidate.get("phase") or "").strip().lower()
+                == "resolved"
+                and (
+                    str(
+                        candidate.get("broker_order_status") or ""
+                    ).strip().lower()
+                    in _ORDER_TERMINAL_STATUSES
+                    or exact_replacement_terminal
+                )
+            ):
+                continue
+            cid = str(candidate.get("client_order_id") or "").strip()
+            oid = str(candidate.get("broker_order_id") or "").strip()
+            request = candidate.get("order_request")
+            request = request if isinstance(request, dict) else {}
+            try:
+                filled = float(candidate.get("filled_size"))
+                remaining = float(candidate.get("remaining_quantity"))
+            except (TypeError, ValueError):
+                return _queue_full_close(
+                    "deadman_predecessor_history_invalid",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+            if not (
+                cid
+                and oid
+                and request
+                and math.isfinite(filled)
+                and filled >= 0.0
+                and math.isfinite(remaining)
+                and remaining >= 0.0
+            ):
+                return _queue_full_close(
+                    "deadman_predecessor_history_invalid",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+            key = (cid, oid)
+            if key in seen_generations:
+                return _queue_full_close(
+                    "deadman_predecessor_history_ambiguous",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+            seen_generations.add(key)
+            if filled > 1e-12 or exact_replacement_terminal:
+                resolved_deadmen.append(dict(candidate))
+
+        def _predecessor_marker_count(generation: dict[str, Any]) -> int:
+            markers = le.get("deadman_applied_fill_watermarks")
+            markers = markers if isinstance(markers, list) else []
+            matches = 0
+            for marker in markers:
+                if not isinstance(marker, dict):
+                    continue
+                marker_transport = marker.get("owner_transport")
+                marker_transport = (
+                    marker_transport
+                    if isinstance(marker_transport, dict)
+                    else {}
+                )
+                marker_fill = _float_or_none(
+                    marker.get("applied_filled_size")
+                )
+                marker_remaining = _float_or_none(
+                    marker.get("broker_remaining_quantity")
+                )
+                if (
+                    str(marker.get("client_order_id") or "").strip()
+                    == str(generation.get("client_order_id") or "").strip()
+                    and str(marker.get("order_id") or "").strip()
+                    == str(generation.get("broker_order_id") or "").strip()
+                    and marker_transport.get("order_request")
+                    == generation.get("order_request")
+                    and marker_fill is not None
+                    and marker_remaining is not None
+                    and abs(marker_fill - float(generation["filled_size"]))
+                    <= max(1e-9, abs(float(generation["filled_size"])) * 1e-8)
+                    and abs(
+                        marker_remaining
+                        - float(generation["remaining_quantity"])
+                    )
+                    <= max(
+                        1e-9,
+                        abs(float(generation["remaining_quantity"])) * 1e-8,
+                    )
+                ):
+                    matches += 1
+            return matches
+
+        for predecessor in resolved_deadmen:
+            marker_count = _predecessor_marker_count(predecessor)
+            if marker_count > 1:
+                return _queue_full_close(
+                    "deadman_predecessor_watermark_ambiguous",
+                    client_order_id=predecessor.get("client_order_id"),
+                    broker_order_id=predecessor.get("broker_order_id"),
+                )
+            if marker_count == 1:
+                continue
+            predecessor_cid = str(
+                predecessor.get("client_order_id") or ""
+            ).strip()
+            predecessor_oid = str(
+                predecessor.get("broker_order_id") or ""
+            ).strip()
+            predecessor_state, predecessor_order = (
+                _strict_client_order_id_truth(adapter, predecessor_cid)
+            )
+            replay_adapter = adapter
+            replacement_lineage = predecessor.get("replacement_lineage_evidence")
+            if isinstance(replacement_lineage, dict):
+                successor_oid = str(
+                    replacement_lineage.get("successor_broker_order_id") or ""
+                ).strip()
+                successor_request = replacement_lineage.get(
+                    "successor_order_request"
+                )
+                successor_request = (
+                    dict(successor_request)
+                    if isinstance(successor_request, dict)
+                    else {}
+                )
+                successor_state, successor_order = _strict_broker_order_id_truth(
+                    adapter,
+                    successor_oid,
+                )
+                predecessor_raw = getattr(predecessor_order, "raw", None)
+                predecessor_raw = (
+                    predecessor_raw if isinstance(predecessor_raw, dict) else {}
+                )
+                successor_raw = getattr(successor_order, "raw", None)
+                successor_raw = (
+                    successor_raw if isinstance(successor_raw, dict) else {}
+                )
+                reported_predecessor_fill = _float_or_none(
+                    getattr(predecessor_order, "filled_size", None)
+                )
+                reported_successor_fill = _float_or_none(
+                    getattr(successor_order, "filled_size", None)
+                )
+                evidence_predecessor_fill = _float_or_none(
+                    replacement_lineage.get("predecessor_reported_filled_size")
+                )
+                evidence_successor_fill = _float_or_none(
+                    replacement_lineage.get("successor_reported_filled_size")
+                )
+                evidence_average_fill = _float_or_none(
+                    replacement_lineage.get("successor_average_filled_price")
+                )
+                successor_status = str(
+                    getattr(successor_order, "status", "") or ""
+                ).strip().lower()
+                successor_lifecycle = _alpaca_protective_order_lifecycle(
+                    successor_order
+                ) if successor_order is not None else ""
+                successor_expected_active = bool(
+                    replacement_lineage.get("successor_active")
+                )
+                successor_state_exact = bool(
+                    _alpaca_protective_order_is_certifiably_active(successor_order)
+                    if successor_expected_active and successor_order is not None
+                    else (
+                        successor_order is not None
+                        and successor_status in _ORDER_TERMINAL_STATUSES
+                    )
+                )
+                replacement_exact = bool(
+                    replacement_lineage.get("identity_contract")
+                    == "alpaca_replacement_lineage_v1"
+                    and predecessor_state == "found"
+                    and predecessor_order is not None
+                    and str(predecessor_raw.get("alpaca_status") or "").strip().lower()
+                    == "replaced"
+                    and str(predecessor_raw.get("replaced_by") or "").strip()
+                    == successor_oid
+                    and reported_predecessor_fill is not None
+                    and evidence_predecessor_fill is not None
+                    and abs(reported_predecessor_fill - evidence_predecessor_fill)
+                    <= max(1e-9, abs(evidence_predecessor_fill) * 1e-8)
+                    and successor_state == "found"
+                    and successor_order is not None
+                    and _alpaca_replacement_successor_order_matches(
+                        successor_order,
+                        predecessor_broker_order_id=predecessor_oid,
+                        successor_broker_order_id=successor_oid,
+                        successor_order_request=successor_request,
+                    )
+                    and str(successor_raw.get("replaces") or "").strip()
+                    == predecessor_oid
+                    and reported_successor_fill is not None
+                    and evidence_successor_fill is not None
+                    and abs(reported_successor_fill - evidence_successor_fill)
+                    <= max(1e-9, abs(evidence_successor_fill) * 1e-8)
+                    and successor_status
+                    == str(
+                        replacement_lineage.get("successor_broker_status") or ""
+                    ).strip().lower()
+                    and successor_lifecycle
+                    == str(
+                        replacement_lineage.get("successor_broker_lifecycle") or ""
+                    ).strip().lower()
+                    and successor_state_exact
+                )
+                if not replacement_exact:
+                    return _queue_full_close(
+                        "deadman_replacement_lineage_terminal_truth_unavailable",
+                        client_order_id=predecessor_cid,
+                        broker_order_id=predecessor_oid,
+                        successor_broker_order_id=successor_oid,
+                    )
+                synthetic_predecessor = NormalizedOrder(
+                    order_id=predecessor_oid,
+                    client_order_id=predecessor_cid,
+                    product_id=str(
+                        (predecessor.get("order_request") or {}).get("product_id")
+                        or product_id
+                    ),
+                    side="sell",
+                    status="pending",
+                    order_type="stop",
+                    filled_size=float(predecessor["filled_size"]),
+                    average_filled_price=evidence_average_fill,
+                    raw={
+                        **dict(predecessor_raw),
+                        "alpaca_status": "replaced",
+                        "qty": _float_or_none(
+                            (predecessor.get("order_request") or {}).get("base_size")
+                        ),
+                        "time_in_force": "gtc",
+                        "extended_hours": False,
+                        "position_intent": "sell_to_close",
+                        "stop_price": _float_or_none(
+                            (predecessor.get("order_request") or {}).get("stop_price")
+                        ),
+                        "replacement_lineage_terminal": True,
+                    },
+                )
+                predecessor_order = synthetic_predecessor
+
+                class _ReplacementLineageReplayAdapter:
+                    def __getattr__(self, name: str) -> Any:
+                        return getattr(adapter, name)
+
+                    def get_order_by_client_order_id_truth(
+                        self,
+                        cid: str,
+                    ) -> dict[str, Any]:
+                        if str(cid) == predecessor_cid:
+                            return {
+                                "readable": True,
+                                "found": True,
+                                "order": synthetic_predecessor,
+                            }
+                        return adapter.get_order_by_client_order_id_truth(cid)
+
+                replay_adapter = _ReplacementLineageReplayAdapter()
+            predecessor_status = str(
+                getattr(predecessor_order, "status", "") or ""
+            ).strip().lower()
+            predecessor_lifecycle = _alpaca_protective_order_lifecycle(
+                predecessor_order
+            ) if predecessor_order is not None else ""
+            history_status = str(
+                predecessor.get("broker_order_status") or ""
+            ).strip().lower()
+            status_exact = bool(
+                predecessor_status == history_status
+                or (
+                    isinstance(replacement_lineage, dict)
+                    and history_status == "replaced"
+                    and predecessor_lifecycle == "replaced"
+                )
+                or (
+                    history_status == "filled"
+                    and predecessor_lifecycle == "calculated"
+                    and float(predecessor["remaining_quantity"]) <= 1e-9
+                )
+            )
+            if not (
+                predecessor_state == "found"
+                and predecessor_order is not None
+                and str(
+                    getattr(predecessor_order, "order_id", "") or ""
+                ).strip()
+                == predecessor_oid
+                and status_exact
+                and abs(
+                    float(getattr(predecessor_order, "filled_size", 0.0) or 0.0)
+                    - float(predecessor["filled_size"])
+                )
+                <= max(1e-9, abs(float(predecessor["filled_size"])) * 1e-8)
+                and _owner_transport_order_matches(
+                    predecessor_order,
+                    predecessor,
+                )
+            ):
+                return _queue_full_close(
+                    "deadman_predecessor_terminal_truth_unavailable",
+                    client_order_id=predecessor_cid,
+                    broker_order_id=predecessor_oid,
+                )
+            le["deadman_stop"] = {
+                "order_id": predecessor_oid,
+                "client_order_id": predecessor_cid,
+                "stop_price": (
+                    predecessor.get("order_request") or {}
+                ).get("stop_price"),
+                "qty": (
+                    predecessor.get("order_request") or {}
+                ).get("base_size"),
+                "phase": "submitted",
+                "owner_transport": dict(predecessor),
+            }
+            replay = _ensure_alpaca_deadman_stop(
+                db,
+                sess,
+                replay_adapter,
+                le=le,
+                product_id=product_id,
+                quantity=float(
+                    (predecessor.get("order_request") or {})["base_size"]
+                ),
+                avg_entry_price=avg_entry_price,
+                software_stop_price=software_stop_price,
+                rearm_after_terminal=False,
+                terminal_remaining_override=float(
+                    predecessor["remaining_quantity"]
+                ),
+                _skip_predecessor_replay=True,
+            )
+            if not replay.get("ok"):
+                return replay
+        replayed_position = le.get("position")
+        replayed_position = (
+            replayed_position if isinstance(replayed_position, dict) else {}
+        )
+        replayed_qty = _float_or_none(replayed_position.get("quantity"))
+        if resolved_deadmen and replayed_qty is not None and replayed_qty > 0.0:
+            quantity = replayed_qty
+    existing = le.get("deadman_stop")
+    existing = dict(existing) if isinstance(existing, dict) else None
+    if existing is None:
+        # Crash recovery after the claim-side replacement was certified can leave
+        # the outer session JSON one commit behind.  Recover only the exact current
+        # deadman generation from the retained owner claim.  A stale local handoff
+        # mirror is cleared solely after strict CID/OID/request + active-lifecycle
+        # broker proof; dormant/replaced orders never count as protection.
+        readable_owner, owner_claim = read_action_claim_committed(
+            symbol=context["symbol"],
+            account_scope=context["account_scope"],
+        )
+        owner_claim = owner_claim if readable_owner and isinstance(owner_claim, dict) else {}
+        owner_metadata = owner_claim.get("metadata")
+        owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
+        owner_current = owner_metadata.get("owner_transport")
+        owner_current = owner_current if isinstance(owner_current, dict) else None
+        owner_current_phase = str(
+            (owner_current or {}).get("phase") or ""
+        ).strip().lower()
+
+        def _resolved_current_needs_local_replay() -> bool:
+            if owner_current_phase != "resolved" or owner_current is None:
+                return owner_current_phase != "resolved"
+            request = owner_current.get("order_request")
+            request = request if isinstance(request, dict) else {}
+            cid = str(owner_current.get("client_order_id") or "").strip()
+            oid = str(owner_current.get("broker_order_id") or "").strip()
+            status = str(
+                owner_current.get("broker_order_status") or ""
+            ).strip().lower()
+            try:
+                filled = float(owner_current.get("filled_size"))
+                remaining = float(owner_current.get("remaining_quantity"))
+            except (TypeError, ValueError):
+                # A resolved proven-no-transport row is permission to mint a new
+                # generation, not a broker terminal fill to reconstruct.
+                return False
+            if not (
+                str(owner_current.get("transport_kind") or "").strip().lower()
+                == "deadman"
+                and cid
+                and oid
+                and request
+                and status in _ORDER_TERMINAL_STATUSES
+                and math.isfinite(filled)
+                and filled >= 0.0
+                and math.isfinite(remaining)
+                and remaining >= 0.0
+            ):
+                return False
+            exact_markers = []
+            markers = le.get("deadman_applied_fill_watermarks")
+            for marker in markers if isinstance(markers, list) else []:
+                if not isinstance(marker, dict):
+                    continue
+                marker_transport = marker.get("owner_transport")
+                marker_transport = (
+                    marker_transport
+                    if isinstance(marker_transport, dict)
+                    else {}
+                )
+                marker_fill = _float_or_none(
+                    marker.get("applied_filled_size")
+                )
+                marker_remaining = _float_or_none(
+                    marker.get("broker_remaining_quantity")
+                )
+                if (
+                    str(marker.get("client_order_id") or "").strip() == cid
+                    and str(marker.get("order_id") or "").strip() == oid
+                    and marker_transport.get("order_request") == request
+                    and marker_fill is not None
+                    and marker_remaining is not None
+                    and abs(marker_fill - filled)
+                    <= max(1e-9, abs(filled) * 1e-8)
+                    and abs(marker_remaining - remaining)
+                    <= max(1e-9, abs(remaining) * 1e-8)
+                ):
+                    exact_markers.append(marker)
+            return len(exact_markers) != 1
+
+        recover_owner_current = bool(
+            owner_current is not None
+            and (
+                owner_current_phase != "resolved"
+                or _resolved_current_needs_local_replay()
+            )
+        )
+        if (
+            recover_owner_current
+            and str(owner_current.get("transport_kind") or "").strip().lower()
+            == "deadman"
+            and str(owner_current.get("client_order_id") or "").strip()
+            and owner_current.get("order_request")
+        ):
+            recovered_cid = str(owner_current["client_order_id"]).strip()
+            recovered_state, recovered_order = _strict_client_order_id_truth(
+                adapter,
+                recovered_cid,
+            )
+            if (
+                recovered_state == "found"
+                and recovered_order is not None
+                and _owner_transport_order_matches(recovered_order, owner_current)
+            ):
+                recovered_oid = str(
+                    getattr(recovered_order, "order_id", "") or ""
+                ).strip()
+                expected_oid = str(
+                    owner_current.get("broker_order_id") or recovered_oid
+                ).strip()
+                if recovered_oid == expected_oid:
+                    recovered_request = dict(owner_current.get("order_request") or {})
+                    existing = {
+                        "order_id": recovered_oid,
+                        "client_order_id": recovered_cid,
+                        "stop_price": recovered_request.get("stop_price"),
+                        "qty": recovered_request.get("base_size"),
+                        "phase": owner_current.get("phase"),
+                        "owner_transport": dict(owner_current),
+                    }
+                    le["deadman_stop"] = dict(existing)
+                    if _alpaca_protective_order_is_certifiably_active(recovered_order):
+                        le.pop("deadman_released_for_close", None)
+                        le.pop("deadman_close_handoff_priority_block", None)
+                    _commit_le(sess, le)
+    try:
+        qty = float(quantity)
+        avg = float(avg_entry_price)
+        software_stop = float(software_stop_price)
+        if not (
+            math.isfinite(qty)
+            and qty > 0.0
+            and math.isfinite(avg)
+            and (
+                existing is not None
+                or (math.isfinite(software_stop) and software_stop > 0.0)
+            )
+        ):
+            raise ValueError("invalid deadman envelope")
+    except (TypeError, ValueError):
+        return _queue_full_close("alpaca_deadman_envelope_invalid")
+    if abs(qty - round(qty)) > 1e-9:
+        # Fractional equity stops are DAY-only at Alpaca and therefore cannot
+        # satisfy this lane's crash-surviving GTC protection contract. Persist
+        # the exact terminal source generation with the remainder.  On the next
+        # pulse the independently committed predecessor fill is verified, its
+        # handoff is archived, and the generic owner outbox freezes one new
+        # emergency DAY close before any broker POST.
+        source_transport = (
+            dict(existing.get("owner_transport") or {})
+            if isinstance(existing, dict)
+            and isinstance(existing.get("owner_transport"), dict)
+            else {}
+        )
+        le["alpaca_fractional_day_close_required"] = {
+            "identity_contract": "alpaca_fractional_day_close_v1",
+            "product_id": str(product_id or "").strip().upper(),
+            "broker_remainder_quantity": qty,
+            "source_owner_transport": source_transport,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        queued = _queue_full_close(
+            "alpaca_fractional_remainder_no_gtc_deadman",
+            broker_remainder_quantity=qty,
+        )
+        queued["fractional_day_close_required"] = True
+        return queued
+
+    if existing and isinstance(existing.get("owner_transport"), dict):
+        transport = dict(existing["owner_transport"])
+        request = transport.get("order_request")
+        request = dict(request) if isinstance(request, dict) else {}
+        cid = str(transport.get("client_order_id") or "").strip()
+    else:
+        # The session JSON counter can roll back after the claim-side lease or
+        # terminal resolution commits.  Derive the next ordinal from every
+        # durable owner generation as well, so a rearm can never recycle an old
+        # Alpaca client_order_id with an identical request digest.
+        try:
+            local_generation = int(le.get("deadman_generation") or 0)
+        except (TypeError, ValueError):
+            local_generation = 0
+        durable_generation = 0
+        readable_generation, generation_claim = read_action_claim_committed(
+            symbol=context["symbol"],
+            account_scope=context["account_scope"],
+        )
+        generation_claim = (
+            generation_claim
+            if readable_generation and isinstance(generation_claim, dict)
+            else {}
+        )
+        generation_metadata = generation_claim.get("metadata")
+        generation_metadata = (
+            generation_metadata
+            if isinstance(generation_metadata, dict)
+            else {}
+        )
+        try:
+            durable_generation = max(
+                durable_generation,
+                int(
+                    generation_metadata.get(
+                        "deadman_generation_high_watermark"
+                    )
+                    or 0
+                ),
+            )
+        except (TypeError, ValueError):
+            pass
+        durable_rows: list[Any] = [generation_metadata.get("owner_transport")]
+        durable_history = generation_metadata.get("owner_transport_history")
+        if isinstance(durable_history, list):
+            durable_rows.extend(durable_history)
+        durable_ledger = generation_metadata.get("protective_terminal_ledger")
+        if isinstance(durable_ledger, list):
+            durable_rows.extend(durable_ledger)
+        durable_handoff = generation_metadata.get("deadman_close_handoff")
+        if isinstance(durable_handoff, dict):
+            durable_rows.extend([
+                {
+                    "client_order_id": durable_handoff.get(
+                        "deadman_client_order_id"
+                    )
+                },
+                {
+                    "client_order_id": durable_handoff.get(
+                        "replacement_deadman_client_order_id"
+                    )
+                },
+                *(durable_handoff.get("protective_terminal_generations") or []),
+            ])
+        prefix = f"chili_dm_{int(sess.id)}_"
+        for row in durable_rows:
+            if not isinstance(row, dict):
+                continue
+            durable_cid = str(row.get("client_order_id") or "").strip()
+            if not durable_cid.startswith(prefix):
+                continue
+            ordinal = durable_cid[len(prefix):].split("_", 1)[0]
+            try:
+                durable_generation = max(durable_generation, int(ordinal))
+            except (TypeError, ValueError):
+                continue
+        generation = max(local_generation, durable_generation) + 1
+        # Software stops can legitimately ratchet above breakeven. Keep the
+        # disaster stop below that current software stop using a positive buffer
+        # rather than requiring the original risk distance to stay positive.
+        buffer = max(avg * 0.0025, abs(avg - software_stop) * 0.25, 0.01)
+        # Freeze the exact venue-valid stop generation.  Alpaca permits four
+        # decimals below $1; cent-rounding here could otherwise turn a valid
+        # $0.004 disaster floor into zero before the adapter ever saw it.
+        from ..venue.alpaca_spot import quantize_alpaca_equity_sell_stop_price
+
+        deadman_px = quantize_alpaca_equity_sell_stop_price(
+            max(0.0001, software_stop - buffer)
+        )
+        request_base = {
+            "account_scope": "alpaca:paper",
+            "alpaca_account_id": str(context["alpaca_account_id"]),
+            "product_id": str(product_id or "").strip().upper(),
+            "side": "sell",
+            "base_size": _fmt_base_size(qty),
+            "position_intent": "sell_to_close",
+            "order_type": "stop",
+            "time_in_force": "gtc",
+            "extended_hours": False,
+            "stop_price": deadman_px,
+        }
+        digest = hashlib.sha256(
+            json.dumps(request_base, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:10]
+        cid = f"chili_dm_{int(sess.id)}_{generation}_{digest}"
+        request = {**request_base, "client_order_id": cid}
+        transport = {
+            "identity_contract": "alpaca_owner_transport_v1",
+            "transport_kind": "deadman",
+            "client_order_id": cid,
+            "order_request": request,
+        }
+        le["deadman_generation"] = generation
+
+    if not cid or not request:
+        return _queue_full_close("alpaca_deadman_identity_invalid")
+
+    def _replacement_handoff_state() -> tuple[dict[str, Any] | None, str | None]:
+        _ctx, _claim, _meta, active_handoff, handoff_error = (
+            _read_exact_alpaca_deadman_handoff(sess)
+        )
+        return active_handoff, handoff_error
+
+    def _certify_replacement_deadman_active(
+        exact_transport: dict[str, Any],
+        exact_order: Any,
+    ) -> bool:
+        # This helper is also used by crash recovery when there is no replacement
+        # handoff.  Broker identity alone is never protection: every caller must
+        # first prove that the exact stop is in Alpaca's executable allowlist.
+        if not (
+            _owner_transport_order_matches(exact_order, exact_transport)
+            and _alpaca_protective_order_is_certifiably_active(exact_order)
+        ):
+            return False
+        active_handoff, handoff_error = _replacement_handoff_state()
+        if handoff_error is not None:
+            return False
+        if active_handoff is None:
+            return True
+        exact_cid = str(exact_transport.get("client_order_id") or "").strip()
+        exact_oid = str(getattr(exact_order, "order_id", "") or "").strip()
+        exact_status = str(getattr(exact_order, "status", "") or "").strip().lower()
+        exact_lifecycle = _alpaca_protective_order_lifecycle(exact_order)
+        if not (
+            active_handoff.get("phase") == "replacement_deadman_submitted"
+            and str(
+                active_handoff.get("replacement_deadman_client_order_id") or ""
+            ).strip()
+            == exact_cid
+            and str(
+                active_handoff.get("replacement_deadman_broker_order_id") or ""
+            ).strip()
+            == exact_oid
+            and active_handoff.get("replacement_deadman_order_request")
+            == exact_transport.get("order_request")
+            and _alpaca_protective_order_is_certifiably_active(exact_order)
+            and _owner_transport_order_matches(exact_order, exact_transport)
+        ):
+            return False
+        return bool(
+            certify_deadman_handoff_reprotected_committed(
+                **context,
+                client_order_id=exact_cid,
+                broker_order_id=exact_oid,
+                broker_order_status=exact_status,
+                broker_order_lifecycle=exact_lifecycle,
+            )
+        )
+
+    def _sync_active_replacement_quarantine(
+        exact_transport: dict[str, Any],
+        exact_order: Any,
+    ) -> dict[str, Any]:
+        """Clamp local quantity to an active quarantined successor's exact remainder."""
+        lineage = exact_transport.get("replacement_lineage_parent")
+        lineage = dict(lineage) if isinstance(lineage, dict) else {}
+        if not (
+            lineage.get("identity_contract") == "alpaca_replacement_lineage_v1"
+            and lineage.get("fill_attribution_quarantined") is True
+        ):
+            return {"ok": True, "not_applicable": True}
+        lineage_id = str(lineage.get("replacement_lineage_id") or "").strip()
+        containment_id = f"active-adopt-{lineage_id}"
+        successor_cid = str(exact_transport.get("client_order_id") or "").strip()
+        successor_oid = str(getattr(exact_order, "order_id", "") or "").strip()
+        successor_request = exact_transport.get("order_request")
+        successor_request = (
+            dict(successor_request)
+            if isinstance(successor_request, dict)
+            else {}
+        )
+        try:
+            requested = float(successor_request.get("base_size"))
+            cumulative = float(getattr(exact_order, "filled_size", 0.0) or 0.0)
+            broker_remaining = float(adapter.get_position_quantity(product_id))
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "replacement_active_quarantine_truth_unreadable",
+            }
+        tol = max(1e-9, abs(requested) * 1e-8) if math.isfinite(requested) else 1e-9
+        if not (
+            lineage_id
+            and successor_cid
+            and successor_oid
+            and _owner_transport_order_matches(exact_order, exact_transport)
+            and _alpaca_protective_order_is_certifiably_active(exact_order)
+            and math.isfinite(requested)
+            and requested > 0.0
+            and math.isfinite(cumulative)
+            and cumulative > 0.0
+            and math.isfinite(broker_remaining)
+            and broker_remaining > 0.0
+            and abs((requested - cumulative) - broker_remaining) <= tol
+        ):
+            return {
+                "ok": False,
+                "error": "replacement_active_quarantine_conservation_unproven",
+            }
+        durable = advance_deadman_replacement_quarantine_baseline_committed(
+            **context,
+            containment_id=containment_id,
+            successor_client_order_id=successor_cid,
+            successor_broker_order_id=successor_oid,
+            successor_order_request=successor_request,
+            successor_reported_filled_size=cumulative,
+            broker_remaining_quantity=broker_remaining,
+        )
+        quarantine = durable.get("quarantine")
+        quarantine = dict(quarantine) if isinstance(quarantine, dict) else {}
+        if not durable.get("ok") or not (
+            _float_or_none(quarantine.get("successor_applied_fill_baseline"))
+            is not None
+            and abs(
+                float(quarantine["successor_applied_fill_baseline"])
+                - cumulative
+            )
+            <= tol
+            and _float_or_none(quarantine.get("broker_remaining_quantity"))
+            is not None
+            and abs(
+                float(quarantine["broker_remaining_quantity"])
+                - broker_remaining
+            )
+            <= tol
+        ):
+            return {
+                "ok": False,
+                "error": str(
+                    durable.get("reason")
+                    or "replacement_active_quarantine_baseline_not_durable"
+                ),
+            }
+        markers = le.get("deadman_applied_fill_watermarks")
+        markers = list(markers) if isinstance(markers, list) else []
+        exact_indexes = [
+            index
+            for index, marker in enumerate(markers)
+            if isinstance(marker, dict)
+            and str(marker.get("client_order_id") or "").strip() == successor_cid
+            and str(marker.get("order_id") or "").strip() == successor_oid
+        ]
+        if len(exact_indexes) > 1:
+            return {
+                "ok": False,
+                "error": "replacement_active_quarantine_local_baseline_ambiguous",
+            }
+        marker = (
+            dict(markers[exact_indexes[0]])
+            if exact_indexes
+            else {}
+        )
+        prior_cumulative = _float_or_none(marker.get("applied_filled_size"))
+        if prior_cumulative is None:
+            prior_cumulative = _float_or_none(
+                lineage.get("successor_reported_filled_size")
+            )
+        if prior_cumulative is None:
+            return {
+                "ok": False,
+                "error": "replacement_active_quarantine_local_baseline_missing",
+            }
+        prior_remaining = _float_or_none(marker.get("broker_remaining_quantity"))
+        if prior_remaining is None:
+            prior_remaining = requested - prior_cumulative
+        position = le.get("position")
+        position = dict(position) if isinstance(position, dict) else {}
+        local_qty = _float_or_none(position.get("quantity"))
+        if not (
+            cumulative + tol >= prior_cumulative
+            and prior_remaining is not None
+            and abs((requested - prior_cumulative) - prior_remaining) <= tol
+            and local_qty is not None
+            and (
+                abs(local_qty - prior_remaining) <= tol
+                or abs(local_qty - broker_remaining) <= tol
+                or (not exact_indexes and abs(local_qty - requested) <= tol)
+            )
+        ):
+            return {
+                "ok": False,
+                "error": "replacement_active_quarantine_local_generation_mismatch",
+            }
+        quarantine_markers = le.get("deadman_attribution_quarantine_watermarks")
+        quarantine_markers = (
+            list(quarantine_markers)
+            if isinstance(quarantine_markers, list)
+            else []
+        )
+        quarantine_indexes = [
+            index
+            for index, row in enumerate(quarantine_markers)
+            if isinstance(row, dict)
+            and str(row.get("containment_id") or "").strip() == containment_id
+        ]
+        if len(quarantine_indexes) > 1:
+            return {
+                "ok": False,
+                "error": "replacement_active_quarantine_watermark_ambiguous",
+            }
+        marker_exact = bool(
+            exact_indexes
+            and abs(prior_cumulative - cumulative) <= tol
+            and abs(prior_remaining - broker_remaining) <= tol
+        )
+        local_exact = abs(local_qty - broker_remaining) <= tol
+        if marker_exact and local_exact:
+            return {
+                "ok": True,
+                "reused": True,
+                "broker_remaining_quantity": broker_remaining,
+                "successor_reported_filled_size": cumulative,
+            }
+        position["quantity"] = broker_remaining
+        le["position"] = position
+        next_marker = {
+            **marker,
+            "identity_contract": "alpaca_deadman_applied_fill_v1",
+            "order_id": successor_oid,
+            "client_order_id": successor_cid,
+            "owner_transport": dict(exact_transport),
+            "applied_filled_size": cumulative,
+            "broker_remaining_quantity": broker_remaining,
+            "fill_attribution_quarantined": True,
+            "containment_id": containment_id,
+        }
+        if exact_indexes:
+            markers[exact_indexes[0]] = next_marker
+        else:
+            markers.append(next_marker)
+        le["deadman_applied_fill_watermarks"] = markers
+        quarantine_marker = {
+            **(
+                dict(quarantine_markers[quarantine_indexes[0]])
+                if quarantine_indexes
+                else {}
+            ),
+            "identity_contract": "alpaca_replacement_attribution_quarantine_watermark_v1",
+            "containment_id": containment_id,
+            "successor_client_order_id": successor_cid,
+            "successor_broker_order_id": successor_oid,
+            "successor_applied_fill_baseline": cumulative,
+            "broker_remaining_quantity": broker_remaining,
+        }
+        if quarantine_indexes:
+            quarantine_markers[quarantine_indexes[0]] = quarantine_marker
+        else:
+            quarantine_markers.append(quarantine_marker)
+        le["deadman_attribution_quarantine_watermarks"] = quarantine_markers
+        deadman = le.get("deadman_stop")
+        deadman = dict(deadman) if isinstance(deadman, dict) else {}
+        deadman.update({
+            "filled_size": cumulative,
+            "applied_filled_size": cumulative,
+            "broker_remaining_quantity": broker_remaining,
+            "fill_attribution_quarantined": True,
+        })
+        le["deadman_stop"] = deadman
+        le["alpaca_entries_quarantined"] = True
+        le["alpaca_replacement_fill_attribution_quarantine"] = quarantine
+        _commit_le(sess, le)
+        return {
+            "ok": True,
+            "applied": True,
+            "broker_remaining_quantity": broker_remaining,
+            "successor_reported_filled_size": cumulative,
+        }
+
+    def _apply_terminal_deadman_outcome(
+        exact_transport: dict[str, Any],
+        terminal_order: Any,
+        remaining: float,
+        *,
+        broker_status_override: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve and book one terminal disaster-stop outcome exactly once."""
+        status = str(
+            broker_status_override
+            if broker_status_override is not None
+            else (getattr(terminal_order, "status", "") or "")
+        ).strip().lower()
+        oid = str(getattr(terminal_order, "order_id", "") or "").strip()
+        try:
+            cumulative = float(
+                getattr(terminal_order, "filled_size", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            return _queue_full_close("terminal_deadman_fill_truth_invalid")
+        exact_cid = str(exact_transport.get("client_order_id") or "").strip()
+        exact_request = exact_transport.get("order_request")
+        exact_request = exact_request if isinstance(exact_request, dict) else {}
+
+        # Local PnL and this watermark share the outer session transaction.  If
+        # that transaction rolls back, both replay; if it commits, neither can be
+        # applied twice even though the independently committed owner claim has
+        # already moved on to the successor generation.
+        applied_candidates: list[float] = []
+
+        def _collect_applied(row: Any) -> None:
+            if not isinstance(row, dict):
+                return
+            row_transport = row.get("owner_transport")
+            row_transport = row_transport if isinstance(row_transport, dict) else {}
+            if not (
+                str(row.get("order_id") or "").strip() == oid
+                and str(row.get("client_order_id") or "").strip() == exact_cid
+                and str(row_transport.get("client_order_id") or "").strip()
+                == exact_cid
+                and row_transport.get("order_request") == exact_request
+            ):
+                return
+            applied = _float_or_none(row.get("applied_filled_size"))
+            if applied is not None and applied >= 0.0:
+                applied_candidates.append(applied)
+
+        _collect_applied(existing)
+        prior_history = le.get("deadman_stop_history")
+        if isinstance(prior_history, list):
+            for row in prior_history:
+                _collect_applied(row)
+        durable_watermarks = le.get("deadman_applied_fill_watermarks")
+        if isinstance(durable_watermarks, list):
+            for row in durable_watermarks:
+                _collect_applied(row)
+        applied_before = max(applied_candidates, default=0.0)
+        exact_local_watermark = bool(applied_candidates)
+        if not (
+            math.isfinite(cumulative)
+            and cumulative >= 0.0
+            and math.isfinite(applied_before)
+            and 0.0 <= applied_before <= cumulative + 1e-9
+        ):
+            return _queue_full_close("terminal_deadman_fill_truth_invalid")
+        if not _resolve_exact_owner_transport_terminal(
+            sess,
+            exact_transport,
+            terminal_order,
+            remaining_quantity=remaining,
+            broker_status_override=broker_status_override,
+        ):
+            return _queue_full_close("terminal_deadman_owner_resolution_failed")
+
+        pos = le.get("position")
+        pos = dict(pos) if isinstance(pos, dict) else {}
+        current_qty = _float_or_none(pos.get("quantity")) or 0.0
+        fill_delta = min(
+            current_qty,
+            max(0.0, cumulative - applied_before),
+        )
+        avg_fill = _float_or_none(
+            getattr(terminal_order, "average_filled_price", None)
+        )
+        entry_price = _float_or_none(pos.get("avg_entry_price"))
+        terminal_record = {
+            **dict(existing or {}),
+            "owner_transport": exact_transport,
+            "order_id": oid,
+            "terminal_status": status,
+            "filled_size": cumulative,
+            "applied_filled_size": cumulative,
+            "broker_remaining_quantity": remaining,
+            "resolved_at_utc": _utcnow().isoformat(),
+        }
+        history = le.get("deadman_stop_history")
+        history = list(history) if isinstance(history, list) else []
+        watermarks = le.get("deadman_applied_fill_watermarks")
+        watermarks = list(watermarks) if isinstance(watermarks, list) else []
+
+        def _record_applied_watermark() -> None:
+            retained = [
+                row
+                for row in watermarks
+                if not (
+                    isinstance(row, dict)
+                    and str(row.get("order_id") or "").strip() == oid
+                    and str(row.get("client_order_id") or "").strip() == exact_cid
+                )
+            ]
+            retained.append(dict(terminal_record))
+            le["deadman_applied_fill_watermarks"] = retained
+
+        if fill_delta > 1e-12:
+            if avg_fill is None or entry_price is None:
+                le["deadman_stop"] = {
+                    **dict(existing or {}),
+                    "owner_transport": exact_transport,
+                    "phase": "terminal_fill_accounting_blocked",
+                    "applied_filled_size": applied_before,
+                    "terminal_filled_size": cumulative,
+                    "broker_remaining_quantity": remaining,
+                }
+                _commit_le(sess, le)
+                return _queue_full_close("terminal_deadman_fill_basis_unavailable")
+            le["last_exit_fee_usd"] = _order_total_fees_usd(terminal_order)
+            le["last_exit_broker_truth"] = {
+                "broker_order_id": oid,
+                "order_status": status,
+                "avg_px": avg_fill,
+                "filled_size": cumulative,
+            }
+            if remaining <= 1e-9:
+                if not _resolve_retained_alpaca_entry_claim_after_broker_flat(
+                    db,
+                    sess,
+                    le=le,
+                ):
+                    return _queue_full_close(
+                        "terminal_deadman_entry_claim_resolution_pending"
+                    )
+                history.append(terminal_record)
+                le["deadman_stop_history"] = history[-10:]
+                _record_applied_watermark()
+                le.pop("deadman_stop", None)
+                _complete_confirmed_live_exit(
+                    db,
+                    sess,
+                    le=le,
+                    quantity=fill_delta,
+                    entry_price=entry_price,
+                    fill_price=avg_fill,
+                    reason="deadman_stop",
+                    slip_bps=float(le.get("entry_slip_bps_ref") or 0.0),
+                )
+                db.flush()
+                return {
+                    "ok": True,
+                    "position_closed": True,
+                    "terminal_deadman_fill": True,
+                    "terminal_order_id": oid,
+                    "terminal_client_order_id": str(
+                        exact_transport.get("client_order_id") or ""
+                    ),
+                    "terminal_status": status,
+                    "terminal_filled_size": cumulative,
+                    "broker_remaining_quantity": remaining,
+                }
+
+            _apply_confirmed_live_partial_exit(
+                db,
+                sess,
+                le=le,
+                filled_quantity=fill_delta,
+                entry_price=entry_price,
+                fill_price=avg_fill,
+                reason="deadman_stop_partial",
+            )
+            updated_pos = le.get("position")
+            updated_pos = dict(updated_pos) if isinstance(updated_pos, dict) else {}
+            updated_qty = _float_or_none(updated_pos.get("quantity"))
+            if (
+                updated_qty is None
+                or abs(updated_qty - remaining)
+                > max(1e-6, max(updated_qty or 0.0, remaining) * 1e-6)
+            ):
+                history.append(terminal_record)
+                le["deadman_stop_history"] = history[-10:]
+                _record_applied_watermark()
+                le.pop("deadman_stop", None)
+                _commit_le(sess, le)
+                return _queue_full_close(
+                    "terminal_deadman_partial_local_broker_remainder_mismatch",
+                    local_remaining_quantity=updated_qty,
+                    broker_remaining_quantity=remaining,
+                )
+
+        history.append(terminal_record)
+        le["deadman_stop_history"] = history[-10:]
+        _record_applied_watermark()
+        le.pop("deadman_stop", None)
+        _commit_le(sess, le)
+        if remaining <= 1e-9:
+            if (
+                cumulative > 1e-12
+                and exact_local_watermark
+                and applied_before >= cumulative - max(1e-9, cumulative * 1e-8)
+                and (_float_or_none((le.get("position") or {}).get("quantity")) or 0.0)
+                <= 1e-9
+            ):
+                return {
+                    "ok": True,
+                    "position_closed": True,
+                    "terminal_deadman_fill": True,
+                    "terminal_deadman_already_accounted": True,
+                    "terminal_order_id": oid,
+                    "terminal_client_order_id": exact_cid,
+                    "terminal_status": status,
+                    "terminal_filled_size": cumulative,
+                    "broker_remaining_quantity": remaining,
+                }
+            return _queue_full_close(
+                "terminal_deadman_broker_flat_without_accountable_fill"
+            )
+        if not rearm_after_terminal:
+            return {
+                "ok": True,
+                "deadman_terminal_accounted": True,
+                "deadman_released_for_close": True,
+                "terminal_order_id": oid,
+                "terminal_client_order_id": str(
+                    exact_transport.get("client_order_id") or ""
+                ),
+                "terminal_status": status,
+                "terminal_filled_size": cumulative,
+                "broker_remaining_quantity": remaining,
+            }
+        updated_position = le.get("position")
+        updated_position = (
+            dict(updated_position) if isinstance(updated_position, dict) else pos
+        )
+        return _ensure_alpaca_deadman_stop(
+            db,
+            sess,
+            adapter,
+            le=le,
+            product_id=product_id,
+            quantity=remaining,
+            avg_entry_price=(
+                _float_or_none(updated_position.get("avg_entry_price")) or avg
+            ),
+            software_stop_price=(
+                _float_or_none(updated_position.get("stop_price")) or software_stop
+            ),
+        )
+
+    def _handle_nonactive_alpaca_lifecycle(
+        exact_transport: dict[str, Any],
+        exact_order: Any,
+        lifecycle: str,
+    ) -> dict[str, Any] | None:
+        """Fail closed for Alpaca states that cannot prove executable protection.
+
+        Alpaca's ``calculated`` means completed for this trading day while final
+        settlement is pending; it can represent either a fill or a dormant GTC
+        order that may reactivate next session.  A positive remainder therefore
+        must retain the old owner authority.  Book only the exact cumulative fill
+        delta against a fresh broker position, then queue the exact cancel/close
+        handoff.  ``held`` and ``suspended`` are likewise non-executable/ambiguous;
+        reposting any of the three states could create duplicate sell authority.
+        """
+        lifecycle = str(lifecycle or "").strip().lower()
+        replacement_lineage = exact_transport.get("replacement_lineage_evidence")
+        raw = getattr(exact_order, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
+        if (
+            lifecycle == "replaced"
+            and isinstance(replacement_lineage, dict)
+            and replacement_lineage.get("identity_contract")
+            == "alpaca_replacement_lineage_v1"
+            and raw.get("replacement_lineage_terminal") is True
+        ):
+            try:
+                remaining = (
+                    float(terminal_remaining_override)
+                    if terminal_remaining_override is not None
+                    else float(replacement_lineage["broker_remaining_quantity"])
+                )
+            except (KeyError, TypeError, ValueError):
+                return _queue_full_close(
+                    "replacement_lineage_terminal_remainder_invalid"
+                )
+            return _apply_terminal_deadman_outcome(
+                exact_transport,
+                exact_order,
+                remaining,
+                broker_status_override="replaced",
+            )
+        if lifecycle == "replaced":
+            return _dispatch_alpaca_replaced_deadman_successor(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                predecessor_transport=exact_transport,
+                predecessor_order=exact_order,
+                avg_entry_price=avg_entry_price,
+                software_stop_price=software_stop_price,
+                rearm_after_terminal=rearm_after_terminal,
+            )
+        if lifecycle == "calculated":
+            try:
+                remaining = (
+                    float(terminal_remaining_override)
+                    if terminal_remaining_override is not None
+                    else float(adapter.get_position_quantity(product_id))
+                )
+                if not math.isfinite(remaining) or remaining < 0.0:
+                    raise ValueError("invalid remaining")
+            except Exception:
+                return _queue_full_close(
+                    "calculated_deadman_position_unknown",
+                    client_order_id=str(
+                        exact_transport.get("client_order_id") or ""
+                    ).strip(),
+                )
+            oid = str(getattr(exact_order, "order_id", "") or "").strip()
+            cid = str(exact_transport.get("client_order_id") or "").strip()
+            request = exact_transport.get("order_request")
+            request = request if isinstance(request, dict) else {}
+            try:
+                cumulative = float(
+                    getattr(exact_order, "filled_size", 0.0) or 0.0
+                )
+                requested = float(request.get("base_size"))
+            except (TypeError, ValueError):
+                return _queue_full_close(
+                    "calculated_deadman_fill_truth_invalid",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+            if not (
+                math.isfinite(cumulative)
+                and cumulative >= 0.0
+                and math.isfinite(requested)
+                and requested > 0.0
+                and cumulative <= requested + max(1e-9, requested * 1e-8)
+            ):
+                return _queue_full_close(
+                    "calculated_deadman_fill_truth_invalid",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+
+            applied_candidates: list[float] = []
+
+            def _collect_applied(row: Any) -> None:
+                if not isinstance(row, dict):
+                    return
+                row_transport = row.get("owner_transport")
+                row_transport = (
+                    row_transport if isinstance(row_transport, dict) else {}
+                )
+                if not (
+                    str(row.get("order_id") or "").strip() == oid
+                    and str(row.get("client_order_id") or "").strip() == cid
+                    and str(row_transport.get("client_order_id") or "").strip()
+                    == cid
+                    and row_transport.get("order_request") == request
+                ):
+                    return
+                applied = _float_or_none(row.get("applied_filled_size"))
+                if applied is not None and applied >= 0.0:
+                    applied_candidates.append(applied)
+
+            _collect_applied(le.get("deadman_stop"))
+            for key in (
+                "deadman_stop_history",
+                "deadman_applied_fill_watermarks",
+            ):
+                rows = le.get(key)
+                if isinstance(rows, list):
+                    for row in rows:
+                        _collect_applied(row)
+            applied_before = max(applied_candidates, default=0.0)
+            if not (
+                math.isfinite(applied_before)
+                and 0.0 <= applied_before <= cumulative + 1e-9
+            ):
+                return _queue_full_close(
+                    "calculated_deadman_fill_truth_invalid",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+
+            # Exact full fill + broker flat is affirmative terminal lineage.  Use
+            # ``filled`` (not the ambiguous raw lifecycle) to retire this one
+            # authority and perform the normal idempotent terminal accounting.
+            if (
+                remaining <= 1e-9
+                and cumulative >= requested - max(1e-9, requested * 1e-8)
+            ):
+                return _apply_terminal_deadman_outcome(
+                    exact_transport,
+                    exact_order,
+                    remaining,
+                    broker_status_override="filled",
+                )
+
+            pos = le.get("position")
+            pos = dict(pos) if isinstance(pos, dict) else {}
+            current_qty = _float_or_none(pos.get("quantity"))
+            entry_price = _float_or_none(pos.get("avg_entry_price"))
+            fill_delta = max(0.0, cumulative - applied_before)
+            if current_qty is None or current_qty <= 0.0:
+                return _queue_full_close(
+                    "calculated_deadman_local_position_unknown",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+            expected_remaining = max(0.0, current_qty - fill_delta)
+            if abs(expected_remaining - remaining) > max(
+                1e-6,
+                max(expected_remaining, remaining) * 1e-6,
+            ):
+                return _queue_full_close(
+                    "calculated_deadman_local_broker_remainder_mismatch",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                    local_expected_remaining_quantity=expected_remaining,
+                    broker_remaining_quantity=remaining,
+                )
+            if fill_delta > 1e-12:
+                avg_fill = _float_or_none(
+                    getattr(exact_order, "average_filled_price", None)
+                )
+                if avg_fill is None or entry_price is None:
+                    return _queue_full_close(
+                        "calculated_deadman_fill_basis_unavailable",
+                        client_order_id=cid,
+                        broker_order_id=oid,
+                    )
+                le["last_exit_broker_truth"] = {
+                    "broker_order_id": oid,
+                    "order_status": "calculated",
+                    "avg_px": avg_fill,
+                    "filled_size": cumulative,
+                }
+                _apply_confirmed_live_partial_exit(
+                    db,
+                    sess,
+                    le=le,
+                    filled_quantity=fill_delta,
+                    entry_price=entry_price,
+                    fill_price=avg_fill,
+                    reason="deadman_stop_calculated_partial",
+                )
+                updated_pos = le.get("position")
+                updated_pos = (
+                    updated_pos if isinstance(updated_pos, dict) else {}
+                )
+                updated_qty = _float_or_none(updated_pos.get("quantity"))
+                if updated_qty is None or abs(updated_qty - remaining) > max(
+                    1e-6,
+                    max(updated_qty or 0.0, remaining) * 1e-6,
+                ):
+                    return _queue_full_close(
+                        "calculated_deadman_partial_accounting_mismatch",
+                        client_order_id=cid,
+                        broker_order_id=oid,
+                    )
+
+            dormant_record = {
+                **dict(le.get("deadman_stop") or {}),
+                "owner_transport": dict(exact_transport),
+                "order_id": oid,
+                "client_order_id": cid,
+                "phase": "calculated_dormant",
+                "alpaca_lifecycle": "calculated",
+                "filled_size": cumulative,
+                "applied_filled_size": cumulative,
+                "broker_remaining_quantity": remaining,
+                "reconciled_at_utc": _utcnow().isoformat(),
+            }
+            markers = le.get("deadman_applied_fill_watermarks")
+            markers = list(markers) if isinstance(markers, list) else []
+            markers = [
+                row
+                for row in markers
+                if not (
+                    isinstance(row, dict)
+                    and str(row.get("order_id") or "").strip() == oid
+                    and str(row.get("client_order_id") or "").strip() == cid
+                )
+            ]
+            markers.append(dict(dormant_record))
+            le["deadman_applied_fill_watermarks"] = markers
+            le["deadman_stop"] = dormant_record
+            le["deadman_protection_reconcile_pending"] = {
+                "reason": "deadman_calculated_dormant_requires_exact_cancel",
+                "client_order_id": cid,
+                "broker_order_id": oid,
+                "alpaca_lifecycle": "calculated",
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            queued = _queue_full_close(
+                "deadman_calculated_dormant_requires_exact_cancel",
+                client_order_id=cid,
+                broker_order_id=oid,
+                broker_remaining_quantity=remaining,
+            )
+            queued["ambiguous_protection_requires_close"] = True
+            queued["calculated_fill_delta_accounted"] = fill_delta
+            return queued
+        if lifecycle not in {"held", "suspended"}:
+            return None
+        cid = str(exact_transport.get("client_order_id") or "").strip()
+        oid = str(getattr(exact_order, "order_id", "") or "").strip()
+        reason = f"deadman_{lifecycle}_non_executable"
+        le["deadman_protection_reconcile_pending"] = {
+            "reason": reason,
+            "client_order_id": cid,
+            "broker_order_id": oid,
+            "alpaca_lifecycle": lifecycle,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        queued = _queue_full_close(
+            reason,
+            client_order_id=cid,
+            broker_order_id=oid,
+            alpaca_lifecycle=lifecycle,
+        )
+        queued["ambiguous_protection_requires_close"] = True
+        return queued
+
+    def _reconcile_found_deadman_after_post(
+        exact_transport: dict[str, Any],
+        exact_order: Any,
+        *,
+        expected_order_id: str,
+        recovered: bool,
+    ) -> dict[str, Any]:
+        """Certify every submitted stop from strict broker truth before success."""
+        oid = str(getattr(exact_order, "order_id", "") or "").strip()
+        cid = str(exact_transport.get("client_order_id") or "").strip()
+        if not (
+            oid
+            and oid == str(expected_order_id or "").strip()
+            and _owner_transport_order_matches(exact_order, exact_transport)
+        ):
+            return _queue_full_close(
+                "deadman_post_broker_identity_mismatch",
+                client_order_id=cid,
+                expected_broker_order_id=str(expected_order_id or "").strip(),
+                observed_broker_order_id=oid,
+            )
+        lifecycle = _alpaca_protective_order_lifecycle(exact_order)
+        nonactive = _handle_nonactive_alpaca_lifecycle(
+            exact_transport,
+            exact_order,
+            lifecycle,
+        )
+        if nonactive is not None:
+            return nonactive
+        status = str(getattr(exact_order, "status", "") or "").strip().lower()
+        if lifecycle in {"replaced", "done_for_day"}:
+            reason = (
+                "deadman_replacement_successor_unverified"
+                if lifecycle == "replaced"
+                else "deadman_done_for_day_dormant"
+            )
+            raw = getattr(exact_order, "raw", None)
+            raw = raw if isinstance(raw, dict) else {}
+            le["deadman_protection_reconcile_pending"] = {
+                "reason": reason,
+                "client_order_id": cid,
+                "broker_order_id": oid,
+                "replaced_by": raw.get("replaced_by"),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            if lifecycle == "done_for_day":
+                queued = _queue_full_close(
+                    reason,
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                )
+                queued["dormant_protection_requires_close"] = True
+                return queued
+            queued = _queue_full_close(
+                reason,
+                client_order_id=cid,
+                broker_order_id=oid,
+                replaced_by=raw.get("replaced_by"),
+            )
+            queued["replacement_successor_requires_reconcile"] = True
+            return queued
+        if status in _ORDER_TERMINAL_STATUSES:
+            try:
+                remaining = (
+                    float(terminal_remaining_override)
+                    if terminal_remaining_override is not None
+                    else float(adapter.get_position_quantity(product_id))
+                )
+                if not math.isfinite(remaining) or remaining < 0.0:
+                    raise ValueError("invalid remaining")
+            except Exception:
+                return _queue_full_close(
+                    "terminal_deadman_position_unknown",
+                    client_order_id=cid,
+                )
+            return _apply_terminal_deadman_outcome(
+                exact_transport,
+                exact_order,
+                remaining,
+            )
+        if not _alpaca_protective_order_is_certifiably_active(exact_order):
+            return _queue_full_close(
+                "deadman_post_active_certification_failed",
+                client_order_id=cid,
+                broker_order_id=oid,
+                alpaca_lifecycle=lifecycle,
+            )
+        if not _certify_replacement_deadman_active(
+            exact_transport,
+            exact_order,
+        ):
+            return {
+                "ok": False,
+                "pending": True,
+                "error": "replacement_deadman_active_certification_pending",
+            }
+        quarantine_sync = _sync_active_replacement_quarantine(
+            exact_transport,
+            exact_order,
+        )
+        if not quarantine_sync.get("ok"):
+            return {
+                "ok": False,
+                "pending": True,
+                "active_successor_retained": True,
+                "error": quarantine_sync.get("error"),
+            }
+        le.pop("deadman_protection_reconcile_pending", None)
+        le.pop("deadman_protection_unavailable", None)
+        _commit_le(sess, le)
+        return {
+            "ok": True,
+            "protected": True,
+            "order_id": oid,
+            **({"recovered": True} if recovered else {}),
+        }
+
+    if existing and isinstance(existing.get("owner_transport"), dict):
+        # Reconcile the durable local identity before attempting any lease. This
+        # is the crash-recovery seam after an independently committed terminal
+        # owner resolution: a broker-flat deadman fill must be booked, never
+        # converted into permission for a second stop/close order.
+        strict_state, known = _strict_client_order_id_truth(adapter, cid)
+        if strict_state == "found" and known is not None:
+            if not _owner_transport_order_matches(known, transport):
+                return _queue_full_close("alpaca_deadman_broker_identity_mismatch")
+            known_oid = str(getattr(known, "order_id", "") or "").strip()
+            known_status = str(
+                getattr(known, "status", "") or ""
+            ).strip().lower()
+            known_raw = getattr(known, "raw", None)
+            known_raw = known_raw if isinstance(known_raw, dict) else {}
+            alpaca_lifecycle = str(
+                known_raw.get("alpaca_status") or ""
+            ).strip().lower()
+            nonactive = _handle_nonactive_alpaca_lifecycle(
+                transport,
+                known,
+                alpaca_lifecycle,
+            )
+            if nonactive is not None:
+                return nonactive
+            if alpaca_lifecycle in {"replaced", "done_for_day"}:
+                le["deadman_protection_reconcile_pending"] = {
+                    "reason": (
+                        "deadman_replacement_successor_unverified"
+                        if alpaca_lifecycle == "replaced"
+                        else "deadman_done_for_day_dormant"
+                    ),
+                    "client_order_id": cid,
+                    "broker_order_id": known_oid,
+                    "replaced_by": known_raw.get("replaced_by"),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                if alpaca_lifecycle == "done_for_day":
+                    le["operator_flatten_requested_utc"] = str(
+                        le.get("operator_flatten_requested_utc")
+                        or _utcnow().isoformat()
+                    )
+                    _commit_le(sess, le)
+                    return {
+                        "ok": False,
+                        "pending": False,
+                        "dormant_protection_requires_close": True,
+                        "error": "deadman_done_for_day_dormant",
+                    }
+                queued = _queue_full_close(
+                    le["deadman_protection_reconcile_pending"]["reason"],
+                    client_order_id=cid,
+                    broker_order_id=known_oid,
+                    replaced_by=known_raw.get("replaced_by"),
+                )
+                queued["replacement_successor_requires_reconcile"] = True
+                return queued
+            if known_status in _ORDER_TERMINAL_STATUSES:
+                try:
+                    remaining = (
+                        float(terminal_remaining_override)
+                        if terminal_remaining_override is not None
+                        else float(adapter.get_position_quantity(product_id))
+                    )
+                    if not math.isfinite(remaining) or remaining < 0.0:
+                        raise ValueError("invalid remaining")
+                except Exception:
+                    return _queue_full_close(
+                        "terminal_deadman_position_unknown",
+                        client_order_id=cid,
+                    )
+                return _apply_terminal_deadman_outcome(
+                    transport,
+                    known,
+                    remaining,
+                )
+            le["deadman_stop"] = {
+                **dict(existing),
+                "order_id": known_oid,
+                "client_order_id": cid,
+                "phase": "submitted",
+                "owner_transport": transport,
+            }
+            le.pop("deadman_protection_reconcile_pending", None)
+            le.pop("deadman_protection_unavailable", None)
+            _commit_le(sess, le)
+            if not _alpaca_protective_order_is_certifiably_active(known):
+                return _queue_full_close(
+                    "deadman_active_certification_failed",
+                    client_order_id=cid,
+                    broker_order_id=known_oid,
+                    alpaca_lifecycle=alpaca_lifecycle,
+                )
+            if not _certify_replacement_deadman_active(transport, known):
+                return {
+                    "ok": False,
+                    "pending": True,
+                    "error": "replacement_deadman_active_certification_pending",
+                }
+            quarantine_sync = _sync_active_replacement_quarantine(
+                transport,
+                known,
+            )
+            if not quarantine_sync.get("ok"):
+                return {
+                    "ok": False,
+                    "pending": True,
+                    "active_successor_retained": True,
+                    "error": quarantine_sync.get("error"),
+                }
+            return {
+                "ok": True,
+                "protected": True,
+                "order_id": known_oid,
+                "recovered": True,
+            }
+        if strict_state != "absent" or str(existing.get("order_id") or "").strip():
+            le["deadman_protection_reconcile_pending"] = {
+                "reason": (
+                    "deadman_cid_truth_unknown"
+                    if strict_state != "absent"
+                    else "accepted_deadman_cid_absent_operator_recovery_required"
+                ),
+                "client_order_id": cid,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "ok": False,
+                "pending": True,
+                "error": le["deadman_protection_reconcile_pending"]["reason"],
+            }
+
+    lease_token = uuid.uuid4().hex
+    local_generation_qty = _float_or_none(
+        (le.get("position") or {}).get("quantity")
+        if isinstance(le.get("position"), dict)
+        else None
+    )
+    active_handoff, handoff_error = _replacement_handoff_state()
+    if handoff_error is not None:
+        return _queue_full_close(handoff_error)
+    if active_handoff is not None:
+        leased = lease_deadman_handoff_replacement_committed(
+            **context,
+            client_order_id=cid,
+            order_request=request,
+            lease_token=lease_token,
+            broker_position_quantity=qty,
+            local_position_quantity=(
+                local_generation_qty
+                if local_generation_qty is not None
+                else math.nan
+            ),
+        )
+    else:
+        leased = lease_owner_transport_committed(
+            **context,
+            transport_kind="deadman",
+            client_order_id=cid,
+            order_request=request,
+            lease_token=lease_token,
+        )
+    if not leased.get("ok"):
+        current = leased.get("transport")
+        current = dict(current) if isinstance(current, dict) else None
+        if current is None or str(current.get("transport_kind") or "") != "deadman":
+            le["deadman_protection_reconcile_pending"] = {
+                "reason": leased.get("reason") or "owner_transport_unavailable",
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {"ok": False, "pending": True, "error": "alpaca_deadman_owner_transport_busy"}
+        transport = current
+        request = dict(current.get("order_request") or {})
+        cid = str(current.get("client_order_id") or "").strip()
+        strict_state, known = _strict_client_order_id_truth(adapter, cid)
+        if strict_state == "found" and known is not None:
+            if not _owner_transport_order_matches(known, current):
+                return _queue_full_close("alpaca_deadman_broker_identity_mismatch")
+            oid = str(getattr(known, "order_id", "") or "").strip()
+            status = str(getattr(known, "status", "") or "").strip().lower()
+            known_raw = getattr(known, "raw", None)
+            known_raw = known_raw if isinstance(known_raw, dict) else {}
+            alpaca_lifecycle = str(
+                known_raw.get("alpaca_status") or ""
+            ).strip().lower()
+            nonactive = _handle_nonactive_alpaca_lifecycle(
+                current,
+                known,
+                alpaca_lifecycle,
+            )
+            if nonactive is not None:
+                return nonactive
+            if alpaca_lifecycle in {"replaced", "done_for_day"}:
+                le["deadman_protection_reconcile_pending"] = {
+                    "reason": (
+                        "deadman_replacement_successor_unverified"
+                        if alpaca_lifecycle == "replaced"
+                        else "deadman_done_for_day_dormant"
+                    ),
+                    "client_order_id": cid,
+                    "broker_order_id": oid,
+                    "replaced_by": known_raw.get("replaced_by"),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                if alpaca_lifecycle == "done_for_day":
+                    le["operator_flatten_requested_utc"] = str(
+                        le.get("operator_flatten_requested_utc")
+                        or _utcnow().isoformat()
+                    )
+                    _commit_le(sess, le)
+                    return {
+                        "ok": False,
+                        "pending": False,
+                        "dormant_protection_requires_close": True,
+                        "error": "deadman_done_for_day_dormant",
+                    }
+                queued = _queue_full_close(
+                    le["deadman_protection_reconcile_pending"]["reason"],
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                    replaced_by=known_raw.get("replaced_by"),
+                )
+                queued["replacement_successor_requires_reconcile"] = True
+                return queued
+            if status in _ORDER_TERMINAL_STATUSES:
+                try:
+                    remaining = (
+                        float(terminal_remaining_override)
+                        if terminal_remaining_override is not None
+                        else float(adapter.get_position_quantity(product_id))
+                    )
+                    if not math.isfinite(remaining) or remaining < 0.0:
+                        raise ValueError("invalid remaining")
+                except Exception:
+                    le["deadman_protection_reconcile_pending"] = {
+                        "reason": "terminal_deadman_position_unknown",
+                        "client_order_id": cid,
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    return {"ok": False, "pending": True, "error": "terminal_deadman_position_unknown"}
+                return _apply_terminal_deadman_outcome(
+                    current,
+                    known,
+                    remaining,
+                )
+            le["deadman_stop"] = {
+                "order_id": oid,
+                "client_order_id": cid,
+                "stop_price": float(request["stop_price"]),
+                "qty": float(request["base_size"]),
+                "phase": "submitted",
+                "owner_transport": current,
+            }
+            le.pop("deadman_protection_reconcile_pending", None)
+            le.pop("deadman_protection_unavailable", None)
+            _commit_le(sess, le)
+            if not _alpaca_protective_order_is_certifiably_active(known):
+                return _queue_full_close(
+                    "deadman_active_certification_failed",
+                    client_order_id=cid,
+                    broker_order_id=oid,
+                    alpaca_lifecycle=alpaca_lifecycle,
+                )
+            if not _certify_replacement_deadman_active(current, known):
+                return {
+                    "ok": False,
+                    "pending": True,
+                    "error": "replacement_deadman_active_certification_pending",
+                }
+            return {"ok": True, "protected": True, "order_id": oid, "recovered": True}
+        if strict_state != "absent" or not _owner_transport_lease_expired(current):
+            le["deadman_protection_reconcile_pending"] = {
+                "reason": (
+                    "deadman_cid_truth_unknown"
+                    if strict_state != "absent"
+                    else "deadman_cid_absent_lease_active"
+                ),
+                "client_order_id": cid,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {"ok": False, "pending": True, "error": le["deadman_protection_reconcile_pending"]["reason"]}
+        lease_token = uuid.uuid4().hex
+        active_handoff, handoff_error = _replacement_handoff_state()
+        if handoff_error is not None:
+            return {"ok": False, "pending": True, "error": handoff_error}
+        if active_handoff is not None:
+            leased = lease_deadman_handoff_replacement_committed(
+                **context,
+                client_order_id=cid,
+                order_request=request,
+                lease_token=lease_token,
+                broker_position_quantity=qty,
+                local_position_quantity=(
+                    local_generation_qty
+                    if local_generation_qty is not None
+                    else math.nan
+                ),
+                strict_cid_absent_after_expiry=True,
+            )
+        else:
+            leased = lease_owner_transport_committed(
+                **context,
+                transport_kind="deadman",
+                client_order_id=cid,
+                order_request=request,
+                lease_token=lease_token,
+                strict_cid_absent_after_expiry=True,
+            )
+        if not leased.get("ok"):
+            return {"ok": False, "pending": True, "error": leased.get("reason")}
+
+    leased_transport = leased.get("transport")
+    transport = dict(leased_transport) if isinstance(leased_transport, dict) else transport
+    le["deadman_stop"] = {
+        "order_id": None,
+        "client_order_id": cid,
+        "stop_price": float(request["stop_price"]),
+        "qty": float(request["base_size"]),
+        "phase": "submitting",
+        "owner_transport": transport,
+    }
+    _commit_le(sess, le)
+    # The retained owner claim above is the crash-surviving pre-HTTP identity.
+    # Keep the outer session row lock through broker transport; committing this
+    # JSON mirror here would let a second tick race stale local accounting.
+    db.flush()
+
+    literal_account_ok, literal_account = _strict_alpaca_account_identity(
+        adapter,
+        sess,
+    )
+    if not literal_account_ok:
+        release_owner_transport_pre_post_committed(
+            **context,
+            client_order_id=cid,
+            lease_token=lease_token,
+            reason="deadman_account_identity_changed_pre_post",
+        )
+        return _queue_full_close(
+            str(literal_account.get("reason") or "alpaca_account_identity_blocked"),
+            alpaca_account_identity=literal_account,
+        )
+
+    try:
+        result = adapter.place_deadman_stop(
+            product_id=request["product_id"],
+            base_size=request["base_size"],
+            stop_price=float(request["stop_price"]),
+            client_order_id=cid,
+        ) or {}
+    except Exception as exc:
+        result = {"ok": False, "error": str(exc), "exception_type": type(exc).__name__}
+    oid = str(result.get("order_id") or "").strip()
+    submitted = bool(result.get("ok") and oid)
+    if not submitted and result.get("submit_outcome") == "broker_rejected":
+        if resolve_owner_transport_terminal_committed(
+            **context,
+            client_order_id=cid,
+            broker_order_id="",
+            broker_order_status="rejected",
+            filled_size=0.0,
+            pre_accept_rejected=True,
+            lease_token=lease_token,
+        ):
+            le.pop("deadman_stop", None)
+            return _queue_full_close(
+                "alpaca_deadman_explicitly_rejected",
+                broker_error=result.get("error"),
+            )
+    advanced = advance_owner_transport_committed(
+        **context,
+        client_order_id=cid,
+        lease_token=lease_token,
+        phase=("submitted" if submitted else "submit_indeterminate"),
+        broker_order_id=(oid or None),
+        metadata={
+            "submit_status": result.get("status"),
+            "submit_error": result.get("error"),
+            "exception_type": result.get("exception_type"),
+        },
+    )
+    if submitted:
+        transport.update({"phase": "submitted", "broker_order_id": oid})
+        le["deadman_stop"] = {
+            "order_id": oid,
+            "client_order_id": cid,
+            "stop_price": float(request["stop_price"]),
+            "qty": float(request["base_size"]),
+            "phase": "submitted",
+            "owner_transport": transport,
+        }
+        le.pop("deadman_protection_reconcile_pending", None)
+        le.pop("deadman_protection_unavailable", None)
+        _commit_le(sess, le)
+        strict_state, strict_order = _strict_client_order_id_truth(adapter, cid)
+        if strict_state != "found" or strict_order is None:
+            return _queue_full_close(
+                "deadman_post_strict_cid_truth_unavailable",
+                client_order_id=cid,
+                broker_order_id=oid,
+                strict_cid_state=strict_state,
+            )
+        certified = _reconcile_found_deadman_after_post(
+            transport,
+            strict_order,
+            expected_order_id=oid,
+            recovered=False,
+        )
+        if not (certified.get("ok") and certified.get("protected")):
+            return certified
+        _emit(db, sess, "live_deadman_stop_placed", {
+            "ok": True,
+            "order_id": oid,
+            "client_order_id": cid,
+            "stop_price": float(request["stop_price"]),
+            "qty": float(request["base_size"]),
+        })
+        return certified
+
+    strict_state, known = _strict_client_order_id_truth(adapter, cid)
+    if strict_state == "found" and known is not None and _owner_transport_order_matches(known, transport):
+        known_oid = str(getattr(known, "order_id", "") or "").strip()
+        if known_oid:
+            advance_owner_transport_committed(
+                **context,
+                client_order_id=cid,
+                lease_token=lease_token,
+                phase="submitted",
+                broker_order_id=known_oid,
+                metadata={"recovered_after_submit_result": True},
+            )
+            transport.update({"phase": "submitted", "broker_order_id": known_oid})
+            le["deadman_stop"] = {
+                "order_id": known_oid,
+                "client_order_id": cid,
+                "stop_price": float(request["stop_price"]),
+                "qty": float(request["base_size"]),
+                "phase": "submitted",
+                "owner_transport": transport,
+            }
+            _commit_le(sess, le)
+            return _reconcile_found_deadman_after_post(
+                transport,
+                known,
+                expected_order_id=known_oid,
+                recovered=True,
+            )
+    le["deadman_protection_reconcile_pending"] = {
+        "reason": "deadman_submit_indeterminate",
+        "client_order_id": cid,
+        "owner_transport_advanced": bool(advanced),
+        "broker_error": result.get("error"),
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    _commit_le(sess, le)
+    _emit(db, sess, "live_deadman_stop_reconcile_pending", dict(le["deadman_protection_reconcile_pending"]))
+    return {"ok": False, "pending": True, "error": "deadman_submit_indeterminate"}
+
+
+def _reconcile_alpaca_deadman_before_broker_zero(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+) -> dict[str, Any]:
+    """Account an exact terminal disaster stop before accepting broker-flat truth."""
+    if normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES:
+        return {"ok": False, "not_applicable": True}
+    deadman = le.get("deadman_stop")
+    deadman = deadman if isinstance(deadman, dict) else {}
+    if not isinstance(deadman.get("owner_transport"), dict):
+        return {
+            "ok": False,
+            "error": "alpaca_broker_zero_deadman_identity_missing",
+        }
+    pos = le.get("position")
+    pos = pos if isinstance(pos, dict) else {}
+    qty = _float_or_none(pos.get("quantity"))
+    avg = _float_or_none(pos.get("avg_entry_price"))
+    stop = _float_or_none(pos.get("stop_price"))
+    if qty is None or qty <= 0.0 or avg is None or avg <= 0.0:
+        return {
+            "ok": False,
+            "error": "alpaca_broker_zero_local_position_basis_missing",
+        }
+    result = _ensure_alpaca_deadman_stop(
+        db,
+        sess,
+        adapter,
+        le=le,
+        product_id=product_id,
+        quantity=qty,
+        avg_entry_price=avg,
+        software_stop_price=(stop if stop is not None and stop > 0.0 else avg),
+    )
+    if result.get("position_closed") is True and not isinstance(
+        le.get("position"), dict
+    ):
+        return {
+            "ok": True,
+            "deadman_accounted": True,
+            "detail": result,
+        }
+    return {
+        "ok": False,
+        "error": result.get("error")
+        or "alpaca_broker_zero_deadman_terminal_unconfirmed",
+        "detail": result,
+    }
 
 
 def _record_live_exit_intent_safe(
@@ -1210,16 +7407,66 @@ def _submit_live_market_exit(
     mid: float | None,
     extra: dict[str, Any] | None = None,
     hard_floor_price: float | None = None,
+    quote_independent_authority: bool = False,
+    emergency_exit_authority: dict[str, Any] | None = None,
+    alpaca_handoff_recovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _utcnow()
+    handoff_recovery = (
+        dict(alpaca_handoff_recovery)
+        if isinstance(alpaca_handoff_recovery, dict)
+        else None
+    )
+    handoff_request: dict[str, Any] | None = None
+    handoff_kind: str | None = None
+    if handoff_recovery is not None:
+        raw_request = (
+            handoff_recovery.get("successor_order_request")
+            or handoff_recovery.get("successor_intent")
+        )
+        handoff_request = (
+            dict(raw_request) if isinstance(raw_request, dict) else None
+        )
+        handoff_kind = str(
+            handoff_recovery.get("successor_transport_kind") or ""
+        ).strip().lower()
+        frozen_qty = _float_or_none((handoff_request or {}).get("base_size"))
+        frozen_cid = str((handoff_request or {}).get("client_order_id") or "").strip()
+        frozen_reason = str(handoff_recovery.get("reason") or "").strip()
+        if not (
+            normalize_execution_family(sess.execution_family) == "alpaca_spot"
+            and handoff_kind in {"ordinary_exit", "emergency_exit"}
+            and frozen_qty is not None
+            and frozen_qty > 0.0
+            and frozen_cid
+            and frozen_reason
+            and str((handoff_request or {}).get("product_id") or "").strip().upper()
+            == str(product_id or "").strip().upper()
+            and str((handoff_request or {}).get("alpaca_account_id") or "").strip()
+            == str(_frozen_alpaca_account_id(sess) or "")
+        ):
+            return {
+                "ok": False,
+                "error": "deadman_close_handoff_recovery_identity_invalid",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        quantity = float(frozen_qty)
+        client_order_id = frozen_cid
+        reason = frozen_reason
+        quote_independent_authority = handoff_kind == "emergency_exit"
     attempts = int(le.get("exit_submit_attempts", 0) or 0)
+    exit_execution_bbo_freshness = None
+    exit_execution_bbo_max_age: float | None = None
+    alpaca_extended_bbo_required = False
+    alpaca_equity_session: str | None = None
 
     # Backoff gate — do NOT place another broker order until the scheduled
     # retry time. Returns a synthetic deferred result (no broker call, no
     # attempt increment) so the caller stays in its exit state and retries
     # on a later pulse without hammering the venue API.
     next_retry_raw = le.get("exit_next_retry_at_utc")
-    if next_retry_raw:
+    if next_retry_raw and handoff_recovery is None:
         try:
             next_retry = datetime.fromisoformat(
                 str(next_retry_raw).replace("Z", "+00:00")
@@ -1237,7 +7484,7 @@ def _submit_live_market_exit(
 
     # Max-attempts cap — stop submitting and signal escalation to the
     # broker-zero / dust reconcile (handled in _live_exit_submit_succeeded).
-    if attempts >= _EXIT_SUBMIT_MAX_ATTEMPTS:
+    if attempts >= _EXIT_SUBMIT_MAX_ATTEMPTS and handoff_recovery is None:
         return {
             "ok": False,
             "error": "exit_retry_cap_exceeded",
@@ -1245,28 +7492,22 @@ def _submit_live_market_exit(
             "attempts": attempts,
         }
 
-    # DEAD-MAN release (2026-07-10): before ANY software sell, cancel the resting
-    # broker-side dead-man stop so the shares are free and a double-sell is
-    # impossible even in the cancel/fill race (sell_to_close bounds the race's
-    # worst case at flat, never short). Same chokepoint rationale as the scale-out
-    # cancel below — every exit path crosses here. Fail-open: a cancel failure
-    # logs + proceeds (the broker-qty clamp below still sells only what is free).
-    _dm = le.get("deadman_stop") if isinstance(le.get("deadman_stop"), dict) else None
-    if _dm and _dm.get("order_id") and hasattr(adapter, "cancel_order_by_id"):
-        try:
-            if adapter.cancel_order_by_id(str(_dm["order_id"])):
-                le.pop("deadman_stop", None)
-                _commit_le(sess, le)
-                _emit(db, sess, "live_deadman_stop_released", {"order_id": _dm["order_id"], "reason": reason})
-        except Exception:
-            logger.warning("[live_runner] deadman release failed", exc_info=True)
-
     # Sell-into-strength invariant: a resting scale-out limit may be working this
     # position. Cancel it FIRST and adopt any fill it caught, then clamp the sell
     # quantity to the true remainder — the one chokepoint every exit path crosses.
     quantity = _cancel_scale_limit_and_clamp(
         db, sess, adapter, le=le, requested_qty=quantity, reason=reason
     )
+    if quantity is None:
+        le["exit_submit_attempts"] = attempts
+        le.pop("exit_next_retry_at_utc", None)
+        _commit_le(sess, le)
+        return {
+            "ok": False,
+            "error": "alpaca_scale_limit_release_unconfirmed",
+            "deferred": True,
+            "pre_place_blocked": True,
+        }
     if quantity <= 0:
         _emit(db, sess, "live_exit_noop_scale_limit_consumed", {"reason": reason})
         return {"ok": False, "error": "no_remaining_quantity", "noop": True}
@@ -1312,10 +7553,142 @@ def _submit_live_market_exit(
             })
             quantity = float(_bq)
             if quantity <= 0:
+                if normalize_execution_family(
+                    sess.execution_family
+                ) in ALPACA_EXECUTION_FAMILIES:
+                    deadman_reconcile = (
+                        _reconcile_alpaca_deadman_before_broker_zero(
+                            db,
+                            sess,
+                            adapter,
+                            le=le,
+                            product_id=product_id,
+                        )
+                    )
+                    if deadman_reconcile.get("ok") is True:
+                        return {
+                            "ok": True,
+                            "broker_zero": True,
+                            "alpaca_deadman_accounted": True,
+                            "deadman_reconcile": deadman_reconcile,
+                        }
+                    le["alpaca_broker_zero_identity_block"] = {
+                        "reason": deadman_reconcile.get("error"),
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    return {
+                        "ok": False,
+                        "error": deadman_reconcile.get("error")
+                        or "alpaca_broker_zero_identity_reconcile_required",
+                        "broker_zero": True,
+                        "alpaca_identity_reconcile_required": True,
+                        "deferred": True,
+                        "pre_place_blocked": True,
+                        "deadman_reconcile": deadman_reconcile,
+                    }
                 return {"ok": False, "error": "no_remaining_quantity", "noop": True,
                         "broker_zero": True}
     except Exception:
         pass
+
+    # A normal strategy exit is still a quote-derived decision.  Re-read the
+    # strict Alpaca execution BBO immediately before recording/submitting it so
+    # cancel/adopt/clamp work above cannot silently age the decision quote.  An
+    # already-authorized emergency flatten is deliberately exempt: stale or
+    # absent market data must never veto an operator/EOD/governance liquidation.
+    if (
+        not quote_independent_authority
+        and normalize_execution_family(sess.execution_family)
+        in ALPACA_EXECUTION_FAMILIES
+    ):
+        try:
+            configured_age = float(
+                getattr(settings, "chili_momentum_entry_bbo_max_age_seconds", 2.0)
+                or 2.0
+            )
+        except (TypeError, ValueError):
+            configured_age = 2.0
+        max_age_seconds = min(2.0, max(0.0, configured_age))
+        final_tick, final_bbo = _final_entry_bbo(
+            adapter,
+            product_id,
+            max_age_seconds=max_age_seconds,
+        )
+        le["exit_final_bbo"] = final_bbo
+        if final_tick is None:
+            _commit_le(sess, le)
+            _emit(db, sess, "live_exit_deferred_final_bbo", {
+                "reason": reason,
+                "execution_bbo": final_bbo,
+            })
+            return {
+                "ok": False,
+                "error": final_bbo.get("reason") or "execution_bbo_unavailable",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        bid = float(final_tick.bid)
+        ask = float(final_tick.ask)
+        mid = float(final_tick.mid)
+        exit_execution_bbo_freshness = getattr(final_tick, "freshness", None)
+        exit_execution_bbo_max_age = max_age_seconds
+
+    _exit_family = normalize_execution_family(sess.execution_family)
+    if (
+        _exit_family in ALPACA_EXECUTION_FAMILIES
+        and not str(sess.symbol or "").upper().endswith("-USD")
+    ):
+        try:
+            from .market_profile import market_session_now as _alpaca_exit_session_now
+
+            alpaca_equity_session = _alpaca_exit_session_now(sess.symbol)
+        except Exception:
+            alpaca_equity_session = None
+        if alpaca_equity_session == "closed":
+            block = {
+                "ok": False,
+                "error": "alpaca_equity_exit_session_closed",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+            le["last_exit_bbo_place_block"] = block
+            _commit_le(sess, le)
+            _emit(db, sess, "live_exit_deferred_session_closed", {"reason": reason})
+            return block
+        if (
+            quote_independent_authority
+            and alpaca_equity_session in {"premarket", "afterhours"}
+        ):
+            # Alpaca cannot execute equity market orders in extended hours. A
+            # deterministic emergency therefore needs a fresh executable BBO to
+            # construct a marketable DAY limit; no BBO means no broker POST and a
+            # loud unresolved authority, never a queued pseudo-success.
+            max_age_seconds = 2.0
+            final_tick, final_bbo = _final_entry_bbo(
+                adapter,
+                product_id,
+                max_age_seconds=max_age_seconds,
+            )
+            le["emergency_exit_extended_bbo"] = final_bbo
+            if final_tick is None:
+                _commit_le(sess, le)
+                _emit(db, sess, "live_emergency_exit_extended_bbo_blocked", {
+                    "reason": reason,
+                    "execution_bbo": final_bbo,
+                })
+                return {
+                    "ok": False,
+                    "error": final_bbo.get("reason") or "alpaca_extended_exit_bbo_unavailable",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            bid = float(final_tick.bid)
+            ask = float(final_tick.ask)
+            mid = float(final_tick.mid)
+            exit_execution_bbo_freshness = getattr(final_tick, "freshness", None)
+            exit_execution_bbo_max_age = max_age_seconds
+            alpaca_extended_bbo_required = True
 
     _record_live_exit_intent_safe(
         db,
@@ -1365,6 +7738,8 @@ def _submit_live_market_exit(
             _exit_extended = market_session_now(sess.symbol) != "regular"
         except Exception:
             _exit_extended = False
+    elif _exit_family in ALPACA_EXECUTION_FAMILIES:
+        _exit_extended = alpaca_equity_session in {"premarket", "afterhours"}
     # ⚠️ 2026-06-23 STRANDED-EXIT FIX: use extended_hours, NOT all_day_hours. all_day_hours
     # is RH's 24-HOUR market — only valid for the few 24h-eligible names; for ~every Ross
     # low-float mover RH rejects it ("untradable for 24 hour trading"), and the AGENTIC MCP
@@ -1372,11 +7747,2182 @@ def _submit_live_market_exit(
     # rail does not), so a premarket/after-hours STOP-OUT could not flatten -> naked stranded
     # long (the exact AHMA/SMCX class). extended_hours covers pre+regular+post (the lane's
     # 04:00-20:00 ET window) and is accepted for ALL equities. Mirrors the entry-side fix.
-    _ext_kwargs: dict[str, Any] = (
-        {"market_hours_override": "extended_hours", "extended_hours_override": True}
-        if _exit_extended
-        else {}
-    )
+    if _exit_extended and _exit_family in ALPACA_EXECUTION_FAMILIES:
+        _ext_kwargs = {"extended_hours": True}
+    else:
+        _ext_kwargs = (
+            {"market_hours_override": "extended_hours", "extended_hours_override": True}
+            if _exit_extended
+            else {}
+        )
+
+    def _last_instruction_exit_bbo_block() -> dict[str, Any] | None:
+        if quote_independent_authority and not alpaca_extended_bbo_required:
+            return None
+        if normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES:
+            return None
+        try:
+            if exit_execution_bbo_freshness is None or exit_execution_bbo_max_age is None:
+                raise ValueError("missing execution freshness")
+            age_seconds = float(exit_execution_bbo_freshness.age_seconds())
+            if not math.isfinite(age_seconds):
+                raise ValueError("non-finite execution freshness")
+        except Exception:
+            block = {
+                "ok": False,
+                "error": "execution_bbo_time_invalid_at_exit_place",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        else:
+            if age_seconds <= exit_execution_bbo_max_age:
+                return None
+            block = {
+                "ok": False,
+                "error": "execution_bbo_stale_at_exit_place",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "execution_bbo_age_seconds": age_seconds,
+                "execution_bbo_max_age_seconds": exit_execution_bbo_max_age,
+            }
+        # No broker transport occurred, so this must not consume an attempt or
+        # impose a retry backoff.  The next pulse may use a newly fetched BBO.
+        le["exit_submit_attempts"] = max(0, attempts - 1)
+        le.pop("exit_next_retry_at_utc", None)
+        le["last_exit_bbo_place_block"] = block
+        _commit_le(sess, le)
+        _emit(db, sess, "live_exit_deferred_final_bbo", {
+            "reason": reason,
+            **block,
+        })
+        return block
+
+    _owner_transport_post: dict[str, Any] = {}
+    _close_only_transport_post: dict[str, Any] = {}
+
+    def _owner_transport_block(
+        error: str,
+        *,
+        transport: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        block = {
+            "ok": False,
+            "error": error,
+            "deferred": True,
+            "pre_place_blocked": True,
+        }
+        if transport:
+            block["client_order_id"] = transport.get("client_order_id")
+            block["transport_kind"] = transport.get("transport_kind")
+        le["exit_submit_attempts"] = max(0, attempts - 1)
+        le.pop("exit_next_retry_at_utc", None)
+        le["alpaca_owner_transport_block"] = {
+            **block,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        return block
+
+    def _freeze_alpaca_owner_transport_before_post(
+        *,
+        transport_kind: str,
+        request: dict[str, Any],
+        order_kwargs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Cross-process outbox for ordinary and emergency Alpaca closes."""
+        nonlocal client_order_id, quantity
+        if _exit_family not in ALPACA_EXECUTION_FAMILIES:
+            return None
+        # The recertified orphan close has its own exact action claim/request
+        # contract and must not be forced through an unrelated entry-owner row.
+        close_only_marker, close_only_error = _validated_alpaca_close_only_marker(sess)
+        if close_only_error is None and close_only_marker is not None:
+            return None
+        context = _alpaca_owner_transport_context(sess)
+        if context is None:
+            return _owner_transport_block("alpaca_owner_transport_context_missing")
+
+        proposal = dict(request)
+        lease_token = uuid.uuid4().hex
+        leased = lease_owner_transport_committed(
+            **context,
+            transport_kind=transport_kind,
+            client_order_id=str(proposal.get("client_order_id") or ""),
+            order_request=proposal,
+            lease_token=lease_token,
+        )
+        if not leased.get("ok"):
+            current = leased.get("transport")
+            current = dict(current) if isinstance(current, dict) else None
+            if current is None:
+                return _owner_transport_block(
+                    str(leased.get("reason") or "alpaca_owner_transport_lease_failed")
+                )
+            current_request = current.get("order_request")
+            current_request = (
+                dict(current_request) if isinstance(current_request, dict) else {}
+            )
+            if (
+                str(current.get("transport_kind") or "").strip()
+                != str(transport_kind or "").strip()
+            ):
+                return _owner_transport_block(
+                    "alpaca_owner_transport_kind_mismatch",
+                    transport=current,
+                )
+            # The independently committed outbox is authoritative after an
+            # outer session rollback. The next tick will naturally generate a
+            # new ephemeral CID/request, but it must first adopt or same-CID
+            # replay the unresolved durable request rather than rotate.
+            current_cid = str(current.get("client_order_id") or "").strip()
+            strict_state, known = _strict_client_order_id_truth(adapter, current_cid)
+            if strict_state == "found" and known is not None:
+                if not _owner_transport_order_matches(known, current):
+                    return _owner_transport_block(
+                        "alpaca_owner_transport_identity_mismatch",
+                        transport=current,
+                    )
+                known_status = str(getattr(known, "status", "") or "").strip().lower()
+                known_filled = _float_or_none(getattr(known, "filled_size", 0.0))
+                if (
+                    known_status in _ORDER_TERMINAL_STATUSES
+                    and known_filled is not None
+                    and known_filled <= 1e-12
+                ):
+                    if not _resolve_exact_owner_transport_terminal(sess, current, known):
+                        return _owner_transport_block(
+                            "alpaca_owner_transport_terminal_resolution_failed",
+                            transport=current,
+                        )
+                    leased = lease_owner_transport_committed(
+                        **context,
+                        transport_kind=transport_kind,
+                        client_order_id=str(proposal.get("client_order_id") or ""),
+                        order_request=proposal,
+                        lease_token=lease_token,
+                    )
+                    if not leased.get("ok"):
+                        return _owner_transport_block(
+                            str(leased.get("reason") or "alpaca_owner_transport_lease_failed")
+                        )
+                else:
+                    known_oid = str(getattr(known, "order_id", "") or "").strip()
+                    if not known_oid:
+                        return _owner_transport_block(
+                            "alpaca_owner_transport_broker_id_missing",
+                            transport=current,
+                        )
+                    recovered_qty = float(
+                        _float_or_none((current.get("order_request") or {}).get("base_size"))
+                        or quantity
+                    )
+                    le["exit_order_id"] = known_oid
+                    le["exit_client_order_id"] = current_cid
+                    le["pending_exit_reason"] = reason
+                    le["pending_exit_quantity"] = recovered_qty
+                    le["pending_exit_submitted_at_utc"] = str(
+                        current.get("created_at_utc") or _utcnow().isoformat()
+                    )
+                    le["alpaca_active_exit_owner_transport"] = dict(current)
+                    le.pop("alpaca_owner_transport_block", None)
+                    _commit_le(sess, le)
+                    db.flush()
+                    return {
+                        "ok": True,
+                        "order_id": known_oid,
+                        "client_order_id": current_cid,
+                        "status": known_status,
+                        "recovered_before_duplicate_exit": True,
+                    }
+            elif strict_state != "absent":
+                return _owner_transport_block(
+                    "alpaca_owner_transport_cid_truth_unknown",
+                    transport=current,
+                )
+            else:
+                if not _owner_transport_lease_expired(current):
+                    return _owner_transport_block(
+                        "alpaca_owner_transport_cid_absent_lease_active",
+                        transport=current,
+                    )
+                frozen = current.get("order_request")
+                frozen = dict(frozen) if isinstance(frozen, dict) else {}
+                lease_token = uuid.uuid4().hex
+                leased = lease_owner_transport_committed(
+                    **context,
+                    transport_kind=str(current.get("transport_kind") or ""),
+                    client_order_id=current_cid,
+                    order_request=frozen,
+                    lease_token=lease_token,
+                    strict_cid_absent_after_expiry=True,
+                )
+                if not leased.get("ok"):
+                    return _owner_transport_block(
+                        str(leased.get("reason") or "alpaca_owner_transport_replay_lease_failed"),
+                        transport=current,
+                    )
+                client_order_id = current_cid
+                quantity = float(frozen["base_size"])
+                for key in (
+                    "product_id",
+                    "side",
+                    "base_size",
+                    "client_order_id",
+                    "position_intent",
+                    "time_in_force",
+                    "extended_hours",
+                    "limit_price",
+                    "asset_class",
+                ):
+                    if key in frozen:
+                        order_kwargs[key] = frozen[key]
+                    else:
+                        order_kwargs.pop(key, None)
+                proposal = frozen
+
+        transport = leased.get("transport")
+        transport = dict(transport) if isinstance(transport, dict) else {}
+        _owner_transport_post.clear()
+        _owner_transport_post.update({
+            **context,
+            "transport_kind": str(transport.get("transport_kind") or transport_kind),
+            "client_order_id": str(transport.get("client_order_id") or proposal.get("client_order_id") or ""),
+            "lease_token": lease_token,
+            "order_request": dict(transport.get("order_request") or proposal),
+            "transport": dict(transport),
+        })
+        frozen_post_request = dict(_owner_transport_post["order_request"])
+        client_order_id = str(
+            frozen_post_request.get("client_order_id") or client_order_id
+        ).strip()
+        frozen_post_quantity = _float_or_none(
+            frozen_post_request.get("base_size")
+        )
+        if frozen_post_quantity is not None and frozen_post_quantity > 0.0:
+            quantity = float(frozen_post_quantity)
+        for key in (
+            "product_id",
+            "side",
+            "base_size",
+            "client_order_id",
+            "position_intent",
+            "time_in_force",
+            "extended_hours",
+            "limit_price",
+            "asset_class",
+        ):
+            if key in frozen_post_request and frozen_post_request[key] is not None:
+                order_kwargs[key] = frozen_post_request[key]
+            elif key == "limit_price":
+                order_kwargs.pop(key, None)
+        le["alpaca_active_exit_owner_transport"] = dict(transport)
+        le.pop("alpaca_owner_transport_block", None)
+        _commit_le(sess, le)
+        return None
+
+    def _advance_alpaca_owner_transport_after_post(
+        result: dict[str, Any] | None,
+        *,
+        exception_type: str | None = None,
+    ) -> None:
+        if not _owner_transport_post:
+            return
+        oid = str((result or {}).get("order_id") or "").strip()
+        submitted = bool((result or {}).get("ok") and oid)
+        if (
+            not submitted
+            and isinstance(result, dict)
+            and result.get("submit_outcome") == "broker_rejected"
+        ):
+            resolved_reject = resolve_owner_transport_terminal_committed(
+                account_scope=_owner_transport_post["account_scope"],
+                alpaca_account_id=_owner_transport_post["alpaca_account_id"],
+                symbol=_owner_transport_post["symbol"],
+                claim_token=_owner_transport_post["claim_token"],
+                owner_session_id=_owner_transport_post["owner_session_id"],
+                client_order_id=_owner_transport_post["client_order_id"],
+                broker_order_id="",
+                broker_order_status="rejected",
+                filled_size=0.0,
+                pre_accept_rejected=True,
+                lease_token=_owner_transport_post["lease_token"],
+            )
+            if resolved_reject:
+                history = le.get("exit_submit_transport_identities")
+                history = list(history) if isinstance(history, list) else []
+                current_cid = str(
+                    _owner_transport_post.get("client_order_id") or ""
+                ).strip()
+                for idx, row in enumerate(history):
+                    if not isinstance(row, dict) or str(
+                        row.get("client_order_id") or ""
+                    ).strip() != current_cid:
+                        continue
+                    history[idx] = {
+                        **row,
+                        "proven_no_transport": True,
+                        "broker_order_status": "rejected",
+                        "pre_accept_rejected": True,
+                        "resolved_at_utc": _utcnow().isoformat(),
+                    }
+                    le["exit_submit_transport_identities"] = history
+                    break
+                le["alpaca_owner_transport_pre_accept_rejected"] = {
+                    "client_order_id": _owner_transport_post.get("client_order_id"),
+                    "error": result.get("error"),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _owner_transport_post.clear()
+                return
+        advanced = advance_owner_transport_committed(
+            account_scope=_owner_transport_post["account_scope"],
+            alpaca_account_id=_owner_transport_post["alpaca_account_id"],
+            symbol=_owner_transport_post["symbol"],
+            claim_token=_owner_transport_post["claim_token"],
+            owner_session_id=_owner_transport_post["owner_session_id"],
+            client_order_id=_owner_transport_post["client_order_id"],
+            lease_token=_owner_transport_post["lease_token"],
+            phase=("submitted" if submitted else "submit_indeterminate"),
+            broker_order_id=(oid or None),
+            metadata={
+                "submit_status": (result or {}).get("status"),
+                "submit_error": (result or {}).get("error"),
+                "exception_type": exception_type,
+            },
+        )
+        if not advanced:
+            le["alpaca_owner_transport_post_advance_pending"] = {
+                "client_order_id": _owner_transport_post.get("client_order_id"),
+                "broker_order_id": oid or None,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+
+    def _release_alpaca_owner_transport_without_post(reason_code: str) -> bool:
+        if not _owner_transport_post:
+            return True
+        released = release_owner_transport_pre_post_committed(
+            account_scope=_owner_transport_post["account_scope"],
+            alpaca_account_id=_owner_transport_post["alpaca_account_id"],
+            symbol=_owner_transport_post["symbol"],
+            claim_token=_owner_transport_post["claim_token"],
+            owner_session_id=_owner_transport_post["owner_session_id"],
+            client_order_id=_owner_transport_post["client_order_id"],
+            lease_token=_owner_transport_post["lease_token"],
+            reason=reason_code,
+        )
+        if released:
+            _owner_transport_post.clear()
+        return released
+
+    def _release_close_only_transport_without_post(reason_code: str) -> bool:
+        if not _close_only_transport_post:
+            return True
+        released = release_orphan_close_pre_post_committed(
+            **{
+                key: _close_only_transport_post[key]
+                for key in (
+                    "symbol",
+                    "claim_token",
+                    "client_order_id",
+                    "close_request",
+                    "post_bind_token",
+                    "transport_generation",
+                    "expected_claim_phase",
+                    "account_scope",
+                )
+            },
+            reason=reason_code,
+        )
+        if released:
+            _close_only_transport_post.clear()
+        return bool(released)
+
+    def _mark_close_only_transport_started() -> bool:
+        if not _close_only_transport_post:
+            return True
+        started = mark_orphan_close_transport_started_committed(
+            **{
+                key: _close_only_transport_post[key]
+                for key in (
+                    "symbol",
+                    "claim_token",
+                    "client_order_id",
+                    "close_request",
+                    "post_bind_token",
+                    "transport_generation",
+                    "expected_claim_phase",
+                    "account_scope",
+                )
+            },
+        )
+        if started:
+            _close_only_transport_post["transport_started"] = True
+        return bool(started)
+
+    def _abort_deadman_handoff_and_reprotect(
+        block: dict[str, Any],
+        *,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """One post-release abort path: prove no close POST, then restore cover."""
+        if block.get("ok") is True:
+            return block
+        (
+            _ctx,
+            _claim,
+            _metadata,
+            active_handoff,
+            handoff_error,
+        ) = _read_exact_alpaca_deadman_handoff(sess)
+        if active_handoff is None:
+            if handoff_error is not None:
+                block["deadman_reprotect_error"] = handoff_error
+            return block
+
+        phase = str(active_handoff.get("phase") or "").strip().lower()
+        if phase == "intent_frozen":
+            deadman_request = active_handoff.get("deadman_order_request")
+            deadman_transport = {
+                "identity_contract": "alpaca_owner_transport_v1",
+                "transport_kind": "deadman",
+                "client_order_id": active_handoff.get("deadman_client_order_id"),
+                "order_request": deadman_request,
+            }
+            state, retained_order = _strict_client_order_id_truth(
+                adapter,
+                str(active_handoff.get("deadman_client_order_id") or ""),
+            )
+            if (
+                state == "found"
+                and retained_order is not None
+                and str(getattr(retained_order, "order_id", "") or "").strip()
+                == str(active_handoff.get("deadman_broker_order_id") or "").strip()
+                and _alpaca_protective_order_is_certifiably_active(retained_order)
+                and _owner_transport_order_matches(retained_order, deadman_transport)
+            ):
+                block["deadman_rearmed"] = True
+                block["deadman_retained_active"] = True
+                return block
+
+        released = _release_alpaca_owner_transport_without_post(reason_code)
+        if _owner_transport_post and not released:
+            block["deadman_reprotect_error"] = "successor_no_post_cas_failed"
+            le["operator_flatten_requested_utc"] = str(
+                le.get("operator_flatten_requested_utc") or _utcnow().isoformat()
+            )
+            _commit_le(sess, le)
+            return block
+
+        position = le.get("position")
+        position = position if isinstance(position, dict) else {}
+        if le.get("scale_limit_order_id"):
+            released_scale_qty = _cancel_scale_limit_and_clamp(
+                db,
+                sess,
+                adapter,
+                le=le,
+                requested_qty=(
+                    _float_or_none(position.get("quantity")) or 0.0
+                ),
+                reason=f"deadman_no_post_reprotect:{reason_code}",
+            )
+            if released_scale_qty is None:
+                block["deadman_reprotect_error"] = (
+                    "scale_limit_release_unconfirmed_before_deadman_reprotect"
+                )
+                le["operator_flatten_requested_utc"] = str(
+                    le.get("operator_flatten_requested_utc")
+                    or _utcnow().isoformat()
+                )
+                _commit_le(sess, le)
+                return block
+            position = le.get("position")
+            position = position if isinstance(position, dict) else {}
+        try:
+            broker_qty = float(adapter.get_position_quantity(product_id))
+        except Exception:
+            broker_qty = math.nan
+        avg_entry = _float_or_none(position.get("avg_entry_price"))
+        stop_price = _float_or_none(position.get("stop_price"))
+        local_qty = _float_or_none(position.get("quantity"))
+        if not (
+            math.isfinite(broker_qty)
+            and broker_qty > 1e-9
+            and local_qty is not None
+            and abs(local_qty - broker_qty)
+            <= max(1e-9, broker_qty * 1e-8)
+            and avg_entry is not None
+            and avg_entry > 0.0
+            and stop_price is not None
+            and stop_price > 0.0
+        ):
+            block["deadman_reprotect_error"] = (
+                "replacement_deadman_quantity_generation_mismatch"
+                if math.isfinite(broker_qty) and broker_qty > 1e-9
+                else "replacement_deadman_envelope_unavailable"
+            )
+            le["operator_flatten_requested_utc"] = str(
+                le.get("operator_flatten_requested_utc") or _utcnow().isoformat()
+            )
+            _commit_le(sess, le)
+            return block
+        protection = _ensure_alpaca_deadman_stop(
+            db,
+            sess,
+            adapter,
+            le=le,
+            product_id=product_id,
+            quantity=broker_qty,
+            avg_entry_price=avg_entry,
+            software_stop_price=stop_price,
+        )
+        block["deadman_rearmed"] = bool(protection.get("ok"))
+        block["owner_transport_released"] = released
+        if protection.get("ok"):
+            _ctx, _claim, _meta, remaining_handoff, remaining_error = (
+                _read_exact_alpaca_deadman_handoff(sess)
+            )
+            if remaining_handoff is None and remaining_error is None:
+                le.pop("deadman_released_for_close", None)
+                le.pop("last_deadman_release_block", None)
+                le.pop("deadman_close_handoff_priority_block", None)
+        else:
+            block["deadman_reprotect_error"] = str(
+                protection.get("error") or "replacement_deadman_not_certified_active"
+            )
+            le["operator_flatten_requested_utc"] = str(
+                le.get("operator_flatten_requested_utc") or _utcnow().isoformat()
+            )
+        _commit_le(sess, le)
+        return block
+
+    def _final_literal_exit_bbo_refresh(
+        *,
+        order_kwargs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Revalidate account and executable quote after every slow gate."""
+        if _exit_family not in ALPACA_EXECUTION_FAMILIES:
+            return None
+        literal_account_ok, literal_account = _strict_alpaca_account_identity(
+            adapter,
+            sess,
+        )
+        final_tick = None
+        evidence: dict[str, Any] = {}
+        if not literal_account_ok:
+            evidence = {
+                "reason": literal_account.get("reason")
+                or "alpaca_account_identity_blocked",
+                "alpaca_account_identity": literal_account,
+            }
+        elif quote_independent_authority and not alpaca_extended_bbo_required:
+            return None
+        else:
+            try:
+                configured = (
+                    2.0
+                    if exit_execution_bbo_max_age is None
+                    else float(exit_execution_bbo_max_age)
+                )
+                max_age = min(2.0, max(0.0, configured))
+            except Exception:
+                max_age = 2.0
+            final_tick, evidence = _final_entry_bbo(
+                adapter,
+                product_id,
+                max_age_seconds=max_age,
+            )
+        if final_tick is not None:
+            frozen_request = _owner_transport_post.get("order_request")
+            frozen_request = (
+                frozen_request if isinstance(frozen_request, dict) else {}
+            )
+            order_type = str(
+                frozen_request.get("order_type")
+                or ("limit" if order_kwargs.get("limit_price") is not None else "market")
+            ).strip().lower()
+            if order_type == "limit":
+                fresh_bid = _float_or_none(getattr(final_tick, "bid", None))
+                frozen_limit = _float_or_none(
+                    frozen_request.get("limit_price")
+                    if frozen_request
+                    else order_kwargs.get("limit_price")
+                )
+                if (
+                    fresh_bid is None
+                    or frozen_limit is None
+                    or frozen_limit
+                    > fresh_bid + max(1e-9, fresh_bid * 1e-8)
+                ):
+                    final_tick = None
+                    evidence = {
+                        **dict(evidence or {}),
+                        "reason": "frozen_exit_limit_not_marketable_at_literal_post",
+                        "fresh_bid": fresh_bid,
+                        "frozen_limit_price": frozen_limit,
+                    }
+        if final_tick is not None:
+            le["alpaca_exit_literal_bbo"] = {
+                **dict(evidence or {}),
+                "bid": _float_or_none(getattr(final_tick, "bid", None)),
+                "ask": _float_or_none(getattr(final_tick, "ask", None)),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return None
+
+        # First durably record that this exact attempt cannot cross HTTP. Only
+        # after that commit may this worker's fenced lease be released.
+        history = le.get("exit_submit_transport_identities")
+        history = list(history) if isinstance(history, list) else []
+        if (
+            history
+            and int(history[-1].get("attempt_no") or 0) == attempts
+            and str(history[-1].get("client_order_id") or "").strip()
+            == str(client_order_id or "").strip()
+        ):
+            history[-1] = {
+                **dict(history[-1]),
+                "pre_post_block_pending_owner_release": True,
+                "no_transport_reason": str(
+                    (evidence or {}).get("reason")
+                    or "execution_bbo_unavailable_at_literal_post"
+                ),
+                "no_transport_recorded_at_utc": _utcnow().isoformat(),
+            }
+            le["exit_submit_transport_identities"] = history
+        le.pop("exit_next_retry_at_utc", None)
+        block = {
+            "ok": False,
+            "error": str(
+                (evidence or {}).get("reason")
+                or "execution_bbo_unavailable_at_literal_post"
+            ),
+            "deferred": True,
+            "pre_place_blocked": True,
+            "literal_post_bbo_refresh": dict(evidence or {}),
+        }
+        le["alpaca_exit_literal_bbo_block"] = {
+            **block,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        db.flush()
+
+        released = _release_alpaca_owner_transport_without_post(
+            "exit_literal_bbo_refresh_failed"
+        )
+        close_only_released = _release_close_only_transport_without_post(
+            "exit_literal_bbo_refresh_failed"
+        )
+        if released:
+            history = le.get("exit_submit_transport_identities")
+            history = list(history) if isinstance(history, list) else []
+            if (
+                history
+                and int(history[-1].get("attempt_no") or 0) == attempts
+                and str(history[-1].get("client_order_id") or "").strip()
+                == str(client_order_id or "").strip()
+            ):
+                history[-1] = {
+                    **dict(history[-1]),
+                    "proven_no_transport": True,
+                    "pre_post_block_pending_owner_release": False,
+                    "owner_release_recorded_at_utc": _utcnow().isoformat(),
+                }
+                le["exit_submit_transport_identities"] = history
+            le.pop("alpaca_active_exit_owner_transport", None)
+            _commit_le(sess, le)
+            db.flush()
+
+        block = _abort_deadman_handoff_and_reprotect(
+            block,
+            reason_code="exit_literal_bbo_refresh_failed",
+        )
+        block["owner_transport_released"] = released
+        block["close_only_transport_released"] = close_only_released
+        if not close_only_released:
+            block["error"] = "alpaca_close_only_no_post_cas_failed"
+        _emit(db, sess, "live_exit_literal_bbo_refresh_blocked", {
+            "reason": reason,
+            **block,
+        })
+        return block
+
+    def _release_deadman_at_literal_submit(
+        requested_quantity: float,
+        *,
+        successor_order_type: str,
+        successor_order_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, float]:
+        """Durably hand one deadman generation to one exact close generation.
+
+        The successor CID/request is frozen before cancel.  A crash anywhere
+        between cancel and POST therefore resumes this same close identity; it
+        cannot mint another stop or another close.  Terminal stop fills are
+        accounted from exact broker truth with recursive re-arm disabled.
+        """
+        nonlocal client_order_id, handoff_request
+
+        # This handoff protocol is backed by the Alpaca retained-owner claim and
+        # its immutable transport history.  Non-Alpaca adapters have their own
+        # account-generation fence and covering-order cancellation path; trying
+        # to read an Alpaca owner claim for those families turns a legitimate
+        # close into ``deadman_identity_unproven`` before the broker boundary.
+        if _exit_family not in ALPACA_EXECUTION_FAMILIES:
+            return None, float(requested_quantity)
+
+        def _successor_request(qty: float) -> dict[str, Any]:
+            return {
+                "account_scope": "alpaca:paper",
+                "alpaca_account_id": str(_frozen_alpaca_account_id(sess) or ""),
+                "product_id": str(
+                    successor_order_kwargs.get("product_id") or product_id
+                ).strip().upper(),
+                "side": str(successor_order_kwargs.get("side") or "").strip().lower(),
+                "base_size": _fmt_base_size(qty),
+                "client_order_id": str(
+                    successor_order_kwargs.get("client_order_id")
+                    or client_order_id
+                    or ""
+                ).strip(),
+                "position_intent": str(
+                    successor_order_kwargs.get("position_intent") or ""
+                ).strip().lower(),
+                "order_type": str(successor_order_type or "").strip().lower(),
+                "time_in_force": str(
+                    successor_order_kwargs.get("time_in_force") or ""
+                ).strip().lower(),
+                "extended_hours": bool(
+                    successor_order_kwargs.get("extended_hours", False)
+                ),
+                "limit_price": (
+                    str(successor_order_kwargs.get("limit_price"))
+                    if successor_order_kwargs.get("limit_price") is not None
+                    else None
+                ),
+            }
+
+        def _apply_frozen_successor(request: dict[str, Any]) -> float | None:
+            nonlocal client_order_id
+            try:
+                frozen_qty = float(request.get("base_size"))
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(frozen_qty) or frozen_qty <= 0.0:
+                return None
+            frozen_cid = str(request.get("client_order_id") or "").strip()
+            if (
+                not frozen_cid
+                or str(request.get("product_id") or "").strip().upper()
+                != str(product_id).strip().upper()
+                or str(request.get("side") or "").strip().lower() != "sell"
+                or str(request.get("position_intent") or "").strip().lower()
+                != "sell_to_close"
+                or str(request.get("order_type") or "").strip().lower()
+                != str(successor_order_type or "").strip().lower()
+                or str(request.get("account_scope") or "").strip().lower()
+                != "alpaca:paper"
+                or str(request.get("alpaca_account_id") or "").strip()
+                != str(_frozen_alpaca_account_id(sess) or "")
+            ):
+                return None
+            client_order_id = frozen_cid
+            for key in (
+                "product_id",
+                "side",
+                "base_size",
+                "client_order_id",
+                "position_intent",
+                "time_in_force",
+                "extended_hours",
+                "limit_price",
+            ):
+                if key in request and request[key] is not None:
+                    successor_order_kwargs[key] = request[key]
+                elif key == "limit_price":
+                    successor_order_kwargs.pop(key, None)
+            return frozen_qty
+
+        deadman = (
+            le.get("deadman_stop")
+            if isinstance(le.get("deadman_stop"), dict)
+            else None
+        )
+        (
+            owner_context,
+            _durable_claim,
+            durable_metadata,
+            durable_handoff,
+            durable_handoff_error,
+        ) = _read_exact_alpaca_deadman_handoff(sess)
+        durable_metadata = durable_metadata or {}
+        local_handoff = le.get("deadman_released_for_close")
+        local_handoff = (
+            dict(local_handoff) if isinstance(local_handoff, dict) else None
+        )
+        handoff = None
+        durable_owner_transport = None
+        if durable_handoff is not None:
+            deadman_cid = str(
+                durable_handoff.get("deadman_client_order_id") or ""
+            ).strip()
+            deadman_oid = str(
+                durable_handoff.get("deadman_broker_order_id") or ""
+            ).strip()
+            deadman_request = durable_handoff.get("deadman_order_request")
+            deadman_request = (
+                dict(deadman_request) if isinstance(deadman_request, dict) else {}
+            )
+            candidates: list[Any] = [durable_metadata.get("owner_transport")]
+            owner_history = durable_metadata.get("owner_transport_history")
+            if isinstance(owner_history, list):
+                candidates.extend(owner_history)
+            exact_deadman_transports = [
+                dict(candidate)
+                for candidate in candidates
+                if isinstance(candidate, dict)
+                and str(candidate.get("transport_kind") or "").strip().lower()
+                == "deadman"
+                and str(candidate.get("client_order_id") or "").strip()
+                == deadman_cid
+                and str(candidate.get("broker_order_id") or "").strip()
+                == deadman_oid
+                and candidate.get("order_request") == deadman_request
+            ]
+            if exact_deadman_transports:
+                # Prefer the active row before cancel, otherwise the latest
+                # immutable resolved history row after successor leasing.
+                durable_owner_transport = exact_deadman_transports[0]
+                for candidate in exact_deadman_transports:
+                    if str(candidate.get("phase") or "").strip().lower() != "resolved":
+                        durable_owner_transport = candidate
+                        break
+            else:
+                durable_handoff_error = "deadman_close_handoff_transport_history_missing"
+            handoff = {
+                "version": 1,
+                "session_id": int(sess.id),
+                "account_scope": "alpaca:paper",
+                "alpaca_account_id": durable_handoff.get("alpaca_account_id"),
+                "product_id": durable_handoff.get("symbol"),
+                "reason": durable_handoff.get("reason") or reason,
+                "attempt_no": int(le.get("exit_submit_attempts") or attempts),
+                "phase": durable_handoff.get("phase"),
+                "handoff_token": durable_handoff.get("handoff_token"),
+                "deadman_identity": {
+                    "order_id": durable_handoff.get("deadman_broker_order_id"),
+                    "client_order_id": durable_handoff.get("deadman_client_order_id"),
+                    "owner_transport": durable_owner_transport,
+                },
+                "successor_intent_pre_cancel": durable_handoff.get("successor_intent"),
+                "successor_order_request": durable_handoff.get("successor_order_request"),
+                "claim_phase": durable_handoff.get("phase"),
+                "created_at_utc": durable_handoff.get("created_at_utc"),
+            }
+            le["deadman_released_for_close"] = handoff
+            _commit_le(sess, le)
+        elif local_handoff is not None:
+            # A session mirror cannot authorize cancel/POST without the exact
+            # independently committed claim generation.
+            durable_handoff_error = (
+                durable_handoff_error or "deadman_close_handoff_claim_missing"
+            )
+        if not deadman and handoff is None:
+            if durable_handoff_error is not None:
+                handoff = local_handoff
+            else:
+                return None, float(requested_quantity)
+        if handoff is None:
+            handoff = local_handoff
+        deadman_identity = (
+            dict(handoff.get("deadman_identity") or {})
+            if handoff is not None
+            else dict(deadman or {})
+        )
+        order_id = str(deadman_identity.get("order_id") or "").strip()
+        client_id = str(deadman_identity.get("client_order_id") or "").strip()
+        transport = deadman_identity.get("owner_transport")
+        transport = dict(transport) if isinstance(transport, dict) else None
+
+        def _block(error: str) -> tuple[dict[str, Any], float]:
+            block = {
+                "ok": False,
+                "error": error,
+                "deferred": True,
+                "pre_place_blocked": True,
+                "deadman_order_id": order_id or None,
+                "deadman_client_order_id": client_id or None,
+            }
+            # No exit instruction crossed the transport seam. Preserve attempt
+            # and retry budget for the next pulse.
+            le["exit_submit_attempts"] = max(0, attempts - 1)
+            le.pop("exit_next_retry_at_utc", None)
+            le["last_deadman_release_block"] = block
+            _commit_le(sess, le)
+            _emit(db, sess, "live_deadman_stop_release_blocked", {
+                "order_id": order_id,
+                "reason": reason,
+                "error": error,
+            })
+            return block, 0.0
+
+        if durable_handoff_error is not None and (
+            durable_handoff is not None or local_handoff is not None
+        ):
+            return _block(durable_handoff_error)
+        if not order_id or not client_id or transport is None:
+            return _block("deadman_identity_unproven")
+
+        if handoff is None:
+            pre_cancel_request = _successor_request(float(requested_quantity))
+            if _apply_frozen_successor(pre_cancel_request) is None:
+                return _block("deadman_successor_request_invalid")
+            if owner_context is None:
+                return _block("deadman_successor_owner_context_missing")
+            handoff_token = uuid.uuid4().hex
+            prepared = prepare_deadman_close_handoff_committed(
+                **owner_context,
+                handoff_token=handoff_token,
+                deadman_client_order_id=client_id,
+                deadman_broker_order_id=order_id,
+                deadman_order_request=dict(transport.get("order_request") or {}),
+                successor_transport_kind=(
+                    "emergency_exit"
+                    if emergency_exit_authority is not None
+                    else "ordinary_exit"
+                ),
+                successor_intent=pre_cancel_request,
+                reason=str(reason),
+            )
+            durable = prepared.get("handoff")
+            durable = dict(durable) if isinstance(durable, dict) else None
+            if not prepared.get("ok") or durable is None:
+                return _block(
+                    str(
+                        prepared.get("reason")
+                        or "deadman_successor_identity_not_durable_pre_cancel"
+                    )
+                )
+            handoff = {
+                "version": 1,
+                "session_id": int(sess.id),
+                "account_scope": "alpaca:paper",
+                "alpaca_account_id": str(_frozen_alpaca_account_id(sess) or ""),
+                "product_id": str(product_id).strip().upper(),
+                "reason": str(reason),
+                "attempt_no": int(attempts),
+                "phase": "intent_frozen",
+                "handoff_token": durable.get("handoff_token"),
+                "deadman_identity": {
+                    **dict(deadman or {}),
+                    "order_id": order_id,
+                    "client_order_id": client_id,
+                    "owner_transport": transport,
+                },
+                "successor_intent_pre_cancel": pre_cancel_request,
+                "successor_order_request": None,
+                "created_at_utc": durable.get("created_at_utc"),
+            }
+            le["deadman_released_for_close"] = handoff
+            # A restart must choose the same ladder rung/order type and CID.
+            le["exit_submit_attempts"] = max(0, attempts - 1)
+            le.pop("exit_next_retry_at_utc", None)
+            _commit_le(sess, le)
+            # Deliberate two-phase boundary: the short owner-claim transaction is
+            # durable, while this outer session row remains locked until return.
+            # A later pulse owns cancel/accounting; this worker never continues
+            # from a stale post-commit session snapshot.
+            return _block("deadman_successor_intent_frozen_for_next_pulse")
+        else:
+            exact_handoff = bool(
+                handoff.get("version") == 1
+                and int(handoff.get("session_id") or 0) == int(sess.id)
+                and str(handoff.get("account_scope") or "").strip().lower()
+                == "alpaca:paper"
+                and str(handoff.get("alpaca_account_id") or "").strip()
+                == str(_frozen_alpaca_account_id(sess) or "")
+                and str(handoff.get("product_id") or "").strip().upper()
+                == str(product_id).strip().upper()
+                and str(deadman_identity.get("order_id") or "").strip() == order_id
+                and str(deadman_identity.get("client_order_id") or "").strip()
+                == client_id
+            )
+            frozen_request = (
+                handoff.get("successor_order_request")
+                or handoff.get("successor_intent_pre_cancel")
+            )
+            frozen_request = (
+                dict(frozen_request) if isinstance(frozen_request, dict) else {}
+            )
+            if not exact_handoff or _apply_frozen_successor(frozen_request) is None:
+                return _block("deadman_close_handoff_identity_mismatch")
+
+        containment = (
+            durable_handoff.get("replacement_lineage_containment")
+            if isinstance(durable_handoff, dict)
+            else None
+        )
+        if (
+            isinstance(containment, dict)
+            and containment.get("state") == "successor_ready"
+            and str((durable_handoff or {}).get("phase") or "").strip().lower()
+            == "successor_ready"
+        ):
+            linked_successor_oid = str(
+                containment.get("successor_broker_order_id") or ""
+            ).strip()
+            linked_successor_request = containment.get("successor_order_request")
+            linked_successor_request = (
+                dict(linked_successor_request)
+                if isinstance(linked_successor_request, dict)
+                else {}
+            )
+            old_state, old_order = _strict_client_order_id_truth(
+                adapter,
+                client_id,
+            )
+            linked_state, linked_order = _strict_broker_order_id_truth(
+                adapter,
+                linked_successor_oid,
+            )
+            old_raw = getattr(old_order, "raw", None)
+            old_raw = old_raw if isinstance(old_raw, dict) else {}
+            linked_status = str(
+                getattr(linked_order, "status", "") or ""
+            ).strip().lower()
+            try:
+                current_broker_qty = float(
+                    adapter.get_position_quantity(product_id)
+                )
+            except Exception:
+                current_broker_qty = math.nan
+            if not (
+                old_state == "found"
+                and old_order is not None
+                and str(getattr(old_order, "order_id", "") or "").strip()
+                == order_id
+                and _owner_transport_order_matches(old_order, transport)
+                and _alpaca_protective_order_lifecycle(old_order) == "replaced"
+                and str(old_raw.get("replaced_by") or "").strip()
+                == linked_successor_oid
+                and linked_state == "found"
+                and linked_order is not None
+                and linked_status in _ORDER_TERMINAL_STATUSES
+                and _alpaca_replacement_successor_order_matches(
+                    linked_order,
+                    predecessor_broker_order_id=order_id,
+                    successor_broker_order_id=linked_successor_oid,
+                    successor_order_request=linked_successor_request,
+                )
+                and math.isfinite(current_broker_qty)
+                and abs(current_broker_qty - float(requested_quantity))
+                <= max(1e-9, float(requested_quantity) * 1e-8)
+            ):
+                return _block(
+                    "replacement_containment_literal_post_truth_mismatch"
+                )
+            return None, float(current_broker_qty)
+
+        strict_state, exact_order = _strict_client_order_id_truth(adapter, client_id)
+        if strict_state != "found" or exact_order is None:
+            return _block(
+                "deadman_pre_cancel_truth_unknown"
+                if strict_state != "absent"
+                else "deadman_pre_cancel_cid_absent"
+            )
+        if (
+            str(getattr(exact_order, "order_id", "") or "").strip() != order_id
+            or not _owner_transport_order_matches(exact_order, transport)
+        ):
+            return _block("deadman_pre_cancel_identity_mismatch")
+
+        exact_status = str(getattr(exact_order, "status", "") or "").strip().lower()
+        if not hasattr(adapter, "cancel_order_by_id"):
+            return _block("deadman_cancel_unsupported")
+        if exact_status not in _ORDER_TERMINAL_STATUSES:
+            account_ok, account_identity = _strict_alpaca_account_identity(
+                adapter,
+                sess,
+            )
+            if not account_ok:
+                return _block(
+                    str(account_identity.get("reason") or "alpaca_account_identity_blocked")
+                )
+            try:
+                adapter.cancel_order_by_id(order_id)
+            except Exception:
+                logger.warning("[live_runner] deadman cancel transport failed", exc_info=True)
+            # A cancel response is never truth.  The exact CID must now be found
+            # terminal; absent/unknown/open preserves the stop identity and blocks.
+            strict_state, exact_order = _strict_client_order_id_truth(adapter, client_id)
+            if strict_state != "found" or exact_order is None:
+                return _block(
+                    "deadman_post_cancel_truth_unknown"
+                    if strict_state != "absent"
+                    else "deadman_post_cancel_cid_absent"
+                )
+            if (
+                str(getattr(exact_order, "order_id", "") or "").strip() != order_id
+                or not _owner_transport_order_matches(exact_order, transport)
+            ):
+                return _block("deadman_post_cancel_identity_mismatch")
+            exact_status = str(getattr(exact_order, "status", "") or "").strip().lower()
+        if exact_status not in _ORDER_TERMINAL_STATUSES:
+            return _block("deadman_cancel_not_terminal")
+
+        position = le.get("position")
+        position = position if isinstance(position, dict) else {}
+        if deadman is not None:
+            reconciled = _ensure_alpaca_deadman_stop(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                quantity=(
+                    _float_or_none(position.get("quantity"))
+                    or float(requested_quantity)
+                ),
+                avg_entry_price=(
+                    _float_or_none(position.get("avg_entry_price")) or 0.0
+                ),
+                software_stop_price=(
+                    _float_or_none(position.get("stop_price")) or 0.0
+                ),
+                rearm_after_terminal=False,
+            )
+            if reconciled.get("position_closed") is True:
+                handoff.update({
+                    "phase": "position_closed_by_deadman",
+                    "terminal_outcome": dict(reconciled),
+                    "completed_at_utc": _utcnow().isoformat(),
+                })
+                le["deadman_released_for_close"] = handoff
+                _commit_le(sess, le)
+                return ({
+                    "ok": True,
+                    "broker_zero": True,
+                    "alpaca_deadman_accounted": True,
+                    "deadman_reconcile": reconciled,
+                }, 0.0)
+            if not reconciled.get("ok"):
+                return _block(
+                    str(
+                        reconciled.get("error")
+                        or "deadman_terminal_accounting_pending"
+                    )
+                )
+            remaining = _float_or_none(
+                reconciled.get("broker_remaining_quantity")
+            )
+        else:
+            # Restart after local terminal accounting committed but before the
+            # successor marker advanced.  Require the exact deadman history and
+            # broker terminal row; never infer release from the missing live key.
+            history = le.get("deadman_stop_history")
+            history = history if isinstance(history, list) else []
+            exact_history = [
+                row
+                for row in history
+                if isinstance(row, dict)
+                and str(row.get("order_id") or "").strip() == order_id
+                and str(row.get("client_order_id") or "").strip() == client_id
+                and str(row.get("terminal_status") or "").strip().lower()
+                == exact_status
+                and _float_or_none(row.get("applied_filled_size"))
+                == _float_or_none(getattr(exact_order, "filled_size", None))
+            ]
+            if len(exact_history) != 1:
+                return _block("deadman_handoff_terminal_history_unproven")
+            try:
+                remaining = float(adapter.get_position_quantity(product_id))
+            except Exception:
+                remaining = None
+        if remaining is None or not math.isfinite(remaining) or remaining < 0.0:
+            return _block("deadman_handoff_broker_remainder_unreadable")
+        if remaining <= 1e-9:
+            return _block("deadman_handoff_broker_flat_accounting_required")
+        local_remaining = _float_or_none(
+            (le.get("position") or {}).get("quantity")
+            if isinstance(le.get("position"), dict)
+            else None
+        )
+        if (
+            local_remaining is None
+            or abs(local_remaining - remaining)
+            > max(1e-9, remaining * 1e-8)
+        ):
+            return _block("deadman_successor_quantity_generation_mismatch")
+
+        final_request = _successor_request(remaining)
+        if _apply_frozen_successor(final_request) is None:
+            return _block("deadman_successor_final_request_invalid")
+        if owner_context is None or not str(handoff.get("handoff_token") or ""):
+            return _block("deadman_close_handoff_owner_context_missing")
+        finalized = finalize_deadman_close_handoff_request_committed(
+            **owner_context,
+            handoff_token=str(handoff["handoff_token"]),
+            successor_order_request=final_request,
+        )
+        finalized_handoff = finalized.get("handoff")
+        finalized_handoff = (
+            dict(finalized_handoff)
+            if isinstance(finalized_handoff, dict)
+            else None
+        )
+        if not finalized.get("ok") or finalized_handoff is None:
+            return _block(
+                str(
+                    finalized.get("reason")
+                    or "deadman_close_handoff_final_request_not_durable"
+                )
+            )
+        final_request = dict(
+            finalized_handoff.get("successor_order_request") or {}
+        )
+        if _apply_frozen_successor(final_request) is None:
+            return _block("deadman_close_handoff_final_request_mismatch")
+        if handoff_recovery is not None:
+            handoff_request = dict(final_request)
+        handoff.update({
+            "phase": "successor_ready",
+            "deadman_terminal_status": exact_status,
+            "deadman_terminal_filled_size": _float_or_none(
+                getattr(exact_order, "filled_size", None)
+            ),
+            "broker_remaining_quantity": remaining,
+            "successor_order_request": final_request,
+            "deadman_accounted_at_utc": _utcnow().isoformat(),
+        })
+        le["deadman_released_for_close"] = handoff
+        le.pop("last_deadman_release_block", None)
+        _commit_le(sess, le)
+        db.flush()
+        return None, float(remaining)
+
+    def _freeze_emergency_request_before_post(
+        *,
+        order_type: str,
+        order_kwargs: dict[str, Any],
+        limit_price: str | None,
+    ) -> dict[str, Any] | None:
+        """Durably bind every Alpaca close-order identity field before POST."""
+        if handoff_recovery is not None:
+            if handoff_kind != "emergency_exit":
+                return None
+            request = {
+                "account_scope": "alpaca:paper",
+                "alpaca_account_id": str(_frozen_alpaca_account_id(sess) or ""),
+                "product_id": str(order_kwargs.get("product_id") or "").strip().upper(),
+                "side": str(order_kwargs.get("side") or "").strip().lower(),
+                "base_size": str(order_kwargs.get("base_size") or ""),
+                "client_order_id": str(order_kwargs.get("client_order_id") or "").strip(),
+                "position_intent": str(order_kwargs.get("position_intent") or "").strip().lower(),
+                "order_type": str(order_type).strip().lower(),
+                "time_in_force": str(order_kwargs.get("time_in_force") or "").strip().lower(),
+                "extended_hours": bool(order_kwargs.get("extended_hours", False)),
+                "limit_price": limit_price,
+            }
+            if request != handoff_request:
+                return {
+                    "ok": False,
+                    "error": "deadman_emergency_successor_request_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            return _freeze_alpaca_owner_transport_before_post(
+                transport_kind="emergency_exit",
+                request=request,
+                order_kwargs=order_kwargs,
+            )
+        authority = emergency_exit_authority
+        if authority is None:
+            return None
+        if str(authority.get("identity_contract") or "") != "alpaca_close_v1":
+            return None
+        account_scope = _frozen_alpaca_account_scope(sess)
+        account_id = _frozen_alpaca_account_id(sess)
+        if account_scope is None or account_id is None:
+            return {
+                "ok": False,
+                "error": "alpaca_account_identity_unfrozen_or_mismatched",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        cid = str(order_kwargs.get("client_order_id") or "").strip()
+        side = str(order_kwargs.get("side") or "").strip().lower()
+        intent = str(order_kwargs.get("position_intent") or "").strip().lower()
+        tif = str(order_kwargs.get("time_in_force") or "").strip().lower()
+        extended = bool(order_kwargs.get("extended_hours", False))
+        request = {
+            "account_scope": account_scope,
+            "alpaca_account_id": account_id,
+            "product_id": str(order_kwargs.get("product_id") or "").strip().upper(),
+            "side": side,
+            "base_size": str(order_kwargs.get("base_size") or ""),
+            "client_order_id": cid,
+            "position_intent": intent,
+            "order_type": str(order_type).strip().lower(),
+            "time_in_force": tif,
+            "extended_hours": extended,
+            "limit_price": limit_price,
+        }
+        try:
+            request_qty = float(request["base_size"])
+            request_limit = (
+                None if limit_price is None else float(limit_price)
+            )
+            valid = bool(
+                cid
+                and cid == str(authority.get("client_order_id") or "").strip()
+                and request["product_id"] == str(product_id).strip().upper()
+                and side == "sell"
+                and intent == "sell_to_close"
+                and math.isfinite(request_qty)
+                and request_qty > 0.0
+                and (
+                    (
+                        request["order_type"] == "market"
+                        and tif == "day"
+                        and extended is False
+                        and limit_price is None
+                    )
+                    or (
+                        request["order_type"] == "limit"
+                        and (
+                            (extended is True and tif == "day")
+                            or (extended is False and tif in {"day", "gtc"})
+                        )
+                        and request_limit is not None
+                        and math.isfinite(request_limit)
+                        and request_limit > 0.0
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            return {
+                "ok": False,
+                "error": "alpaca_emergency_close_request_invalid",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        existing = authority.get("order_request")
+        if isinstance(existing, dict) and existing != request:
+            return {
+                "ok": False,
+                "error": "alpaca_emergency_close_request_immutable_mismatch",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        close_only_marker, close_only_error = _validated_alpaca_close_only_marker(sess)
+        if _alpaca_close_only_marker(sess) is not None:
+            if close_only_error is not None or close_only_marker is None:
+                return {
+                    "ok": False,
+                    "error": close_only_error or "alpaca_close_only_proof_invalid",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            if not (
+                cid == str(close_only_marker.get("close_client_order_id") or "")
+                and str(authority.get("close_claim_token") or "")
+                == str(close_only_marker.get("close_claim_token") or "")
+            ):
+                return {
+                    "ok": False,
+                    "error": "alpaca_close_only_claim_identity_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            proposed_post_bind_token = str(
+                authority.get("close_post_bind_token") or uuid.uuid4().hex
+            ).strip()
+            close_bind_metadata = {
+                    "runner_emergency_close_only": True,
+                    "owner_session_id": int(sess.id),
+                    "max_close_qty": float(close_only_marker["max_close_qty"]),
+                    "broker_position_qty_at_recertification": float(
+                        close_only_marker[
+                            "broker_position_qty_at_recertification"
+                        ]
+                    ),
+                    "broker_unattributed_quantity_floor": float(
+                        close_only_marker["unattributed_quantity_floor"]
+                    ),
+                }
+
+            def _bind_close_generation(
+                token: str,
+                *,
+                strict_absent: bool = False,
+            ) -> dict[str, Any]:
+                return bind_orphan_close_request_committed(
+                    symbol=request["product_id"],
+                    claim_token=str(close_only_marker["close_claim_token"]),
+                    client_order_id=cid,
+                    close_request=request,
+                    post_bind_token=token,
+                    metadata=close_bind_metadata,
+                    strict_cid_absent_after_expiry=strict_absent,
+                    account_scope="alpaca:paper",
+                )
+
+            bound_close = _bind_close_generation(proposed_post_bind_token)
+            if not bound_close.get("ok") and str(
+                bound_close.get("reason") or ""
+            ) in {
+                "orphan_close_new_generation_token_required",
+                "orphan_close_transport_reconcile_required",
+            }:
+                prior_state = str(
+                    bound_close.get("transport_state") or ""
+                ).strip().lower()
+                lease_expired = bound_close.get("lease_expired") is True
+                strict_replay_required = prior_state in {
+                    "started",
+                    "submit_indeterminate",
+                }
+                strict_state = "not_required"
+                if strict_replay_required:
+                    strict_state, _strict_order = _strict_client_order_id_truth(
+                        adapter,
+                        cid,
+                    )
+                rotation_allowed = bool(
+                    prior_state == "recyclable_no_transport"
+                    or (
+                        prior_state == "leased"
+                        and lease_expired
+                    )
+                    or (
+                        strict_replay_required
+                        and lease_expired
+                        and strict_state == "absent"
+                    )
+                )
+                if rotation_allowed:
+                    replacement_token = uuid.uuid4().hex
+                    while replacement_token == proposed_post_bind_token:
+                        replacement_token = uuid.uuid4().hex
+                    proposed_post_bind_token = replacement_token
+                    bound_close = _bind_close_generation(
+                        proposed_post_bind_token,
+                        strict_absent=strict_replay_required,
+                    )
+                elif strict_replay_required:
+                    bound_close = {
+                        **bound_close,
+                        "reason": "orphan_close_strict_cid_reconcile_required",
+                        "strict_cid_state": strict_state,
+                    }
+            if not bound_close.get("ok"):
+                return {
+                    "ok": False,
+                    "error": str(
+                        bound_close.get("reason")
+                        or "alpaca_close_only_request_not_durable_in_claim"
+                    ),
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            bound_post_token = str(
+                bound_close.get("post_bind_token") or ""
+            ).strip()
+            try:
+                bound_generation = int(bound_close.get("transport_generation"))
+            except (TypeError, ValueError):
+                bound_generation = 0
+            bound_claim_phase = str(
+                bound_close.get("claim_phase") or ""
+            ).strip().lower()
+            if not (
+                bound_post_token
+                and bound_generation > 0
+                and bound_claim_phase in {
+                    ALPACA_CLAIMED,
+                    ALPACA_SUBMIT_INDETERMINATE,
+                }
+                and bound_close.get("transport_started") is not True
+                and str(bound_close.get("transport_state") or "").strip().lower()
+                == "leased"
+            ):
+                return {
+                    "ok": False,
+                    "error": "alpaca_close_only_transport_reconcile_required",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            authority["close_post_bind_token"] = bound_post_token
+            authority["close_transport_generation"] = bound_generation
+            authority["close_expected_claim_phase"] = bound_claim_phase
+            authority["close_transport_lease_expires_at_utc"] = bound_close.get(
+                "lease_expires_at_utc"
+            )
+            _close_only_transport_post.clear()
+            _close_only_transport_post.update({
+                "symbol": request["product_id"],
+                "claim_token": str(close_only_marker["close_claim_token"]),
+                "client_order_id": cid,
+                "close_request": dict(request),
+                "post_bind_token": bound_post_token,
+                "transport_generation": bound_generation,
+                "expected_claim_phase": bound_claim_phase,
+                "account_scope": "alpaca:paper",
+            })
+        authority["order_request"] = dict(request)
+        authority["submitted_quantity"] = request_qty
+        authority["phase"] = "submitting"
+        if not authority.get("submit_started_at_utc"):
+            authority["submit_started_at_utc"] = _utcnow().isoformat()
+        le["emergency_exit_authority"] = authority
+        _commit_le(sess, le)
+        db.flush()
+        return _freeze_alpaca_owner_transport_before_post(
+            transport_kind="emergency_exit",
+            request=request,
+            order_kwargs=order_kwargs,
+        )
+
+    def _clamp_close_only_at_literal_submit(
+        requested_quantity: float,
+    ) -> tuple[dict[str, Any] | None, float]:
+        marker, marker_error = _validated_alpaca_close_only_marker(sess)
+        if _alpaca_close_only_marker(sess) is None:
+            return None, float(requested_quantity)
+
+        def _block(error: str, **extra: Any) -> tuple[dict[str, Any], float]:
+            block = {
+                "ok": False,
+                "error": error,
+                "deferred": True,
+                "pre_place_blocked": True,
+                **extra,
+            }
+            le["exit_submit_attempts"] = max(0, attempts - 1)
+            le.pop("exit_next_retry_at_utc", None)
+            le["alpaca_close_only_literal_submit_block"] = block
+            _commit_le(sess, le)
+            return block, 0.0
+
+        if marker_error is not None or marker is None:
+            return _block(marker_error or "alpaca_close_only_proof_invalid")
+        if not hasattr(adapter, "get_position_quantity"):
+            return _block("alpaca_close_only_position_truth_unavailable")
+        try:
+            fresh_signed_total = adapter.get_position_quantity(product_id)
+            if fresh_signed_total is None:
+                raise ValueError("missing signed position")
+            fresh_signed_total = float(fresh_signed_total)
+            if not math.isfinite(fresh_signed_total) or fresh_signed_total < 0.0:
+                raise ValueError("unknown or opposite signed position")
+        except Exception:
+            return _block("alpaca_close_only_position_truth_unknown_at_post")
+        floor = float(marker["unattributed_quantity_floor"])
+        max_close_qty = float(marker["max_close_qty"])
+        already_applied = max(
+            0.0,
+            _float_or_none(
+                (emergency_exit_authority or {}).get("applied_filled_size")
+            )
+            or 0.0,
+        )
+        remaining_cap = max(0.0, max_close_qty - already_applied)
+        attributable_available = max(0.0, fresh_signed_total - floor)
+        final_quantity = min(
+            float(requested_quantity),
+            remaining_cap,
+            attributable_available,
+        )
+        if final_quantity <= 1e-9:
+            return _block(
+                "alpaca_close_only_no_attributable_quantity_at_post",
+                fresh_broker_total_quantity=fresh_signed_total,
+                protected_unattributed_quantity_floor=floor,
+                remaining_close_cap=remaining_cap,
+            )
+        le["alpaca_close_only_literal_submit_clamp"] = {
+            "requested_quantity": float(requested_quantity),
+            "fresh_broker_total_quantity": fresh_signed_total,
+            "protected_unattributed_quantity_floor": floor,
+            "remaining_close_cap": remaining_cap,
+            "final_quantity": final_quantity,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        return None, final_quantity
+
+    def _advance_close_only_claim_after_transport(
+        *,
+        result: dict[str, Any] | None,
+        exception_type: str | None = None,
+    ) -> None:
+        if not _close_only_transport_post:
+            return
+        oid = str((result or {}).get("order_id") or "").strip()
+        submitted = bool((result or {}).get("ok") and oid)
+        advanced = advance_orphan_close_claim_phase_committed(
+            symbol=_close_only_transport_post["symbol"],
+            claim_token=_close_only_transport_post["claim_token"],
+            phase=(ALPACA_SUBMITTED if submitted else ALPACA_SUBMIT_INDETERMINATE),
+            client_order_id=_close_only_transport_post["client_order_id"],
+            close_request=_close_only_transport_post["close_request"],
+            post_bind_token=_close_only_transport_post["post_bind_token"],
+            transport_generation=_close_only_transport_post["transport_generation"],
+            expected_claim_phase=_close_only_transport_post["expected_claim_phase"],
+            broker_order_id=(oid or None),
+            metadata={
+                "runner_emergency_close_only": True,
+                "submit_status": (result or {}).get("status"),
+                "submit_error": (result or {}).get("error"),
+                "exception_type": exception_type,
+            },
+            account_scope="alpaca:paper",
+        )
+        if not advanced:
+            le["alpaca_close_only_post_advance_pending"] = {
+                "client_order_id": _close_only_transport_post.get("client_order_id"),
+                "broker_order_id": oid or None,
+                "transport_generation": _close_only_transport_post.get(
+                    "transport_generation"
+                ),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+
+    def _freeze_ordinary_alpaca_exit_identity_before_post(
+        *,
+        order_type: str,
+        order_kwargs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Commit each ordinary Alpaca exit CID before its broker POST.
+
+        Retry-cap recovery can prove all old identities only if the complete
+        transport chain survived an ack-loss or process crash. Emergency exits
+        already freeze their full request through their separate authority path.
+        """
+        if handoff_recovery is not None:
+            if handoff_kind != "ordinary_exit":
+                return None
+            request = {
+                "account_scope": "alpaca:paper",
+                "alpaca_account_id": str(_frozen_alpaca_account_id(sess) or ""),
+                "product_id": str(order_kwargs.get("product_id") or "").strip().upper(),
+                "side": str(order_kwargs.get("side") or "").strip().lower(),
+                "base_size": str(order_kwargs.get("base_size") or ""),
+                "client_order_id": str(order_kwargs.get("client_order_id") or "").strip(),
+                "position_intent": str(order_kwargs.get("position_intent") or "").strip().lower(),
+                "order_type": str(order_type).strip().lower(),
+                "time_in_force": str(order_kwargs.get("time_in_force") or "").strip().lower(),
+                "extended_hours": bool(order_kwargs.get("extended_hours", False)),
+                "limit_price": (
+                    str(order_kwargs.get("limit_price"))
+                    if order_kwargs.get("limit_price") is not None
+                    else None
+                ),
+            }
+            if request != handoff_request:
+                return {
+                    "ok": False,
+                    "error": "deadman_ordinary_successor_request_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            return _freeze_alpaca_owner_transport_before_post(
+                transport_kind="ordinary_exit",
+                request=request,
+                order_kwargs=order_kwargs,
+            )
+        if (
+            _exit_family not in ALPACA_EXECUTION_FAMILIES
+            or emergency_exit_authority is not None
+        ):
+            return None
+        request = {
+            "account_scope": "alpaca:paper",
+            "alpaca_account_id": str(
+                _frozen_alpaca_account_id(sess) or ""
+            ),
+            "product_id": str(order_kwargs.get("product_id") or "").strip().upper(),
+            "side": str(order_kwargs.get("side") or "").strip().lower(),
+            "base_size": str(order_kwargs.get("base_size") or ""),
+            "client_order_id": str(order_kwargs.get("client_order_id") or "").strip(),
+            "position_intent": str(order_kwargs.get("position_intent") or "").strip().lower(),
+            "order_type": str(order_type).strip().lower(),
+            "time_in_force": str(order_kwargs.get("time_in_force") or "").strip().lower(),
+            "extended_hours": bool(order_kwargs.get("extended_hours", False)),
+            "limit_price": (
+                str(order_kwargs.get("limit_price"))
+                if order_kwargs.get("limit_price") is not None
+                else None
+            ),
+        }
+        history = le.get("exit_submit_transport_identities")
+        history = list(history) if isinstance(history, list) else []
+        try:
+            valid_prefix = bool(
+                len(history) == attempts - 1
+                and all(
+                    isinstance(row, dict)
+                    and int(row.get("attempt_no") or 0) == idx
+                    and str(row.get("product_id") or "").strip().upper()
+                    == str(product_id).strip().upper()
+                    and str(row.get("side") or "").strip().lower() == "sell"
+                    and str(row.get("alpaca_account_id") or "").strip()
+                    == str(_frozen_alpaca_account_id(sess) or "")
+                    and str(row.get("client_order_id") or "").strip()
+                    for idx, row in enumerate(history, start=1)
+                )
+            )
+        except (TypeError, ValueError):
+            valid_prefix = False
+        if not valid_prefix:
+            # A missing old transport identity means another submit could race an
+            # ack-lost sell. Escalate directly to the read-only retry-cap proof;
+            # do not cross the adapter seam under an incomplete chain.
+            le["exit_submit_attempts"] = _EXIT_SUBMIT_MAX_ATTEMPTS
+            le["exit_retry_transport_history_block"] = {
+                "reason": "prior_transport_identity_history_incomplete",
+                "expected_prior_attempts": max(0, attempts - 1),
+                "recorded_prior_attempts": len(history),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "ok": False,
+                "error": "exit_retry_transport_history_incomplete",
+                "cap_exceeded": True,
+                "attempts": _EXIT_SUBMIT_MAX_ATTEMPTS,
+                "pre_place_blocked": True,
+            }
+        (
+            _durable_context,
+            _durable_claim,
+            durable_owner_metadata,
+            _durable_handoff,
+            durable_owner_error,
+        ) = _read_exact_alpaca_deadman_handoff(sess)
+        if durable_owner_error is not None:
+            return _owner_transport_block(durable_owner_error)
+        durable_owner_metadata = durable_owner_metadata or {}
+        durable_current = durable_owner_metadata.get("owner_transport")
+        durable_current = (
+            dict(durable_current) if isinstance(durable_current, dict) else None
+        )
+
+        def _row_request(row: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "account_scope": "alpaca:paper",
+                "alpaca_account_id": row.get("alpaca_account_id"),
+                "product_id": row.get("product_id"),
+                "side": row.get("side"),
+                "base_size": row.get("base_size"),
+                "client_order_id": row.get("client_order_id"),
+                "position_intent": row.get("position_intent"),
+                "order_type": row.get("order_type"),
+                "time_in_force": row.get("time_in_force"),
+                "extended_hours": row.get("extended_hours"),
+                "limit_price": row.get("limit_price"),
+            }
+
+        actionable_prior_orders: list[tuple[dict[str, Any], Any]] = []
+        for row in history:
+            if row.get("pre_post_block_pending_owner_release") is True:
+                context = _alpaca_owner_transport_context(sess)
+                if context is None:
+                    return _owner_transport_block(
+                        "provisional_no_transport_owner_context_missing"
+                    )
+                readable, owner_claim = read_action_claim(
+                    db,
+                    symbol=context["symbol"],
+                    account_scope=context["account_scope"],
+                    for_update=False,
+                )
+                claim_meta = (
+                    dict(owner_claim.get("metadata") or {})
+                    if readable and isinstance(owner_claim, dict)
+                    else {}
+                )
+                resolved_transport = claim_meta.get("owner_transport")
+                resolved_transport = (
+                    dict(resolved_transport)
+                    if isinstance(resolved_transport, dict)
+                    else None
+                )
+                row_request = {
+                    "account_scope": "alpaca:paper",
+                    "alpaca_account_id": row.get("alpaca_account_id"),
+                    "product_id": row.get("product_id"),
+                    "side": row.get("side"),
+                    "base_size": row.get("base_size"),
+                    "client_order_id": row.get("client_order_id"),
+                    "position_intent": row.get("position_intent"),
+                    "order_type": row.get("order_type"),
+                    "time_in_force": row.get("time_in_force"),
+                    "extended_hours": row.get("extended_hours"),
+                    "limit_price": row.get("limit_price"),
+                }
+                try:
+                    resolved_replay_count = int(
+                        (resolved_transport or {}).get("same_cid_replay_count") or 0
+                    )
+                except (TypeError, ValueError):
+                    resolved_replay_count = -1
+                safely_released = bool(
+                    resolved_transport is not None
+                    and resolved_transport.get("phase") == "resolved"
+                    and resolved_transport.get("proven_no_transport") is True
+                    and str(resolved_transport.get("transport_kind") or "")
+                    == "ordinary_exit"
+                    and str(resolved_transport.get("client_order_id") or "").strip()
+                    == str(row.get("client_order_id") or "").strip()
+                    and resolved_transport.get("order_request") == row_request
+                    and resolved_replay_count == 0
+                )
+                if not safely_released:
+                    return _owner_transport_block(
+                        "provisional_no_transport_owner_not_exactly_resolved",
+                        transport=resolved_transport,
+                    )
+                row.update({
+                    "proven_no_transport": True,
+                    "pre_post_block_pending_owner_release": False,
+                    "owner_release_recovered_at_utc": _utcnow().isoformat(),
+                })
+                le["exit_submit_transport_identities"] = history
+                le.pop("alpaca_active_exit_owner_transport", None)
+                le["operator_flatten_requested_utc"] = str(
+                    le.get("operator_flatten_requested_utc") or _utcnow().isoformat()
+                )
+                _commit_le(sess, le)
+                db.flush()
+                position = le.get("position")
+                position = position if isinstance(position, dict) else {}
+                try:
+                    remaining = float(adapter.get_position_quantity(product_id))
+                except Exception:
+                    remaining = float("nan")
+                avg_entry = _float_or_none(position.get("avg_entry_price"))
+                stop_price = _float_or_none(position.get("stop_price"))
+                protection = (
+                    _ensure_alpaca_deadman_stop(
+                        db,
+                        sess,
+                        adapter,
+                        le=le,
+                        product_id=product_id,
+                        quantity=remaining,
+                        avg_entry_price=avg_entry or 0.0,
+                        software_stop_price=stop_price or 0.0,
+                    )
+                    if math.isfinite(remaining) and remaining > 1e-9
+                    else {"ok": False}
+                )
+                return {
+                    "ok": False,
+                    "error": "provisional_no_transport_recovered_and_reprotected",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                    "deadman_rearmed": bool(protection.get("ok")),
+                }
+            if row.get("proven_no_transport") is True:
+                # This row was committed before this worker's exact owner lease
+                # was released at a literal pre-POST gate. Preserve it in the
+                # ladder, but it has no broker identity to reconcile.
+                continue
+            if (
+                durable_current is not None
+                and str(durable_current.get("phase") or "").strip().lower()
+                != "resolved"
+                and str(
+                    durable_current.get("transport_kind") or ""
+                ).strip().lower()
+                == "ordinary_exit"
+                and str(durable_current.get("client_order_id") or "").strip()
+                == str(row.get("client_order_id") or "").strip()
+                and durable_current.get("order_request") == _row_request(row)
+            ):
+                # The durable owner lease, not the outer JSON mirror, decides
+                # whether this exact CID is adopted, held, or same-CID replayed.
+                continue
+            prior_cid = str(row.get("client_order_id") or "").strip()
+            prior_state, prior_order = _strict_client_order_id_truth(
+                adapter,
+                prior_cid,
+            )
+            if prior_state == "absent":
+                # A strict 404 is not terminal-zero proof and may be propagation
+                # lag after an accepted-but-ack-lost POST.  Legacy rows have no
+                # durable transport lease, so they cannot safely be rotated.
+                le["exit_submit_attempts"] = max(0, attempts - 1)
+                le.pop("exit_next_retry_at_utc", None)
+                le["exit_retry_prior_identity_block"] = {
+                    "reason": "prior_exit_cid_absent_without_terminal_truth",
+                    "client_order_id": prior_cid,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return {
+                    "ok": False,
+                    "error": "prior_exit_cid_absent_without_terminal_truth",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            if prior_state != "found" or prior_order is None:
+                le["exit_submit_attempts"] = max(0, attempts - 1)
+                le.pop("exit_next_retry_at_utc", None)
+                le["exit_retry_prior_identity_block"] = {
+                    "reason": "prior_exit_cid_truth_unknown",
+                    "client_order_id": prior_cid,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return {
+                    "ok": False,
+                    "error": "prior_exit_cid_truth_unknown",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            prior_status = str(
+                getattr(prior_order, "status", "") or ""
+            ).strip().lower()
+            try:
+                prior_filled = float(
+                    getattr(prior_order, "filled_size", 0.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                prior_filled = math.nan
+            prior_identity_ok = bool(
+                str(getattr(prior_order, "client_order_id", "") or "").strip()
+                == prior_cid
+                and str(getattr(prior_order, "product_id", "") or "").strip().upper()
+                == str(product_id).strip().upper()
+                and str(getattr(prior_order, "side", "") or "").strip().lower()
+                == "sell"
+                and str(getattr(prior_order, "order_id", "") or "").strip()
+                and math.isfinite(prior_filled)
+                and prior_filled >= 0.0
+            )
+            if not prior_identity_ok:
+                le["exit_submit_attempts"] = max(0, attempts - 1)
+                le.pop("exit_next_retry_at_utc", None)
+                le["exit_retry_prior_identity_block"] = {
+                    "reason": "prior_exit_cid_identity_mismatch",
+                    "client_order_id": prior_cid,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return {
+                    "ok": False,
+                    "error": "prior_exit_cid_identity_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            prior_quantity = _float_or_none(row.get("base_size"))
+            prior_order_type = str(row.get("order_type") or "").strip().lower()
+            prior_tif = str(row.get("time_in_force") or "").strip().lower()
+            prior_extended = row.get("extended_hours")
+            prior_limit_value = row.get("limit_price")
+            prior_limit = _float_or_none(prior_limit_value)
+            prior_request_valid = bool(
+                prior_quantity is not None
+                and prior_quantity > 0.0
+                and prior_quantity <= float(quantity) + max(1e-9, float(quantity) * 1e-8)
+                and str(row.get("position_intent") or "").strip().lower()
+                == "sell_to_close"
+                and str(row.get("alpaca_account_id") or "").strip()
+                == str(_frozen_alpaca_account_id(sess) or "")
+                and prior_order_type in {"market", "limit"}
+                and prior_tif in {"day", "gtc"}
+                and isinstance(prior_extended, bool)
+                and (
+                    (
+                        prior_order_type == "market"
+                        and prior_tif == "day"
+                        and prior_extended is False
+                        and prior_limit_value is None
+                    )
+                    or (
+                        prior_order_type == "limit"
+                        and prior_limit is not None
+                        and prior_limit > 0.0
+                        and (
+                            (prior_extended is True and prior_tif == "day")
+                            or (
+                                prior_extended is False
+                                and prior_tif in {"day", "gtc"}
+                            )
+                        )
+                    )
+                )
+                and str(row.get("recorded_at_utc") or "").strip()
+            )
+            prior_request = _row_request(row)
+            prior_authority = {
+                "client_order_id": prior_cid,
+                "order_id": str(getattr(prior_order, "order_id", "") or "").strip(),
+                "identity_contract": "alpaca_close_v1",
+                "order_request": prior_request,
+            }
+            if not prior_request_valid or not _emergency_exit_order_matches(
+                prior_order,
+                prior_authority,
+                product_id=product_id,
+                side="sell",
+            ):
+                le["exit_submit_attempts"] = max(0, attempts - 1)
+                le.pop("exit_next_retry_at_utc", None)
+                le["exit_retry_prior_identity_block"] = {
+                    "reason": "prior_exit_request_identity_mismatch",
+                    "client_order_id": prior_cid,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return {
+                    "ok": False,
+                    "error": "prior_exit_request_identity_mismatch",
+                    "deferred": True,
+                    "pre_place_blocked": True,
+                }
+            if (
+                prior_status in _ORDER_TERMINAL_STATUSES
+                and prior_filled <= 1e-12
+            ):
+                continue
+            actionable_prior_orders.append((row, prior_order))
+        if len(actionable_prior_orders) > 1:
+            le["exit_submit_attempts"] = max(0, attempts - 1)
+            le.pop("exit_next_retry_at_utc", None)
+            le["exit_retry_prior_identity_block"] = {
+                "reason": "multiple_prior_exit_orders_actionable",
+                "client_order_ids": [
+                    row.get("client_order_id") for row, _ in actionable_prior_orders
+                ],
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "ok": False,
+                "error": "multiple_prior_exit_orders_actionable",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        if actionable_prior_orders:
+            prior_row, prior_order = actionable_prior_orders[0]
+            prior_oid = str(getattr(prior_order, "order_id", "") or "").strip()
+            prior_cid = str(prior_row.get("client_order_id") or "").strip()
+            recovered_quantity = _float_or_none(prior_row.get("base_size"))
+            if recovered_quantity is None or recovered_quantity <= 0.0:
+                recovered_quantity = float(quantity)
+            le["exit_order_id"] = prior_oid
+            le["exit_client_order_id"] = prior_cid
+            le["pending_exit_reason"] = reason
+            le["pending_exit_quantity"] = recovered_quantity
+            le["pending_exit_submitted_at_utc"] = str(
+                prior_row.get("recorded_at_utc") or _utcnow().isoformat()
+            )
+            le["exit_submit_attempts"] = 0
+            le.pop("exit_next_retry_at_utc", None)
+            le.pop("exit_retry_prior_identity_block", None)
+            _commit_le(sess, le)
+            db.flush()
+            return {
+                "ok": True,
+                "order_id": prior_oid,
+                "client_order_id": prior_cid,
+                "status": str(getattr(prior_order, "status", "") or ""),
+                "recovered": True,
+                "recovered_before_duplicate_exit": True,
+            }
+        le.pop("exit_retry_prior_identity_block", None)
+        owner_transport_result = _freeze_alpaca_owner_transport_before_post(
+            transport_kind="ordinary_exit",
+            request=request,
+            order_kwargs=order_kwargs,
+        )
+        if owner_transport_result is not None:
+            return owner_transport_result
+        if _owner_transport_post.get("order_request"):
+            request = dict(_owner_transport_post["order_request"])
+        history.append({
+            "attempt_no": attempts,
+            "alpaca_account_id": request["alpaca_account_id"],
+            "product_id": request["product_id"],
+            "side": request["side"],
+            "base_size": request["base_size"],
+            "client_order_id": request["client_order_id"],
+            "position_intent": request["position_intent"],
+            "order_type": request["order_type"],
+            "time_in_force": request["time_in_force"],
+            "extended_hours": request["extended_hours"],
+            "limit_price": request["limit_price"],
+            "recorded_at_utc": _utcnow().isoformat(),
+        })
+        le["exit_submit_transport_identities"] = history
+        le["alpaca_active_exit_owner_transport"] = dict(
+            _owner_transport_post.get("transport") or {}
+        )
+        le.pop("exit_retry_transport_history_block", None)
+        _commit_le(sess, le)
+        # The short owner-claim lease is already durable. Keep the session row
+        # lock instead of committing this telemetry mirror before HTTP.
+        db.flush()
+        return None
+
+    def _durable_owner_request_for_dispatch(
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+        """Peek only the exact retained-owner outbox to select the POST verb.
+
+        A local rollback may regenerate a different ladder rung, but an
+        unresolved independently committed request owns both its CID *and* its
+        order type.  Select limit-vs-market from that frozen envelope before any
+        deadman release or broker POST; the lease/CID checks still run below.
+        """
+        if _exit_family not in ALPACA_EXECUTION_FAMILIES:
+            return None, None, None
+        (
+            _dispatch_context,
+            _dispatch_claim,
+            dispatch_metadata,
+            _dispatch_handoff,
+            _dispatch_error,
+        ) = _read_exact_alpaca_deadman_handoff(sess)
+        dispatch_metadata = dispatch_metadata or {}
+        current = dispatch_metadata.get("owner_transport")
+        current = dict(current) if isinstance(current, dict) else None
+        expected_kind = (
+            "emergency_exit"
+            if emergency_exit_authority is not None
+            else "ordinary_exit"
+        )
+        if not (
+            current is not None
+            and str(current.get("phase") or "").strip().lower() != "resolved"
+            and str(current.get("transport_kind") or "").strip().lower()
+            == expected_kind
+        ):
+            return None, current, None
+        request = current.get("order_request")
+        request = dict(request) if isinstance(request, dict) else {}
+        order_type = str(request.get("order_type") or "").strip().lower()
+        limit_price = _float_or_none(request.get("limit_price"))
+        if not (
+            str(request.get("client_order_id") or "").strip()
+            == str(current.get("client_order_id") or "").strip()
+            and order_type in {"limit", "market"}
+            and (
+                (order_type == "market" and request.get("limit_price") is None)
+                or (
+                    order_type == "limit"
+                    and limit_price is not None
+                    and limit_price > 0.0
+                )
+            )
+        ):
+            return None, current, "alpaca_owner_transport_dispatch_request_invalid"
+        return request, current, None
 
     # HARD MAX-LOSS-CIRCUIT FLOOR (2026-06-17): when the caller supplies an absolute
     # loss-anchored floor (avg - K*stop_distance), OVERRIDE the entire bid-relative
@@ -1393,9 +9939,51 @@ def _submit_live_market_exit(
             _floor_override = float(hard_floor_price)
     except (TypeError, ValueError):
         _floor_override = None
-    _urgent = str(reason or "") in ("kill_switch_flatten", "operator_flatten")
+    _urgent = str(reason or "") in {
+        "kill_switch_flatten",
+        "operator_flatten",
+        "overnight_pricebus_dark_flatten",
+        "eod_flatten",
+    }
+    durable_dispatch_request, durable_dispatch_transport, durable_dispatch_error = (
+        _durable_owner_request_for_dispatch()
+    )
+    if durable_dispatch_error is not None:
+        return _owner_transport_block(
+            durable_dispatch_error,
+            transport=durable_dispatch_transport,
+        )
+    emergency_dispatch_request = (
+        dict(emergency_exit_authority.get("order_request") or {})
+        if isinstance(emergency_exit_authority, dict)
+        and isinstance(emergency_exit_authority.get("order_request"), dict)
+        else None
+    )
+    frozen_dispatch_request = (
+        dict(handoff_request or {})
+        if handoff_recovery is not None
+        else emergency_dispatch_request or durable_dispatch_request
+    )
     _lim_px = None
-    if _floor_override is not None:
+    if frozen_dispatch_request is not None:
+        frozen_dispatch_type = str(
+            frozen_dispatch_request.get("order_type") or ""
+        ).strip().lower()
+        if frozen_dispatch_type == "limit":
+            _lim_px = _float_or_none(
+                frozen_dispatch_request.get("limit_price")
+            )
+            if _lim_px is None or _lim_px <= 0.0:
+                return _owner_transport_block(
+                    "alpaca_frozen_limit_dispatch_price_invalid",
+                    transport=durable_dispatch_transport,
+                )
+        elif frozen_dispatch_type != "market":
+            return _owner_transport_block(
+                "alpaca_frozen_owner_transport_order_type_invalid",
+                transport=durable_dispatch_transport,
+            )
+    elif _floor_override is not None:
         _lim_px = _floor_override
     elif not _urgent and attempts <= 2:
         _g = (_notional_guard_multiplier() - 1.0) * (1.0 if attempts <= 1 else 4.0)
@@ -1413,9 +10001,17 @@ def _submit_live_market_exit(
     # marketable limit — even on an urgent flatten or the attempt-3+ market fallback.
     # Cross the bid HARD (8× guard) so it fills immediately, like the market order it
     # replaces. Regular hours / crypto: _exit_extended is False → branch unchanged.
-    if _floor_override is None and _exit_extended and _lim_px is None:
+    if (
+        handoff_recovery is None
+        and _floor_override is None
+        and _exit_extended
+        and _lim_px is None
+    ):
         _ref = None
-        for _cand in (bid, mid):
+        _cover_short = bool(
+            _exit_family in ALPACA_EXECUTION_FAMILIES and not _le_side_long(le)
+        )
+        for _cand in ((ask, mid) if _cover_short else (bid, mid)):
             try:
                 if _cand and float(_cand) > 0:
                     _ref = float(_cand)
@@ -1423,7 +10019,40 @@ def _submit_live_market_exit(
             except (TypeError, ValueError):
                 continue
         if _ref is not None:
-            _lim_px = _ref * (1.0 - (_notional_guard_multiplier() - 1.0) * 8.0)
+            _guard = (_notional_guard_multiplier() - 1.0) * 8.0
+            _lim_px = _ref * (1.0 + _guard if _cover_short else 1.0 - _guard)
+    if (
+        _lim_px is not None
+        and frozen_dispatch_request is not None
+        and not hasattr(adapter, "place_limit_order_gtc")
+    ):
+        return _owner_transport_block(
+            "alpaca_frozen_limit_dispatch_unsupported",
+            transport=durable_dispatch_transport,
+        )
+
+    def _owner_post_dispatch_block(
+        expected_order_type: str,
+    ) -> dict[str, Any] | None:
+        if not _owner_transport_post:
+            return None
+        frozen_request = _owner_transport_post.get("order_request")
+        frozen_request = (
+            frozen_request if isinstance(frozen_request, dict) else {}
+        )
+        if str(frozen_request.get("order_type") or "").strip().lower() == str(
+            expected_order_type
+        ).strip().lower():
+            return None
+        return _owner_transport_block(
+            "alpaca_owner_transport_literal_dispatch_mismatch",
+            transport=(
+                _owner_transport_post.get("transport")
+                if isinstance(_owner_transport_post.get("transport"), dict)
+                else None
+            ),
+        )
+
     if _lim_px is not None and hasattr(adapter, "place_limit_order_gtc"):
         # TICK-VALID SELL PRICE (SMCX premarket stranded-position fix, 2026-06-22): an
         # RH-agentic equity limit finer than a penny on a $1+ stock is rejected by
@@ -1439,10 +10068,22 @@ def _submit_live_market_exit(
             EXECUTION_FAMILY_ROBINHOOD_SPOT,
             EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
         )
+        _is_alpaca_equity_exit = (
+            _exit_family in ALPACA_EXECUTION_FAMILIES
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        )
         _exit_limit_str = (
-            _fmt_limit_price_sell(_lim_px)
-            if _is_rh_equity_exit
-            else f"{_lim_px:.6f}".rstrip("0").rstrip(".")
+            str((handoff_request or {}).get("limit_price"))
+            if handoff_recovery is not None
+            else (
+                (
+                    _fmt_limit_price_buy(_lim_px)
+                    if not _le_side_long(le)
+                    else _fmt_limit_price_sell(_lim_px)
+                )
+                if (_is_rh_equity_exit or _is_alpaca_equity_exit)
+                else f"{_lim_px:.6f}".rstrip("0").rstrip(".")
+            )
         )
         _lim_kwargs: dict[str, Any] = dict(
             product_id=product_id,
@@ -1456,10 +10097,83 @@ def _submit_live_market_exit(
             # the long-shaped sell formatter; the lane stays gated OFF until P2.
             _lim_kwargs["side"] = "buy"
             _lim_kwargs["position_intent"] = "buy_to_close"
+        elif normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+            _lim_kwargs["position_intent"] = "sell_to_close"
+            _lim_kwargs["time_in_force"] = "day" if _exit_extended else "gtc"
         if _ext_kwargs:
             _lim_kwargs["extended_hours"] = True
             _lim_kwargs.update(_ext_kwargs)
-        result = adapter.place_limit_order_gtc(**_lim_kwargs) or {}
+        _bbo_block = _last_instruction_exit_bbo_block()
+        if _bbo_block is not None:
+            return _bbo_block
+        _deadman_block, quantity = _release_deadman_at_literal_submit(
+            quantity,
+            successor_order_type="limit",
+            successor_order_kwargs=_lim_kwargs,
+        )
+        if _deadman_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _deadman_block,
+                reason_code="deadman_release_blocked_before_limit_close",
+            )
+        _close_only_block, quantity = _clamp_close_only_at_literal_submit(quantity)
+        if _close_only_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _close_only_block,
+                reason_code="close_only_clamp_blocked_before_limit_close",
+            )
+        _lim_kwargs["base_size"] = _fmt_base_size(quantity)
+        _request_block = _freeze_emergency_request_before_post(
+            order_type="limit",
+            order_kwargs=_lim_kwargs,
+            limit_price=_exit_limit_str,
+        )
+        if _request_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _request_block,
+                reason_code="emergency_request_blocked_before_limit_close",
+            )
+        _transport_identity_block = _freeze_ordinary_alpaca_exit_identity_before_post(
+            order_type="limit",
+            order_kwargs=_lim_kwargs,
+        )
+        if _transport_identity_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _transport_identity_block,
+                reason_code="owner_transport_blocked_before_limit_close",
+            )
+        _dispatch_block = _owner_post_dispatch_block("limit")
+        if _dispatch_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _dispatch_block,
+                reason_code="owner_transport_limit_dispatch_mismatch",
+            )
+        _literal_bbo_block = _final_literal_exit_bbo_refresh(
+            order_kwargs=_lim_kwargs,
+        )
+        if _literal_bbo_block is not None:
+            return _literal_bbo_block
+        if not _mark_close_only_transport_started():
+            return {
+                "ok": False,
+                "error": "alpaca_close_only_transport_start_cas_failed",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        try:
+            result = adapter.place_limit_order_gtc(**_lim_kwargs) or {}
+        except Exception as exc:
+            _advance_alpaca_owner_transport_after_post(
+                None,
+                exception_type=type(exc).__name__,
+            )
+            _advance_close_only_claim_after_transport(
+                result=None,
+                exception_type=type(exc).__name__,
+            )
+            raise
+        _advance_alpaca_owner_transport_after_post(result)
+        _advance_close_only_claim_after_transport(result=result)
         le["exit_order_type"] = "limit"
         le["exit_limit_price"] = _lim_px
         if _floor_override is not None:
@@ -1476,9 +10190,82 @@ def _submit_live_market_exit(
         if not _le_side_long(le):
             _mkt_kwargs["side"] = "buy"  # SHORT cover (BUY_TO_CLOSE)
             _mkt_kwargs["position_intent"] = "buy_to_close"
+        elif normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+            _mkt_kwargs["position_intent"] = "sell_to_close"
+            _mkt_kwargs["time_in_force"] = "day"
         if _ext_kwargs:
             _mkt_kwargs.update(_ext_kwargs)
-        result = adapter.place_market_order(**_mkt_kwargs) or {}
+        _bbo_block = _last_instruction_exit_bbo_block()
+        if _bbo_block is not None:
+            return _bbo_block
+        _deadman_block, quantity = _release_deadman_at_literal_submit(
+            quantity,
+            successor_order_type="market",
+            successor_order_kwargs=_mkt_kwargs,
+        )
+        if _deadman_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _deadman_block,
+                reason_code="deadman_release_blocked_before_market_close",
+            )
+        _close_only_block, quantity = _clamp_close_only_at_literal_submit(quantity)
+        if _close_only_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _close_only_block,
+                reason_code="close_only_clamp_blocked_before_market_close",
+            )
+        _mkt_kwargs["base_size"] = _fmt_base_size(quantity)
+        _request_block = _freeze_emergency_request_before_post(
+            order_type="market",
+            order_kwargs=_mkt_kwargs,
+            limit_price=None,
+        )
+        if _request_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _request_block,
+                reason_code="emergency_request_blocked_before_market_close",
+            )
+        _transport_identity_block = _freeze_ordinary_alpaca_exit_identity_before_post(
+            order_type="market",
+            order_kwargs=_mkt_kwargs,
+        )
+        if _transport_identity_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _transport_identity_block,
+                reason_code="owner_transport_blocked_before_market_close",
+            )
+        _dispatch_block = _owner_post_dispatch_block("market")
+        if _dispatch_block is not None:
+            return _abort_deadman_handoff_and_reprotect(
+                _dispatch_block,
+                reason_code="owner_transport_market_dispatch_mismatch",
+            )
+        _literal_bbo_block = _final_literal_exit_bbo_refresh(
+            order_kwargs=_mkt_kwargs,
+        )
+        if _literal_bbo_block is not None:
+            return _literal_bbo_block
+        if not _mark_close_only_transport_started():
+            return {
+                "ok": False,
+                "error": "alpaca_close_only_transport_start_cas_failed",
+                "deferred": True,
+                "pre_place_blocked": True,
+            }
+        try:
+            result = adapter.place_market_order(**_mkt_kwargs) or {}
+        except Exception as exc:
+            _advance_alpaca_owner_transport_after_post(
+                None,
+                exception_type=type(exc).__name__,
+            )
+            _advance_close_only_claim_after_transport(
+                result=None,
+                exception_type=type(exc).__name__,
+            )
+            raise
+        _advance_alpaca_owner_transport_after_post(result)
+        _advance_close_only_claim_after_transport(result=result)
         le["exit_order_type"] = "market"
         le.pop("exit_limit_price", None)
     le["exit_order_id"] = result.get("order_id")
@@ -1490,8 +10277,14 @@ def _submit_live_market_exit(
         le["pending_exit_submitted_at_utc"] = now.isoformat()
         # Accepted by the broker — reset the retry state so a later,
         # independent exit (e.g. re-exit of a remainder) starts fresh.
-        le["exit_submit_attempts"] = 0
-        le.pop("exit_next_retry_at_utc", None)
+        acknowledged = bool(str(result.get("order_id") or "").strip())
+        if acknowledged and _exit_family not in ALPACA_EXECUTION_FAMILIES:
+            # Non-Alpaca lanes retain their legacy independent-exit reset.  An
+            # Alpaca acknowledgement is not terminal truth: preserve the full
+            # attempt/CID chain through poll, cancel, and exact terminal outcome.
+            le["exit_submit_attempts"] = 0
+            le.pop("exit_next_retry_at_utc", None)
+            le.pop("exit_submit_transport_identities", None)
     # Persist the counter/backoff state so it survives across pulses (the
     # caller's flush/commit writes sess.risk_snapshot_json to the DB).
     _commit_le(sess, le)
@@ -1587,10 +10380,852 @@ def _broker_position_confirms_zero(sess: TradingAutomationSession) -> bool:
     return False
 
 
+_EXIT_RETRY_CAP_EMERGENCY_REASON = "exit_retry_cap_emergency"
+
+
+def _retry_cap_certified_alpaca_long(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return exact local long evidence for the supported retry-cap handoff.
+
+    This is intentionally narrower than ``_le_side_long`` (which is legacy
+    fail-long).  A retry-cap handoff may sell only a position explicitly recorded
+    as this paper-Alpaca session's long equity; missing direction or symbol truth
+    is not close authority.
+    """
+    if normalize_execution_family(sess.execution_family) != "alpaca_spot":
+        return None
+    if getattr(settings, "chili_alpaca_paper", True) is not True:
+        return None
+    if sess.state not in _HELD_LIVE_STATES:
+        return None
+    symbol = str(sess.symbol or "").strip().upper()
+    if not symbol or symbol.endswith("-USD") or "/" in symbol:
+        return None
+    snapshot = sess.risk_snapshot_json
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    if str(snapshot.get("alpaca_account_scope") or "").strip().lower() != "alpaca:paper":
+        return None
+    if not str(snapshot.get("alpaca_account_id") or "").strip():
+        return None
+    position = le.get("position")
+    if not isinstance(position, dict):
+        return None
+    if str(position.get("product_id") or "").strip().upper() != symbol:
+        return None
+    if str(position.get("side") or "").strip().lower() != "long":
+        return None
+    if not _le_side_long(le):
+        return None
+    quantity = _float_or_none(position.get("quantity"))
+    if quantity is None or quantity <= 0.0:
+        return None
+    return snapshot, {**position, "quantity": quantity, "product_id": symbol}
+
+
+def _retry_cap_prior_exit_cids(
+    le: dict[str, Any],
+    *,
+    symbol: str,
+    attempts: int,
+) -> list[str] | None:
+    """Return every pre-HTTP-durable identity in the capped retry chain."""
+    rows = le.get("exit_submit_transport_identities")
+    rows = rows if isinstance(rows, list) else []
+    matching: list[str] = []
+    required = max(1, int(attempts or 0))
+    if len(rows) != required:
+        return None
+    for expected_attempt, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            return None
+        try:
+            recorded_attempt = int(row.get("attempt_no") or 0)
+        except (TypeError, ValueError):
+            return None
+        if recorded_attempt != expected_attempt:
+            return None
+        if str(row.get("product_id") or "").strip().upper() != symbol:
+            return None
+        if str(row.get("side") or "").strip().lower() != "sell":
+            return None
+        cid = str(row.get("client_order_id") or "").strip()
+        if not cid:
+            return None
+        if row.get("proven_no_transport") is True:
+            continue
+        matching.append(cid)
+    return matching
+
+
+def _retry_cap_exact_prior_exit_truth(
+    adapter: Any,
+    *,
+    symbol: str,
+    client_order_ids: list[str],
+) -> tuple[
+    bool,
+    str,
+    tuple[str, Any] | None,
+    dict[str, tuple[Any, ...]],
+]:
+    """Read one complete CID pass without treating a lone 404 as final proof.
+
+    ``absent`` observations are returned to the caller as chronology evidence.
+    Promotion is allowed only when an exact open-order snapshot is bracketed by
+    two identical CID passes plus stable account/position reads.
+    """
+    actionable: list[tuple[str, Any]] = []
+    observations: dict[str, tuple[Any, ...]] = {}
+    for cid in dict.fromkeys(client_order_ids):
+        state, order = _strict_client_order_id_truth(adapter, cid)
+        if state == "absent":
+            observations[cid] = ("absent",)
+            continue
+        if state != "found" or order is None:
+            return False, "prior_exit_cid_truth_unknown", None, observations
+        status = str(getattr(order, "status", "") or "").strip().lower()
+        try:
+            filled = float(getattr(order, "filled_size", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False, "prior_exit_cid_fill_truth_invalid", None, observations
+        oid = str(getattr(order, "order_id", "") or "").strip()
+        raw = getattr(order, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
+        average_filled_price = _float_or_none(
+            getattr(order, "average_filled_price", None)
+        )
+        order_type = str(
+            getattr(order, "order_type", "") or raw.get("order_type") or ""
+        ).strip().lower()
+        identity_ok = bool(
+            str(getattr(order, "client_order_id", "") or "").strip() == cid
+            and str(getattr(order, "product_id", "") or "").strip().upper() == symbol
+            and str(getattr(order, "side", "") or "").strip().lower() == "sell"
+            and math.isfinite(filled)
+            and filled >= 0.0
+            and oid
+        )
+        if not identity_ok:
+            return False, "prior_exit_cid_identity_mismatch", None, observations
+        observation = (
+            oid,
+            status,
+            filled,
+            average_filled_price,
+            order_type,
+            str(raw.get("qty") or "").strip(),
+            str(raw.get("limit_price") or "").strip() or None,
+            str(raw.get("time_in_force") or "").strip().lower(),
+            raw.get("extended_hours"),
+            str(raw.get("position_intent") or "").strip().lower(),
+            _order_total_fees_usd(order),
+        )
+        if status in _ORDER_TERMINAL_STATUSES and filled <= 1e-12:
+            observations[cid] = ("terminal_zero", *observation)
+            continue
+        # One exact active order or one exact terminal partial-fill order is
+        # adoptable.  The caller proves its immutable request, open-order
+        # lifecycle, and broker remainder before applying any accounting.
+        observations[cid] = ("actionable", *observation)
+        actionable.append((cid, order))
+    if len(actionable) > 1:
+        return (
+            False,
+            "multiple_prior_exit_orders_actionable",
+            None,
+            observations,
+        )
+    return True, "ok", (actionable[0] if actionable else None), observations
+
+
+def _retry_cap_exact_open_orders_truth(
+    adapter: Any,
+    *,
+    symbol: str,
+) -> tuple[bool, str, list[Any]]:
+    """Read Alpaca's strict ``(orders, FreshnessMeta)`` snapshot exactly.
+
+    The metadata object is present on both success and failure.  ``orders=None``
+    is the adapter's explicit read-failure sentinel; a non-None FreshnessMeta is
+    therefore never itself an error.  Certification also refuses malformed or
+    stale snapshots rather than interpreting them as an empty account.
+    """
+    if adapter is None or not hasattr(adapter, "list_open_orders"):
+        return False, "open_order_truth_unavailable", []
+    try:
+        result = adapter.list_open_orders(
+            product_id=symbol,
+            limit=100,
+            strict=True,
+        )
+    except Exception:
+        return False, "open_order_truth_unreadable", []
+    if not isinstance(result, tuple) or len(result) != 2:
+        return False, "open_order_truth_unreadable", []
+    open_orders, freshness = result
+    if open_orders is None or not isinstance(freshness, FreshnessMeta):
+        return False, "open_order_truth_unreadable", []
+    try:
+        if not is_fresh_enough(freshness):
+            return False, "open_order_truth_stale", []
+        return True, "ok", list(open_orders)
+    except Exception:
+        return False, "open_order_truth_unreadable", []
+
+
+def _record_retry_cap_emergency_block(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    reason: str,
+    attempts: int,
+    block_reason: str,
+    details: dict[str, Any] | None = None,
+) -> str:
+    prior = le.get("exit_retry_cap_emergency_block")
+    prior_reason = prior.get("block_reason") if isinstance(prior, dict) else None
+    le["exit_retry_cap_emergency_requested_utc"] = str(
+        le.get("exit_retry_cap_emergency_requested_utc") or _utcnow().isoformat()
+    )
+    le["exit_retry_cap_emergency_block"] = {
+        "active": True,
+        "reason": reason,
+        "attempts": int(attempts or 0),
+        "block_reason": block_reason,
+        "details": dict(details or {}),
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    # Prevent this same held session from entering or adding while exact close
+    # authority is being re-certified. Cleared only with broker-flat claim proof.
+    le["alpaca_entries_quarantined"] = True
+    _commit_le(sess, le)
+    if prior_reason != block_reason:
+        _emit(db, sess, "live_exit_retry_cap_emergency_blocked", {
+            "reason": reason,
+            "attempts": int(attempts or 0),
+            "block_reason": block_reason,
+            **dict(details or {}),
+        })
+    return "blocked"
+
+
+def _promote_alpaca_retry_cap_to_emergency(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    reason: str,
+    attempts: int,
+) -> str:
+    """Atomically retain exact exposure ownership and arm a continuous exit.
+
+    The entry action claim remains the durable account/symbol exposure guard.
+    The session emergency authority owns close-order CIDs and may rotate only
+    after terminal proof, preserving partial-fill serviceability without letting
+    the generic orphan reconciler infer or liquidate a position.
+    """
+    certified = _retry_cap_certified_alpaca_long(sess, le)
+    if certified is None:
+        return "not_applicable"
+    snapshot, position = certified
+    symbol = str(position["product_id"])
+    local_quantity = float(position["quantity"])
+
+    def _block(code: str, **details: Any) -> str:
+        return _record_retry_cap_emergency_block(
+            db,
+            sess,
+            le=le,
+            reason=reason,
+            attempts=attempts,
+            block_reason=code,
+            details=details,
+        )
+
+    account_ok, account_evidence = _strict_alpaca_account_identity(adapter, sess)
+    if not account_ok:
+        return _block(
+            str(account_evidence.get("reason") or "alpaca_account_identity_unreadable"),
+            alpaca_account_identity=account_evidence,
+        )
+    if adapter is None or not hasattr(adapter, "get_position_quantity"):
+        return _block("broker_position_truth_unavailable")
+    try:
+        broker_quantity = adapter.get_position_quantity(symbol)
+        broker_quantity = float(broker_quantity)
+    except Exception:
+        return _block("broker_position_truth_unreadable")
+    if not math.isfinite(broker_quantity) or broker_quantity <= 0.0:
+        return _block(
+            "broker_position_not_verified_nonzero_long",
+            broker_quantity=broker_quantity,
+        )
+    quantity_tolerance = max(1e-9, local_quantity * 1e-8)
+
+    prior_cids = _retry_cap_prior_exit_cids(
+        le,
+        symbol=symbol,
+        attempts=attempts,
+    )
+    if prior_cids is None:
+        return _block("prior_exit_cid_history_incomplete")
+    (
+        prior_truth,
+        prior_error,
+        actionable_prior,
+        prior_observations,
+    ) = _retry_cap_exact_prior_exit_truth(
+        adapter,
+        symbol=symbol,
+        client_order_ids=prior_cids,
+    )
+    if not prior_truth:
+        return _block(prior_error)
+
+    actionable_authority: dict[str, Any] | None = None
+    actionable_transport_row: dict[str, Any] | None = None
+    actionable_filled = 0.0
+    actionable_status = ""
+    actionable_terminal = False
+    if actionable_prior is not None:
+        prior_cid, prior_order = actionable_prior
+        transport_rows = le.get("exit_submit_transport_identities")
+        transport_rows = transport_rows if isinstance(transport_rows, list) else []
+        matching_rows = [
+            row
+            for row in transport_rows
+            if isinstance(row, dict)
+            and str(row.get("client_order_id") or "").strip() == prior_cid
+        ]
+        if len(matching_rows) != 1:
+            return _block("prior_exit_request_identity_ambiguous")
+        actionable_transport_row = matching_rows[0]
+        submitted_quantity = _float_or_none(
+            actionable_transport_row.get("base_size")
+        )
+        order_type = str(
+            actionable_transport_row.get("order_type") or ""
+        ).strip().lower()
+        time_in_force = str(
+            actionable_transport_row.get("time_in_force") or ""
+        ).strip().lower()
+        position_intent = str(
+            actionable_transport_row.get("position_intent") or ""
+        ).strip().lower()
+        extended_hours = actionable_transport_row.get("extended_hours")
+        limit_value = actionable_transport_row.get("limit_price")
+        limit_price = _float_or_none(limit_value)
+        actionable_status = str(
+            getattr(prior_order, "status", "") or ""
+        ).strip().lower()
+        actionable_terminal = actionable_status in _ORDER_TERMINAL_STATUSES
+        actionable_filled = _float_or_none(
+            getattr(prior_order, "filled_size", None)
+        ) or 0.0
+        request_shape_valid = bool(
+            submitted_quantity is not None
+            and submitted_quantity > 0.0
+            and submitted_quantity <= local_quantity + quantity_tolerance
+            and actionable_filled
+            <= submitted_quantity + quantity_tolerance
+            and str(actionable_transport_row.get("product_id") or "")
+            .strip()
+            .upper()
+            == symbol
+            and str(actionable_transport_row.get("side") or "")
+            .strip()
+            .lower()
+            == "sell"
+            and str(actionable_transport_row.get("client_order_id") or "").strip()
+            == prior_cid
+            and str(actionable_transport_row.get("alpaca_account_id") or "").strip()
+            == str(_frozen_alpaca_account_id(sess) or "")
+            and position_intent == "sell_to_close"
+            and order_type in {"market", "limit"}
+            and time_in_force in {"day", "gtc"}
+            and isinstance(extended_hours, bool)
+            and (
+                (
+                    order_type == "market"
+                    and time_in_force == "day"
+                    and extended_hours is False
+                    and limit_value is None
+                )
+                or (
+                    order_type == "limit"
+                    and limit_price is not None
+                    and limit_price > 0.0
+                    and (
+                        (extended_hours is True and time_in_force == "day")
+                        or (
+                            extended_hours is False
+                            and time_in_force in {"day", "gtc"}
+                        )
+                    )
+                )
+            )
+            and str(actionable_transport_row.get("recorded_at_utc") or "").strip()
+        )
+        if not request_shape_valid:
+            return _block("prior_exit_request_identity_incomplete")
+        order_request = {
+            "account_scope": "alpaca:paper",
+            "alpaca_account_id": str(
+                actionable_transport_row.get("alpaca_account_id") or ""
+            ),
+            "product_id": symbol,
+            "side": "sell",
+            "base_size": actionable_transport_row["base_size"],
+            "client_order_id": prior_cid,
+            "position_intent": "sell_to_close",
+            "order_type": order_type,
+            "time_in_force": time_in_force,
+            "extended_hours": extended_hours,
+            "limit_price": limit_value,
+        }
+        actionable_authority = {
+            "reason": _EXIT_RETRY_CAP_EMERGENCY_REASON,
+            "requested_reasons": [_EXIT_RETRY_CAP_EMERGENCY_REASON],
+            "client_order_id": prior_cid,
+            "order_id": str(getattr(prior_order, "order_id", "") or "").strip(),
+            "phase": "submitted",
+            "attempt_no": 1,
+            "submitted_quantity": float(submitted_quantity),
+            "applied_filled_size": 0.0,
+            "last_observed_filled_size": actionable_filled,
+            "last_order_status": actionable_status,
+            "identity_contract": "alpaca_close_v1",
+            "order_request": order_request,
+            "recovered_from_retry_cap_transport_chain": True,
+        }
+        if not _emergency_exit_order_matches(
+            prior_order,
+            actionable_authority,
+            product_id=symbol,
+            side="sell",
+        ):
+            return _block("prior_exit_request_identity_mismatch")
+
+    expected_broker_quantity = max(
+        0.0,
+        local_quantity - actionable_filled,
+    )
+    if abs(broker_quantity - expected_broker_quantity) > quantity_tolerance:
+        return _block(
+            "broker_local_quantity_mismatch",
+            broker_quantity=broker_quantity,
+            local_quantity=local_quantity,
+            exact_prior_exit_filled_size=actionable_filled,
+            expected_broker_quantity=expected_broker_quantity,
+        )
+
+    open_orders_ok, open_orders_error, open_orders = (
+        _retry_cap_exact_open_orders_truth(
+            adapter,
+            symbol=symbol,
+        )
+    )
+    if not open_orders_ok:
+        return _block(open_orders_error)
+    if actionable_authority is None:
+        if open_orders:
+            return _block("competing_open_order_present")
+    else:
+        actionable_oid = str(actionable_authority["order_id"])
+        matching_open_orders = [
+            order
+            for order in open_orders
+            if str(getattr(order, "order_id", "") or "").strip()
+            == actionable_oid
+            and _emergency_exit_order_matches(
+                order,
+                actionable_authority,
+                product_id=symbol,
+                side="sell",
+            )
+        ]
+        if actionable_terminal:
+            if open_orders:
+                return _block("competing_open_order_present")
+        elif len(open_orders) != 1 or len(matching_open_orders) != 1:
+            return _block("competing_open_order_present")
+
+    # Bracket the complete open-order snapshot with a second exact CID pass.
+    # A transient 404, late-visible order, status/fill change, or transport read
+    # error therefore remains unknown and cannot mint another close authority.
+    (
+        second_prior_truth,
+        second_prior_error,
+        second_actionable_prior,
+        second_prior_observations,
+    ) = _retry_cap_exact_prior_exit_truth(
+        adapter,
+        symbol=symbol,
+        client_order_ids=prior_cids,
+    )
+    if not second_prior_truth:
+        return _block(second_prior_error)
+    first_actionable_cid = (
+        actionable_prior[0] if actionable_prior is not None else None
+    )
+    second_actionable_cid = (
+        second_actionable_prior[0] if second_actionable_prior is not None else None
+    )
+    if (
+        second_prior_observations != prior_observations
+        or second_actionable_cid != first_actionable_cid
+    ):
+        return _block("prior_exit_cid_truth_changed_during_certification")
+    if actionable_authority is not None:
+        second_actionable_order = (
+            second_actionable_prior[1]
+            if second_actionable_prior is not None
+            else None
+        )
+        if second_actionable_order is None or not _emergency_exit_order_matches(
+            second_actionable_order,
+            actionable_authority,
+            product_id=symbol,
+            side="sell",
+        ):
+            return _block("prior_exit_request_identity_changed_during_certification")
+
+    second_account_ok, second_account_evidence = _strict_alpaca_account_identity(
+        adapter,
+        sess,
+    )
+    if not second_account_ok:
+        return _block(
+            str(
+                second_account_evidence.get("reason")
+                or "alpaca_account_identity_unreadable"
+            ),
+            alpaca_account_identity=second_account_evidence,
+        )
+    try:
+        second_broker_quantity = float(adapter.get_position_quantity(symbol))
+    except Exception:
+        return _block("broker_position_truth_unreadable")
+    if not (
+        math.isfinite(second_broker_quantity)
+        and second_broker_quantity > 0.0
+        and abs(second_broker_quantity - broker_quantity) <= quantity_tolerance
+        and abs(second_broker_quantity - expected_broker_quantity)
+        <= quantity_tolerance
+    ):
+        return _block(
+            "broker_position_truth_changed_during_certification",
+            initial_broker_quantity=broker_quantity,
+            final_broker_quantity=second_broker_quantity,
+            local_quantity=local_quantity,
+            exact_prior_exit_filled_size=actionable_filled,
+            expected_broker_quantity=expected_broker_quantity,
+        )
+
+    scope = "alpaca:paper"
+    snapshot_token = str(snapshot.get("alpaca_symbol_claim_token") or "").strip()
+    readable, existing_claim = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope=scope,
+        for_update=True,
+    )
+    if not readable or not isinstance(existing_claim, dict):
+        return _block("entry_exposure_claim_unreadable")
+    entry_cid = str(existing_claim.get("client_order_id") or "").strip()
+    if not (
+        existing_claim.get("action") == "entry"
+        and existing_claim.get("owner_session_id") == int(sess.id)
+        and str(existing_claim.get("account_scope") or "").strip().lower() == scope
+        and str(existing_claim.get("symbol") or "").strip().upper() == symbol
+        and snapshot_token
+        and existing_claim.get("claim_token") == snapshot_token
+        and entry_cid
+    ):
+        return _block("entry_exposure_claim_identity_mismatch")
+
+    entry_order = None
+    entry_oid = str(existing_claim.get("broker_order_id") or "").strip()
+    if entry_oid and hasattr(adapter, "get_order"):
+        try:
+            entry_order, _ = adapter.get_order(entry_oid)
+        except Exception:
+            entry_order = None
+    if entry_order is None:
+        entry_state, entry_order = _strict_client_order_id_truth(adapter, entry_cid)
+        if entry_state != "found":
+            entry_order = None
+    entry_request = _alpaca_claim_order_request(existing_claim, sess, symbol)
+    entry_status = str(getattr(entry_order, "status", "") or "").strip().lower()
+    try:
+        entry_filled = float(getattr(entry_order, "filled_size", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        entry_filled = 0.0
+    if not (
+        entry_order is not None
+        and _alpaca_claim_order_matches(
+            entry_order,
+            existing_claim,
+            entry_request,
+        )
+        and entry_status in _ORDER_TERMINAL_STATUSES
+        and math.isfinite(entry_filled)
+        and entry_filled > 0.0
+    ):
+        return _block("entry_exposure_claim_terminal_order_unproven")
+    entry_oid = str(getattr(entry_order, "order_id", "") or "").strip()
+
+    retained = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=snapshot_token,
+        owner_session_id=int(sess.id),
+        client_order_id=entry_cid,
+        metadata={
+            **dict(existing_claim.get("metadata") or {}),
+            "runner_exit_guard": True,
+            "runner_exit_guard_reason": "exit_retry_cap_nonzero_exposure",
+            "runner_exit_guard_local_quantity": local_quantity,
+            "runner_exit_guard_broker_quantity": broker_quantity,
+        },
+        account_scope=scope,
+    )
+    retained_claim = retained.get("claim") if isinstance(retained, dict) else None
+    if not (
+        isinstance(retained, dict)
+        and retained.get("ok")
+        and isinstance(retained_claim, dict)
+        and retained_claim.get("phase") != "resolved"
+        and retained_claim.get("action") == "entry"
+        and retained_claim.get("claim_token") == snapshot_token
+        and retained_claim.get("owner_session_id") == int(sess.id)
+        and retained_claim.get("client_order_id") == entry_cid
+        and str(retained_claim.get("account_scope") or "").strip().lower() == scope
+        and str(retained_claim.get("symbol") or "").strip().upper() == symbol
+    ):
+        return _block(
+            "entry_exposure_claim_not_retained",
+            claim_reason=(retained.get("reason") if isinstance(retained, dict) else None),
+        )
+
+    requested_at = str(
+        le.get("exit_retry_cap_emergency_requested_utc") or _utcnow().isoformat()
+    )
+    le["exit_retry_cap_emergency_requested_utc"] = requested_at
+    le["alpaca_entry_claim_resolution_pending"] = {
+        "claim_token": snapshot_token,
+        "client_order_id": entry_cid,
+        "broker_order_id": entry_oid,
+        "broker_order_status": entry_status,
+        "filled_size": entry_filled,
+        "retain_until_broker_flat": True,
+        "runner_exit_guard": True,
+    }
+    le["alpaca_entries_quarantined"] = True
+    if actionable_authority is not None:
+        authority = actionable_authority
+        authority["created_at_utc"] = requested_at
+        retained_metadata = retained_claim.get("metadata")
+        retained_metadata = (
+            retained_metadata if isinstance(retained_metadata, dict) else {}
+        )
+        transport_candidates: list[Any] = [
+            retained_metadata.get("owner_transport")
+        ]
+        retained_transport_history = retained_metadata.get(
+            "owner_transport_history"
+        )
+        if isinstance(retained_transport_history, list):
+            transport_candidates.extend(retained_transport_history)
+        matching_transports = [
+            dict(candidate)
+            for candidate in transport_candidates
+            if isinstance(candidate, dict)
+            and str(candidate.get("transport_kind") or "").strip().lower()
+            in {"ordinary_exit", "emergency_exit"}
+            and str(candidate.get("client_order_id") or "").strip()
+            == str(authority.get("client_order_id") or "").strip()
+            and candidate.get("order_request") == authority.get("order_request")
+            and _owner_transport_order_matches(
+                actionable_prior[1],
+                candidate,
+            )
+        ]
+        if matching_transports:
+            # The independently committed owner row remains authoritative for
+            # terminal resolution after the local retry-cap transaction commits.
+            le["alpaca_active_exit_owner_transport"] = matching_transports[0]
+
+        if actionable_filled > 1e-12:
+            fill_price = _float_or_none(
+                getattr(actionable_prior[1], "average_filled_price", None)
+            )
+            entry_price = _float_or_none(position.get("avg_entry_price"))
+            le["last_exit_fee_usd"] = max(
+                0.0,
+                _order_total_fees_usd(actionable_prior[1]) or 0.0,
+            )
+            le["last_exit_broker_truth"] = {
+                "broker_order_id": authority["order_id"],
+                "order_status": actionable_status,
+                "avg_px": fill_price,
+                "filled_size": actionable_filled,
+            }
+            if entry_price is not None and fill_price is not None:
+                _apply_confirmed_live_partial_exit(
+                    db,
+                    sess,
+                    le=le,
+                    filled_quantity=actionable_filled,
+                    entry_price=entry_price,
+                    fill_price=fill_price,
+                    reason=reason,
+                )
+            else:
+                _record_emergency_unpriced_fill(
+                    db,
+                    sess,
+                    le=le,
+                    authority=authority,
+                    filled_quantity=actionable_filled,
+                    fill_price=fill_price,
+                    remaining_quantity=broker_quantity,
+                    reason=reason,
+                    note=(
+                        "retry_cap_missing_entry_cost_basis"
+                        if entry_price is None
+                        else "retry_cap_missing_exit_fill_price"
+                    ),
+                )
+            authority["applied_filled_size"] = actionable_filled
+            authority["retry_cap_fill_reconciled_at_utc"] = _utcnow().isoformat()
+            authority["retry_cap_broker_remaining_quantity"] = broker_quantity
+        le["exit_order_id"] = authority["order_id"]
+        le["exit_client_order_id"] = authority["client_order_id"]
+        le["pending_exit_reason"] = reason
+        le["pending_exit_quantity"] = authority["submitted_quantity"]
+        le["pending_exit_submitted_at_utc"] = str(
+            actionable_transport_row.get("recorded_at_utc")
+            if actionable_transport_row is not None
+            else requested_at
+        )
+    else:
+        authority = _emergency_exit_authority(
+            sess,
+            le,
+            reason=_EXIT_RETRY_CAP_EMERGENCY_REASON,
+        )
+    authority["source_exit_reason"] = reason
+    authority["entry_exposure_claim_token"] = snapshot_token
+    authority["entry_exposure_claim_client_order_id"] = entry_cid
+    authority["certified_local_quantity"] = local_quantity
+    authority["certified_broker_quantity"] = broker_quantity
+    le["emergency_exit_authority"] = authority
+    le["exit_submit_attempts"] = 0
+    le.pop("exit_next_retry_at_utc", None)
+    le.pop("exit_submit_transport_identities", None)
+    le.pop("exit_retry_cap_emergency_block", None)
+    if actionable_authority is None:
+        for key in (
+            "exit_order_id",
+            "exit_client_order_id",
+            "pending_exit_reason",
+            "pending_exit_quantity",
+            "pending_exit_submitted_at_utc",
+        ):
+            le.pop(key, None)
+    _commit_le(sess, le)
+    _emit(db, sess, "live_exit_retry_cap_emergency_promoted", {
+        "reason": reason,
+        "attempts": int(attempts or 0),
+        "symbol": symbol,
+        "quantity": local_quantity,
+        "entry_claim_token": snapshot_token,
+        "entry_claim_client_order_id": entry_cid,
+        "emergency_client_order_id": authority.get("client_order_id"),
+        "state": sess.state,
+    })
+    return "promoted"
+
+
+def _resolve_retained_alpaca_entry_claim_after_broker_flat(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+) -> bool:
+    """Release the retry-cap exposure guard only under exact broker-flat proof."""
+    pending = le.get("alpaca_entry_claim_resolution_pending")
+    if not (
+        isinstance(pending, dict)
+        and pending.get("retain_until_broker_flat") is True
+        and pending.get("runner_exit_guard") is True
+    ):
+        return True
+    resolved = resolve_action_claim(
+        db,
+        symbol=sess.symbol,
+        claim_token=str(pending.get("claim_token") or ""),
+        client_order_id=str(pending.get("client_order_id") or ""),
+        broker_order_id=str(pending.get("broker_order_id") or ""),
+        broker_order_status=str(pending.get("broker_order_status") or ""),
+        broker_position_zero=True,
+        terminal_owner_broker_flat=True,
+        metadata={
+            "reason": "runner_retry_cap_emergency_broker_flat",
+            "filled_size": pending.get("filled_size"),
+        },
+        account_scope="alpaca:paper",
+    )
+    if not resolved:
+        # The parent claim can have committed its exact broker-flat terminal
+        # proof before the outer session-accounting transaction failed. Treat
+        # only that same immutable owner as idempotently resolved.
+        readable, existing_claim = read_action_claim(
+            db,
+            symbol=sess.symbol,
+            account_scope="alpaca:paper",
+        )
+        resolved = bool(
+            readable
+            and isinstance(existing_claim, dict)
+            and existing_claim.get("phase") == "resolved"
+            and existing_claim.get("action") == "entry"
+            and existing_claim.get("claim_token")
+            == str(pending.get("claim_token") or "")
+            and str(existing_claim.get("client_order_id") or "")
+            == str(pending.get("client_order_id") or "")
+            and str(existing_claim.get("broker_order_id") or "")
+            == str(pending.get("broker_order_id") or "")
+        )
+    if not resolved:
+        le["alpaca_retry_cap_claim_resolution_block"] = {
+            "reason": "exact_entry_exposure_claim_not_resolved",
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        return False
+    le.pop("alpaca_entry_claim_resolution_pending", None)
+    le.pop("alpaca_retry_cap_claim_resolution_block", None)
+    le.pop("alpaca_entries_quarantined", None)
+    le["alpaca_retry_cap_entry_claim_resolved"] = {
+        "claim_token": pending.get("claim_token"),
+        "broker_flat_at_utc": _utcnow().isoformat(),
+    }
+    _commit_le(sess, le)
+    return True
+
+
 def _live_exit_submit_succeeded(
     db: Session,
     sess: TradingAutomationSession,
     *,
+    adapter: Any = None,
     le: dict[str, Any],
     result: dict[str, Any],
     reason: str,
@@ -1601,6 +11236,10 @@ def _live_exit_submit_succeeded(
     # or emitting an event (avoids the per-pulse event spam that itself was
     # part of the wedged-session problem). (2026-06-07 audit.)
     if result.get("deferred"):
+        return False
+    if result.get("alpaca_deadman_accounted") is True:
+        return True
+    if result.get("alpaca_identity_reconcile_required") is True:
         return False
 
     # Max-attempts cap reached — stop re-submitting and escalate. If the
@@ -1617,7 +11256,35 @@ def _live_exit_submit_succeeded(
                 "max_attempts": _EXIT_SUBMIT_MAX_ATTEMPTS,
             },
         )
-        if _broker_position_confirms_zero(sess):
+        _family = normalize_execution_family(sess.execution_family)
+        if _family in ALPACA_EXECUTION_FAMILIES:
+            try:
+                _adapter_qty = adapter.get_position_quantity(sess.symbol)
+                _confirmed_zero = (
+                    _adapter_qty is not None and float(_adapter_qty) <= 1e-9
+                )
+            except Exception:
+                _confirmed_zero = False
+        else:
+            _confirmed_zero = _broker_position_confirms_zero(sess)
+        if _confirmed_zero:
+            if _family in ALPACA_EXECUTION_FAMILIES:
+                deadman_reconcile = _reconcile_alpaca_deadman_before_broker_zero(
+                    db,
+                    sess,
+                    adapter,
+                    le=le,
+                    product_id=sess.symbol,
+                )
+                if deadman_reconcile.get("ok") is True:
+                    return True
+                le["alpaca_broker_zero_identity_block"] = {
+                    "reason": deadman_reconcile.get("error"),
+                    "source": "exit_retry_cap",
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
             le["position"] = None
             le["last_exit_reason"] = (reason or "exit") + "_retry_cap_broker_zero_reconcile"
             le.pop("pending_exit_reason", None)
@@ -1635,6 +11302,19 @@ def _live_exit_submit_succeeded(
                 },
             )
             return True
+        promotion = _promote_alpaca_retry_cap_to_emergency(
+            db,
+            sess,
+            adapter,
+            le=le,
+            reason=reason,
+            attempts=int(result.get("attempts") or 0),
+        )
+        if promotion in {"promoted", "blocked"}:
+            # Both outcomes remain in a held, runner-serviceable state. A blocked
+            # certification is retried read-only; it is never permission to
+            # terminalize real local exposure or to infer a generic position.
+            return False
         # GENUINELY STRANDED POSITION (2026-06-16): the exit hit the retry cap AND
         # the broker still HOLDS the position (not zero/dust) — a real naked long with
         # no working exit (this is what stranded BEEM/AHMA premarket before the
@@ -1751,6 +11431,25 @@ def _live_exit_submit_succeeded(
     # what makes the bailout path satisfy the confirmed-flat reconcile (the agentic
     # family fell through the legacy second read and looped live_bailout forever).
     if result.get("broker_zero") is True:
+        if normalize_execution_family(
+            sess.execution_family
+        ) in ALPACA_EXECUTION_FAMILIES:
+            deadman_reconcile = _reconcile_alpaca_deadman_before_broker_zero(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=sess.symbol,
+            )
+            if deadman_reconcile.get("ok") is True:
+                return True
+            le["alpaca_broker_zero_identity_block"] = {
+                "reason": deadman_reconcile.get("error"),
+                "source": "generic_broker_zero_result",
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return False
         _confirm_n = 1
         try:
             _confirm_n = max(1, int(getattr(settings, "chili_momentum_broker_zero_confirm_reads", 2) or 2))
@@ -1863,6 +11562,24 @@ def _poll_live_exit_fill(
     if not oid:
         _emit(db, sess, "live_exit_pending_unconfirmed", {"reason": reason, "why": "missing_exit_order_id"})
         return {"filled": False, "pending": True, "why": "missing_exit_order_id"}
+    alpaca_family = normalize_execution_family(
+        sess.execution_family
+    ) in ALPACA_EXECUTION_FAMILIES
+    if alpaca_family:
+        account_ok, account_identity = _strict_alpaca_account_identity(adapter, sess)
+        if not account_ok:
+            le["alpaca_exit_poll_account_identity_block"] = {
+                **account_identity,
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "filled": False,
+                "pending": True,
+                "why": account_identity.get("reason")
+                or "alpaca_account_identity_blocked",
+            }
     try:
         no, _ = adapter.get_order(str(oid))
     except Exception:
@@ -1872,17 +11589,169 @@ def _poll_live_exit_fill(
         _emit(db, sess, "live_exit_pending_unconfirmed", {"reason": reason, "order_id": oid, "why": "order_missing"})
         return {"filled": False, "pending": True, "why": "order_missing"}
 
+    def _resolve_terminal_owner_transport() -> tuple[bool, float | None, str | None]:
+        if not alpaca_family:
+            return True, None, None
+        status = str(getattr(no, "status", "") or "").strip().lower()
+        if status not in _ORDER_TERMINAL_STATUSES:
+            return False, None, "alpaca_exit_order_not_terminal"
+        close_only_marker, close_only_error = _validated_alpaca_close_only_marker(
+            sess
+        )
+        if _alpaca_close_only_marker(sess) is not None:
+            if close_only_error is not None or close_only_marker is None:
+                return False, None, close_only_error or "alpaca_close_only_proof_invalid"
+            literal_ok, literal_identity = _strict_alpaca_account_identity(adapter, sess)
+            if not literal_ok:
+                return (
+                    False,
+                    None,
+                    str(literal_identity.get("reason") or "alpaca_account_identity_blocked"),
+                )
+            try:
+                remaining = float(adapter.get_position_quantity(sess.symbol))
+                if not math.isfinite(remaining) or remaining < 0.0:
+                    raise ValueError("invalid remaining quantity")
+            except Exception:
+                return False, None, "alpaca_exit_terminal_position_unknown"
+            return True, remaining, None
+        transport = le.get("alpaca_active_exit_owner_transport")
+        transport = dict(transport) if isinstance(transport, dict) else None
+        if transport is None:
+            return False, None, "alpaca_exit_owner_transport_missing"
+        if not (
+            str(transport.get("client_order_id") or "").strip()
+            == str(le.get("exit_client_order_id") or "").strip()
+            == str(getattr(no, "client_order_id", "") or "").strip()
+            and str(getattr(no, "order_id", "") or "").strip() == str(oid)
+            and _owner_transport_order_matches(no, transport)
+        ):
+            return False, None, "alpaca_exit_owner_transport_identity_mismatch"
+        literal_ok, literal_identity = _strict_alpaca_account_identity(adapter, sess)
+        if not literal_ok:
+            return (
+                False,
+                None,
+                str(literal_identity.get("reason") or "alpaca_account_identity_blocked"),
+            )
+        try:
+            remaining = float(adapter.get_position_quantity(sess.symbol))
+            if not math.isfinite(remaining) or remaining < 0.0:
+                raise ValueError("invalid remaining quantity")
+        except Exception:
+            return False, None, "alpaca_exit_terminal_position_unknown"
+        if not _resolve_exact_owner_transport_terminal(
+            sess,
+            transport,
+            no,
+            remaining_quantity=remaining,
+        ):
+            return False, remaining, "alpaca_exit_owner_transport_resolution_failed"
+        le["alpaca_last_resolved_exit_owner_transport"] = {
+            **transport,
+            "broker_order_id": str(oid),
+            "broker_order_status": status,
+            "filled_size": float(getattr(no, "filled_size", 0.0) or 0.0),
+            "broker_remaining_quantity": remaining,
+            "resolved_at_utc": _utcnow().isoformat(),
+        }
+        le.pop("alpaca_active_exit_owner_transport", None)
+        _commit_le(sess, le)
+        return True, remaining, None
+
     filled_size = float(no.filled_size or 0.0)
     avg_px = _float_or_none(no.average_filled_price)
+    terminal_status = (no.status or "").lower() in (
+        "filled",
+        "done",
+        "closed",
+        "cancelled",
+        "canceled",
+        "expired",
+        "failed",
+        "rejected",
+    )
     full_fill = _order_done_for_exit(no) and avg_px is not None and filled_size + 1e-12 >= float(quantity) * 0.999
     # FILL-BY-SIZE (2026-06-12 SMU/RZLV phantoms): RH kept reporting the stop
     # sell as status "open" while filled_size was already FULL — the status-
     # string gate spun live_exit_pending_confirmation forever and the session
     # held a phantom position. An order that has filled its full size with a
     # known average price IS done, whatever the status string says.
-    if not full_fill and avg_px is not None and filled_size + 1e-12 >= float(quantity) * 0.999:
+    if (
+        not full_fill
+        and not alpaca_family
+        and avg_px is not None
+        and filled_size + 1e-12 >= float(quantity) * 0.999
+    ):
         full_fill = True
     if full_fill:
+        owner_resolved, broker_remaining, owner_error = (
+            _resolve_terminal_owner_transport()
+        )
+        if not owner_resolved:
+            le["alpaca_exit_owner_transport_resolution_block"] = {
+                "reason": owner_error,
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "filled": False,
+                "pending": True,
+                "why": owner_error,
+                "order_status": no.status,
+            }
+        if (
+            alpaca_family
+            and _alpaca_close_only_marker(sess) is None
+            and (
+            broker_remaining is None or broker_remaining > 1e-9
+            )
+        ):
+            return {
+                "filled": False,
+                "pending": True,
+                "why": "alpaca_full_exit_broker_flat_unproven",
+                "order_status": no.status,
+            }
+        retained_guard = le.get("alpaca_entry_claim_resolution_pending")
+        if (
+            isinstance(retained_guard, dict)
+            and retained_guard.get("retain_until_broker_flat") is True
+            and retained_guard.get("runner_exit_guard") is True
+        ):
+            try:
+                broker_quantity = adapter.get_position_quantity(sess.symbol)
+                broker_quantity = float(broker_quantity)
+            except Exception:
+                broker_quantity = math.nan
+            if not math.isfinite(broker_quantity) or abs(broker_quantity) > 1e-9:
+                le["alpaca_retry_cap_full_fill_broker_flat_block"] = {
+                    "broker_quantity": (
+                        broker_quantity if math.isfinite(broker_quantity) else None
+                    ),
+                    "order_id": str(oid),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return {
+                    "filled": False,
+                    "pending": True,
+                    "why": "retained_entry_claim_broker_flat_unproven",
+                    "order_status": no.status,
+                }
+            if not _resolve_retained_alpaca_entry_claim_after_broker_flat(
+                db,
+                sess,
+                le=le,
+            ):
+                return {
+                    "filled": False,
+                    "pending": True,
+                    "why": "retained_entry_claim_resolution_pending",
+                    "order_status": no.status,
+                }
+            le.pop("alpaca_retry_cap_full_fill_broker_flat_block", None)
         le.pop("exit_pending_first_seen_utc", None)
         # Fee truth (2026-06-13): stash the broker-reported commission so the
         # completion fn (which never sees the order object) books it into the
@@ -1899,10 +11768,31 @@ def _poll_live_exit_fill(
             "filled_size": filled_size,
         }
         _commit_le(sess, le)
-        return {"filled": True, "fill_price": avg_px, "filled_size": filled_size, "order_status": no.status}
+        return {
+            "filled": True,
+            "fill_price": avg_px,
+            "filled_size": filled_size,
+            "broker_remaining_quantity": broker_remaining,
+            "order_status": no.status,
+        }
 
-    terminal_status = (no.status or "").lower() in ("filled", "done", "closed", "cancelled", "canceled", "expired", "failed")
     if terminal_status and filled_size > 1e-12 and avg_px is not None:
+        owner_resolved, broker_remaining, owner_error = (
+            _resolve_terminal_owner_transport()
+        )
+        if not owner_resolved:
+            le["alpaca_exit_owner_transport_resolution_block"] = {
+                "reason": owner_error,
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "filled": False,
+                "pending": True,
+                "why": owner_error,
+                "order_status": no.status,
+            }
         le["last_exit_fee_usd"] = _order_total_fees_usd(no)
         le["last_exit_broker_truth"] = {
             "broker_order_id": str(oid) if oid else None,
@@ -1916,18 +11806,40 @@ def _poll_live_exit_fill(
             "partial": True,
             "fill_price": avg_px,
             "filled_size": filled_size,
+            "broker_remaining_quantity": broker_remaining,
             "order_status": no.status,
         }
 
     if _order_terminal_without_exit_fill(no):
+        owner_resolved, broker_remaining, owner_error = (
+            _resolve_terminal_owner_transport()
+        )
+        if not owner_resolved:
+            le["alpaca_exit_owner_transport_resolution_block"] = {
+                "reason": owner_error,
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return {
+                "filled": False,
+                "pending": True,
+                "why": owner_error,
+                "order_status": no.status,
+            }
         failed = {
             "reason": reason,
             "order_id": oid,
             "order_status": no.status,
             "filled_size": filled_size,
+            "broker_remaining_quantity": broker_remaining,
             "recorded_at_utc": _utcnow().isoformat(),
         }
         le["last_exit_terminal_no_fill"] = failed
+        le.pop("exit_order_id", None)
+        le.pop("exit_client_order_id", None)
+        le.pop("exit_order_type", None)
+        le.pop("exit_limit_price", None)
         le.pop("pending_exit_reason", None)
         le.pop("pending_exit_quantity", None)
         le.pop("pending_exit_submitted_at_utc", None)
@@ -1968,6 +11880,135 @@ def _poll_live_exit_fill(
             _sub_age = 0.0
         _repeg_s = float(getattr(settings, "chili_momentum_exit_limit_repeg_seconds", 20.0) or 20.0)
         if _repeg_s > 0 and _sub_age > _repeg_s and filled_size <= 1e-12:
+            if alpaca_family:
+                transport = le.get("alpaca_active_exit_owner_transport")
+                transport = dict(transport) if isinstance(transport, dict) else None
+                if transport is None or not (
+                    str(transport.get("client_order_id") or "").strip()
+                    == str(le.get("exit_client_order_id") or "").strip()
+                    == str(getattr(no, "client_order_id", "") or "").strip()
+                    and _owner_transport_order_matches(no, transport)
+                ):
+                    return {
+                        "filled": False,
+                        "pending": True,
+                        "why": "alpaca_repeg_owner_transport_identity_missing",
+                    }
+                account_ok, account_identity = _strict_alpaca_account_identity(
+                    adapter,
+                    sess,
+                )
+                if not account_ok:
+                    return {
+                        "filled": False,
+                        "pending": True,
+                        "why": account_identity.get("reason")
+                        or "alpaca_account_identity_blocked",
+                    }
+                try:
+                    adapter.cancel_order(str(oid))
+                except Exception:
+                    pass
+                cid_state, exact_after_cancel = _strict_client_order_id_truth(
+                    adapter,
+                    str(transport["client_order_id"]),
+                )
+                if cid_state != "found" or exact_after_cancel is None:
+                    return {
+                        "filled": False,
+                        "pending": True,
+                        "why": (
+                            "alpaca_repeg_post_cancel_cid_absent"
+                            if cid_state == "absent"
+                            else "alpaca_repeg_post_cancel_truth_unknown"
+                        ),
+                    }
+                if not (
+                    str(getattr(exact_after_cancel, "order_id", "") or "").strip()
+                    == str(oid)
+                    and _owner_transport_order_matches(exact_after_cancel, transport)
+                ):
+                    return {
+                        "filled": False,
+                        "pending": True,
+                        "why": "alpaca_repeg_post_cancel_identity_mismatch",
+                    }
+                post_status = str(
+                    getattr(exact_after_cancel, "status", "") or ""
+                ).strip().lower()
+                if post_status not in _ORDER_TERMINAL_STATUSES:
+                    return {
+                        "filled": False,
+                        "pending": True,
+                        "why": "alpaca_repeg_cancel_not_terminal",
+                    }
+                no = exact_after_cancel
+                resolved, broker_remaining, resolve_error = (
+                    _resolve_terminal_owner_transport()
+                )
+                if not resolved:
+                    return {
+                        "filled": False,
+                        "pending": True,
+                        "why": resolve_error,
+                    }
+                post_filled = float(
+                    getattr(exact_after_cancel, "filled_size", 0.0) or 0.0
+                )
+                post_avg = _float_or_none(
+                    getattr(exact_after_cancel, "average_filled_price", None)
+                )
+                if post_filled > 1e-12:
+                    if post_avg is None:
+                        return {
+                            "filled": False,
+                            "pending": True,
+                            "why": "alpaca_repeg_cancel_race_fill_price_unknown",
+                        }
+                    le["last_exit_fee_usd"] = _order_total_fees_usd(
+                        exact_after_cancel
+                    )
+                    le["last_exit_broker_truth"] = {
+                        "broker_order_id": str(oid),
+                        "order_status": post_status,
+                        "avg_px": post_avg,
+                        "filled_size": post_filled,
+                    }
+                    _commit_le(sess, le)
+                    return {
+                        "filled": bool(
+                            post_filled + 1e-12 >= float(quantity) * 0.999
+                            and broker_remaining is not None
+                            and broker_remaining <= 1e-9
+                        ),
+                        "partial": bool(
+                            post_filled + 1e-12 < float(quantity) * 0.999
+                            or broker_remaining is None
+                            or broker_remaining > 1e-9
+                        ),
+                        "fill_price": post_avg,
+                        "filled_size": post_filled,
+                        "broker_remaining_quantity": broker_remaining,
+                        "order_status": post_status,
+                    }
+                le.pop("exit_order_id", None)
+                le.pop("exit_order_type", None)
+                le.pop("pending_exit_reason", None)
+                le.pop("pending_exit_quantity", None)
+                le.pop("pending_exit_submitted_at_utc", None)
+                le.pop("exit_pending_first_seen_utc", None)
+                _commit_le(sess, le)
+                _emit(db, sess, "live_exit_limit_repegged", {
+                    "reason": reason,
+                    "order_id": oid,
+                    "age_s": round(_sub_age, 1),
+                    "exact_terminal_zero": True,
+                })
+                return {
+                    "filled": False,
+                    "repegged": True,
+                    "why": "limit_repeg_exact_terminal_zero",
+                }
             try:
                 adapter.cancel_order(str(oid))
             except Exception:
@@ -1997,7 +12038,11 @@ def _poll_live_exit_fill(
             _age = (_utcnow() - datetime.fromisoformat(str(first_seen))).total_seconds()
         except (TypeError, ValueError):
             _age = 0.0
-        if _age > 90.0 and _broker_position_confirms_zero(sess):
+        if (
+            not alpaca_family
+            and _age > 90.0
+            and _broker_position_confirms_zero(sess)
+        ):
             fill_px = avg_px or _float_or_none(getattr(no, "price", None))
             le.pop("exit_pending_first_seen_utc", None)
             _commit_le(sess, le)
@@ -2488,6 +12533,20 @@ def _place_scale_out_limit(
     pop is still paying the level, instead of a reactive market sell after the
     trigger (which pays the give-back). Fail-open: any failure here leaves the
     reactive market scale-out path fully in charge."""
+    if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+        # Recertification posture: Alpaca has no OCO contract here. A resting
+        # partial SELL and a full-qty deadman would reserve overlapping shares;
+        # keep the broker stop and use only full-position software exits.
+        le["alpaca_scale_out_suppressed_for_deadman"] = {
+            "reason": "single_resting_sell_serialization",
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        _emit(db, sess, "alpaca_scale_out_suppressed_for_deadman", {
+            "target_price": float(target_px),
+            "position_quantity": float(filled),
+        })
+        return
     try:
         _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
         inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
@@ -2533,7 +12592,14 @@ def _place_scale_out_limit(
             limit_price=_fmt_limit_price_sell(float(target_px)),
             client_order_id=cid,
             extended_hours=_ext,
-            **({} if _le_side_long(le) else {"position_intent": "buy_to_close"}),
+            **(
+                {"position_intent": "buy_to_close"}
+                if not _le_side_long(le)
+                else {"position_intent": "sell_to_close"}
+                if normalize_execution_family(sess.execution_family)
+                in ALPACA_EXECUTION_FAMILIES
+                else {}
+            ),
         ) or {}
         if res.get("ok") and res.get("order_id"):
             le["scale_limit_order_id"] = str(res["order_id"])
@@ -2565,7 +12631,7 @@ def _cancel_scale_limit_and_clamp(
     le: dict[str, Any],
     requested_qty: float,
     reason: str,
-) -> float:
+) -> float | None:
     """OVERSELL INVARIANT for sell-into-strength: before ANY market exit, cancel
     the resting scale-out limit and adopt whatever it already filled (cancel-race
     safe), then clamp the requested sell quantity to the TRUE remaining position.
@@ -2575,6 +12641,140 @@ def _cancel_scale_limit_and_clamp(
     oid = le.get("scale_limit_order_id")
     if not oid:
         return float(requested_qty)
+    if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+        account_ok, account_identity = _strict_alpaca_account_identity(adapter, sess)
+        if not account_ok:
+            le["alpaca_scale_limit_release_block"] = {
+                "reason": account_identity.get("reason")
+                or "alpaca_account_identity_blocked",
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return None
+        truth_getter = getattr(adapter, "get_order_truth", None)
+        if not callable(truth_getter):
+            le["alpaca_scale_limit_release_block"] = {
+                "reason": "scale_limit_strict_truth_unavailable",
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return None
+
+        def _strict_order() -> tuple[str, Any | None]:
+            try:
+                result = truth_getter(str(oid))
+            except Exception:
+                return "unknown", None
+            if not isinstance(result, dict) or not result.get("readable"):
+                return "unknown", None
+            if result.get("found") and result.get("order") is not None:
+                return "found", result["order"]
+            if result.get("found") is False:
+                return "absent", None
+            return "unknown", None
+
+        def _legacy_identity_ok(order: Any) -> bool:
+            raw = getattr(order, "raw", None)
+            raw = raw if isinstance(raw, dict) else {}
+            try:
+                broker_qty = float(raw.get("qty"))
+                expected_qty = float(le.get("scale_limit_qty"))
+                broker_limit = float(raw.get("limit_price"))
+                expected_limit = float(le.get("scale_limit_px"))
+                filled_qty = float(getattr(order, "filled_size", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return False
+            return bool(
+                str(getattr(order, "order_id", "") or "").strip() == str(oid)
+                and str(getattr(order, "product_id", "") or "").strip().upper()
+                == str(sess.symbol or "").strip().upper()
+                and str(getattr(order, "side", "") or "").strip().lower() == "sell"
+                and str(getattr(order, "order_type", "") or "").strip().lower() == "limit"
+                and str(raw.get("position_intent") or "").strip().lower() == "sell_to_close"
+                and math.isfinite(broker_qty)
+                and math.isfinite(expected_qty)
+                and abs(broker_qty - expected_qty) <= max(1e-9, expected_qty * 1e-8)
+                and math.isfinite(broker_limit)
+                and math.isfinite(expected_limit)
+                and abs(broker_limit - expected_limit) <= max(1e-9, expected_limit * 1e-8)
+                and math.isfinite(filled_qty)
+                and 0.0 <= filled_qty <= expected_qty + max(1e-9, expected_qty * 1e-8)
+            )
+
+        truth_state, exact = _strict_order()
+        if truth_state != "found" or exact is None or not _legacy_identity_ok(exact):
+            le["alpaca_scale_limit_release_block"] = {
+                "reason": (
+                    "scale_limit_identity_mismatch"
+                    if exact is not None
+                    else f"scale_limit_truth_{truth_state}"
+                ),
+                "order_id": str(oid),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            return None
+        if _order_open(exact):
+            account_ok, account_identity = _strict_alpaca_account_identity(
+                adapter,
+                sess,
+            )
+            if not account_ok:
+                le["alpaca_scale_limit_release_block"] = {
+                    "reason": account_identity.get("reason")
+                    or "alpaca_account_identity_blocked",
+                    "order_id": str(oid),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return None
+            try:
+                adapter.cancel_order(str(oid))
+            except Exception:
+                pass
+            truth_state, exact = _strict_order()
+            if (
+                truth_state != "found"
+                or exact is None
+                or not _legacy_identity_ok(exact)
+                or _order_open(exact)
+            ):
+                le["alpaca_scale_limit_release_block"] = {
+                    "reason": "scale_limit_cancel_not_exact_terminal",
+                    "order_id": str(oid),
+                    "lookup_state": truth_state,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return None
+        filled = float(getattr(exact, "filled_size", 0.0) or 0.0)
+        adopted = float(le.get("scale_limit_adopted_qty") or 0.0)
+        new_fill = max(0.0, filled - adopted)
+        if new_fill > 0.0:
+            pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+            px = float(getattr(exact, "average_filled_price", 0.0) or 0.0) or float(
+                le.get("scale_limit_px") or 0.0
+            )
+            le["last_exit_fee_usd"] = _order_total_fees_usd(exact)
+            _apply_confirmed_live_partial_exit(
+                db,
+                sess,
+                le=le,
+                filled_quantity=new_fill,
+                entry_price=float(pos.get("avg_entry_price") or 0.0),
+                fill_price=px,
+                reason="legacy_alpaca_scale_out_limit_fill",
+            )
+            le["scale_limit_adopted_qty"] = adopted + new_fill
+        le.pop("scale_limit_order_id", None)
+        le.pop("alpaca_scale_limit_release_block", None)
+        _commit_le(sess, le)
+        remaining = float(
+            _float_or_none((le.get("position") or {}).get("quantity")) or 0.0
+        )
+        return max(0.0, min(float(requested_qty), remaining))
     try:
         try:
             adapter.cancel_order(str(oid))
@@ -2644,11 +12844,127 @@ def _cancel_agentic_covering_sells(adapter: Any, symbol: str) -> int:
     return n
 
 
+_ALPACA_PRE_ENTRY_CLAIM_STATES = frozenset(
+    {
+        STATE_LIVE_ARM_PENDING,
+        STATE_ARMED_PENDING_RUNNER,
+        STATE_QUEUED_LIVE,
+        STATE_WATCHING_LIVE,
+        STATE_LIVE_ENTRY_CANDIDATE,
+        STATE_LIVE_PENDING_ENTRY,
+    }
+)
+
+
+def _retire_confirmed_pre_http_alpaca_claim_before_terminal(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    new_state: str,
+) -> None:
+    """Retire the exact no-transport arm permit before terminalizing its owner.
+
+    A confirmed Alpaca arm reserves the account/symbol before a deterministic
+    client order id exists.  If a later pre-entry policy/kill path terminalizes
+    that session without resolving the reservation, every future arm for the
+    symbol is permanently blocked: detached broker recovery cannot prove the
+    fate of a claim which never had transport identity.
+
+    Only the strict confirmed pre-HTTP shape is releasable here.  Any unreadable,
+    malformed, CID/OID-bound, or otherwise ambiguous claim blocks the state
+    mutation so another recovery path can retain ownership and investigate it.
+    """
+    if (
+        sess.state not in _ALPACA_PRE_ENTRY_CLAIM_STATES
+        or new_state not in {STATE_LIVE_ERROR, STATE_LIVE_CANCELLED}
+    ):
+        return
+    if normalize_execution_family(
+        getattr(sess, "execution_family", None)
+    ) not in ALPACA_EXECUTION_FAMILIES:
+        return
+
+    snapshot_raw = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot_raw if isinstance(snapshot_raw, dict) else {}
+    frozen_token = str(snapshot.get("alpaca_symbol_claim_token") or "").strip()
+    has_confirmed_marker = isinstance(snapshot.get("confirmed_arm_generation"), dict)
+    # Legacy/pre-reservation sessions own no confirmed arm permit.  Do not turn
+    # their ordinary error handling into a dependency on a table they never used.
+    if not frozen_token and not has_confirmed_marker:
+        return
+
+    account_scope = _frozen_alpaca_account_scope(sess)
+    if account_scope is None:
+        raise RuntimeError("alpaca_pre_http_claim_terminalization_scope_unproven")
+    readable, claim = read_action_claim(
+        db,
+        symbol=sess.symbol,
+        account_scope=account_scope,
+        for_update=True,
+    )
+    if not readable:
+        raise RuntimeError("alpaca_pre_http_claim_terminalization_unreadable")
+    if claim is None or claim.get("phase") == "resolved":
+        return
+
+    le = snapshot.get(KEY_LIVE_EXEC)
+    le = le if isinstance(le, dict) else {}
+    if not _is_exact_pre_http_alpaca_arm_claim(sess, claim, le=le):
+        raise RuntimeError("alpaca_pre_http_claim_terminalization_ambiguous")
+
+    # Several monitor/reaper callers catch terminalization errors and later commit
+    # unrelated work.  Keep the claim UPDATE + verification inside a savepoint so
+    # even a caught verification failure cannot commit a resolved permit while its
+    # owner remains runnable.
+    with db.begin_nested():
+        resolved = resolve_action_claim(
+            db,
+            symbol=sess.symbol,
+            claim_token=str(claim.get("claim_token") or ""),
+            client_order_id=None,
+            broker_order_id=None,
+            broker_order_status="not_submitted",
+            proven_no_transport=True,
+            metadata={
+                "reason": "owner_pre_entry_terminal_transition",
+                "owner_session_id": int(sess.id),
+                "owner_old_state": str(sess.state),
+                "owner_new_state": str(new_state),
+            },
+            account_scope=account_scope,
+        )
+        if not resolved:
+            raise RuntimeError("alpaca_pre_http_claim_terminalization_cas_failed")
+
+        verified, retired = read_action_claim(
+            db,
+            symbol=sess.symbol,
+            account_scope=account_scope,
+            for_update=True,
+        )
+        if not (
+            verified
+            and isinstance(retired, dict)
+            and retired.get("phase") == "resolved"
+            and retired.get("action") == "entry"
+            and retired.get("claim_token") == claim.get("claim_token") == frozen_token
+            and retired.get("owner_session_id") == int(sess.id)
+            and retired.get("client_order_id") is None
+            and retired.get("broker_order_id") is None
+        ):
+            raise RuntimeError("alpaca_pre_http_claim_terminalization_unverified")
+
+
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
     old = sess.state
     if old == new_state:
         return
     assert_transition_live(old, new_state)
+    _retire_confirmed_pre_http_alpaca_claim_before_terminal(
+        db,
+        sess,
+        new_state=new_state,
+    )
     sess.state = new_state
     sess.updated_at = _utcnow()
     from .feedback_emit import emit_feedback_after_terminal_transition
@@ -3287,6 +13603,219 @@ def _is_dup_reference_reject(error: str | None) -> bool:
     return ("409" in e) and ("reference" in e) and ("unique" in e)
 
 
+def _is_indeterminate_alpaca_submit(
+    result: Any,
+    execution_family: str | None,
+) -> bool:
+    """Whether a failed Alpaca submit lacks proof that the broker rejected it.
+
+    The adapter marks explicit non-timeout 4xx responses ``broker_rejected``.
+    A timeout, disconnect, 5xx, or any older/malformed Alpaca failure envelope is
+    fail-closed: the deterministic client id must be reconciled before the runner
+    may terminalize or place another entry.
+    """
+    if str(execution_family or "").strip().lower() not in (
+        "alpaca_spot",
+        "alpaca_short",
+    ):
+        return False
+    if not isinstance(result, dict) or result.get("ok") is not False:
+        return False
+    outcome = str(result.get("submit_outcome") or "").strip().lower()
+    if outcome == "broker_rejected":
+        return False
+    # Unknown/legacy Alpaca envelopes are not affirmative broker rejections.
+    return True
+
+
+def _recover_entry_order_by_client_id(
+    adapter: Any, client_order_id: str | None
+) -> NormalizedOrder | None:
+    """Best-effort broker-truth lookup for an ack-lost entry submit.
+
+    Venue adapters expose this capability only when their broker has an exact
+    client-id lookup.  Returning ``None`` is deliberately indeterminate rather
+    than evidence that no order exists: callers must remain fail-closed and must
+    not submit a replacement until a real broker order id is recovered.
+    """
+    cid = str(client_order_id or "").strip()
+    lookup = getattr(adapter, "get_order_by_client_order_id", None)
+    if not cid or not callable(lookup):
+        return None
+    try:
+        result = lookup(cid)
+    except Exception:
+        _log.debug(
+            "[momentum_live] client-order-id recovery failed cid=%s",
+            cid,
+            exc_info=True,
+        )
+        return None
+    no = result[0] if isinstance(result, tuple) else result
+    if no is None:
+        return None
+    # Reject loose mocks / malformed broker responses.  An exact broker order id
+    # is the invariant that lets the existing pending-entry poll own the fill.
+    oid = getattr(no, "order_id", None)
+    if not isinstance(oid, (str, int)) or not str(oid).strip():
+        return None
+    return no
+
+
+def _final_entry_bbo(
+    adapter: Any,
+    product_id: str,
+    *,
+    max_age_seconds: float,
+) -> tuple[NormalizedTicker | None, dict[str, Any]]:
+    """Fetch and validate the exact BBO used at the broker submit boundary.
+
+    This is deliberately stricter than the setup/scoring quote.  A quote without
+    explicit source, time, symbol, or a sane uncrossed market is not evidence that
+    an order is safe to send.
+    """
+    getter = getattr(adapter, "get_execution_bbo", None)
+    if not callable(getter):
+        return None, {"ok": False, "reason": "execution_bbo_capability_missing"}
+    try:
+        result = getter(product_id, max_age_seconds=float(max_age_seconds))
+        tick, meta = result if isinstance(result, tuple) else (result, None)
+    except Exception as exc:
+        return None, {
+            "ok": False,
+            "reason": "execution_bbo_read_failed",
+            "error_type": type(exc).__name__,
+        }
+    if tick is None:
+        return None, {"ok": False, "reason": "execution_bbo_unavailable"}
+    # The just-before-place seam re-checks ``tick.freshness``.  Validate that
+    # exact object here as well; accepting only a separate tuple-level metadata
+    # object could prove one clock fresh and then silently skip/re-check another.
+    # When an adapter returns both, use the more conservative (older) age.
+    tuple_meta = meta
+    tick_meta = getattr(tick, "freshness", None)
+    raw = tick.raw if isinstance(getattr(tick, "raw", None), dict) else {}
+    source = str(raw.get("feed") or raw.get("source") or "").strip()
+    expected = str(product_id or "").upper().replace("/", "-")
+    observed = str(getattr(tick, "product_id", "") or "").upper().replace("/", "-")
+    try:
+        bid = float(tick.bid)
+        ask = float(tick.ask)
+        mid = float(tick.mid) if tick.mid is not None else (bid + ask) / 2.0
+    except (TypeError, ValueError):
+        return None, {"ok": False, "reason": "execution_bbo_non_numeric"}
+    if observed != expected:
+        return None, {
+            "ok": False,
+            "reason": "execution_bbo_symbol_mismatch",
+            "expected_symbol": expected,
+            "observed_symbol": observed,
+        }
+    if not source:
+        return None, {"ok": False, "reason": "execution_bbo_source_missing"}
+    if not (bid > 0 and ask >= bid and mid > 0):
+        return None, {
+            "ok": False,
+            "reason": "execution_bbo_invalid_or_crossed",
+            "bid": bid,
+            "ask": ask,
+        }
+    if tick_meta is None or not hasattr(tick_meta, "age_seconds"):
+        return None, {"ok": False, "reason": "execution_bbo_time_missing", "source": source}
+    try:
+        age_candidates = [float(tick_meta.age_seconds())]
+        if tuple_meta is not None and tuple_meta is not tick_meta:
+            if not hasattr(tuple_meta, "age_seconds"):
+                raise ValueError("tuple execution BBO freshness is invalid")
+            age_candidates.append(float(tuple_meta.age_seconds()))
+        age_s = max(age_candidates)
+        if not math.isfinite(age_s):
+            raise ValueError("execution BBO age is non-finite")
+    except Exception:
+        return None, {"ok": False, "reason": "execution_bbo_time_invalid", "source": source}
+    spread_bps = (ask - bid) / mid * 10_000.0
+    snapshot = {
+        "ok": age_s <= float(max_age_seconds),
+        "reason": (
+            "execution_bbo_ok"
+            if age_s <= float(max_age_seconds)
+            else "execution_bbo_stale"
+        ),
+        "symbol": observed,
+        "source": source,
+        "tape_row_id": raw.get("tape_row_id"),
+        "provider_event_at_utc": raw.get("provider_event_at_utc"),
+        "received_at_utc": raw.get("received_at_utc"),
+        "timestamp_basis": raw.get("timestamp_basis"),
+        "age_seconds": round(age_s, 6),
+        "max_age_seconds": float(max_age_seconds),
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "spread_bps": round(spread_bps, 4),
+    }
+    if not snapshot["ok"]:
+        return None, snapshot
+    return tick, snapshot
+
+
+def _entry_spread_risk_decision(
+    *,
+    bid: float,
+    ask: float,
+    quantity: float,
+    stop_distance: float,
+    max_fraction: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Bound spread-crossing cost as a fraction of structural trade risk."""
+    try:
+        qty = float(quantity)
+        risk_usd = float(stop_distance) * qty
+        spread_cost_usd = (float(ask) - float(bid)) * qty
+        fraction = spread_cost_usd / risk_usd
+    except (TypeError, ValueError, ZeroDivisionError):
+        risk_usd = 0.0
+        spread_cost_usd = 0.0
+        fraction = math.inf
+    ok = bool(
+        risk_usd > 0
+        and spread_cost_usd >= 0
+        and math.isfinite(fraction)
+        and fraction <= float(max_fraction)
+    )
+    return ok, {
+        "spread_cost_usd": round(spread_cost_usd, 2),
+        "structural_risk_usd": round(risk_usd, 2),
+        "spread_fraction_of_risk": round(fraction, 6) if math.isfinite(fraction) else None,
+        "max_spread_fraction_of_risk": float(max_fraction),
+        "reason": (
+            "within_budget"
+            if ok
+            else (
+                "structural_risk_unavailable"
+                if risk_usd <= 0
+                else "spread_consumes_too_much_risk"
+            )
+        ),
+    }
+
+
+def _bind_recovered_entry_order(
+    le: dict[str, Any], no: NormalizedOrder, *, client_order_id: str | None = None
+) -> str:
+    """Attach one client-id-recovered broker order to the normal entry lifecycle."""
+    oid = str(no.order_id)
+    le["entry_order_id"] = oid
+    le["entry_submitted"] = True
+    recovered_cid = str(getattr(no, "client_order_id", None) or client_order_id or "").strip()
+    if recovered_cid:
+        le["entry_client_order_id"] = recovered_cid
+    _record_entry_order_placed(le, oid)
+    le.pop("entry_reconcile_pending_client_order_id", None)
+    le.pop("entry_reconcile_pending_since_utc", None)
+    return oid
+
+
 def _adaptive_notional_guard_multiplier(*, expected_move_bps: float | None) -> float:
     """Marketable-limit premium over the ask. Base = the documented notional-guard bps
     (25 today); on a volatile name widen toward a fraction of its expected move so the
@@ -3480,6 +14009,42 @@ def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str,
 _HELD_LIVE_STATES = frozenset(
     {STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT}
 )
+
+
+def _live_tick_bbo(
+    adapter: Any,
+    product_id: str,
+    *,
+    execution_family: str | None,
+    state: str,
+) -> tuple[Any, Any, dict[str, Any] | None]:
+    """Return the quote allowed to drive this live tick.
+
+    Held Alpaca positions are exit-critical: the adapter's ordinary quote path may
+    accept an IQFeed row up to 60 seconds old, which can make a stop/target decision
+    against a dead book.  Route only those held ticks through the strict execution
+    BBO contract, hard-capped at two seconds (or a tighter configured entry bound).
+    Pre-entry and non-Alpaca paths retain their existing quote behaviour.
+    """
+    family = str(execution_family or "").strip().lower()
+    if family in ("alpaca_spot", "alpaca_short") and state in _HELD_LIVE_STATES:
+        try:
+            configured = float(
+                getattr(settings, "chili_momentum_entry_bbo_max_age_seconds", 2.0)
+                or 2.0
+            )
+        except (TypeError, ValueError):
+            configured = 2.0
+        max_age_seconds = min(2.0, max(0.0, configured))
+        tick, snapshot = _final_entry_bbo(
+            adapter,
+            product_id,
+            max_age_seconds=max_age_seconds,
+        )
+        return tick, getattr(tick, "freshness", None), snapshot
+
+    tick, freshness = adapter.get_best_bid_ask(product_id)
+    return tick, freshness, None
 
 
 def _stop_vol_floor_mult() -> float:
@@ -4938,6 +15503,118 @@ def _mark_entry_order_resolved(le: dict, order_id, outcome: str) -> None:
     le["entry_orders_resolved"] = res
 
 
+def _resolve_alpaca_entry_claim_from_terminal_order(
+    sess: TradingAutomationSession,
+    order: Any,
+    *,
+    le: dict[str, Any],
+    durable_adopted: bool,
+) -> bool:
+    """Release the exact entry/add permit only after durable terminal truth."""
+    if normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES:
+        return True
+    status = str(getattr(order, "status", "") or "").strip().lower()
+    if status not in _ORDER_TERMINAL_STATUSES:
+        return False
+    cid = str(getattr(order, "client_order_id", "") or "").strip()
+    oid = str(getattr(order, "order_id", "") or "").strip()
+    if not cid or not oid:
+        return False
+    try:
+        filled = float(getattr(order, "filled_size", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    snap = dict(sess.risk_snapshot_json or {})
+    account_scope = _frozen_alpaca_account_scope(sess)
+    if account_scope is None:
+        return False
+    token = str(snap.get("alpaca_symbol_claim_token") or "").strip()
+    if not token:
+        return False
+    if durable_adopted and filled > 0.0:
+        # The caller's session adoption is still inside the outer tick transaction.
+        # Persist a resolution proof marker there; only the *next* tick (after that
+        # transaction committed) may release the independent broker claim.
+        le["alpaca_entry_claim_resolution_pending"] = {
+            "claim_token": token,
+            "client_order_id": cid,
+            "broker_order_id": oid,
+            "broker_order_status": status,
+            "filled_size": filled,
+            "retain_until_broker_flat": True,
+            "runner_exit_guard": True,
+        }
+        _commit_le(sess, le)
+        return True
+    return resolve_action_claim_committed(
+        symbol=sess.symbol,
+        claim_token=token,
+        client_order_id=cid,
+        broker_order_id=oid,
+        broker_order_status=status,
+        zero_fill_terminal=bool(filled <= 0.0),
+        metadata={"reason": "terminal_entry_zero_fill", "filled_size": filled},
+        account_scope=account_scope,
+    )
+
+
+def _resolve_committed_alpaca_entry_claim_pending(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+) -> bool:
+    """Release a filled claim only from adoption evidence committed last tick."""
+    if normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES:
+        return True
+    account_scope = _frozen_alpaca_account_scope(sess)
+    if account_scope is None:
+        return False
+    pending = le.get("alpaca_entry_claim_resolution_pending")
+    if not isinstance(pending, dict):
+        return True
+    token = str(pending.get("claim_token") or "").strip()
+    cid = str(pending.get("client_order_id") or "").strip()
+    oid = str(pending.get("broker_order_id") or "").strip()
+    status = str(pending.get("broker_order_status") or "").strip().lower()
+    if not token or not cid or not oid or status not in _ORDER_TERMINAL_STATUSES:
+        return False
+    position = le.get("position")
+    try:
+        held_qty = abs(float((position or {}).get("quantity")))
+    except (TypeError, ValueError, AttributeError):
+        held_qty = 0.0
+    if (
+        not isinstance(position, dict)
+        or held_qty <= 0.0
+        or str(sess.state) not in LIVE_POSITION_HOLDING_STATES
+    ):
+        return False
+    if (
+        pending.get("retain_until_broker_flat") is True
+        and pending.get("runner_exit_guard") is True
+    ):
+        # Every exact Alpaca fill keeps its owner permit for the complete held
+        # lifetime.  The same row is the cross-process close/deadman outbox, and
+        # only the existing fresh broker-flat proof may release it.
+        return True
+    resolved = resolve_action_claim_committed(
+        symbol=sess.symbol,
+        claim_token=token,
+        client_order_id=cid,
+        broker_order_id=oid,
+        broker_order_status=status,
+        durable_entry_adopted=True,
+        metadata={
+            "reason": "committed_session_adoption_verified_next_tick",
+            "filled_size": pending.get("filled_size"),
+        },
+        account_scope=account_scope,
+    )
+    if resolved:
+        le.pop("alpaca_entry_claim_resolution_pending", None)
+        _commit_le(sess, le)
+    return resolved
+
+
 # ── RECYCLE entry/position lifecycle reset (2026-06-27 duplicate-fill root cause) ──
 # At COOLDOWN -> WATCHING_LIVE the session RECYCLES into a fresh watcher. Today it keeps
 # the PRIOR trade's entry-order / position state in `le`, so the recycled watcher's first
@@ -4978,11 +15655,15 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     # ── entry submit / sizing / pricing context ──
     "entry_submit_utc",
     "entry_client_order_id",
+    "entry_reconcile_pending_client_order_id",
+    "entry_reconcile_pending_since_utc",
     "entry_limit_price",
     "entry_original_limit_px",
     "entry_order_type",
     "entry_place_count",
     "entry_place_result",
+    "emergency_entry_order_terminal_confirmed",
+    "emergency_entry_cancel_pending",
     "entry_repeg_count",
     "entry_chunk_order_ids",
     "entry_decision_packet_id",
@@ -5040,6 +15721,12 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "pending_exit_is_scale_out",
     "last_exit_pending_confirmation",
     "broker_zero_confirm_streak",
+    "deadman_stop",
+    "deadman_released_for_close",
+    "deadman_applied_fill_watermarks",
+    "alpaca_exit_applied_fill_watermarks",
+    "alpaca_active_exit_owner_transport",
+    "alpaca_last_resolved_exit_owner_transport",
     # ── scale-out / runner ladder ──
     "scale_limit_order_id",
     "scale_limit_px",
@@ -5075,6 +15762,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "micropullback_reentry_order_id",
     "micropullback_reentry_limit_px",
     "micropullback_reentry_count",
+    "micropullback_reentry_place_count",
     "micropullback_reentry_cooldown_until_utc",
     "micropullback_reentry_pending_R0",
     "micropullback_confirm_ofi",
@@ -5086,6 +15774,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "pullback_add_order_id",
     "pullback_add_limit_px",
     "pullback_add_count",
+    "pullback_add_place_count",
     "pullback_add_cooldown_until_utc",
     "pullback_add_pending_R0",
     "pullback_add_pending_low",
@@ -5097,6 +15786,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "flag_breakout_add_order_id",
     "flag_breakout_add_limit_px",
     "flag_breakout_add_count",
+    "flag_breakout_add_place_count",
     "flag_breakout_add_cooldown_until_utc",
     "flag_breakout_add_pending_R0",
     "flag_breakout_add_pending_high",
@@ -5256,6 +15946,12 @@ def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
             # forget; unblocks the pre-submit guard.
             _mark_entry_order_resolved(le, oid, "void")
             _commit_le(sess, le)
+            _resolve_alpaca_entry_claim_from_terminal_order(
+                sess,
+                no,
+                le=le,
+                durable_adopted=False,
+            )
     return False
 
 
@@ -5853,10 +16549,55 @@ def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[Trading
             TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
         )
         .order_by(TradingAutomationSession.updated_at.asc())
-        .limit(lim)
         .all()
     )
-    return [row for row in rows if not is_operator_paused(row.risk_snapshot_json)]
+    # Crash-surviving Alpaca owner claims and explicit exit authorities are a
+    # priority lane independent of the normal batch cap.  Merely being a paused
+    # Alpaca row is not authority: including every inert paused row lets the oldest
+    # ``limit`` rows starve a newer real emergency forever.
+    claim_owner_ids: set[int] = set()
+    claim_truth_readable = True
+    try:
+        claim_owner_ids = {
+            int(row[0])
+            for row in (
+                db.query(BrokerSymbolActionClaim.owner_session_id)
+                .filter(
+                    BrokerSymbolActionClaim.phase != "resolved",
+                    BrokerSymbolActionClaim.action == "entry",
+                    BrokerSymbolActionClaim.owner_session_id.isnot(None),
+                )
+                .distinct()
+                .all()
+            )
+        }
+    except Exception:
+        claim_truth_readable = False
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _log.error(
+            "[live_runner] durable Alpaca claim priority read failed; "
+            "suppressing normal entry dispatch this batch",
+            exc_info=True,
+        )
+        # Fail closed for new entries when claim truth itself is unreadable.
+        # Explicit exit authorities remain eligible below.
+        claim_owner_ids = set()
+
+    priority: list[TradingAutomationSession] = []
+    normal: list[TradingAutomationSession] = []
+    for row in rows:
+        paused = is_operator_paused(row.risk_snapshot_json)
+        has_claim = int(row.id) in claim_owner_ids
+        has_exit_authority = _paused_session_has_exit_authority(row)
+        if has_claim or has_exit_authority:
+            priority.append(row)
+        elif not paused and claim_truth_readable:
+            normal.append(row)
+    remaining = max(0, lim - len(priority))
+    return priority + normal[:remaining]
 
 
 # Momentum-lane advisory-lock namespace ("ML"), distinct from auto_trader's 0x4154
@@ -5983,6 +16724,525 @@ _RECONCILE_TICK_INTERVAL = 5  # only reconcile every Nth tick
 _reconcile_counters: dict[int, int] = {}
 
 
+def _paused_session_has_exit_authority(sess: TradingAutomationSession) -> bool:
+    """Paused held sessions stay inert except for explicit/emergency flatten authority."""
+    if sess.state not in _HELD_LIVE_STATES and sess.state != STATE_LIVE_PENDING_ENTRY:
+        return False
+    snap = dict(sess.risk_snapshot_json or {})
+    le = dict(snap.get("momentum_live_execution") or {})
+    authority = le.get("emergency_exit_authority")
+    if isinstance(authority, dict) and authority.get("phase") != "resolved":
+        return True
+    retry_cap_block = le.get("exit_retry_cap_emergency_block")
+    if isinstance(retry_cap_block, dict) and retry_cap_block.get("active") is True:
+        # This is a read-only certification pending state, not close authority by
+        # itself. Keeping it in the priority lane lets exact broker/CID truth
+        # recover even when the operator has paused ordinary strategy work.
+        return True
+    if (
+        le.get("operator_flatten_requested_utc")
+        or le.get("eod_flatten_requested_utc")
+        or le.get("overnight_dark_flatten_requested")
+    ):
+        return True
+    policy = snap.get("momentum_risk_policy_summary") or {}
+    if policy.get("disable_live_if_governance_inhibit", True) and is_kill_switch_active():
+        return True
+    if sess.state not in _HELD_LIVE_STATES or str(sess.symbol or "").upper().endswith("-USD"):
+        return False
+    if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+        # Alpaca EOD authority is derived only from a fresh broker next_close in
+        # the tick. Keep even a paused held row runnable so an early-close day is
+        # not hidden behind the ordinary 16:00 wall-clock assumption.
+        return True
+    try:
+        from zoneinfo import ZoneInfo
+
+        now_et = _now_in_tz(ZoneInfo("America/New_York"))
+        lead = float(getattr(settings, "chili_momentum_eod_flatten_lead_min", 5.0) or 0.0)
+        minutes_to_close = (16 * 60) - (now_et.hour * 60 + now_et.minute)
+        return bool(
+            lead > 0.0
+            and now_et.weekday() < 5
+            and 0 <= minutes_to_close <= lead
+            and not le.get("eod_flatten_done")
+        )
+    except Exception:
+        return False
+
+
+def _broker_quantity_for_emergency(adapter: Any, product_id: str) -> float | None:
+    if not hasattr(adapter, "get_position_quantity"):
+        return None
+    try:
+        qty = adapter.get_position_quantity(product_id)
+        return None if qty is None else float(qty)
+    except Exception:
+        return None
+
+
+def _broker_position_basis_for_emergency(
+    adapter: Any,
+    product_id: str,
+) -> tuple[float | None, float | None]:
+    qty = _broker_quantity_for_emergency(adapter, product_id)
+    avg = None
+    if hasattr(adapter, "list_positions"):
+        try:
+            rows, _ = adapter.list_positions()
+            if rows is not None:
+                for row in rows:
+                    if str(row.get("product_id") or "").strip().upper() == str(product_id).strip().upper():
+                        qty = float(row.get("qty"))
+                        avg = _float_or_none(row.get("avg_entry_price"))
+                        break
+        except Exception:
+            pass
+    return qty, avg
+
+
+def _normalize_emergency_broker_quantity(
+    signed_quantity: float | None,
+    *,
+    side_long: bool,
+) -> tuple[float | None, str | None]:
+    """Convert signed broker position truth into remaining exit exposure.
+
+    A sign opposite the session thesis is not "flat" and must never be hidden
+    by ``abs``/``max`` normalization.  The caller keeps the durable emergency
+    authority unresolved so an operator can inspect the unexpected exposure.
+    """
+    if signed_quantity is None:
+        return None, "broker_position_unknown"
+    try:
+        signed = float(signed_quantity)
+    except (TypeError, ValueError):
+        return None, "broker_position_invalid"
+    if not math.isfinite(signed):
+        return None, "broker_position_invalid"
+    if side_long:
+        if signed < -1e-9:
+            return None, "opposite_sign_exposure"
+        return max(0.0, signed), None
+    if signed > 1e-9:
+        return None, "opposite_sign_exposure"
+    return abs(min(0.0, signed)), None
+
+
+def _record_emergency_unpriced_fill(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    authority: dict[str, Any],
+    filled_quantity: float,
+    fill_price: float | None,
+    remaining_quantity: float,
+    reason: str,
+    note: str,
+) -> None:
+    """Persist confirmed quantity truth without inventing a zero cost basis.
+
+    Emergency liquidation must continue when Alpaca can prove quantity but not
+    the entry basis.  Such a fill is deliberately quarantined from realized P&L
+    until accounting can recover the missing broker basis.
+    """
+    qty = max(0.0, float(filled_quantity or 0.0))
+    remaining = max(0.0, float(remaining_quantity or 0.0))
+    pending = le.get("emergency_exit_accounting_pending")
+    pending = dict(pending) if isinstance(pending, dict) else {
+        "status": "pending_cost_basis",
+        "created_at_utc": _utcnow().isoformat(),
+        "legs": [],
+    }
+    legs = list(pending.get("legs") or [])
+    broker_truth = le.pop("last_exit_broker_truth", None)
+    fee = max(0.0, _float_or_none(le.pop("last_exit_fee_usd", None)) or 0.0)
+    leg = {
+        "attempt_no": int(authority.get("attempt_no") or 1),
+        "client_order_id": authority.get("client_order_id"),
+        "broker_order_id": authority.get("order_id"),
+        "order_status": (
+            broker_truth.get("order_status")
+            if isinstance(broker_truth, dict)
+            else authority.get("last_order_status")
+        ),
+        "quantity": qty,
+        "fill_price": _float_or_none(fill_price),
+        "fee_usd": fee,
+        "reason": reason,
+        "note": note,
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    # The fill watermark makes repeated terminal polls harmless; retain a second
+    # idempotency key here as defense in depth for manual data repair/replay.
+    leg_key = (
+        str(leg.get("client_order_id") or ""),
+        round(qty, 12),
+        str(note),
+    )
+    existing_keys = {
+        (
+            str(row.get("client_order_id") or ""),
+            round(float(row.get("quantity") or 0.0), 12),
+            str(row.get("note") or ""),
+        )
+        for row in legs
+        if isinstance(row, dict)
+    }
+    if qty > 1e-12 and leg_key not in existing_keys:
+        legs.append(leg)
+    pending["legs"] = legs[-20:]
+    pending["unpriced_quantity"] = sum(
+        max(0.0, float(row.get("quantity") or 0.0))
+        for row in pending["legs"]
+        if isinstance(row, dict)
+    )
+    pending["last_updated_at_utc"] = _utcnow().isoformat()
+    pending["reason"] = reason
+    pending["remaining_quantity"] = remaining
+    le["emergency_exit_accounting_pending"] = pending
+
+    pos = le.get("position")
+    pos = dict(pos) if isinstance(pos, dict) else {}
+    if remaining > 1e-9:
+        pos["quantity"] = remaining
+        pos["emergency_accounting_basis_unknown"] = True
+        le["position"] = pos
+    else:
+        le["position"] = None
+    le.pop("pending_exit_reason", None)
+    le.pop("pending_exit_quantity", None)
+    le.pop("pending_exit_submitted_at_utc", None)
+    _commit_le(sess, le)
+    _emit(db, sess, "live_emergency_exit_unpriced", {
+        "reason": reason,
+        "quantity": qty,
+        "fill_price": _float_or_none(fill_price),
+        "remaining_quantity": remaining,
+        "note": note,
+    })
+
+
+def _emergency_exit_authority(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    existing = le.get("emergency_exit_authority")
+    if isinstance(existing, dict) and existing.get("phase") != "resolved":
+        requested = [str(v) for v in (existing.get("requested_reasons") or []) if v]
+        if reason not in requested:
+            requested.append(reason)
+        existing["requested_reasons"] = requested
+        return existing
+    request_clock = str(
+        le.get("operator_flatten_requested_utc")
+        or le.get("eod_flatten_requested_utc")
+        or le.get("overnight_dark_flatten_requested_utc")
+        or le.get("exit_retry_cap_emergency_requested_utc")
+        or _utcnow().isoformat()
+    )
+    digest = hashlib.sha1(
+        f"{int(sess.id)}|{reason}|{request_clock}".encode("utf-8")
+    ).hexdigest()[:20]
+    authority = {
+        "reason": reason,
+        "client_order_id": f"chili_ml_x_{int(sess.id)}_{digest}"[:120],
+        "phase": "prepared",
+        "created_at_utc": _utcnow().isoformat(),
+        "order_id": None,
+        "attempt_no": 1,
+        "applied_filled_size": 0.0,
+        "requested_reasons": [reason],
+        "identity_contract": (
+            "alpaca_close_v1"
+            if normalize_execution_family(getattr(sess, "execution_family", None))
+            in ALPACA_EXECUTION_FAMILIES
+            else "legacy"
+        ),
+    }
+    le["emergency_exit_authority"] = authority
+    return authority
+
+
+def _rotate_emergency_exit_attempt(
+    sess: TradingAutomationSession,
+    authority: dict[str, Any],
+) -> None:
+    history = list(authority.get("terminal_attempts") or [])
+    history.append({
+        "attempt_no": authority.get("attempt_no"),
+        "client_order_id": authority.get("client_order_id"),
+        "order_id": authority.get("order_id"),
+        "phase": authority.get("phase"),
+        "applied_filled_size": authority.get("applied_filled_size"),
+        "submitted_quantity": authority.get("submitted_quantity"),
+        "order_request": (
+            dict(authority["order_request"])
+            if isinstance(authority.get("order_request"), dict)
+            else None
+        ),
+        "strict_cid_absent_after_grace": bool(
+            authority.get("strict_cid_absent_after_grace")
+        ),
+    })
+    attempt_no = int(authority.get("attempt_no") or 1) + 1
+    seed = (
+        f"{int(sess.id)}|{authority.get('reason')}|{authority.get('created_at_utc')}|{attempt_no}"
+    ).encode("utf-8")
+    digest = hashlib.sha1(seed).hexdigest()[:20]
+    authority.update({
+        "attempt_no": attempt_no,
+        "client_order_id": f"chili_ml_x_{int(sess.id)}_{digest}"[:120],
+        "order_id": None,
+        "phase": "prepared",
+        "submit_started_at_utc": None,
+        "submitted_quantity": None,
+        "order_request": None,
+        "strict_cid_absent_after_grace": False,
+        "applied_filled_size": 0.0,
+        "terminal_attempts": history[-10:],
+    })
+
+
+def _exact_emergency_exit_order(
+    adapter: Any,
+    authority: dict[str, Any],
+    *,
+    product_id: str,
+    side: str,
+) -> Any | None:
+    cid = str(authority.get("client_order_id") or "").strip()
+    oid = str(authority.get("order_id") or "").strip()
+    order = None
+    try:
+        if oid:
+            order, _ = adapter.get_order(oid)
+        elif cid and hasattr(adapter, "get_order_by_client_order_id"):
+            order, _ = adapter.get_order_by_client_order_id(cid)
+    except Exception:
+        return None
+    if order is None:
+        return None
+    return (
+        order
+        if _emergency_exit_order_matches(
+            order,
+            authority,
+            product_id=product_id,
+            side=side,
+        )
+        else None
+    )
+
+
+def _emergency_exit_order_matches(
+    order: Any,
+    authority: dict[str, Any],
+    *,
+    product_id: str,
+    side: str,
+) -> bool:
+    cid = str(authority.get("client_order_id") or "").strip()
+    oid = str(authority.get("order_id") or "").strip()
+    if not cid:
+        return False
+    if cid and str(getattr(order, "client_order_id", "") or "") != cid:
+        return False
+    if oid and str(getattr(order, "order_id", "") or "") != oid:
+        return False
+    if str(getattr(order, "product_id", "") or "").strip().upper() != str(product_id).strip().upper():
+        return False
+    if str(getattr(order, "side", "") or "").strip().lower() != str(side).strip().lower():
+        return False
+    if str(authority.get("identity_contract") or "") != "alpaca_close_v1":
+        return True
+    request = authority.get("order_request")
+    if not isinstance(request, dict):
+        return False
+    expected_intent = "sell_to_close" if str(side).strip().lower() == "sell" else "buy_to_close"
+    try:
+        expected_qty = float(request.get("base_size"))
+    except (TypeError, ValueError):
+        return False
+    expected_type = str(request.get("order_type") or "").strip().lower()
+    expected_tif = str(request.get("time_in_force") or "").strip().lower()
+    expected_extended = request.get("extended_hours")
+    expected_limit = _float_or_none(request.get("limit_price"))
+    if not (
+        math.isfinite(expected_qty)
+        and expected_qty > 0.0
+        and str(request.get("account_scope") or "").strip().lower()
+        == "alpaca:paper"
+        and str(request.get("client_order_id") or "").strip() == cid
+        and str(request.get("product_id") or "").strip().upper()
+        == str(product_id).strip().upper()
+        and str(request.get("side") or "").strip().lower()
+        == str(side).strip().lower()
+        and str(request.get("position_intent") or "").strip().lower()
+        == expected_intent
+        and expected_type in {"market", "limit"}
+        and expected_tif in {"day", "gtc"}
+        and isinstance(expected_extended, bool)
+        and (
+            (
+                expected_type == "market"
+                and expected_tif == "day"
+                and expected_extended is False
+                and request.get("limit_price") is None
+            )
+            or (
+                expected_type == "limit"
+                and expected_limit is not None
+                and expected_limit > 0.0
+                and (
+                    (expected_extended is True and expected_tif == "day")
+                    or (expected_extended is False and expected_tif in {"day", "gtc"})
+                )
+            )
+        )
+    ):
+        return False
+
+    raw = getattr(order, "raw", None)
+    if not isinstance(raw, dict):
+        return False
+    # Every signed field is mandatory broker identity evidence. Missing echoes
+    # are indeterminate and cannot authorize adoption, accounting, or rotation.
+    required_raw = {
+        "qty",
+        "limit_price",
+        "time_in_force",
+        "extended_hours",
+        "position_intent",
+    }
+    if not required_raw.issubset(raw):
+        return False
+    try:
+        broker_qty = float(raw.get("qty"))
+    except (TypeError, ValueError):
+        return False
+    if (
+        not math.isfinite(broker_qty)
+        or broker_qty <= 0.0
+        or abs(broker_qty - expected_qty) > max(1e-9, expected_qty * 1e-8)
+    ):
+        return False
+    if str(getattr(order, "order_type", "") or "").strip().lower() != expected_type:
+        return False
+    broker_tif = str(raw.get("time_in_force") or "").strip().lower()
+    if broker_tif != expected_tif:
+        return False
+    broker_extended = raw.get("extended_hours")
+    if not isinstance(broker_extended, bool) or broker_extended is not expected_extended:
+        return False
+    if str(raw.get("position_intent") or "").strip().lower() != expected_intent:
+        return False
+    broker_limit = _float_or_none(raw.get("limit_price"))
+    if expected_type == "market":
+        if raw.get("limit_price") is not None:
+            return False
+    elif (
+        broker_limit is None
+        or expected_limit is None
+        or abs(broker_limit - expected_limit) > max(1e-9, expected_limit * 1e-8)
+    ):
+        return False
+    return bool(str(getattr(order, "order_id", "") or "").strip())
+
+
+def _strict_client_order_id_truth(
+    adapter: Any,
+    client_order_id: str,
+) -> tuple[str, Any | None]:
+    """Return ``found`` / ``absent`` / ``unknown`` from a strict venue read.
+
+    Only adapters that explicitly distinguish HTTP 404 from transport/auth/server
+    failure may return ``absent``.  A legacy ``None`` lookup is always unknown.
+    """
+    getter = getattr(adapter, "get_order_by_client_order_id_truth", None)
+    if not callable(getter):
+        return "unknown", None
+    try:
+        result = getter(str(client_order_id))
+    except Exception:
+        return "unknown", None
+    if not isinstance(result, dict) or not result.get("readable"):
+        return "unknown", None
+    order = result.get("order")
+    if result.get("found") and order is not None:
+        return "found", order
+    if result.get("found") is False:
+        return "absent", None
+    return "unknown", None
+
+
+def _strict_broker_order_id_truth(
+    adapter: Any,
+    broker_order_id: str,
+) -> tuple[str, Any | None]:
+    """Strict broker-ID counterpart to the CID truth helper."""
+    oid = str(broker_order_id or "").strip()
+    getter = getattr(adapter, "get_order_truth", None)
+    if not oid or not callable(getter):
+        return "unknown", None
+    try:
+        result = getter(oid)
+    except Exception:
+        return "unknown", None
+    if not isinstance(result, dict) or not result.get("readable"):
+        return "unknown", None
+    order = result.get("order")
+    if result.get("found") and order is not None:
+        return "found", order
+    if result.get("found") is False:
+        return "absent", None
+    return "unknown", None
+
+
+def _prior_absent_emergency_attempt_truth(
+    adapter: Any,
+    authority: dict[str, Any],
+    *,
+    product_id: str,
+    side: str,
+) -> tuple[str, Any | None, dict[str, Any] | None]:
+    """Recheck rotated CIDs so a late-visible old close blocks a successor."""
+    if str(authority.get("identity_contract") or "") != "alpaca_close_v1":
+        return "clear", None, None
+    for row in authority.get("terminal_attempts") or []:
+        if not isinstance(row, dict) or not row.get("strict_cid_absent_after_grace"):
+            continue
+        cid = str(row.get("client_order_id") or "").strip()
+        request = row.get("order_request")
+        if not cid or not isinstance(request, dict):
+            return "unknown", None, row
+        state, order = _strict_client_order_id_truth(adapter, cid)
+        if state == "absent":
+            continue
+        if state != "found" or order is None:
+            return "unknown", None, row
+        prior_authority = dict(authority)
+        prior_authority.update({
+            "attempt_no": row.get("attempt_no"),
+            "client_order_id": cid,
+            "order_id": row.get("order_id"),
+            "order_request": dict(request),
+            "submitted_quantity": row.get("submitted_quantity"),
+        })
+        if not _emergency_exit_order_matches(
+            order,
+            prior_authority,
+            product_id=product_id,
+            side=side,
+        ):
+            return "identity_mismatch", order, row
+        return "found", order, row
+    return "clear", None, None
+
+
 def _reconcile_venue_position(adapter: Any, db: Session, sess: Any, product_id: str) -> None:
     """Rate-limited venue reconciliation: detect orphaned orders or stale positions."""
     sid = int(sess.id)
@@ -6023,6 +17283,216 @@ def _reconcile_venue_position(adapter: Any, db: Session, sess: Any, product_id: 
         _log.debug("[live_runner] reconcile failed for session=%s: %s", sid, e)
 
 
+def _live_runner_order_factory(
+    factory: AdapterFactory,
+    execution_family: str | None,
+) -> AdapterFactory:
+    """Apply optional chunking only where durable order identity supports it.
+
+    An Alpaca claim owns exactly one immutable parent client-order-id/request.
+    Generic chunking replaces that id with fresh child ids, so it is incompatible
+    with crash recovery for entries and closes.  The flag is therefore ignored for
+    every Alpaca family and the exact raw factory is returned.
+    """
+    if normalize_execution_family(execution_family) in ALPACA_EXECUTION_FAMILIES:
+        return factory
+    try:
+        from ..venue.chunking_adapter import maybe_wrap_chunking
+
+        return maybe_wrap_chunking(factory)
+    except Exception:
+        return factory
+
+
+_NON_ALPACA_ACCOUNT_QUARANTINE_KEY = (
+    "non_alpaca_account_identity_quarantined"
+)
+_NON_ALPACA_MUTATION_METHODS = frozenset({
+    "cancel_order",
+    "cancel_order_by_id",
+    "place_deadman_stop",
+    "place_limit_order_gtc",
+    "place_market_order",
+})
+
+
+def _quarantine_non_alpaca_account_identity(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    phase: str,
+    truth: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist one stable account-generation quarantine without event spam."""
+    now = _utcnow().isoformat()
+    reason = str(
+        truth.get("reason") or "non_alpaca_account_identity_unknown"
+    )
+    observed_phase = str(phase or "unknown")
+    fingerprint = {
+        "reason": reason,
+        "frozen_identity": truth.get("frozen_identity"),
+        "current_identity": truth.get("current_identity"),
+    }
+    snapshot = dict(getattr(sess, "risk_snapshot_json", None) or {})
+    prior = snapshot.get(_NON_ALPACA_ACCOUNT_QUARANTINE_KEY)
+    prior = dict(prior) if isinstance(prior, dict) else {}
+    prior_fingerprint = prior.get("fingerprint")
+    changed = prior_fingerprint != fingerprint
+    first_at = str(prior.get("first_quarantined_at_utc") or now)
+    if not is_operator_paused(snapshot):
+        snapshot = apply_operator_pause(snapshot, state=sess.state)
+    if changed:
+        snapshot[_NON_ALPACA_ACCOUNT_QUARANTINE_KEY] = {
+            "active": True,
+            "fingerprint": fingerprint,
+            "first_quarantined_at_utc": first_at,
+            "first_phase": str(prior.get("first_phase") or observed_phase),
+            "last_phase": observed_phase,
+            "last_changed_at_utc": now,
+        }
+    elif prior:
+        prior["last_phase"] = observed_phase
+        snapshot[_NON_ALPACA_ACCOUNT_QUARANTINE_KEY] = prior
+    sess.risk_snapshot_json = snapshot
+    try:
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    if changed:
+        try:
+            _emit(
+                db,
+                sess,
+                "non_alpaca_account_identity_quarantined",
+                {
+                    **fingerprint,
+                    "phase": observed_phase,
+                    "first_quarantined_at_utc": first_at,
+                },
+            )
+        except Exception:
+            _log.warning(
+                "[live_runner] account identity quarantine event failed session=%s",
+                sess.id,
+                exc_info=True,
+            )
+    persistence_error = None
+    try:
+        db.flush()
+    except Exception as exc:
+        persistence_error = type(exc).__name__
+    block = {
+        "ok": False,
+        "error": reason,
+        "reason": reason,
+        "deferred": True,
+        "non_alpaca_account_identity_quarantined": True,
+        "phase": observed_phase,
+        "frozen_identity": fingerprint["frozen_identity"],
+        "current_identity": fingerprint["current_identity"],
+        "broker_mutations": 0,
+    }
+    if persistence_error is not None:
+        block["quarantine_persistence_error"] = persistence_error
+    return block
+
+
+def _non_alpaca_account_identity_fence(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    phase: str,
+) -> dict[str, Any] | None:
+    truth = verify_frozen_non_alpaca_account_identity(
+        sess,
+        adapter=adapter,
+    )
+    if truth.get("ok") is True:
+        return None
+    return _quarantine_non_alpaca_account_identity(
+        db,
+        sess,
+        phase=phase,
+        truth=truth,
+    )
+
+
+class _NonAlpacaAccountFencedAdapter:
+    """Recheck the same resolved account immediately before every mutation.
+
+    The wrapper sits *inside* optional chunking, so each child broker POST is
+    independently fenced rather than inheriting one stale logical-order check.
+    """
+
+    def __init__(
+        self,
+        adapter: Any,
+        *,
+        db: Session,
+        sess: TradingAutomationSession,
+    ) -> None:
+        self._adapter = adapter
+        self._db = db
+        self._sess = sess
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._adapter, name)
+        if name not in _NON_ALPACA_MUTATION_METHODS or not callable(attr):
+            return attr
+
+        def _fenced(*args: Any, **kwargs: Any) -> Any:
+            snapshot = getattr(self._sess, "risk_snapshot_json", None)
+            snapshot = snapshot if isinstance(snapshot, dict) else {}
+            active = snapshot.get(_NON_ALPACA_ACCOUNT_QUARANTINE_KEY)
+            if isinstance(active, dict) and active.get("active") is True and is_operator_paused(snapshot):
+                fingerprint = active.get("fingerprint")
+                fingerprint = (
+                    dict(fingerprint) if isinstance(fingerprint, dict) else {}
+                )
+                block = {
+                    "ok": False,
+                    "error": str(
+                        fingerprint.get("reason")
+                        or "non_alpaca_account_identity_unknown"
+                    ),
+                    "reason": str(
+                        fingerprint.get("reason")
+                        or "non_alpaca_account_identity_unknown"
+                    ),
+                    "deferred": True,
+                    "non_alpaca_account_identity_quarantined": True,
+                    "phase": active.get("last_phase"),
+                    "frozen_identity": fingerprint.get("frozen_identity"),
+                    "current_identity": fingerprint.get("current_identity"),
+                    "broker_mutations": 0,
+                }
+            else:
+                mutation_phase = (
+                    "before_order_cancel"
+                    if name.startswith("cancel")
+                    else "before_order_place"
+                )
+                block = _non_alpaca_account_identity_fence(
+                    self._db,
+                    self._sess,
+                    self._adapter,
+                    phase=mutation_phase,
+                )
+            if block is not None:
+                block = dict(block)
+                block[
+                    "pre_cancel_blocked"
+                    if name.startswith("cancel")
+                    else "pre_place_blocked"
+                ] = True
+                return block
+            return attr(*args, **kwargs)
+
+        return _fenced
+
+
 def tick_live_session(
     db: Session,
     session_id: int,
@@ -6046,29 +17516,148 @@ def tick_live_session(
         return {"ok": True, "skipped": "concurrent_tick"}
     if sess is None:
         return {"ok": False, "error": "not_found"}
-    if is_operator_paused(sess.risk_snapshot_json):
-        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
+    _operator_paused = is_operator_paused(sess.risk_snapshot_json)
     ef = normalize_execution_family(sess.execution_family)
     if not momentum_runner_supports_execution_family(ef):
         return {"ok": True, "skipped": "execution_family_not_implemented", "execution_family": ef}
+    _alpaca_quarantine = _alpaca_execution_quarantine_reason(sess)
+    if _alpaca_quarantine:
+        return {
+            "ok": True,
+            "skipped": _alpaca_quarantine,
+            "execution_family": ef,
+            "broker_calls": 0,
+        }
+    if (
+        ef in ALPACA_EXECUTION_FAMILIES
+        and getattr(sess, "state", None) in _PRE_ENTRY_DECLINE_STATES
+    ):
+        _generation_quarantine = _confirmed_alpaca_arm_generation_reason(sess)
+        if _generation_quarantine:
+            return {
+                "ok": True,
+                "skipped": _generation_quarantine,
+                "execution_family": ef,
+                "broker_calls": 0,
+            }
+    # A pre-entry kill switch is broker-free authority. Honor it before adapter
+    # construction, connectivity probes, or account-identity reads so a halted
+    # venue cannot turn a deterministic safety terminal into a network wait or
+    # an unrelated account quarantine. Held exposure still continues into the
+    # identity-fenced emergency-flatten path below.
+    _pre_adapter_snapshot = dict(sess.risk_snapshot_json or {})
+    _pre_adapter_policy = (
+        _pre_adapter_snapshot.get("momentum_risk_policy_summary") or {}
+    )
+    if (
+        getattr(sess, "state", None)
+        in {
+            STATE_ARMED_PENDING_RUNNER,
+            STATE_QUEUED_LIVE,
+            STATE_WATCHING_LIVE,
+            STATE_LIVE_ENTRY_CANDIDATE,
+        }
+        and _pre_adapter_policy.get("disable_live_if_governance_inhibit", True)
+        and is_kill_switch_active()
+    ):
+        _emit(db, sess, "live_blocked_by_risk", {"reason": "kill_switch"})
+        _safe_transition(db, sess, STATE_LIVE_ERROR)
+        db.flush()
+        return {
+            "ok": True,
+            "blocked": True,
+            "reason": "kill_switch",
+            "broker_calls": 0,
+        }
     try:
         factory = adapter_factory or resolve_live_spot_adapter_factory(ef)
     except ExecutionFamilyNotImplementedError:
         return {"ok": True, "skipped": "execution_family_not_implemented", "execution_family": ef}
     # ORDER CHUNKING (item 2, DEFAULT OFF ⇒ byte-identical): wrap the resolved factory so the
-    # entry place_limit_order_gtc is split into N venue blocks for queue priority. When the
-    # flag is OFF or blocks<=1, maybe_wrap_chunking returns the factory UNCHANGED (the exact
-    # same adapter object), so every place_*_order is byte-identical. The wrapper is transparent
-    # to every other VenueAdapter method (delegates) and folds child broker_order_ids onto the
-    # parent for the existing dedupe/orphan reconciliation. NEW order-path: do not enable
-    # without soak (the agentic rail's duplicate-fill history).
-    try:
-        from ..venue.chunking_adapter import maybe_wrap_chunking as _maybe_wrap_chunking
-
-        factory = _maybe_wrap_chunking(factory)
-    except Exception:
-        pass  # fail-closed to the base factory (byte-identical)
-    adapter = factory()
+    # Alpaca is the hard exception: its durable owner claim tracks one exact
+    # parent CID/request, while the generic wrapper creates unclaimed children.
+    if ef in ALPACA_EXECUTION_FAMILIES:
+        factory = _live_runner_order_factory(factory, ef)
+        adapter = factory()
+        # A caller-supplied wrapper is unsafe for the same reason. Reject it
+        # before account bind and before any broker call; never delegate through
+        # it and accidentally mint unclaimed child order ids.
+        try:
+            from ..venue.chunking_adapter import ChunkingVenueAdapter
+        except Exception:
+            return {
+                "ok": True,
+                "skipped": "alpaca_chunking_adapter_identity_unreadable",
+                "execution_family": ef,
+                "broker_calls": 0,
+            }
+        if isinstance(adapter, ChunkingVenueAdapter):
+            return {
+                "ok": True,
+                "skipped": "alpaca_chunking_adapter_forbidden",
+                "execution_family": ef,
+                "broker_calls": 0,
+            }
+        bind_account = getattr(adapter, "bind_account_id", None)
+        frozen_account_id = _frozen_alpaca_account_id(sess)
+        if not (
+            callable(bind_account)
+            and frozen_account_id
+            and bind_account(frozen_account_id) is True
+        ):
+            return {
+                "ok": True,
+                "skipped": "alpaca_adapter_account_generation_bind_failed",
+                "execution_family": ef,
+                "broker_calls": 0,
+            }
+    else:
+        raw_adapter = factory()
+        # Connectivity is a cheaper, broker-free precondition than account
+        # identity. Never paginate accounts/profiles while this transaction
+        # holds the session row lock for a venue already known disconnected.
+        if not _venue_broker_connected(ef):
+            return {
+                "ok": True,
+                "skipped": "venue_broker_not_connected",
+                "execution_family": ef,
+            }
+        if not raw_adapter.is_enabled():
+            return {"ok": True, "skipped": "coinbase_adapter_unavailable"}
+        identity_block = _non_alpaca_account_identity_fence(
+            db,
+            sess,
+            raw_adapter,
+            phase="tick_start",
+        )
+        if identity_block is not None:
+            return {
+                "ok": True,
+                "skipped": "non_alpaca_account_identity_quarantined",
+                "deferred": True,
+                "execution_family": ef,
+                **{
+                    key: identity_block.get(key)
+                    for key in (
+                        "reason",
+                        "phase",
+                        "frozen_identity",
+                        "current_identity",
+                        "broker_mutations",
+                        "quarantine_persistence_error",
+                    )
+                    if identity_block.get(key) is not None
+                },
+            }
+        guarded_adapter = _NonAlpacaAccountFencedAdapter(
+            raw_adapter,
+            db=db,
+            sess=sess,
+        )
+        # Keep the fence inside optional chunking so every child broker POST
+        # rechecks the exact same resolved account generation.
+        factory = _live_runner_order_factory(lambda: guarded_adapter, ef)
+        adapter = factory()
     if not adapter.is_enabled():
         return {"ok": True, "skipped": "coinbase_adapter_unavailable"}
 
@@ -6081,9 +17670,6 @@ def tick_live_session(
     if not _venue_broker_connected(ef):
         return {"ok": True, "skipped": "venue_broker_not_connected", "execution_family": ef}
 
-    if sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
-        return {"ok": True, "skipped": "not_runnable", "state": sess.state}
-
     product_id = sess.symbol.upper().strip()
     if ef == EXECUTION_FAMILY_COINBASE_SPOT:
         # Coinbase crypto convention: ensure the BASE-USD pair suffix.
@@ -6093,17 +17679,120 @@ def tick_live_session(
     # an -USD RH-crypto pair. NEVER append -USD to an equity (that broke the entry:
     # AAPL -> AAPL-USD is not a Robinhood product).
 
+    snap = dict(sess.risk_snapshot_json or {})
+    le = _live_exec(snap)
+    _resolve_committed_alpaca_entry_claim_pending(sess, le)
+    _owner_recovery = _recover_owner_alpaca_entry_claim(
+        db,
+        sess,
+        adapter,
+        le=le,
+        product_id=product_id,
+        operator_paused=_operator_paused,
+    )
+    if _owner_recovery.get("terminal_zero_fill"):
+        # An explicit flatten that raced a still-pending entry is complete once
+        # exact broker truth proves that entry terminal with zero fill.  Owner
+        # recovery normally returns the session to watching; doing that here
+        # would silently discard the operator/EOD cancel intent and could allow
+        # a later re-entry.  Terminalize the now-flat generation instead.
+        _zero_fill_reason = None
+        if le.get("operator_flatten_requested_utc"):
+            _zero_fill_reason = "operator_flatten"
+        elif le.get("eod_flatten_requested_utc"):
+            _zero_fill_reason = "eod_flatten"
+        elif le.get("overnight_dark_flatten_requested"):
+            _zero_fill_reason = "overnight_pricebus_dark_flatten"
+        if _zero_fill_reason is not None:
+            le.pop("operator_flatten_requested_utc", None)
+            le.pop("eod_flatten_requested_utc", None)
+            le.pop("overnight_dark_flatten_requested", None)
+            le["position"] = None
+            _commit_le(sess, le)
+            if sess.state != STATE_LIVE_CANCELLED:
+                _safe_transition(db, sess, STATE_LIVE_CANCELLED)
+            _emit(
+                db,
+                sess,
+                "operator_flatten_executed",
+                {
+                    "reason": _zero_fill_reason,
+                    "entry_terminal_zero_fill": True,
+                },
+            )
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "operator_flatten": True,
+                "flatten_reason": _zero_fill_reason,
+                "entry_terminal_zero_fill": True,
+            }
+    _alpaca_owner_recovery_blocks_entries = bool(
+        _owner_recovery.get("block_new_entries")
+    )
+    if _owner_recovery.get("must_return_early"):
+        db.flush()
+        return {
+            "ok": True,
+            "session_id": sess.id,
+            "state": sess.state,
+            "pending": "entry_client_id_reconcile",
+            "owner_recovery": _owner_recovery,
+        }
+    if _operator_paused and not (
+        _paused_session_has_exit_authority(sess) or _owner_recovery.get("active")
+    ):
+        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
+    if sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
+        return {
+            "ok": True,
+            "skipped": "not_runnable",
+            "state": sess.state,
+            "owner_recovery": _owner_recovery,
+        }
+
+    # A pre-entry owner whose exact order is still unknown must not reach any
+    # trigger/counter/CID generation. Held sessions continue through exit
+    # management; each add predicate is separately gated below.
+    if (
+        _alpaca_owner_recovery_blocks_entries
+        and sess.state not in _HELD_LIVE_STATES
+        and not _owner_recovery.get("attached")
+    ):
+        db.flush()
+        return {
+            "ok": True,
+            "session_id": sess.id,
+            "state": sess.state,
+            # Preserve the established outward contract for the primary-entry
+            # ack-loss path.  Owner-claim details remain available in the
+            # structured payload below.
+            "pending": (
+                "entry_client_id_reconcile"
+                if _owner_recovery.get("order_role") in {"primary", "repeg"}
+                else "alpaca_owner_claim_reconcile"
+            ),
+            "owner_recovery": _owner_recovery,
+        }
+
     # C2: Orphaned order recovery — reconcile with venue (rate-limited)
     _reconcile_venue_position(adapter, db, sess, product_id)
 
-    snap = dict(sess.risk_snapshot_json or {})
-    if RISK_SNAPSHOT_KEY not in snap:
+    if RISK_SNAPSHOT_KEY not in snap and not _owner_recovery.get("adopted_fill"):
         _emit(db, sess, "live_error", {"reason": "missing_frozen_risk_snapshot"})
         _safe_transition(db, sess, STATE_LIVE_ERROR)
         db.flush()
         return {"ok": False, "error": "missing_risk_snapshot"}
+    if RISK_SNAPSHOT_KEY not in snap and _owner_recovery.get("adopted_fill"):
+        # Broker exposure already exists.  The recovery helper requested a
+        # quote-independent flatten, which must run below before missing frozen
+        # scanner inputs are allowed to terminalize the session.
+        le["alpaca_owner_recovery_missing_risk_snapshot"] = True
+        le["operator_flatten_requested_utc"] = _utcnow().isoformat()
+        _commit_le(sess, le)
 
-    le = _live_exec(snap)
     mid: float | None = None
     bid: float | None = None
     ask: float | None = None
@@ -6119,65 +17808,1489 @@ def tick_live_session(
         Reused by the operator FLATTEN button (flatten_reason="operator_flatten")
         so manual exits flow through the same chokepoint chain."""
         nonlocal le, snap
-        if le.get("entry_order_id") and not le.get("position"):
-            oid = str(le["entry_order_id"])
-            cr = adapter.cancel_order(oid)
-            _emit(db, sess, "live_order_cancelled", {"order_id": oid, "raw": cr})
         pos = le.get("position")
-        if isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0:
-            pid = pos.get("product_id") or sess.symbol
-            cid = f"chili_ml_x_{sess.id}_{uuid.uuid4().hex[:12]}"
+        pos_valid = bool(
+            isinstance(pos, dict)
+            and _float_or_none(pos.get("quantity")) is not None
+            and float(pos.get("quantity")) > 0.0
+        )
+        close_only_marker, close_only_marker_error = (
+            _validated_alpaca_close_only_marker(sess)
+        )
+        close_only_claim: dict[str, Any] | None = None
+        if _alpaca_close_only_marker(sess) is not None:
+            if close_only_marker_error is not None or close_only_marker is None:
+                le["alpaca_close_only_block"] = {
+                    "reason": close_only_marker_error or "invalid_marker",
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            readable, close_only_claim = read_action_claim(
+                db,
+                symbol=sess.symbol,
+                account_scope="alpaca:paper",
+            )
+            if not (
+                readable
+                and close_only_claim is not None
+                and close_only_claim.get("phase") != "resolved"
+                and close_only_claim.get("action") == "orphan_flatten"
+                and close_only_claim.get("claim_token")
+                == str(close_only_marker.get("close_claim_token"))
+                and close_only_claim.get("client_order_id")
+                == str(close_only_marker.get("close_client_order_id"))
+                and close_only_claim.get("owner_session_id") == int(sess.id)
+                and str(close_only_claim.get("symbol") or "").strip().upper()
+                == str(sess.symbol or "").strip().upper()
+            ):
+                le["alpaca_close_only_block"] = {
+                    "reason": "exact_close_claim_unreadable_or_mismatched",
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            local_close_qty = (
+                _float_or_none(pos.get("quantity"))
+                if isinstance(pos, dict)
+                else None
+            )
+            if not (
+                local_close_qty is not None
+                and abs(local_close_qty - float(close_only_marker["max_close_qty"]))
+                <= max(1e-9, float(close_only_marker["max_close_qty"]) * 1e-8)
+            ):
+                le["alpaca_close_only_block"] = {
+                    "reason": "local_quantity_mismatches_exact_recertification",
+                    "local_quantity": local_close_qty,
+                    "max_close_qty": close_only_marker["max_close_qty"],
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+
+        # Ack-loss emergency: a missing local broker OID is not proof that the
+        # submitted CID never reached Alpaca. Recover that exact identity before
+        # any broker-zero completion; unknown/not-yet-visible remains fail-closed.
+        pending_entry_cid = str(
+            le.get("entry_reconcile_pending_client_order_id")
+            or le.get("entry_client_order_id")
+            or ""
+        ).strip()
+        if (
+            not le.get("entry_order_id")
+            and pending_entry_cid
+            and le.get("entry_submitted")
+        ):
+            cid_state, cid_order = _strict_client_order_id_truth(
+                adapter,
+                pending_entry_cid,
+            )
+            if cid_state != "found":
+                cid_order = _recover_entry_order_by_client_id(
+                    adapter,
+                    pending_entry_cid,
+                )
+                if cid_order is not None:
+                    cid_state = "found"
+            if cid_state != "found" or cid_order is None:
+                le["emergency_entry_ack_loss_pending"] = {
+                    "client_order_id": pending_entry_cid,
+                    "lookup_state": cid_state,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            expected_side = "buy" if _le_side_long(le) else "sell"
+            if not (
+                str(getattr(cid_order, "client_order_id", "") or "")
+                == pending_entry_cid
+                and str(getattr(cid_order, "product_id", "") or "").strip().upper()
+                == str(product_id).strip().upper()
+                and str(getattr(cid_order, "side", "") or "").strip().lower()
+                == expected_side
+                and str(getattr(cid_order, "order_id", "") or "").strip()
+            ):
+                le["emergency_entry_ack_loss_identity_mismatch"] = {
+                    "client_order_id": pending_entry_cid,
+                    "broker_order_id": getattr(cid_order, "order_id", None),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            le["entry_order_id"] = str(cid_order.order_id)
+            le["entry_client_order_id"] = pending_entry_cid
+            _record_entry_order_placed(le, cid_order.order_id)
+            le.pop("emergency_entry_ack_loss_pending", None)
+            _commit_le(sess, le)
+
+        # Pending-entry emergency: a cancel acknowledgement is never enough. Read
+        # the exact order after cancel and adopt any cancel-raced fill before exit.
+        entry_oid = str(le.get("entry_order_id") or "").strip()
+        entry_terminal_marker = le.get("emergency_entry_order_terminal_confirmed")
+        entry_terminal_same_order = bool(
+            isinstance(entry_terminal_marker, dict)
+            and str(entry_terminal_marker.get("order_id") or "") == entry_oid
+        )
+        if entry_oid and not entry_terminal_same_order:
+            try:
+                cancel_result = adapter.cancel_order(entry_oid)
+            except Exception as exc:
+                cancel_result = {"ok": False, "error": type(exc).__name__}
+            _emit(db, sess, "live_order_cancelled", {
+                "order_id": entry_oid,
+                "raw": cancel_result,
+                "reason": flatten_reason,
+            })
+            try:
+                entry_order, _ = adapter.get_order(entry_oid)
+            except Exception:
+                entry_order = None
+            if entry_order is None and le.get("entry_client_order_id") and hasattr(
+                adapter, "get_order_by_client_order_id"
+            ):
+                try:
+                    entry_order, _ = adapter.get_order_by_client_order_id(
+                        str(le["entry_client_order_id"])
+                    )
+                except Exception:
+                    entry_order = None
+            if entry_order is None:
+                le["emergency_entry_cancel_pending"] = {
+                    "reason": flatten_reason,
+                    "order_id": entry_oid,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            expected_entry_cid = str(le.get("entry_client_order_id") or "").strip()
+            actual_entry_cid = str(
+                getattr(entry_order, "client_order_id", "") or ""
+            ).strip()
+            expected_entry_side = "buy" if _le_side_long(le) else "sell"
+            entry_raw = getattr(entry_order, "raw", None)
+            entry_raw = entry_raw if isinstance(entry_raw, dict) else {}
+            broker_order_qty = _float_or_none(entry_raw.get("qty"))
+            observed_filled = _float_or_none(getattr(entry_order, "filled_size", None))
+            entry_identity_ok = bool(
+                str(getattr(entry_order, "order_id", "") or "") == entry_oid
+                and str(getattr(entry_order, "product_id", "") or "").strip().upper()
+                == str(product_id).strip().upper()
+                and str(getattr(entry_order, "side", "") or "").strip().lower()
+                == expected_entry_side
+                and (not expected_entry_cid or actual_entry_cid == expected_entry_cid)
+                and (observed_filled is None or observed_filled >= 0.0)
+                and (
+                    broker_order_qty is None
+                    or observed_filled is None
+                    or observed_filled <= broker_order_qty + 1e-9
+                )
+            )
+            if not entry_identity_ok:
+                le["emergency_entry_identity_mismatch"] = {
+                    "expected_order_id": entry_oid,
+                    "observed_order_id": getattr(entry_order, "order_id", None),
+                    "expected_client_order_id": expected_entry_cid or None,
+                    "observed_client_order_id": actual_entry_cid or None,
+                    "expected_product_id": product_id,
+                    "observed_product_id": getattr(entry_order, "product_id", None),
+                    "expected_side": expected_entry_side,
+                    "observed_side": getattr(entry_order, "side", None),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            entry_filled = float(getattr(entry_order, "filled_size", 0.0) or 0.0)
+            if entry_filled > 0.0:
+                entry_avg = _float_or_none(
+                    getattr(entry_order, "average_filled_price", None)
+                )
+                if entry_avg is not None and entry_avg <= 0.0:
+                    entry_avg = None
+                pos = {
+                    "product_id": product_id,
+                    "quantity": entry_filled,
+                    "original_quantity": entry_filled,
+                    "avg_entry_price": entry_avg,
+                    "notional_usd": (
+                        entry_filled * entry_avg if entry_avg is not None else None
+                    ),
+                    "emergency_accounting_basis_unknown": entry_avg is None,
+                    "emergency_adopted_from_entry_order_id": entry_oid,
+                }
+                le["position"] = pos
+                pos_valid = True
+                if _order_open(entry_order):
+                    le["emergency_entry_cancel_pending"] = {
+                        "reason": flatten_reason,
+                        "order_id": entry_oid,
+                        "filled_size": entry_filled,
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    return False
+                _mark_entry_order_resolved(le, entry_oid, "adopted")
+                le["emergency_entry_order_terminal_confirmed"] = {
+                    "order_id": entry_oid,
+                    "status": getattr(entry_order, "status", None),
+                    "filled_size": entry_filled,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                le.pop("emergency_entry_cancel_pending", None)
+                _resolve_alpaca_entry_claim_from_terminal_order(
+                    sess,
+                    entry_order,
+                    le=le,
+                    durable_adopted=True,
+                )
+                _commit_le(sess, le)
+                if sess.state == STATE_LIVE_PENDING_ENTRY:
+                    _safe_transition(db, sess, STATE_LIVE_ENTERED)
+                    db.flush()
+            elif _order_open(entry_order):
+                return False
+            else:
+                _mark_entry_order_resolved(le, entry_oid, "void")
+                le["emergency_entry_order_terminal_confirmed"] = {
+                    "order_id": entry_oid,
+                    "status": getattr(entry_order, "status", None),
+                    "filled_size": 0.0,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                le.pop("emergency_entry_cancel_pending", None)
+                _resolve_alpaca_entry_claim_from_terminal_order(
+                    sess,
+                    entry_order,
+                    le=le,
+                    durable_adopted=False,
+                )
+                le.pop("entry_order_id", None)
+                le.pop("entry_client_order_id", None)
+                _commit_le(sess, le)
+
+        # Adopt a genuinely pending ordinary close before the broker-position
+        # read below.  It may already have filled and produced broker zero; polling
+        # its exact order first preserves the real fill price/accounting evidence.
+        preliminary_pos = le.get("position")
+        preliminary_pos = (
+            dict(preliminary_pos) if isinstance(preliminary_pos, dict) else {}
+        )
+        preliminary_quantity = _float_or_none(preliminary_pos.get("quantity"))
+        pending_exit_oid = str(le.get("exit_order_id") or "").strip()
+        pending_exit_marker = bool(
+            le.get("pending_exit_reason")
+            and le.get("pending_exit_submitted_at_utc")
+            and (_float_or_none(le.get("pending_exit_quantity")) or 0.0) > 0.0
+        )
+        preliminary_authority = le.get("emergency_exit_authority")
+        if (
+            pending_exit_oid
+            and pending_exit_marker
+            and preliminary_quantity is not None
+            and preliminary_quantity > 0.0
+            and not (
+                isinstance(preliminary_authority, dict)
+                and preliminary_authority.get("phase") != "resolved"
+            )
+        ):
+            le["emergency_exit_authority"] = {
+                "reason": flatten_reason,
+                "requested_reasons": [flatten_reason],
+                "client_order_id": str(le.get("exit_client_order_id") or ""),
+                "order_id": pending_exit_oid,
+                "phase": "submitted",
+                "created_at_utc": _utcnow().isoformat(),
+                "attempt_no": 1,
+                "submitted_quantity": float(
+                    le.get("pending_exit_quantity") or preliminary_quantity
+                ),
+                "applied_filled_size": 0.0,
+                "inherited_ordinary_exit": True,
+                "identity_contract": (
+                    "alpaca_close_v1"
+                    if normalize_execution_family(sess.execution_family)
+                    in ALPACA_EXECUTION_FAMILIES
+                    else "legacy"
+                ),
+            }
+            _commit_le(sess, le)
+
+        broker_qty_signed, broker_avg = _broker_position_basis_for_emergency(
+            adapter,
+            product_id,
+        )
+        side_long = _le_side_long(le)
+        broker_qty, broker_qty_error = _normalize_emergency_broker_quantity(
+            broker_qty_signed,
+            side_long=side_long,
+        )
+        if broker_qty_error is not None:
+            le["emergency_position_truth"] = broker_qty_error
+            _commit_le(sess, le)
+            return False
+        broker_total_qty = float(broker_qty)
+        if close_only_marker is not None:
+            if not pos_valid:
+                le["alpaca_close_only_block"] = {
+                    "reason": "local_attributable_position_missing",
+                    "broker_total_qty": broker_total_qty,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            local_qty = float(pos.get("quantity") or 0.0)
+            attributable_floor = float(
+                close_only_marker["unattributed_quantity_floor"]
+            )
+            attributable_broker_qty = max(
+                0.0,
+                broker_total_qty - attributable_floor,
+            )
+            broker_qty = min(
+                local_qty,
+                float(close_only_marker["max_close_qty"]),
+                attributable_broker_qty,
+            )
+            le["alpaca_close_only_position_clamp"] = {
+                "local_qty": local_qty,
+                "broker_total_qty": broker_total_qty,
+                "max_close_qty": float(close_only_marker["max_close_qty"]),
+                "unattributed_quantity_floor": attributable_floor,
+                "attributable_broker_qty": broker_qty,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            if broker_qty > 1e-9 and abs(broker_qty - local_qty) > 1e-9:
+                pos["quantity"] = broker_qty
+                le["position"] = pos
+                _commit_le(sess, le)
+        unresolved_authority = le.get("emergency_exit_authority")
+        unresolved_authority = (
+            unresolved_authority
+            if isinstance(unresolved_authority, dict)
+            and unresolved_authority.get("phase") != "resolved"
+            else None
+        )
+        if not pos_valid:
+            # `broker_qty` cannot be None here: unknown/invalid truth returned
+            # fail-closed above.  If a prior confirmed fill already consumed the
+            # local quantity, explicit broker zero is the final safety proof.
+            if broker_qty <= 1e-9:
+                if not _resolve_retained_alpaca_entry_claim_after_broker_flat(
+                    db,
+                    sess,
+                    le=le,
+                ):
+                    return False
+                le["position"] = None
+                le["emergency_position_truth"] = "broker_zero"
+                if unresolved_authority is not None:
+                    unresolved_authority["phase"] = "resolved"
+                    unresolved_authority["resolved_at_utc"] = _utcnow().isoformat()
+                    unresolved_authority["resolution"] = "broker_position_zero"
+                    le["emergency_exit_authority"] = unresolved_authority
+                _commit_le(sess, le)
+                return True
+            entry_avg = broker_avg
+            pos = {
+                "product_id": product_id,
+                "quantity": broker_qty,
+                "original_quantity": broker_qty,
+                "avg_entry_price": entry_avg,
+                "notional_usd": (
+                    broker_qty * entry_avg if entry_avg is not None else None
+                ),
+                "emergency_adopted_from_broker_quantity": True,
+                "emergency_accounting_basis_unknown": entry_avg is None,
+            }
+            le["position"] = pos
+            pos_valid = True
+            _commit_le(sess, le)
+        else:
+            if broker_qty <= 1e-9:
+                le["emergency_position_truth"] = "broker_zero"
+                # If an emergency order is already in flight, keep the local
+                # position long enough to read that exact order and book only its
+                # proven fill.  A broker-zero disappearance with no in-flight
+                # authority is quarantined instead of fabricating an exit price.
+                if unresolved_authority is None or str(
+                    unresolved_authority.get("phase") or ""
+                ) == "prepared":
+                    if not _resolve_retained_alpaca_entry_claim_after_broker_flat(
+                        db,
+                        sess,
+                        le=le,
+                    ):
+                        return False
+                    _record_emergency_unpriced_fill(
+                        db,
+                        sess,
+                        le=le,
+                        authority=(unresolved_authority or {
+                            "attempt_no": 0,
+                            "client_order_id": None,
+                            "order_id": None,
+                        }),
+                        filled_quantity=float(pos["quantity"]),
+                        fill_price=None,
+                        remaining_quantity=0.0,
+                        reason=flatten_reason,
+                        note="broker_zero_without_exact_exit_fill",
+                    )
+                    if unresolved_authority is not None:
+                        unresolved_authority["phase"] = "resolved"
+                        unresolved_authority["resolved_at_utc"] = _utcnow().isoformat()
+                        unresolved_authority["resolution"] = "broker_position_zero"
+                    _commit_le(sess, le)
+                    return True
+                _commit_le(sess, le)
+            # Cost-basis truth is independent of whether the quantity changed.
+            # A cancel-race fill commonly reports filled_size with no order avg,
+            # while Alpaca's position view already has the valid basis at exactly
+            # the same quantity. Capture it before the close can erase that view.
+            if (
+                broker_qty > 1e-9
+                and _float_or_none(pos.get("avg_entry_price")) is None
+                and broker_avg is not None
+            ):
+                pos["avg_entry_price"] = broker_avg
+                pos["notional_usd"] = broker_qty * broker_avg
+                pos["emergency_accounting_basis_unknown"] = False
+                le["position"] = pos
+                _commit_le(sess, le)
+            if abs(broker_qty - float(pos["quantity"])) > 1e-9:
+                # Preserve a non-zero local position while a submitted order is
+                # being accounted against broker-zero or a changed nonzero broker
+                # remainder. The exact order poll must apply its cumulative fill
+                # delta before broker truth can replace the local quantity.
+                authority_transport_in_flight = bool(
+                    unresolved_authority is not None
+                    and str(unresolved_authority.get("phase") or "")
+                    in {"submitted", "submitting", "submit_indeterminate"}
+                )
+                if broker_qty > 1e-9 and not authority_transport_in_flight:
+                    pos["quantity"] = broker_qty
+                    if (
+                        _float_or_none(pos.get("avg_entry_price")) is None
+                        and broker_avg is not None
+                    ):
+                        pos["avg_entry_price"] = broker_avg
+                        pos["notional_usd"] = broker_qty * broker_avg
+                    le["position"] = pos
+                    _commit_le(sess, le)
+
+        quantity = float(pos["quantity"])
+        pid = str(pos.get("product_id") or product_id)
+        exit_side = "sell" if _le_side_long(le) else "buy"
+        inherited_order_id = str(le.get("exit_order_id") or "").strip()
+        inherited_exit_pending = bool(
+            le.get("pending_exit_reason")
+            and le.get("pending_exit_submitted_at_utc")
+            and (_float_or_none(le.get("pending_exit_quantity")) or 0.0) > 0.0
+        )
+        existing_authority = le.get("emergency_exit_authority")
+        if inherited_order_id and inherited_exit_pending and not (
+            isinstance(existing_authority, dict)
+            and existing_authority.get("phase") != "resolved"
+        ):
+            if normalize_execution_family(
+                sess.execution_family
+            ) in ALPACA_EXECUTION_FAMILIES:
+                # The ordinary retained-owner outbox remains the sole authority
+                # for this exact order. A second emergency identity system cannot
+                # inherit it without duplicating/losing the immutable request and
+                # transport watermark.
+                le["alpaca_emergency_inheritance_block"] = {
+                    "reason": "ordinary_exit_owner_transport_must_resolve_first",
+                    "order_id": inherited_order_id,
+                    "client_order_id": le.get("exit_client_order_id"),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+            le["emergency_exit_authority"] = {
+                "reason": flatten_reason,
+                "requested_reasons": [flatten_reason],
+                "client_order_id": str(le.get("exit_client_order_id") or ""),
+                "order_id": inherited_order_id,
+                "phase": "submitted",
+                "created_at_utc": _utcnow().isoformat(),
+                "attempt_no": 1,
+                "submitted_quantity": float(
+                    le.get("pending_exit_quantity") or quantity
+                ),
+                "applied_filled_size": 0.0,
+                "inherited_ordinary_exit": True,
+                "identity_contract": (
+                    "alpaca_close_v1"
+                    if normalize_execution_family(sess.execution_family)
+                    in ALPACA_EXECUTION_FAMILIES
+                    else "legacy"
+                ),
+            }
+        authority = _emergency_exit_authority(sess, le, reason=flatten_reason)
+        if close_only_marker is not None:
+            frozen_close_cid = str(
+                close_only_marker.get("close_client_order_id") or ""
+            ).strip()
+            authority_cid = str(authority.get("client_order_id") or "").strip()
+            if (
+                str(authority.get("phase") or "prepared") == "prepared"
+                and not authority.get("order_id")
+                and not isinstance(authority.get("order_request"), dict)
+            ):
+                authority["client_order_id"] = frozen_close_cid
+                authority["close_claim_token"] = str(
+                    close_only_marker["close_claim_token"]
+                )
+                authority["close_claim_action"] = "orphan_flatten"
+                authority["max_close_qty"] = float(
+                    close_only_marker["max_close_qty"]
+                )
+                authority["broker_unattributed_quantity_floor"] = float(
+                    close_only_marker["unattributed_quantity_floor"]
+                )
+                le["emergency_exit_authority"] = authority
+                _commit_le(sess, le)
+            elif authority_cid != frozen_close_cid:
+                le["alpaca_close_only_block"] = {
+                    "reason": "emergency_authority_cid_mismatches_close_claim",
+                    "authority_client_order_id": authority_cid,
+                    "close_client_order_id": frozen_close_cid,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                return False
+        if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+            if str(authority.get("identity_contract") or "") != "alpaca_close_v1":
+                authority["identity_contract"] = "alpaca_close_v1"
+                authority["legacy_identity_contract_upgraded_at_utc"] = _utcnow().isoformat()
+                le["emergency_exit_authority"] = authority
+                _commit_le(sess, le)
+        prior_state, prior_order, prior_attempt = _prior_absent_emergency_attempt_truth(
+            adapter,
+            authority,
+            product_id=pid,
+            side=exit_side,
+        )
+        if prior_state in {"unknown", "identity_mismatch"}:
+            authority["phase"] = (
+                "prior_attempt_identity_mismatch"
+                if prior_state == "identity_mismatch"
+                else "prior_attempt_truth_unknown"
+            )
+            authority["prior_attempt_block"] = {
+                "client_order_id": (
+                    prior_attempt.get("client_order_id")
+                    if isinstance(prior_attempt, dict)
+                    else None
+                ),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            le["emergency_exit_authority"] = authority
+            _commit_le(sess, le)
+            return False
+        if prior_state == "found" and prior_order is not None and isinstance(prior_attempt, dict):
+            authority.update({
+                "attempt_no": prior_attempt.get("attempt_no"),
+                "client_order_id": prior_attempt.get("client_order_id"),
+                "order_id": str(getattr(prior_order, "order_id", "") or ""),
+                "order_request": dict(prior_attempt.get("order_request") or {}),
+                "submitted_quantity": prior_attempt.get("submitted_quantity"),
+                "phase": "submitted",
+                "late_found_after_strict_absence": True,
+                "late_found_at_utc": _utcnow().isoformat(),
+            })
+            le["emergency_exit_authority"] = authority
+            _commit_le(sess, le)
+        strict_cid_state = "unknown"
+        strict_cid_order = None
+        if not authority.get("order_id") and authority.get("client_order_id"):
+            strict_cid_state, strict_cid_order = _strict_client_order_id_truth(
+                adapter,
+                str(authority["client_order_id"]),
+            )
+        if strict_cid_state == "found" and not _emergency_exit_order_matches(
+            strict_cid_order,
+            authority,
+            product_id=pid,
+            side=exit_side,
+        ):
+            authority["phase"] = "identity_mismatch"
+            authority["identity_mismatch_at_utc"] = _utcnow().isoformat()
+            le["emergency_exit_authority"] = authority
+            _commit_le(sess, le)
+            return False
+        if strict_cid_state == "found" and _emergency_exit_order_matches(
+            strict_cid_order,
+            authority,
+            product_id=pid,
+            side=exit_side,
+        ):
+            existing_order = strict_cid_order
+        else:
+            existing_order = _exact_emergency_exit_order(
+                adapter,
+                authority,
+                product_id=pid,
+                side=exit_side,
+            )
+        if existing_order is not None:
+            authority["order_id"] = str(getattr(existing_order, "order_id", "") or "")
+            authority["phase"] = "submitted"
+            existing_raw = (
+                getattr(existing_order, "raw", None)
+                if isinstance(getattr(existing_order, "raw", None), dict)
+                else {}
+            )
+            broker_submitted_quantity = _float_or_none(existing_raw.get("qty"))
+            if broker_submitted_quantity is not None and broker_submitted_quantity > 0.0:
+                authority["submitted_quantity"] = broker_submitted_quantity
+            le["exit_order_id"] = authority["order_id"]
+            le["exit_client_order_id"] = authority["client_order_id"]
+            le["pending_exit_reason"] = flatten_reason
+            le["pending_exit_quantity"] = quantity
+            _commit_le(sess, le)
+            sr = {
+                "ok": True,
+                "order_id": authority["order_id"],
+                "client_order_id": authority["client_order_id"],
+                "recovered": True,
+            }
+        else:
+            phase = str(authority.get("phase") or "prepared")
+            submit_allowed = phase == "prepared"
+            if (
+                phase == "prepared"
+                and normalize_execution_family(sess.execution_family)
+                in ALPACA_EXECUTION_FAMILIES
+            ):
+                # Every Alpaca emergency CID is checked before first transport.
+                # Unknown truth is not permission to risk a duplicate close.
+                submit_allowed = strict_cid_state == "absent"
+            if phase in {
+                "submitting",
+                "submit_indeterminate",
+                "same_cid_terminal_reconcile_required",
+            }:
+                # Only the exact frozen risk-reducing request may replay. The
+                # retained-owner outbox below independently enforces lease expiry,
+                # strict absence, same CID/request/account, and a new worker token.
+                submit_allowed = bool(
+                    strict_cid_state == "absent"
+                    and normalize_execution_family(sess.execution_family)
+                    in ALPACA_EXECUTION_FAMILIES
+                    and isinstance(authority.get("order_request"), dict)
+                    and str(
+                        (authority.get("order_request") or {}).get(
+                            "client_order_id"
+                        )
+                        or ""
+                    ).strip()
+                    == str(authority.get("client_order_id") or "").strip()
+                    and str(
+                        (authority.get("order_request") or {}).get(
+                            "alpaca_account_id"
+                        )
+                        or ""
+                    ).strip()
+                    == str(_frozen_alpaca_account_id(sess) or "")
+                )
+                if not submit_allowed:
+                    authority["phase"] = "same_cid_terminal_reconcile_required"
+                    authority["same_cid_reconcile_block"] = {
+                        "strict_cid_state": strict_cid_state,
+                        "reason": "time_and_absence_never_authorize_successor",
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    le["emergency_exit_authority"] = authority
+                    _commit_le(sess, le)
+            if phase == "submitted" or not submit_allowed:
+                return False
+
+            # Alpaca binds the complete signed request (qty/type/TIF/ext/limit/
+            # intent) at the literal submit boundary inside
+            # ``_submit_live_market_exit``.  Do not persist a request-less
+            # ``submitting`` phase here: a crash in that gap could make absence
+            # rotation unverifiable. Legacy venues retain their prior envelope.
+            if normalize_execution_family(sess.execution_family) not in ALPACA_EXECUTION_FAMILIES:
+                authority["phase"] = "submitting"
+                authority["submit_started_at_utc"] = _utcnow().isoformat()
+                authority["submitted_quantity"] = quantity
+                _commit_le(sess, le)
+                db.flush()
+                db.commit()
+
+            # Emergency authority is durable and same-CID idempotent; do not let
+            # the ordinary finite retry cap terminalize a still-held position.
+            le["exit_submit_attempts"] = 0
+            le.pop("exit_next_retry_at_utc", None)
             sr = _submit_live_market_exit(
                 db,
                 sess,
                 adapter,
                 le=le,
-                product_id=str(pid),
-                quantity=float(pos["quantity"]),
-                client_order_id=cid,
+                product_id=pid,
+                quantity=quantity,
+                client_order_id=str(authority["client_order_id"]),
                 reason=flatten_reason,
-                bid=bid,
-                ask=ask,
-                mid=mid,
-                extra={"trigger": "kill_switch"},
+                bid=None,
+                ask=None,
+                mid=None,
+                extra={"trigger": flatten_reason, "quote_independent_authority": True},
+                quote_independent_authority=True,
+                emergency_exit_authority=authority,
             )
-            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="kill_switch_flatten"):
+            if sr.get("ok") and sr.get("order_id"):
+                authority["order_id"] = str(sr["order_id"])
+                authority["phase"] = "submitted"
+                actual_submitted_quantity = _float_or_none(
+                    le.get("pending_exit_quantity")
+                )
+                if actual_submitted_quantity is not None and actual_submitted_quantity > 0.0:
+                    authority["submitted_quantity"] = actual_submitted_quantity
+            else:
+                if sr.get("pre_place_blocked"):
+                    # The adapter seam was never crossed (e.g. no executable
+                    # extended-hours BBO). Preserve the deterministic authority
+                    # as prepared; do not misclassify it as indeterminate HTTP.
+                    authority["phase"] = "prepared"
+                    authority["submit_started_at_utc"] = None
+                    authority["last_pre_place_block"] = {
+                        "error": sr.get("error"),
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    return False
+                recovered = _exact_emergency_exit_order(
+                    adapter,
+                    authority,
+                    product_id=pid,
+                    side=exit_side,
+                )
+                if recovered is not None:
+                    authority["order_id"] = str(getattr(recovered, "order_id", "") or "")
+                    authority["phase"] = "submitted"
+                    recovered_raw = (
+                        getattr(recovered, "raw", None)
+                        if isinstance(getattr(recovered, "raw", None), dict)
+                        else {}
+                    )
+                    recovered_quantity = _float_or_none(recovered_raw.get("qty"))
+                    if recovered_quantity is not None and recovered_quantity > 0.0:
+                        authority["submitted_quantity"] = recovered_quantity
+                    le["exit_order_id"] = authority["order_id"]
+                    le["exit_client_order_id"] = authority["client_order_id"]
+                    sr = {
+                        "ok": True,
+                        "order_id": authority["order_id"],
+                        "client_order_id": authority["client_order_id"],
+                        "recovered": True,
+                    }
+                else:
+                    authority["phase"] = "submit_indeterminate"
+                    _commit_le(sess, le)
+                    return False
+            _commit_le(sess, le)
+
+        if not _live_exit_submit_succeeded(
+            db,
+            sess,
+            adapter=adapter,
+            le=le,
+            result=sr,
+            reason=flatten_reason,
+        ):
+            return False
+        _emit(db, sess, "live_exit_submitted", {"reason": flatten_reason, "result": sr})
+        attempt_quantity = _float_or_none(authority.get("submitted_quantity"))
+        if attempt_quantity is None or attempt_quantity <= 0.0:
+            # An inherited legacy close may not have stored this field. Bind it
+            # once before polling; every later tick must compare cumulative fills
+            # with this immutable attempt quantity, never the changing remainder.
+            attempt_quantity = float(le.get("pending_exit_quantity") or quantity)
+            authority["submitted_quantity"] = attempt_quantity
+            _commit_le(sess, le)
+        poll = _poll_live_exit_fill(
+            db,
+            sess,
+            adapter,
+            le=le,
+            reason=flatten_reason,
+            quantity=attempt_quantity,
+        )
+        if not (poll.get("filled") or poll.get("partial") or poll.get("failed")):
+            return False
+
+        # The broker reports cumulative filled_size per order.  Apply only the
+        # positive delta beyond the durable watermark, so a repeated terminal
+        # read can never double-book P&L or subtract the same shares twice.
+        cumulative_filled = max(0.0, float(poll.get("filled_size") or 0.0))
+        applied_before = max(
+            0.0,
+            float(authority.get("applied_filled_size") or 0.0),
+        )
+        current_position = le.get("position")
+        current_position = (
+            dict(current_position) if isinstance(current_position, dict) else {}
+        )
+        current_quantity = max(
+            0.0,
+            _float_or_none(current_position.get("quantity")) or 0.0,
+        )
+        fill_delta = min(
+            current_quantity,
+            max(0.0, cumulative_filled - applied_before),
+        )
+        fill_price = _float_or_none(poll.get("fill_price"))
+        entry_price = _float_or_none(current_position.get("avg_entry_price"))
+        authority["last_order_status"] = poll.get("order_status")
+        authority["last_observed_filled_size"] = cumulative_filled
+        authority["terminal_observed_at_utc"] = _utcnow().isoformat()
+        authority["terminal_result"] = (
+            "full_fill"
+            if poll.get("filled")
+            else "partial_fill"
+            if poll.get("partial")
+            else "zero_fill"
+        )
+
+        post_signed_qty, post_broker_avg = _broker_position_basis_for_emergency(
+            adapter,
+            pid,
+        )
+        post_quantity, post_quantity_error = _normalize_emergency_broker_quantity(
+            post_signed_qty,
+            side_long=side_long,
+        )
+        post_total_quantity = post_quantity
+        if (
+            post_quantity_error is None
+            and post_quantity is not None
+            and close_only_marker is not None
+        ):
+            attributable_floor = float(
+                authority.get(
+                    "broker_unattributed_quantity_floor",
+                    close_only_marker["unattributed_quantity_floor"],
+                )
+            )
+            post_quantity = min(
+                current_quantity,
+                max(0.0, float(post_quantity) - attributable_floor),
+            )
+            authority["post_close_position_scope"] = {
+                "broker_total_quantity": float(post_total_quantity),
+                "unattributed_quantity_floor": attributable_floor,
+                "attributable_remaining_quantity": post_quantity,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+
+        def _apply_emergency_fill_delta(remaining_quantity: float) -> None:
+            nonlocal entry_price
+            if fill_delta <= 1e-12:
+                # Polling wrote these side channels again.  A zero delta means a
+                # prior tick already consumed them; never leak that fee/truth into
+                # a successor attempt.
+                le.pop("last_exit_fee_usd", None)
+                le.pop("last_exit_broker_truth", None)
+                return
+            if entry_price is None and post_broker_avg is not None:
+                entry_price = post_broker_avg
+            if entry_price is not None and fill_price is not None:
+                _apply_confirmed_live_partial_exit(
+                    db,
+                    sess,
+                    le=le,
+                    filled_quantity=fill_delta,
+                    entry_price=entry_price,
+                    fill_price=fill_price,
+                    reason=flatten_reason,
+                )
+            else:
+                _record_emergency_unpriced_fill(
+                    db,
+                    sess,
+                    le=le,
+                    authority=authority,
+                    filled_quantity=fill_delta,
+                    fill_price=fill_price,
+                    remaining_quantity=remaining_quantity,
+                    reason=flatten_reason,
+                    note=(
+                        "missing_entry_cost_basis"
+                        if entry_price is None
+                        else "missing_exit_fill_price"
+                    ),
+                )
+            authority["applied_filled_size"] = cumulative_filled
+
+        if post_quantity_error is not None or post_quantity is None:
+            # The attempt is terminal, so applying its proven fill delta is safe;
+            # however, an unknown/mismatched broker remainder cannot authorize a
+            # successor order or completion.
+            _apply_emergency_fill_delta(
+                max(0.0, current_quantity - fill_delta)
+            )
+            authority["phase"] = "terminal_position_unknown"
+            authority["position_truth_error"] = (
+                post_quantity_error or "broker_position_unknown"
+            )
+            le["emergency_exit_authority"] = authority
+            _commit_le(sess, le)
+            return False
+
+        if post_quantity <= 1e-9:
+            if not _resolve_retained_alpaca_entry_claim_after_broker_flat(
+                db,
+                sess,
+                le=le,
+            ):
+                authority["phase"] = "entry_exposure_claim_resolution_pending"
+                le["emergency_exit_authority"] = authority
+                _commit_le(sess, le)
                 return False
-            _emit(db, sess, "live_exit_submitted", {"reason": flatten_reason, "result": sr})
-            poll = _poll_live_exit_fill(
+            if close_only_marker is not None:
+                exact_close = _exact_emergency_exit_order(
+                    adapter,
+                    authority,
+                    product_id=pid,
+                    side=exit_side,
+                )
+                expected_close_qty = _float_or_none(
+                    (authority.get("order_request") or {}).get("base_size")
+                )
+                exact_filled_qty = (
+                    _float_or_none(getattr(exact_close, "filled_size", None))
+                    if exact_close is not None
+                    else None
+                )
+                exact_status = str(
+                    getattr(exact_close, "status", "") or ""
+                ).strip().lower()
+                if not (
+                    exact_close is not None
+                    and expected_close_qty is not None
+                    and expected_close_qty > 0.0
+                    and exact_filled_qty is not None
+                    and exact_filled_qty + 1e-9 >= expected_close_qty
+                    and exact_status == "filled"
+                ):
+                    authority["phase"] = "attributable_flat_exact_fill_unproven"
+                    le["emergency_exit_authority"] = authority
+                    _commit_le(sess, le)
+                    return False
+                claim_resolved = resolve_action_claim(
+                    db,
+                    symbol=sess.symbol,
+                    claim_token=str(close_only_marker["close_claim_token"]),
+                    client_order_id=str(close_only_marker["close_client_order_id"]),
+                    broker_order_id=str(authority.get("order_id") or ""),
+                    broker_order_status=exact_status,
+                    broker_position_zero=bool(
+                        post_total_quantity is not None
+                        and float(post_total_quantity) <= 1e-9
+                    ),
+                    attributable_position_zero=True,
+                    broker_position_quantity=post_total_quantity,
+                    metadata={
+                        "reason": "runner_exact_close_attributable_position_zero",
+                        "broker_total_quantity": post_total_quantity,
+                        "broker_unattributed_quantity_floor": authority.get(
+                            "broker_unattributed_quantity_floor"
+                        ),
+                        "exact_filled_quantity": exact_filled_qty,
+                    },
+                    account_scope="alpaca:paper",
+                )
+                if not claim_resolved:
+                    authority["phase"] = "close_claim_resolution_pending"
+                    le["emergency_exit_authority"] = authority
+                    _commit_le(sess, le)
+                    return False
+            # Explicit broker flat is the completion proof.  When the exact
+            # terminal order covers the whole local remainder and both prices
+            # are known, use the normal completer.  Otherwise quarantine only the
+            # quantities whose accounting evidence is incomplete.
+            if (
+                fill_delta > 1e-12
+                and fill_delta + 1e-9 >= current_quantity
+                and entry_price is not None
+                and fill_price is not None
+            ):
+                _complete_confirmed_live_exit(
+                    db,
+                    sess,
+                    le=le,
+                    quantity=current_quantity,
+                    entry_price=entry_price,
+                    fill_price=fill_price,
+                    reason=flatten_reason,
+                    slip_bps=float(le.get("entry_slip_bps_ref") or 6.0),
+                    sell_result=sr,
+                )
+                authority["applied_filled_size"] = cumulative_filled
+            else:
+                _apply_emergency_fill_delta(
+                    max(0.0, current_quantity - fill_delta)
+                )
+                unaccounted = max(0.0, current_quantity - fill_delta)
+                if unaccounted > 1e-12:
+                    _record_emergency_unpriced_fill(
+                        db,
+                        sess,
+                        le=le,
+                        authority=authority,
+                        filled_quantity=unaccounted,
+                        fill_price=None,
+                        remaining_quantity=0.0,
+                        reason=flatten_reason,
+                        note="broker_zero_unattributed_remainder",
+                    )
+                else:
+                    le["position"] = None
+            authority["phase"] = "resolved"
+            authority["resolved_at_utc"] = _utcnow().isoformat()
+            authority["resolution"] = "broker_position_zero_after_terminal_order"
+            le["emergency_exit_authority"] = authority
+            _commit_le(sess, le)
+            return True
+
+        # A terminal attempt left real exposure.  Apply its fill exactly once,
+        # overwrite local quantity with broker truth, then rotate to a deterministic
+        # successor CID.  Rotation is never allowed before terminal proof.
+        expected_remaining = max(0.0, current_quantity - fill_delta)
+        _apply_emergency_fill_delta(post_quantity)
+        unattributed_reduction = max(0.0, expected_remaining - post_quantity)
+        if unattributed_reduction > 1e-12:
+            _record_emergency_unpriced_fill(
+                db,
+                sess,
+                le=le,
+                authority=authority,
+                filled_quantity=unattributed_reduction,
+                fill_price=None,
+                remaining_quantity=post_quantity,
+                reason=flatten_reason,
+                note="broker_remainder_reduction_unattributed",
+            )
+        elif post_quantity > expected_remaining + 1e-9:
+            authority["unexpected_exposure_increase"] = {
+                "expected_remaining": expected_remaining,
+                "broker_remaining": post_quantity,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+        remaining_pos = le.get("position")
+        remaining_pos = dict(remaining_pos) if isinstance(remaining_pos, dict) else {}
+        remaining_pos.update({
+            "product_id": pid,
+            "quantity": post_quantity,
+            "original_quantity": max(
+                post_quantity,
+                _float_or_none(remaining_pos.get("original_quantity")) or post_quantity,
+            ),
+        })
+        if _float_or_none(remaining_pos.get("avg_entry_price")) is None:
+            if post_broker_avg is not None:
+                remaining_pos["avg_entry_price"] = post_broker_avg
+                remaining_pos["notional_usd"] = post_quantity * post_broker_avg
+                remaining_pos["emergency_accounting_basis_unknown"] = False
+            else:
+                remaining_pos["emergency_accounting_basis_unknown"] = True
+        le["position"] = remaining_pos
+        authority["phase"] = "terminal_remainder"
+        authority["remaining_quantity"] = post_quantity
+        if close_only_marker is not None:
+            # The recertification claim has one immutable CID and quantity cap.
+            # A generic successor could expand to aggregate same-symbol shares;
+            # leave the exact terminal remainder loudly quarantined for operator
+            # review instead of rotating or retrying.
+            authority["phase"] = "terminal_attributable_remainder_quarantined"
+            authority["manual_operator_action_required"] = True
+            authority["close_claim_token"] = close_only_marker.get(
+                "close_claim_token"
+            )
+            le["alpaca_close_only_partial_fill_quarantine"] = {
+                "client_order_id": authority.get("client_order_id"),
+                "broker_order_id": authority.get("order_id"),
+                "remaining_attributable_quantity": post_quantity,
+                "cumulative_filled_quantity": cumulative_filled,
+                "max_close_qty": close_only_marker.get("max_close_qty"),
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            le["emergency_exit_authority"] = authority
+            _commit_le(sess, le)
+            return False
+        _rotate_emergency_exit_attempt(sess, authority)
+        le["emergency_exit_authority"] = authority
+        for key in (
+            "exit_order_id",
+            "exit_client_order_id",
+            "exit_order_type",
+            "exit_limit_price",
+            "pending_exit_reason",
+            "pending_exit_quantity",
+            "pending_exit_submitted_at_utc",
+            "exit_pending_first_seen_utc",
+        ):
+            le.pop(key, None)
+        _commit_le(sess, le)
+        return False
+
+    def _transition_completed_emergency() -> None:
+        final_pos = le.get("position")
+        final_qty = (
+            _float_or_none(final_pos.get("quantity"))
+            if isinstance(final_pos, dict)
+            else None
+        )
+        if sess.state == STATE_LIVE_PENDING_ENTRY and not (
+            final_qty is not None and final_qty > 1e-9
+        ):
+            # Keep the global FSM strict: a generic resting entry may never jump
+            # straight to a clean terminal. This context has already completed the
+            # emergency cancel/identity/broker-zero proof, so recycle the now-void
+            # entry inside this transaction before taking the existing clean
+            # pre-entry decline edge. No other caller gains a pending->cancelled
+            # shortcut.
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            _safe_transition(db, sess, STATE_LIVE_CANCELLED)
+        elif sess.state != STATE_LIVE_CANCELLED:
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
+
+    def _service_quote_independent_emergency_exit() -> dict[str, Any] | None:
+        """Honor exit-only safety authority before viability/BBO gating.
+
+        A stale or absent quote must block ordinary stop/trail calculations, but
+        it must never suppress an already-authorized operator, EOD, dark-bus, or
+        governance flatten. Those paths use the broker exit chokepoint and broker
+        fill confirmation without deriving a decision price from the quote.
+        """
+        nonlocal le
+
+        retry_cap_block = le.get("exit_retry_cap_emergency_block")
+        if (
+            isinstance(retry_cap_block, dict)
+            and retry_cap_block.get("active") is True
+            and sess.state in _HELD_LIVE_STATES
+        ):
+            promotion = _promote_alpaca_retry_cap_to_emergency(
                 db,
                 sess,
                 adapter,
                 le=le,
-                reason=flatten_reason,
-                quantity=float(pos["quantity"]),
+                reason=str(retry_cap_block.get("reason") or "exit"),
+                attempts=int(retry_cap_block.get("attempts") or 0),
             )
-            if not poll.get("filled"):
-                if poll.get("partial"):
-                    _apply_confirmed_live_partial_exit(
-                        db,
-                        sess,
-                        le=le,
-                        filled_quantity=float(poll["filled_size"]),
-                        entry_price=float(pos.get("avg_entry_price") or bid or mid or 0.0),
-                        fill_price=float(poll["fill_price"]),
-                        reason=flatten_reason,
+            if promotion != "promoted":
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "pending": "exit_retry_cap_emergency_certification",
+                    "certification": promotion,
+                }
+
+        # EOD equities set the same operator-flatten flag, then immediately flow
+        # through the single cancel/clamp/submit/confirm chokepoint below.
+        if sess.state in _HELD_LIVE_STATES and not str(sess.symbol or "").upper().endswith("-USD"):
+            try:
+                _lead = float(
+                    getattr(settings, "chili_momentum_eod_flatten_lead_min", 5.0) or 0.0
+                )
+                _clock_evidence: dict[str, Any] = {}
+                if ef in ALPACA_EXECUTION_FAMILIES:
+                    _clock, _clock_evidence = _strict_alpaca_clock_truth(adapter)
+                    _mins_to_close = (
+                        float(_clock["_seconds_to_close"]) / 60.0
+                        if _clock is not None
+                        else float("inf")
                     )
-                return False
-            _complete_confirmed_live_exit(
+                    _calendar_open = bool(
+                        _clock is not None and _clock.get("is_open") is True
+                    )
+                else:
+                    # Non-Alpaca legacy venues do not expose a broker calendar on
+                    # this adapter protocol yet; preserve their prior behavior.
+                    from zoneinfo import ZoneInfo as _ZI
+
+                    _now_et = _now_in_tz(_ZI("America/New_York"))
+                    _mins_to_close = (16 * 60) - (
+                        _now_et.hour * 60 + _now_et.minute
+                    )
+                    _calendar_open = _now_et.weekday() < 5
+                if (
+                    _lead > 0
+                    and _calendar_open
+                    and 0 <= _mins_to_close <= _lead
+                    and not le.get("eod_flatten_requested_utc")
+                    and not le.get("eod_flatten_done")
+                ):
+                    le["eod_flatten_requested_utc"] = _utcnow().isoformat()
+                    _commit_le(sess, le)
+                    _emit(db, sess, "eod_flatten_triggered", {
+                        "minutes_to_close": _mins_to_close,
+                        "lead_min": _lead,
+                        "broker_clock": _clock_evidence or None,
+                    })
+            except Exception:
+                _log.debug("eod flatten check failed session=%s", sess.id, exc_info=True)
+
+        def _prepare_fractional_day_close_generation() -> tuple[bool, str | None]:
+            marker = le.get("alpaca_fractional_day_close_required")
+            if not isinstance(marker, dict):
+                return True, None
+
+            def _block(error: str, **extra: Any) -> tuple[bool, str]:
+                le["alpaca_fractional_day_close_block"] = {
+                    "reason": error,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                    **extra,
+                }
+                _commit_le(sess, le)
+                return False, error
+
+            if marker.get("identity_contract") != "alpaca_fractional_day_close_v1":
+                return _block("fractional_day_close_marker_invalid")
+            position = le.get("position")
+            position = position if isinstance(position, dict) else {}
+            marker_qty = _float_or_none(marker.get("broker_remainder_quantity"))
+            local_qty = _float_or_none(position.get("quantity"))
+            try:
+                broker_qty = float(adapter.get_position_quantity(product_id))
+            except Exception:
+                broker_qty = math.nan
+            if not (
+                marker_qty is not None
+                and marker_qty > 0.0
+                and abs(marker_qty - round(marker_qty)) > 1e-9
+                and local_qty is not None
+                and math.isfinite(broker_qty)
+                and broker_qty > 0.0
+                and abs(local_qty - broker_qty)
+                <= max(1e-9, broker_qty * 1e-8)
+                and abs(marker_qty - broker_qty)
+                <= max(1e-9, broker_qty * 1e-8)
+                and str(marker.get("product_id") or "").strip().upper()
+                == str(product_id or "").strip().upper()
+            ):
+                return _block(
+                    "fractional_day_close_quantity_generation_mismatch",
+                    marker_quantity=marker_qty,
+                    local_quantity=local_qty,
+                    broker_quantity=(broker_qty if math.isfinite(broker_qty) else None),
+                )
+
+            (
+                owner_context,
+                _owner_claim,
+                owner_metadata,
+                active_handoff,
+                handoff_error,
+            ) = _read_exact_alpaca_deadman_handoff(sess)
+            if handoff_error is not None or owner_context is None:
+                return _block(
+                    handoff_error or "fractional_day_close_owner_context_missing"
+                )
+            owner_metadata = owner_metadata or {}
+            current = owner_metadata.get("owner_transport")
+            current = current if isinstance(current, dict) else None
+            source = marker.get("source_owner_transport")
+            source = source if isinstance(source, dict) and source else None
+            if current is not None:
+                exact_source = bool(
+                    source is not None
+                    and str(current.get("phase") or "").strip().lower() == "resolved"
+                    and str(current.get("transport_kind") or "").strip().lower()
+                    == str(source.get("transport_kind") or "").strip().lower()
+                    and str(current.get("client_order_id") or "").strip()
+                    == str(source.get("client_order_id") or "").strip()
+                    and str(current.get("broker_order_id") or "").strip()
+                    == str(source.get("broker_order_id") or "").strip()
+                    and current.get("order_request") == source.get("order_request")
+                    and (
+                        current.get("proven_no_transport") is True
+                        or str(current.get("broker_order_status") or "").strip().lower()
+                        in _ORDER_TERMINAL_STATUSES
+                    )
+                )
+                if not exact_source:
+                    return _block("fractional_day_close_source_generation_mismatch")
+            elif source is not None:
+                return _block("fractional_day_close_source_transport_missing")
+
+            if active_handoff is not None:
+                retired = retire_deadman_handoff_for_fractional_day_close_committed(
+                    **owner_context,
+                    handoff_token=str(active_handoff.get("handoff_token") or ""),
+                    broker_position_quantity=broker_qty,
+                )
+                if not retired:
+                    return _block(
+                        "fractional_day_close_predecessor_not_committed",
+                        handoff_phase=active_handoff.get("phase"),
+                    )
+                (
+                    _ctx_after,
+                    _claim_after,
+                    _meta_after,
+                    remaining_handoff,
+                    remaining_error,
+                ) = _read_exact_alpaca_deadman_handoff(sess)
+                if remaining_error is not None or remaining_handoff is not None:
+                    return _block(
+                        remaining_error
+                        or "fractional_day_close_handoff_retirement_unconfirmed"
+                    )
+
+            marker = {
+                **marker,
+                "phase": "day_close_authority_ready",
+                "predecessor_retired_at_utc": str(
+                    marker.get("predecessor_retired_at_utc")
+                    or _utcnow().isoformat()
+                ),
+            }
+            le["alpaca_fractional_day_close_required"] = marker
+            le.pop("deadman_released_for_close", None)
+            le.pop("deadman_close_handoff_priority_block", None)
+            le.pop("alpaca_fractional_day_close_block", None)
+            _commit_le(sess, le)
+            return True, None
+
+        fractional_ready, fractional_error = (
+            _prepare_fractional_day_close_generation()
+        )
+        if not fractional_ready:
+            db.flush()
+            return {
+                "ok": False,
+                "session_id": sess.id,
+                "state": sess.state,
+                "fractional_day_close_pending": True,
+                "error": fractional_error,
+            }
+
+        _persisted_authority = le.get("emergency_exit_authority")
+        if (
+            isinstance(_persisted_authority, dict)
+            and _persisted_authority.get("phase") != "resolved"
+            and (sess.state in _HELD_LIVE_STATES or sess.state == STATE_LIVE_PENDING_ENTRY)
+        ):
+            _persisted_reason = str(
+                _persisted_authority.get("reason") or "operator_flatten"
+            )
+            _persisted_done = _handle_kill_switch_mid_run(
+                flatten_reason=_persisted_reason
+            )
+            if _persisted_done:
+                le.pop("operator_flatten_requested_utc", None)
+                le.pop("eod_flatten_requested_utc", None)
+                le.pop("overnight_dark_flatten_requested", None)
+                le.pop("exit_retry_cap_emergency_requested_utc", None)
+                le.pop("exit_retry_cap_emergency_block", None)
+                le.pop("alpaca_entries_quarantined", None)
+                le.pop("alpaca_fractional_day_close_required", None)
+                le.pop("alpaca_fractional_day_close_block", None)
+                le.pop("deadman_protection_unavailable", None)
+                if _persisted_reason == "eod_flatten":
+                    le["eod_flatten_done"] = True
+                _commit_le(sess, le)
+                _transition_completed_emergency()
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "emergency_authority": _persisted_reason,
+                "flattened": bool(_persisted_done),
+            }
+
+        # Operator FLATTEN (system-mediated manual exit). Evaluate before strict
+        # held-BBO reads so a quote outage cannot veto the explicit exit request.
+        _requested_flatten_reason = None
+        _requested_flatten_key = None
+        if le.get("operator_flatten_requested_utc"):
+            _requested_flatten_reason = (
+                "alpaca_fractional_remainder_day_close"
+                if isinstance(le.get("alpaca_fractional_day_close_required"), dict)
+                else "operator_flatten"
+            )
+            _requested_flatten_key = "operator_flatten_requested_utc"
+        elif le.get("eod_flatten_requested_utc"):
+            _requested_flatten_reason = "eod_flatten"
+            _requested_flatten_key = "eod_flatten_requested_utc"
+        if _requested_flatten_reason and (
+            sess.state in _HELD_LIVE_STATES
+            or sess.state == STATE_LIVE_PENDING_ENTRY
+        ):
+            _flatten_done = _handle_kill_switch_mid_run(
+                flatten_reason=_requested_flatten_reason
+            )
+            _emit(
                 db,
                 sess,
-                le=le,
-                quantity=float(pos["quantity"]),
-                entry_price=float(pos.get("avg_entry_price") or bid or mid or 0.0),
-                fill_price=float(poll["fill_price"]),
-                reason=flatten_reason,
-                slip_bps=float(le.get("entry_slip_bps_ref") or 6.0),
-                sell_result=sr,
+                "operator_flatten_executed" if _flatten_done else "operator_flatten_pending",
+                {"reason": _requested_flatten_reason},
             )
-            return True
-        _commit_le(sess, le)
-        return True
+            if _flatten_done:
+                le.pop(str(_requested_flatten_key), None)
+                le.pop("alpaca_fractional_day_close_required", None)
+                le.pop("alpaca_fractional_day_close_block", None)
+                le.pop("deadman_protection_unavailable", None)
+                if _requested_flatten_reason == "eod_flatten":
+                    le["eod_flatten_done"] = True
+                _commit_le(sess, le)
+                _transition_completed_emergency()
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "operator_flatten": bool(_flatten_done),
+                "flatten_reason": _requested_flatten_reason,
+            }
+
+        if le.get("overnight_dark_flatten_requested") and sess.state in _HELD_LIVE_STATES:
+            _ovn_flat_done = _handle_kill_switch_mid_run(
+                flatten_reason="overnight_pricebus_dark_flatten"
+            )
+            _emit(
+                db,
+                sess,
+                (
+                    "overnight_dark_flatten_executed"
+                    if _ovn_flat_done
+                    else "overnight_dark_flatten_pending"
+                ),
+                {},
+            )
+            if _ovn_flat_done:
+                le.pop("overnight_dark_flatten_requested", None)
+                _commit_le(sess, le)
+                _transition_completed_emergency()
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "overnight_dark_flatten": bool(_ovn_flat_done),
+            }
+
+        if _kill_switch_blocks_live() and sess.state in (
+            STATE_LIVE_PENDING_ENTRY,
+            STATE_LIVE_ENTERED,
+            STATE_LIVE_SCALING_OUT,
+            STATE_LIVE_TRAILING,
+            STATE_LIVE_BAILOUT,
+        ):
+            _emit(db, sess, "live_blocked_by_risk", {"reason": "kill_switch_mid_run"})
+            if _handle_kill_switch_mid_run():
+                _transition_completed_emergency()
+            le = _live_exec(dict(sess.risk_snapshot_json or {}))
+            db.flush()
+            return {"ok": True, "blocked": True, "reason": "kill_switch"}
+        return None
 
     # ── Early kill switch (before venue reads) ───────────────────────────
     if _kill_switch_blocks_live() and sess.state in (
@@ -6190,6 +19303,12 @@ def tick_live_session(
         _safe_transition(db, sess, STATE_LIVE_ERROR)
         db.flush()
         return {"ok": True, "blocked": True, "reason": "kill_switch"}
+
+    _emergency_result = _service_quote_independent_emergency_exit()
+    if _emergency_result is not None:
+        return _emergency_result
+    if _operator_paused:
+        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
 
     via = (
         db.query(MomentumSymbolViability)
@@ -6210,9 +19329,26 @@ def tick_live_session(
         family_id=variant.family if variant is not None else None,
     )
 
-    tick, _fr = adapter.get_best_bid_ask(product_id)
+    tick, _fr, _held_execution_bbo = _live_tick_bbo(
+        adapter,
+        product_id,
+        execution_family=ef,
+        state=sess.state,
+    )
+    if _held_execution_bbo is not None:
+        le["last_held_execution_bbo"] = dict(_held_execution_bbo)
     if tick is None or tick.mid is None or tick.mid <= 0:
-        _emit(db, sess, "live_blocked_by_risk", {"reason": "no_bbo"})
+        _quote_reason = (
+            str((_held_execution_bbo or {}).get("reason") or "no_bbo")
+        )
+        _quote_block_payload = {"reason": _quote_reason}
+        if _held_execution_bbo is not None:
+            _quote_block_payload["execution_bbo"] = _held_execution_bbo
+            if _quote_reason == "execution_bbo_stale":
+                _register_stale_quote_tick(db, sess, le)
+            _commit_le(sess, le)
+            _emit(db, sess, "live_held_execution_bbo_blocked", _held_execution_bbo)
+        _emit(db, sess, "live_blocked_by_risk", _quote_block_payload)
         if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
             # A persistently quoteless name (thin/non-common-stock — the RVMDW warrant
             # class) is a DETERMINISTIC policy decline, not a runner error: terminalize
@@ -6220,7 +19356,13 @@ def tick_live_session(
             # errors. Still blocks entry; only the terminal label changes.
             _decline_terminal(db, sess, reason="no_bbo")
         db.flush()
-        return {"ok": True, "blocked": True, "reason": "no_quote"}
+        return {
+            "ok": True,
+            "blocked": True,
+            "reason": (
+                _quote_reason if _held_execution_bbo is not None else "no_quote"
+            ),
+        }
 
     # Adaptive spread tolerance (no magic 12 bps): the BBO spread is a round-trip
     # cost, so gate it relative to how far THIS instrument actually moves (its
@@ -6355,9 +19497,15 @@ def tick_live_session(
     # True (the slow-curl CLRO-class name) or legitimately confirm False. FAIL-CLOSED: no
     # re-score / still blocked => the original block stands (byte-identical).
     if not ok_b and _maybe_rescore_eligibility_block(db, sess, ev):
-        ok_b, ev = runner_boundary_risk_ok(
-            db, sess, expected_move_bps=_expected_move_bps, apply_eligibility_grace=True
-        )
+        # The scorer owns a commit for its viability upsert.  Return all the way
+        # out of this tick so no stale session/le snapshot is mutated after that
+        # lock boundary; the next pulse re-reads and evaluates the fresh row.
+        db.flush()
+        return {
+            "ok": True,
+            "blocked": True,
+            "reason": "eligibility_rescore_deferred",
+        }
     if not ok_b:
         _emit(
             db,
@@ -6405,99 +19553,13 @@ def tick_live_session(
             # ASTN simultaneously. A cap breach must block NEW risk, never
             # market-dump working positions; only the kill switch flattens.)
             if _kill_switch_blocks_live() and _handle_kill_switch_mid_run():
-                _safe_transition(db, sess, STATE_LIVE_EXITED)
+                _transition_completed_emergency()
                 db.flush()
                 return {"ok": True, "blocked": True, "risk_evaluation": ev}
             # fall through to exit management (no early return)
         else:
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
-
-    # ── EOD FLATTEN (2026-06-12 QH: a 3:19 PM entry was still held 2 min
-    # before the FRIDAY close — momentum scalps never hold the bell, let alone
-    # a weekend). Equity positions flatten through the operator-flatten
-    # chokepoint when within the lead window of the 16:00 ET close. Derived
-    # from the session clock; the lead is the one documented knob.
-    if sess.state in _HELD_LIVE_STATES and not str(sess.symbol or "").upper().endswith("-USD"):
-        try:
-            from zoneinfo import ZoneInfo as _ZI
-
-            # replay v3: sim-clock-governed ET wall-clock (prod byte-identical).
-            _now_et = _now_in_tz(_ZI("America/New_York"))
-            _lead = float(getattr(settings, "chili_momentum_eod_flatten_lead_min", 5.0) or 0.0)
-            _mins_to_close = (16 * 60) - (_now_et.hour * 60 + _now_et.minute)
-            if (
-                _lead > 0
-                and _now_et.weekday() < 5
-                and 0 <= _mins_to_close <= _lead
-                and not le.get("operator_flatten_requested_utc")
-                and not le.get("eod_flatten_done")
-            ):
-                le["operator_flatten_requested_utc"] = _utcnow().isoformat()
-                le["eod_flatten_done"] = True
-                _commit_le(sess, le)
-                _emit(db, sess, "eod_flatten_triggered", {
-                    "minutes_to_close": _mins_to_close, "lead_min": _lead,
-                })
-        except Exception:
-            _log.debug("eod flatten check failed session=%s", sess.id, exc_info=True)
-
-    # ── Operator FLATTEN (system-mediated manual exit, 2026-06-11) ────────
-    # The button sets a flag; the runner honors it HERE (quotes bound) so the
-    # exit flows through the one chokepoint chain (scale-out cancel ->
-    # broker-qty clamp -> place -> confirm -> reconcile) instead of a
-    # broker-app sell racing the system's own resting orders (CPSH/SNDG).
-    if le.get("operator_flatten_requested_utc") and sess.state in _HELD_LIVE_STATES:
-        le.pop("operator_flatten_requested_utc", None)
-        _commit_le(sess, le)
-        _flatten_done = _handle_kill_switch_mid_run(flatten_reason="operator_flatten")
-        _emit(db, sess, "operator_flatten_executed" if _flatten_done else "operator_flatten_pending", {})
-        if _flatten_done:
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
-        db.flush()
-        return {"ok": True, "session_id": sess.id, "state": sess.state,
-                "operator_flatten": bool(_flatten_done)}
-
-    # ── OVERNIGHT DARK-BUS FLATTEN (2026-06-25, FIX A) ────────────────────
-    # _register_stale_quote_tick (proactive, first stale onset) and
-    # _register_fresh_quote_tick (honoring overnight_flatten_on_fresh) set
-    # overnight_dark_flatten_requested when an OVERNIGHT-held position faces a dark
-    # price-bus. Honor it HERE — quotes bound — through the SAME operator-flatten
-    # chokepoint (cancel scale-out -> broker-qty clamp -> place -> confirm ->
-    # reconcile), so there is no oversell and no orphan. This is what makes overnight
-    # SAFE: the position is never left to ride a dark bus naked (no broker stop
-    # overnight). Flag-gated at the SET sites, so flag OFF => this is unreachable
-    # (byte-identical legacy: flag set but never read). If the flatten cannot complete
-    # this pulse (e.g. still mid-dark), the request flag PERSISTS so it retries every
-    # pulse until the broker confirms flat (FIX B closes the loop on confirmed-zero).
-    if le.get("overnight_dark_flatten_requested") and sess.state in _HELD_LIVE_STATES:
-        _ovn_flat_done = _handle_kill_switch_mid_run(flatten_reason="overnight_pricebus_dark_flatten")
-        _emit(
-            db, sess,
-            "overnight_dark_flatten_executed" if _ovn_flat_done else "overnight_dark_flatten_pending",
-            {},
-        )
-        if _ovn_flat_done:
-            le.pop("overnight_dark_flatten_requested", None)
-            _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
-        db.flush()
-        return {"ok": True, "session_id": sess.id, "state": sess.state,
-                "overnight_dark_flatten": bool(_ovn_flat_done)}
-
-    if _kill_switch_blocks_live() and sess.state in (
-        STATE_LIVE_PENDING_ENTRY,
-        STATE_LIVE_ENTERED,
-        STATE_LIVE_SCALING_OUT,
-        STATE_LIVE_TRAILING,
-        STATE_LIVE_BAILOUT,
-    ):
-        _emit(db, sess, "live_blocked_by_risk", {"reason": "kill_switch_mid_run"})
-        if _handle_kill_switch_mid_run():
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
-        le = _live_exec(dict(sess.risk_snapshot_json or {}))
-        db.flush()
-        return {"ok": True, "blocked": True, "reason": "kill_switch"}
 
     prod: Optional[NormalizedProduct] = None
     try:
@@ -6526,6 +19588,7 @@ def tick_live_session(
 
     snap = dict(sess.risk_snapshot_json or {})
     le = _live_exec(snap)
+    le["effective_max_hold_seconds"] = int(max_hold)
     le["tick_count"] = int(le.get("tick_count") or 0) + 1
     le["last_mid"] = mid
     le["last_tick_utc"] = utc_iso()
@@ -8308,6 +21371,47 @@ def tick_live_session(
                     "ok": True, "session_id": sess.id, "state": sess.state,
                     "blocked": True, "reason": "unresolved_entry_orders",
                 }
+        # ACK-LOST / DUPLICATE-CID RECONCILE: entry_submitted=True with no broker
+        # order id is NOT permission to place again.  The first submit may already
+        # be live or filled at Alpaca (ACTU 2026-07-13).  Resolve it by the exact
+        # deterministic client id and attach it to the normal pending-entry poll.
+        # If the broker read is unavailable/not-yet-visible, remain fail-closed in
+        # LIVE_PENDING_ENTRY; never re-run the gates below or send a second order.
+        if le.get("entry_submitted") and not le.get("entry_order_id"):
+            _reconcile_cid = (
+                le.get("entry_reconcile_pending_client_order_id")
+                or le.get("entry_client_order_id")
+            )
+            _recovered = _recover_entry_order_by_client_id(adapter, _reconcile_cid)
+            if _recovered is None:
+                if _reconcile_cid:
+                    le["entry_reconcile_pending_client_order_id"] = str(_reconcile_cid)
+                le.setdefault("entry_reconcile_pending_since_utc", _utcnow().isoformat())
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_client_id_reconcile_pending", {
+                    "client_order_id": _reconcile_cid,
+                    "reason": (
+                        "broker_order_not_visible"
+                        if _reconcile_cid else "client_order_id_missing"
+                    ),
+                })
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "pending": "entry_client_id_reconcile",
+                }
+            _recovered_oid = _bind_recovered_entry_order(
+                le, _recovered, client_order_id=_reconcile_cid
+            )
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_client_id_recovered", {
+                "client_order_id": le.get("entry_client_order_id") or _reconcile_cid,
+                "order_id": _recovered_oid,
+                "venue_status": getattr(_recovered, "status", None),
+                "filled_size": float(getattr(_recovered, "filled_size", 0.0) or 0.0),
+            })
         if le.get("entry_submitted") and le.get("entry_order_id"):
             # CHUNK 3-B — FAST ACK-POLL: confirm the entry fill WITHIN this tick by
             # polling get_order at the measured rail RTT (geometric widen), bounded by the
@@ -8340,13 +21444,56 @@ def tick_live_session(
                     "filled_size": float(no.filled_size or 0.0),
                 })
             if no and (_order_done_for_entry(no) or float(no.filled_size or 0.0) > 0.0):
-                avg = float(no.average_filled_price or ask)
                 filled = float(no.filled_size or 0.0)
                 if filled <= 0:
                     _emit(db, sess, "live_error", {"reason": "zero_fill"})
                     _safe_transition(db, sess, STATE_LIVE_ERROR)
                     db.flush()
                     return {"ok": False, "error": "zero_fill"}
+                avg = _float_or_none(no.average_filled_price)
+                if avg is None or avg <= 0.0:
+                    _basis_qty, _basis_avg = _broker_position_basis_for_emergency(
+                        adapter,
+                        product_id,
+                    )
+                    avg = _basis_avg if _basis_avg is not None and _basis_avg > 0.0 else None
+                if avg is None:
+                    # Quantity truth is enough to protect the account, not enough
+                    # to invent stops/P&L. Adopt the shares, transition to held,
+                    # and let the quote-independent emergency path flatten while
+                    # accounting remains quarantined.
+                    le["position"] = {
+                        "product_id": product_id,
+                        "side": "long" if _le_side_long(le) else "short",
+                        "quantity": filled,
+                        "original_quantity": filled,
+                        "avg_entry_price": None,
+                        "notional_usd": None,
+                        "opened_at_utc": _utcnow().isoformat(),
+                        "emergency_accounting_basis_unknown": True,
+                    }
+                    le["operator_flatten_requested_utc"] = _utcnow().isoformat()
+                    _mark_entry_order_resolved(le, le.get("entry_order_id"), "adopted")
+                    _resolve_alpaca_entry_claim_from_terminal_order(
+                        sess,
+                        no,
+                        le=le,
+                        durable_adopted=True,
+                    )
+                    le["alpaca_owner_recovery_accounting_pending"] = {
+                        "broker_order_id": getattr(no, "order_id", None),
+                        "filled_size": filled,
+                        "reason": "entry_fill_missing_broker_cost_basis",
+                    }
+                    _commit_le(sess, le)
+                    _safe_transition(db, sess, STATE_LIVE_ENTERED)
+                    db.flush()
+                    return {
+                        "ok": True,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "pending": "emergency_flatten_missing_cost_basis",
+                    }
                 le["position"] = {
                     "product_id": product_id,
                     "side": "long",
@@ -8434,11 +21581,22 @@ def tick_live_session(
                             "pctl_r": _dd_meta.get("pctl_r"),
                             "source": _dd_meta.get("source"),
                         })
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if ef in ALPACA_EXECUTION_FAMILIES:
+                        _breaker_block = {
+                            "breaker": "daily_loss_cap_broker_unavailable",
+                            "transient": True,
+                            "error_type": type(exc).__name__,
+                        }
                 le["admission_viability_score"] = float(via.viability_score or 0)
                 _mark_entry_order_resolved(le, le.get("entry_order_id"), "adopted")
                 _commit_le(sess, le)
+                _resolve_alpaca_entry_claim_from_terminal_order(
+                    sess,
+                    no,
+                    le=le,
+                    durable_adopted=True,
+                )
                 if le.get("entry_decision_packet_id"):
                     try:
                         mark_packet_executed(db, int(le["entry_decision_packet_id"]))
@@ -8512,30 +21670,27 @@ def tick_live_session(
                         _pos_dm = le.get("position") or {}
                         _dm_stop = _float_or_none(_pos_dm.get("stop_price"))
                         if _dm_stop is not None and _dm_stop > 0 and float(avg) > _dm_stop:
-                            _dm_risk = float(avg) - float(_dm_stop)
-                            _dm_px = max(0.01, float(_dm_stop) - 0.25 * _dm_risk)
-                            _dm_res = adapter.place_deadman_stop(
+                            _dm_res = _ensure_alpaca_deadman_stop(
+                                db,
+                                sess,
+                                adapter,
+                                le=le,
                                 product_id=product_id,
-                                base_size=str(filled),
-                                stop_price=_dm_px,
-                                client_order_id=f"chili_dm_{sess.id}_{no.order_id[:8]}",
-                            ) if hasattr(adapter, "place_deadman_stop") else {"ok": False, "error": "adapter_no_deadman"}
-                            if _dm_res.get("ok"):
-                                le["deadman_stop"] = {
-                                    "order_id": _dm_res.get("order_id"),
-                                    "stop_price": _dm_px,
-                                    "qty": float(filled),
-                                }
-                                _commit_le(sess, le)
-                            _emit(db, sess, "live_deadman_stop_placed", {
-                                "ok": bool(_dm_res.get("ok")),
-                                "order_id": _dm_res.get("order_id"),
-                                "stop_price": _dm_px if _dm_res.get("ok") else None,
-                                "software_stop": _dm_stop,
-                                "error": _dm_res.get("error"),
-                            })
+                                quantity=float(filled),
+                                avg_entry_price=float(avg),
+                                software_stop_price=float(_dm_stop),
+                            )
                 except Exception:
-                    logger.warning("[live_runner] deadman stop placement failed", exc_info=True)
+                    _log.warning("[live_runner] deadman stop placement failed", exc_info=True)
+                    le["operator_flatten_requested_utc"] = str(
+                        le.get("operator_flatten_requested_utc") or _utcnow().isoformat()
+                    )
+                    le["deadman_protection_unavailable"] = {
+                        "error": "durable_deadman_helper_exception",
+                        "full_close_queued": True,
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
                 # ENTRY-FEATURE CAPTURE (2026-06-23): record the lookahead-free entry-moment
                 # feature vector onto `le` for the winner/loser META-LABEL dataset (mirrors the
                 # paper path; today entry features are PAPER-ONLY so live has none). POST-
@@ -8924,6 +22079,7 @@ def tick_live_session(
                             _rp_fr = _pfr
                             _rp_iters = 0
                             _rp_did = False
+                            _rp_post = _post  # first iteration's already-confirmed old order
                             # DEEP-BUDGET HANDOFF (the fill-on-verticals fix): the FIX-B
                             # escalation above stashed the unlocked thrust confluence (halt-
                             # resume OR confirmed no-halt UP-thrust) so the ACTUAL placed
@@ -8951,6 +22107,19 @@ def tick_live_session(
                                     expected_move_bps=(float(_emb) if _emb else None),
                                     vertical_confluence=_rp_vc,
                                 )
+                                if (
+                                    _rp_new is not None
+                                    and normalize_execution_family(sess.execution_family)
+                                    in ALPACA_EXECUTION_FAMILIES
+                                ):
+                                    # Re-size against the same executable tick that
+                                    # the replacement request will freeze and submit.
+                                    _rp_new = float(
+                                        quantize_alpaca_equity_limit_price(
+                                            _rp_new,
+                                            "buy",
+                                        )
+                                    )
                                 _rp_maxn = float((le.get("entry_notional_guard") or {}).get("max_notional_usd") or 0.0)
                                 if not (_rp_new and _rp_new > _lim_px and _rp_maxn > 0):
                                     break  # ran past the cumulative ceiling -> stop chasing
@@ -9030,6 +22199,31 @@ def tick_live_session(
                                         }
                                     # else: _rp_post confirmed terminal-cancelled -> safe to
                                     # place the replacement below (old order definitively gone).
+                                # The symbol claim is keyed to the OLD CID. Release that
+                                # exact zero-fill terminal ownership before attempting a
+                                # replacement CID; doing it after `_governed_place` makes
+                                # the replacement unreachable because the old claim blocks
+                                # the same symbol.
+                                _old_claim_resolved = _resolve_alpaca_entry_claim_from_terminal_order(
+                                    sess,
+                                    _rp_post,
+                                    le=le,
+                                    durable_adopted=False,
+                                )
+                                if (
+                                    normalize_execution_family(sess.execution_family)
+                                    in ALPACA_EXECUTION_FAMILIES
+                                    and not _old_claim_resolved
+                                ):
+                                    _commit_le(sess, le)
+                                    db.flush()
+                                    return {
+                                        "ok": True,
+                                        "session_id": sess.id,
+                                        "state": sess.state,
+                                        "pending": "repeg_old_claim_resolution_pending",
+                                    }
+                                _mark_entry_order_resolved(le, str(_rp_old_eid), "void")
                                 _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
                                 le["entry_place_count"] = _rp_pn
                                 # Same recycle-unique cid shape as the first entry (fold the
@@ -9042,16 +22236,43 @@ def tick_live_session(
                                     stopout_cycles=int(le.get("stopout_cycles") or 0),
                                     place_n=_rp_pn,
                                 )
+                                _rp_limit_str = (
+                                    quantize_alpaca_equity_limit_price(
+                                        _rp_new,
+                                        "buy",
+                                    )
+                                    if normalize_execution_family(
+                                        sess.execution_family
+                                    ) in ALPACA_EXECUTION_FAMILIES
+                                    else _fmt_limit_price_buy(_rp_new)
+                                )
                                 _rp_res = _governed_place(
                                     adapter, adapter.place_limit_order_gtc, sess=sess,
+                                    alpaca_order_role="repeg",
+                                    alpaca_risk_stop_price=le.get("entry_reservation_stop_price"),
+                                    alpaca_role_metadata={
+                                        "entry_place_count": _rp_pn,
+                                        "entry_repeg_count": _rp_n + 1,
+                                    },
                                     product_id=product_id,
                                     side=("buy" if _le_side_long(le) else "sell"),
                                     base_size=_fmt_base_size(_rp_qty),
-                                    limit_price=_fmt_limit_price_buy(_rp_new),
+                                    limit_price=_rp_limit_str,
                                     client_order_id=_rp_cid,
                                     time_in_force="gfd",
                                     extended_hours=bool(le.get("entry_session_extended")),
-                                    **({} if _le_side_long(le) else {"position_intent": "sell_to_open"}),
+                                    **(
+                                        {
+                                            "position_intent": (
+                                                "buy_to_open"
+                                                if _le_side_long(le)
+                                                else "sell_to_open"
+                                            )
+                                        }
+                                        if normalize_execution_family(sess.execution_family)
+                                        in ALPACA_EXECUTION_FAMILIES
+                                        else {}
+                                    ),
                                 ) or {}
                                 if not _rp_res.get("ok"):
                                     # Governor DEFER or a place reject: stop the inline loop;
@@ -9059,13 +22280,10 @@ def tick_live_session(
                                     # cancelled above), so fall through to the cancel+re-watch
                                     # below — the next tick retries. Never a silent drop.
                                     break
-                                # OLD order confirmed terminal-cancelled above -> mark
-                                # resolved so it can never resurface as an orphan. [G1 #3]
-                                _mark_entry_order_resolved(le, str(_rp_old_eid), "void")
                                 _rp_old_limit = _lim_px  # capture BEFORE reassigning for the emit
                                 le["entry_order_id"] = _rp_res.get("order_id")
                                 le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
-                                le["entry_limit_price"] = _fmt_limit_price_buy(_rp_new)
+                                le["entry_limit_price"] = _rp_limit_str
                                 _rp_n = _rp_n + 1
                                 le["entry_repeg_count"] = _rp_n
                                 le["entry_submit_utc"] = _utcnow().isoformat()
@@ -9155,8 +22373,13 @@ def tick_live_session(
                             _commit_le(sess, le)
                             db.flush()
                             return {"ok": True, "session_id": sess.id, "state": sess.state, "timeout": True}
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        if ef in ALPACA_EXECUTION_FAMILIES:
+                            _breaker_block = {
+                                "breaker": "drawdown_breaker_unavailable",
+                                "transient": True,
+                                "error_type": type(exc).__name__,
+                            }
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_open"}
             # NO CONFIRMATION OBTAINED (2026-06-27): `no is None` means the entry-confirm
@@ -9176,6 +22399,38 @@ def tick_live_session(
                 return {
                     "ok": True, "session_id": sess.id, "state": sess.state,
                     "pending": "entry_confirm_deferred",
+                }
+            _terminal_entry_status = str(getattr(no, "status", "") or "").lower()
+            _terminal_entry_filled = max(
+                0.0,
+                float(getattr(no, "filled_size", 0.0) or 0.0),
+            )
+            if (
+                _terminal_entry_status in _ORDER_TERMINAL_STATUSES
+                and _terminal_entry_filled <= 1e-12
+            ):
+                _mark_entry_order_resolved(le, le.get("entry_order_id"), "void")
+                _resolve_alpaca_entry_claim_from_terminal_order(
+                    sess,
+                    no,
+                    le=le,
+                    durable_adopted=False,
+                )
+                le.pop("entry_order_id", None)
+                le.pop("entry_client_order_id", None)
+                le["entry_submitted"] = False
+                _commit_le(sess, le)
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                _emit(db, sess, "live_entry_terminal_zero_fill", {
+                    "status": _terminal_entry_status,
+                    "order_id": getattr(no, "order_id", None),
+                })
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "terminal_zero_fill": True,
                 }
             _emit(db, sess, "live_error", {"reason": "entry_order_state", "status": no.status if no else None})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
@@ -9222,8 +22477,13 @@ def tick_live_session(
                     # via live events from other sessions / manual traffic.
                     try:
                         sess.mode = "paper"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        if ef in ALPACA_EXECUTION_FAMILIES:
+                            _breaker_block = {
+                                "breaker": "profit_giveback_unavailable",
+                                "transient": True,
+                                "error_type": type(exc).__name__,
+                            }
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
                 return {
@@ -9341,13 +22601,34 @@ def tick_live_session(
         regime_live = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         ex_live = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
         try:
-            spread_bps_live = float(ex_live.get("spread_bps") or 8.0)
-        except (TypeError, ValueError):
-            spread_bps_live = 8.0
+            # Use the live BBO already fetched for this tick. Missing readiness
+            # previously fabricated an 8 bps spread even when the executable book
+            # was 69-202 bps wide.
+            if bid is None or ask is None or mid is None or float(mid) <= 0:
+                raise ValueError("live_bbo_missing")
+            spread_bps_live = max(
+                0.0,
+                (float(ask) - float(bid)) / float(mid) * 10_000.0,
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            _emit(db, sess, "live_entry_deferred_bbo_missing", {
+                "reason": "spread_unavailable_no_fallback",
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "skipped": "spread_unavailable",
+            }
         try:
-            slip_ref = float(ex_live.get("slippage_estimate_bps") or 6.0)
+            slip_ref = max(
+                float(ex_live.get("slippage_estimate_bps") or 0.0),
+                spread_bps_live / 2.0,
+            )
         except (TypeError, ValueError):
-            slip_ref = 6.0
+            slip_ref = spread_bps_live / 2.0
 
         decision_packet_id = None
         _perf_size_mult = 1.0  # FIX-16: default 1.0 when the decision ledger path is disabled
@@ -9410,6 +22691,13 @@ def tick_live_session(
         inc = prod.base_increment if prod else (1.0 if _equity_share_default else None)
         mn = prod.base_min_size if prod else (1.0 if _equity_share_default else None)
         guarded_ask = ask * _adaptive_notional_guard_multiplier(expected_move_bps=_expected_move_bps)
+        if normalize_execution_family(ef) in ALPACA_EXECUTION_FAMILIES:
+            # Risk-first sizing must use the exact BUY tick Alpaca can execute.
+            # Deferring this ceiling-round until the adapter under-reserves loss
+            # on large sub-dollar share counts.
+            guarded_ask = float(
+                quantize_alpaca_equity_limit_price(guarded_ask, "buy")
+            )
         # Risk-first sizing (Ross-style): qty = per-trade max-loss / stop distance,
         # capped at the (conviction-scaled, equity-relative) notional ceiling — a
         # tighter stop buys MORE size at constant risk. Falls back to notional-first
@@ -9571,6 +22859,12 @@ def tick_live_session(
         _base_max_loss = policy_float_cap(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
+        _alpaca_hard_loss_cap = alpaca_paper_hard_loss_cap_usd(ef)
+        if _alpaca_hard_loss_cap is not None:
+            _base_max_loss = min(
+                float(_base_max_loss),
+                float(_alpaca_hard_loss_cap),
+            )
         # TIER-2 OVERNIGHT max-loss cap: overnight has NO broker-side stop, so the per-trade
         # loss is bounded by the SOFTWARE circuit (C1/C1b every tick) sized off a TIGHTER cap
         # = max($50 irreducible base, 0.5% of overnight buying power) — equity-relative, not a
@@ -10482,6 +23776,13 @@ def tick_live_session(
                                                 **(_scv_meta or {})}
             except Exception:
                 pass  # fail-open: a spread-cost gate failure must never block a fill
+        # Literal pre-sizing backstop.  No later multiplier, paper full-size floor,
+        # or stale watcher snapshot may restore Alpaca paper risk above $50.
+        if _alpaca_hard_loss_cap is not None:
+            _eff_max_loss = min(
+                float(_eff_max_loss),
+                float(_alpaca_hard_loss_cap),
+            )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
         le["entry_resize_basis"] = {
@@ -10503,6 +23804,50 @@ def tick_live_session(
         if _rf_qty and _rf_qty > 0:
             qty = _rf_qty
             le["entry_sizing"] = _rf_meta
+            try:
+                _sized_stop_distance = float((_rf_meta or {}).get("stop_distance"))
+                _model_stop = (
+                    float(guarded_ask) - _sized_stop_distance
+                    if _le_side_long(le)
+                    else float(guarded_ask) + _sized_stop_distance
+                )
+                _structural_stop = _float_or_none(le.get("structural_stop_price"))
+                _reservation_stop = (
+                    min(_model_stop, _structural_stop)
+                    if _le_side_long(le) and _structural_stop is not None
+                    else (
+                        max(_model_stop, _structural_stop)
+                        if not _le_side_long(le) and _structural_stop is not None
+                        else _model_stop
+                    )
+                )
+                if not math.isfinite(_reservation_stop) or _reservation_stop <= 0.0:
+                    raise ValueError("reservation stop invalid")
+                le["entry_reservation_stop_price"] = float(_reservation_stop)
+            except Exception:
+                if ef in ALPACA_EXECUTION_FAMILIES:
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "skipped": "alpaca_reservation_stop_unavailable",
+                    }
+        elif ef in ALPACA_EXECUTION_FAMILIES:
+            le["entry_sizing"] = {
+                "model": "risk_first_required",
+                "reason": (_rf_meta or {}).get("reason"),
+            }
+            _emit(db, sess, "live_entry_risk_sizing_unavailable", le["entry_sizing"])
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "skipped": "alpaca_risk_sizing_unavailable",
+            }
         else:
             qty = _round_base_size(max_notional / guarded_ask, inc, mn)
             le["entry_sizing"] = {"model": "notional_first_fallback", "reason": _rf_meta.get("reason")}
@@ -10526,6 +23871,7 @@ def tick_live_session(
         le.pop("anticipation_armed", None)
         if (
             bool(getattr(settings, "chili_momentum_anticipation_starter_enabled", False))
+            and ef not in ALPACA_EXECUTION_FAMILIES
             and not str(sess.symbol or "").upper().endswith("-USD")
         ):
             try:
@@ -10610,7 +23956,11 @@ def tick_live_session(
             entry_limit_str = f"{entry_limit_px:.6f}".rstrip("0").rstrip(".")
         else:
             entry_limit_px = guarded_ask
-            entry_limit_str = _fmt_limit_price_buy(entry_limit_px)
+            entry_limit_str = (
+                quantize_alpaca_equity_limit_price(entry_limit_px, "buy")
+                if normalize_execution_family(ef) in ALPACA_EXECUTION_FAMILIES
+                else _fmt_limit_price_buy(entry_limit_px)
+            )
             # Anchor for the marketable re-peg chase: the ORIGINAL limit bounds the
             # cumulative drift (the R:R guard), and the re-peg counter resets per fresh entry.
             le["entry_original_limit_px"] = entry_limit_px
@@ -10723,7 +24073,11 @@ def tick_live_session(
             # 24h-session boundary (acceptable; a resting overnight GTC is the KMRK risk).
             time_in_force="gfd",
         )
-        if not _le_side_long(le):
+        if normalize_execution_family(sess.execution_family) in ALPACA_EXECUTION_FAMILIES:
+            _entry_kwargs["position_intent"] = (
+                "buy_to_open" if _le_side_long(le) else "sell_to_open"
+            )
+        elif not _le_side_long(le):
             # SHORT ENTRY intent disambiguation (SHORT_SIDE_LANE.md P0 adapter).
             # SHORT-P2: entry pricing still uses the long-shaped marketable-buy
             # formatter upstream; the short lane stays gated OFF until P2 inverts it.
@@ -10781,8 +24135,12 @@ def tick_live_session(
             _is_crypto = str(sess.symbol or "").upper().endswith("-USD")
             # "ML" (momentum lane) namespace in the high word — distinct from
             # auto_trader's 0x4154 "AT"; lane_key stays well under 2**63.
-            _lane_key = (_MOMENTUM_LANE_LOCK_NS << 32) | (int(sess.user_id) & 0xFFFFFFFF)
-            db.execute(_sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lane_key})
+            if ef not in ALPACA_EXECUTION_FAMILIES:
+                _lane_key = (_MOMENTUM_LANE_LOCK_NS << 32) | (int(sess.user_id) & 0xFFFFFFFF)
+                db.execute(_sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lane_key})
+            # Alpaca uses the short independent account reservation transaction
+            # inside `_prepare_alpaca_place_claim`; never hold this outer tick's
+            # advisory lock across broker HTTP.
 
             # ── COUNT BACKSTOP (effective_position_cap) ──────────────────────
             # When the atomic risk-budget governor (below) is ON, this count is a
@@ -10791,8 +24149,18 @@ def tick_live_session(
             # flag is OFF, this count is the SOLE governor (byte-identical to the
             # legacy decouple_watching path). docs/DESIGN/MOMENTUM_ENGINE.md §2.
             _cap = effective_position_cap(crypto=_is_crypto)
-            _pos_ct = count_open_positions(db, user_id=sess.user_id, mode="live") + (
-                count_inflight_entry_orders(db, user_id=sess.user_id, exclude_session_id=sess.id)
+            _pos_ct = count_open_positions(
+                db,
+                user_id=sess.user_id,
+                mode="live",
+                execution_family=ef,
+            ) + (
+                count_inflight_entry_orders(
+                    db,
+                    user_id=sess.user_id,
+                    exclude_session_id=sess.id,
+                    execution_family=ef,
+                )
             )
             if _pos_ct >= _cap:
                 _emit(db, sess, "live_entry_blocked_position_cap", {"pos_ct": _pos_ct, "cap": _cap})
@@ -10859,7 +24227,11 @@ def tick_live_session(
                 # risk so a fill-burst can't slip dollars past the ceiling — the COUNT
                 # above bounds the count atomically in the same lock; this bounds the
                 # DOLLARS. Over-estimating is the safe side.
-                _open_eq_risk, _ = aggregate_open_risk_usd(db, user_id=sess.user_id)
+                _open_eq_risk, _ = aggregate_open_risk_usd(
+                    db,
+                    user_id=sess.user_id,
+                    execution_family=ef,
+                )
                 # Per-trade loss-fraction FALLBACK. equity_relative_loss_cap(0.0, ...)
                 # short-circuits to 0.0 (a non-positive fixed fallback is preserved by
                 # _equity_relative_cap), so pass the SAME positive per-trade dollar
@@ -10886,6 +24258,7 @@ def tick_live_session(
                     per_trade_fallback_usd=_per_trade_inflight_fallback,
                     crypto_only=False,
                     exclude_session_id=sess.id,
+                    execution_family=ef,
                 )
                 _admit, _admit_meta = admit_by_aggregate_risk(
                     open_risk_usd=_open_eq_risk + _inflight_eq_risk,
@@ -10931,9 +24304,17 @@ def tick_live_session(
                 }
             if _is_crypto:
                 _cryp_ct = count_open_positions(
-                    db, user_id=sess.user_id, mode="live", crypto_only=True
+                    db,
+                    user_id=sess.user_id,
+                    mode="live",
+                    crypto_only=True,
+                    execution_family=ef,
                 ) + count_inflight_entry_orders(
-                    db, user_id=sess.user_id, crypto_only=True, exclude_session_id=sess.id
+                    db,
+                    user_id=sess.user_id,
+                    crypto_only=True,
+                    exclude_session_id=sess.id,
+                    execution_family=ef,
                 )
                 _bucket_cap = int(
                     getattr(settings, "chili_momentum_max_open_positions_per_correlation_bucket", 4) or 4
@@ -10979,7 +24360,11 @@ def tick_live_session(
                 # slip dollars past the ceiling — B3 already bounds the COUNT atomically in
                 # the same lock; this bounds the DOLLARS. Over-estimating is the safe side.
                 _inflight_cryp = count_inflight_entry_orders(
-                    db, user_id=sess.user_id, crypto_only=True, exclude_session_id=sess.id
+                    db,
+                    user_id=sess.user_id,
+                    crypto_only=True,
+                    exclude_session_id=sess.id,
+                    execution_family=ef,
                 )
                 _inflight_cryp_risk = float(_inflight_cryp) * _planned_usd
                 _cap_usd = float(
@@ -11301,6 +24686,148 @@ def tick_live_session(
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "l2_confirm_defer", "l2_confirm": _l2c_dbg,
             }
+        # ALPACA BROKER-BOUNDARY TRUTH: scoring and risk work above can take
+        # minutes. Reserve the shared broker-rail token FIRST (its bounded wait can
+        # otherwise stale a quote), then fetch one explicit time-bounded BBO and
+        # revalidate it again at the actual place-call seam. Persist the exact
+        # source/row/timestamps and the limit truly sent to Alpaca so the decision is
+        # reconstructable.
+        _entry_rail_reservation = None
+        _entry_execution_bbo_freshness = None
+        _entry_execution_bbo_max_age = None
+        if str(ef or "").lower() in ("alpaca_spot", "alpaca_short"):
+            from .rail_governor import acquire_rail
+
+            _entry_rail_reservation = acquire_rail(
+                settings, lane_key=_rail_lane_key(sess)
+            )
+            if not _entry_rail_reservation.acquired:
+                _emit(db, sess, "live_entry_governor_deferred", {
+                    "client_order_id": cid,
+                    "limit_price": entry_limit_str,
+                })
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "skipped": "rail_governor_deferred",
+                }
+            _final_bbo_max_age = float(
+                getattr(settings, "chili_momentum_entry_bbo_max_age_seconds", 2.0) or 2.0
+            )
+            _final_tick, _final_bbo = _final_entry_bbo(
+                adapter,
+                product_id,
+                max_age_seconds=_final_bbo_max_age,
+            )
+            le["entry_final_bbo"] = _final_bbo
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_final_bbo", _final_bbo)
+            if _final_tick is None:
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "skipped": _final_bbo.get("reason") or "execution_bbo_unavailable",
+                }
+
+            _final_bid = float(_final_tick.bid)
+            _final_ask = float(_final_tick.ask)
+            _final_mid = float(_final_tick.mid)
+            # Do not turn a delayed refetch into a chase. A marketable long limit
+            # may use price improvement below the planned ceiling, but it cannot
+            # raise that ceiling after all earlier risk/extension checks ran.
+            if _le_side_long(le):
+                _planned_limit_str = str(_entry_kwargs["limit_price"])
+                _planned_limit_px = float(_planned_limit_str)
+                _final_limit_str = quantize_alpaca_equity_limit_price(
+                    _final_ask,
+                    "buy",
+                )
+                _final_limit_px = float(_final_limit_str)
+                _final_bbo["planned_limit_price"] = _planned_limit_str
+                _final_bbo["execution_ask"] = _final_ask
+                if _final_limit_px > _planned_limit_px:
+                    _final_bbo["ok"] = False
+                    _final_bbo["reason"] = "execution_bbo_above_planned_limit"
+                    _final_bbo["required_limit_price"] = _final_limit_str
+                    le["entry_final_bbo"] = _final_bbo
+                    _commit_le(sess, le)
+                    _emit(db, sess, "live_entry_deferred_final_bbo", _final_bbo)
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "skipped": "execution_bbo_above_planned_limit",
+                    }
+
+                # The actual adapter kwargs, the later submitted event, and the
+                # persisted entry limit must all agree on the fresh marketable ask.
+                # This is price improvement only: the formatted final limit can
+                # never exceed the already-approved/formatted planned ceiling.
+                _entry_kwargs["limit_price"] = _final_limit_str
+                entry_limit_str = _final_limit_str
+                entry_limit_px = _final_limit_px
+                _final_bbo["candidate_limit_price"] = _final_limit_str
+                _notional_guard = le.get("entry_notional_guard")
+                if isinstance(_notional_guard, dict):
+                    _notional_guard["planned_limit_price"] = _planned_limit_str
+                    _notional_guard["limit_price"] = _final_limit_str
+                    le["entry_notional_guard"] = _notional_guard
+
+            try:
+                _spread_full_qty = float(le.get("anticipation_full_qty") or qty)
+                _spread_stop_dist = float((_rf_meta or {}).get("stop_distance") or 0.0)
+            except (TypeError, ValueError, ZeroDivisionError):
+                _spread_full_qty = 0.0
+                _spread_stop_dist = 0.0
+            _max_spread_fraction = float(
+                getattr(
+                    settings,
+                    "chili_momentum_entry_max_spread_fraction_of_risk",
+                    0.25,
+                )
+            )
+            _spread_ok, _spread_gate = _entry_spread_risk_decision(
+                bid=_final_bid,
+                ask=_final_ask,
+                quantity=_spread_full_qty,
+                stop_distance=_spread_stop_dist,
+                max_fraction=_max_spread_fraction,
+            )
+            _spread_gate.update({
+                "source": _final_bbo.get("source"),
+                "tape_row_id": _final_bbo.get("tape_row_id"),
+                "spread_bps": _final_bbo.get("spread_bps"),
+            })
+            if not _spread_ok:
+                le["entry_spread_risk_gate"] = _spread_gate
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_spread_risk_veto", _spread_gate)
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "skipped": _spread_gate["reason"],
+                }
+            le["entry_spread_risk_gate"] = _spread_gate
+            # Downstream fill/provenance records must use this final BBO, not the
+            # setup quote from the start of the tick.
+            bid, ask, mid = _final_bid, _final_ask, _final_mid
+            spread_bps_live = float(_final_bbo["spread_bps"])
+            slip_ref = max(float(slip_ref), spread_bps_live / 2.0)
+            _entry_execution_bbo_freshness = _final_tick.freshness
+            _entry_execution_bbo_max_age = _final_bbo_max_age
+            le["entry_final_bbo"] = _final_bbo
+            _commit_le(sess, le)
         # CHUNK 3-C — RAIL-GOVERNED PLACE: the token bucket shared with every other lane
         # rail call (places + get_order polls) bounds the rate so multi-admission cannot
         # flood / 429 the broker (the flooding risk Chunk 2 introduced by deleting the
@@ -11309,8 +24836,67 @@ def tick_live_session(
         # governor DEFER returns ok=False/error=rail_governor_deferred -> the existing
         # not-ok branch below re-watches / retries next tick (never a silent drop).
         res = _governed_place(
-            adapter, adapter.place_limit_order_gtc, sess=sess, **_entry_kwargs
+            adapter,
+            adapter.place_limit_order_gtc,
+            sess=sess,
+            alpaca_order_role="primary",
+            alpaca_risk_stop_price=le.get("entry_reservation_stop_price"),
+            alpaca_role_metadata={
+                "entry_place_count": int(le.get("entry_place_count") or 0),
+                "entry_limit_price": entry_limit_str,
+                **{
+                    key: le.get(key)
+                    for key in (
+                        "entry_stop_atr_pct",
+                        "entry_stop_model",
+                        "entry_sizing",
+                        "entry_resize_basis",
+                        "entry_trigger_reason",
+                        "entry_trigger_debug",
+                        "structural_stop_price",
+                        "structural_stop_atr_pct",
+                        "entry_notional_guard",
+                        "entry_expected_move_bps",
+                        "entry_want_qty",
+                        "entry_decision_packet_id",
+                        "entry_final_bbo",
+                        "entry_spread_risk_gate",
+                        "entry_spread_bps_at_decision",
+                        "entry_l2_snapshot",
+                        "entry_features",
+                        "entry_regime_snapshot_json",
+                    )
+                    if le.get(key) is not None
+                },
+            },
+            rail_reservation=_entry_rail_reservation,
+            execution_bbo_freshness=_entry_execution_bbo_freshness,
+            execution_bbo_max_age_seconds=_entry_execution_bbo_max_age,
+            **_entry_kwargs,
         )
+        # The final BBO was fresh when fetched but expired before the instruction
+        # crossed the adapter seam. No broker call happened; preserve that truth and
+        # re-watch instead of mislabelling it as a governor defer/reject.
+        if res.get("pre_place_blocked"):
+            _at_place = dict(le.get("entry_final_bbo") or {})
+            _at_place.update({
+                "ok": False,
+                "reason": res.get("error"),
+                "age_seconds_at_place": res.get("execution_bbo_age_seconds"),
+                "max_age_seconds": res.get("execution_bbo_max_age_seconds"),
+                "broker_call_made": False,
+            })
+            le["entry_final_bbo"] = _at_place
+            _commit_le(sess, le)
+            _emit(db, sess, "live_entry_deferred_final_bbo", _at_place)
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "skipped": res.get("error") or "execution_bbo_stale_at_place",
+            }
         # GOVERNOR DEFER (not a broker reject): the rail bucket was empty, so NO order was
         # submitted. Do NOT mark entry_submitted, do NOT write an entry-reject cooldown
         # (the name is fine — the rail was busy), do NOT transition to LIVE_ERROR. Stay
@@ -11328,6 +24914,16 @@ def tick_live_session(
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "rail_governor_deferred",
             }
+        # From here onward the adapter call actually occurred (an explicit broker
+        # reject still counts as a submit attempt). Persist the exact kwarg that
+        # crossed that seam, not the superseded setup-time ceiling.
+        _submitted_guard = le.get("entry_notional_guard")
+        if isinstance(_submitted_guard, dict):
+            _submitted_guard["actual_submitted_limit_price"] = entry_limit_str
+            le["entry_notional_guard"] = _submitted_guard
+        if isinstance(le.get("entry_final_bbo"), dict):
+            le["entry_final_bbo"]["broker_limit_price"] = entry_limit_str
+            le["entry_final_bbo"]["broker_call_made"] = True
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_order_type"] = "limit"
@@ -11413,32 +25009,50 @@ def tick_live_session(
             "result": res,
         })
         if not res.get("ok"):
-            # DUP-REFERENCE 409 RECONCILE (2026-07-06, BJDX sid 10484 orphan): a re-submit
-            # of the SAME logical entry (ack-timeout re-place / parallel watcher) reuses our
-            # deterministic cid, so the rail returns 409 "Reference ID must be unique". That
-            # is NOT a place failure — it CONFIRMS our first submit is already live at the
-            # venue. Terminalizing to live_error here strands the (already filled) position
-            # with NO exit management: BJDX filled @1.61, ran to 2.09, and gave the entire
-            # move back to 1.53 fully unmanaged (no trail / ladder / reversal exit ever ran)
-            # because the session was dead. Instead: stay NON-terminal in WATCHING so the
-            # late-fill sweep (_sweep_unresolved_entry_orders, tick head) re-polls the tracked
-            # entry order id (recorded-before-ok in entry_order_ids_all) and ADOPTS the fill
-            # into a managed position next tick. No reject cooldown / non-tradeable learn —
-            # the name is fine and the order is IN. Mirrors the proven `deferred` path above
-            # (stay WATCHING, ok:True). entry_submitted is already set + committed above.
-            if _is_dup_reference_reject(str(res.get("error") or "")):
+            # ACK-LOST / DUP-REFERENCE RECONCILE: a duplicate-id response confirms an
+            # earlier submit. A timeout/disconnect/5xx is indeterminate because Alpaca
+            # may have accepted the deterministic client id before its response failed.
+            # Neither is permission to terminalize or submit a replacement. Resolve the
+            # exact client id now; if it is not visible yet, stay LIVE_PENDING_ENTRY and
+            # retry that lookup on later ticks. Only an explicit broker-rejected envelope
+            # may enter the normal reject/error path below.
+            _submit_error = str(res.get("error") or "")
+            _dup_submit = _is_dup_reference_reject(_submit_error)
+            _indeterminate_submit = _is_indeterminate_alpaca_submit(res, ef)
+            if _dup_submit or _indeterminate_submit:
                 le["entry_submitted"] = True
+                _dup_cid = str(le.get("entry_client_order_id") or cid)
+                _dup_recovered = _recover_entry_order_by_client_id(adapter, _dup_cid)
+                _dup_oid = None
+                if _dup_recovered is not None:
+                    _dup_oid = _bind_recovered_entry_order(
+                        le, _dup_recovered, client_order_id=_dup_cid
+                    )
+                else:
+                    le["entry_reconcile_pending_client_order_id"] = _dup_cid
+                    le.setdefault(
+                        "entry_reconcile_pending_since_utc", _utcnow().isoformat()
+                    )
                 _commit_le(sess, le)
-                _emit(db, sess, "live_entry_dup_reference_reconcile", {
-                    "client_order_id": le.get("entry_client_order_id") or cid,
+                _reconcile_kind = (
+                    "dup_reference" if _dup_submit else "indeterminate_submit"
+                )
+                _emit(db, sess, f"live_entry_{_reconcile_kind}_reconcile", {
+                    "client_order_id": _dup_cid,
+                    "recovered_order_id": _dup_oid,
                     "error": res.get("error"),
+                    "submit_outcome": res.get("submit_outcome"),
+                    "error_type": res.get("error_type"),
+                    "http_status": res.get("http_status"),
                     "unresolved_entry_order_ids": _unresolved_entry_order_ids(le),
                 })
-                _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
                 return {
                     "ok": True, "session_id": sess.id, "state": sess.state,
-                    "reconcile": "dup_reference_adopt",
+                    "reconcile": (
+                        f"{_reconcile_kind}_order_recovered"
+                        if _dup_oid else f"{_reconcile_kind}_client_id_pending"
+                    ),
                 }
             # ADAPTIVE ENTRY-REJECT COOLDOWN (2026-06-22): the broker REFUSED this entry
             # (place_equity_order isError — a leveraged/inverse ETF tripping
@@ -11542,6 +25156,36 @@ def tick_live_session(
             except (TypeError, ValueError):
                 pending_qty = qty
             is_scale_out = bool(le.get("pending_exit_is_scale_out"))
+            pending_transport = le.get("alpaca_active_exit_owner_transport")
+            pending_transport = (
+                dict(pending_transport)
+                if isinstance(pending_transport, dict)
+                else None
+            )
+            pending_cid = str(le.get("exit_client_order_id") or "").strip()
+            pending_oid = str(le.get("exit_order_id") or "").strip()
+            applied_before = 0.0
+            exact_applied_marker = False
+            if pending_transport is not None and not is_scale_out:
+                markers = le.get("alpaca_exit_applied_fill_watermarks")
+                markers = list(markers) if isinstance(markers, list) else []
+                applied_values: list[float] = []
+                for marker in markers:
+                    if not isinstance(marker, dict) or not (
+                        str(marker.get("client_order_id") or "").strip()
+                        == pending_cid
+                        and str(marker.get("broker_order_id") or "").strip()
+                        == pending_oid
+                        and marker.get("order_request")
+                        == pending_transport.get("order_request")
+                    ):
+                        continue
+                    applied = _float_or_none(marker.get("applied_filled_size"))
+                    if applied is not None and applied >= 0.0:
+                        applied_values.append(applied)
+                if applied_values:
+                    applied_before = max(applied_values)
+                    exact_applied_marker = True
             poll = _poll_live_exit_fill(
                 db,
                 sess,
@@ -11550,8 +25194,71 @@ def tick_live_session(
                 reason=str(pending_exit_reason),
                 quantity=min(max(pending_qty, 0.0), qty),
             )
+            cumulative_filled = _float_or_none(poll.get("filled_size"))
+            fill_delta = (
+                max(0.0, cumulative_filled - applied_before)
+                if cumulative_filled is not None
+                else None
+            )
+
+            def _record_exit_applied_watermark() -> None:
+                if (
+                    pending_transport is None
+                    or cumulative_filled is None
+                    or not (poll.get("filled") or poll.get("partial"))
+                ):
+                    return
+                markers = le.get("alpaca_exit_applied_fill_watermarks")
+                markers = list(markers) if isinstance(markers, list) else []
+                markers = [
+                    marker
+                    for marker in markers
+                    if not (
+                        isinstance(marker, dict)
+                        and str(marker.get("client_order_id") or "").strip()
+                        == pending_cid
+                        and str(marker.get("broker_order_id") or "").strip()
+                        == pending_oid
+                    )
+                ]
+                markers.append({
+                    "identity_contract": "alpaca_exit_applied_fill_v1",
+                    "client_order_id": pending_cid,
+                    "broker_order_id": pending_oid,
+                    "order_request": dict(
+                        pending_transport.get("order_request") or {}
+                    ),
+                    "applied_filled_size": cumulative_filled,
+                    "broker_remaining_quantity": poll.get(
+                        "broker_remaining_quantity"
+                    ),
+                    "broker_order_status": poll.get("order_status"),
+                    "accounted_at_utc": _utcnow().isoformat(),
+                })
+                le["alpaca_exit_applied_fill_watermarks"] = markers
             if poll.get("filled"):
                 slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
+                applied_quantity = (
+                    min(max(float(fill_delta or 0.0), 0.0), qty)
+                    if pending_transport is not None and not is_scale_out
+                    else min(max(pending_qty, 0.0), qty)
+                )
+                if applied_quantity <= 1e-12:
+                    if not exact_applied_marker:
+                        le["alpaca_exit_fill_accounting_block"] = {
+                            "reason": "full_exit_fill_delta_unproven",
+                            "client_order_id": pending_cid,
+                            "broker_order_id": pending_oid,
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "exit_failed": True,
+                        }
                 if is_scale_out:
                     # Deliberate first-target scale-out confirmed on a later tick:
                     # bank the partial, move the balance to breakeven, hold the runner.
@@ -11562,44 +25269,58 @@ def tick_live_session(
                         db,
                         sess,
                         le=le,
-                        filled_quantity=min(max(pending_qty, 0.0), qty),
+                        filled_quantity=applied_quantity,
                         entry_price=avg,
                         fill_price=float(poll["fill_price"]),
                         reason=str(pending_exit_reason),
                     )
                 else:
-                    _complete_confirmed_live_exit(
-                        db,
-                        sess,
-                        le=le,
-                        quantity=min(max(pending_qty, 0.0), qty),
-                        entry_price=avg,
-                        fill_price=float(poll["fill_price"]),
-                        reason=str(pending_exit_reason),
-                        slip_bps=slip_live,
-                    )
+                    if applied_quantity > 1e-12:
+                        _record_exit_applied_watermark()
+                        _complete_confirmed_live_exit(
+                            db,
+                            sess,
+                            le=le,
+                            quantity=applied_quantity,
+                            entry_price=avg,
+                            fill_price=float(poll["fill_price"]),
+                            reason=str(pending_exit_reason),
+                            slip_bps=slip_live,
+                        )
             elif poll.get("partial"):
+                applied_quantity = (
+                    max(0.0, float(fill_delta or 0.0))
+                    if pending_transport is not None and not is_scale_out
+                    else float(poll["filled_size"])
+                )
                 if is_scale_out:
                     _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
                     _step(
                         db,
                         sess,
                         le=le,
-                        filled_quantity=float(poll["filled_size"]),
+                        filled_quantity=applied_quantity,
                         entry_price=avg,
                         fill_price=float(poll["fill_price"]),
                         reason=str(pending_exit_reason),
                     )
                 else:
-                    _apply_confirmed_live_partial_exit(
-                        db,
-                        sess,
-                        le=le,
-                        filled_quantity=float(poll["filled_size"]),
-                        entry_price=avg,
-                        fill_price=float(poll["fill_price"]),
-                        reason=str(pending_exit_reason),
-                    )
+                    if applied_quantity > 1e-12:
+                        _record_exit_applied_watermark()
+                        _apply_confirmed_live_partial_exit(
+                            db,
+                            sess,
+                            le=le,
+                            filled_quantity=applied_quantity,
+                            entry_price=avg,
+                            fill_price=float(poll["fill_price"]),
+                            reason=str(pending_exit_reason),
+                        )
+                    elif exact_applied_marker:
+                        le.pop("pending_exit_reason", None)
+                        le.pop("pending_exit_quantity", None)
+                        le.pop("pending_exit_submitted_at_utc", None)
+                        _commit_le(sess, le)
             db.flush()
             return {
                 "ok": bool(poll.get("filled") or poll.get("partial") or poll.get("pending")),
@@ -11609,6 +25330,1428 @@ def tick_live_session(
                 "partial_exit": bool(poll.get("partial")),
                 "exit_failed": bool(poll.get("failed")),
             }
+        if normalize_execution_family(sess.execution_family) == "alpaca_spot":
+            # A durable deadman->close handoff outranks normal protection
+            # maintenance.  After a crash the old stop may already be terminal
+            # and the session JSON may lag the independently committed owner
+            # claim; rearming here could overlap the frozen successor close.
+            (
+                owner_context,
+                _owner_claim,
+                owner_meta,
+                durable_handoff,
+                handoff_error,
+            ) = _read_exact_alpaca_deadman_handoff(sess)
+            owner_meta = owner_meta or {}
+            quarantine_replay = _apply_replacement_attribution_quarantine(
+                sess,
+                le=le,
+                claim_metadata=owner_meta,
+            )
+            if not quarantine_replay.get("ok"):
+                le["deadman_close_handoff_priority_block"] = {
+                    "reason": quarantine_replay.get("error"),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                db.flush()
+                return {
+                    "ok": False,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "deadman_handoff_reconcile_pending": True,
+                    "error": quarantine_replay.get("error"),
+                }
+            if quarantine_replay.get("broker_flat"):
+                le.pop("deadman_stop", None)
+                _commit_le(sess, le)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "deadman_position_closed": True,
+                    "accounting_quarantined": True,
+                }
+            local_handoff_present = isinstance(
+                le.get("deadman_released_for_close"), dict
+            )
+            raw_claim_handoff_present = "deadman_close_handoff" in owner_meta
+            if handoff_error is not None and (
+                local_handoff_present
+                or raw_claim_handoff_present
+                or handoff_error in {
+                    "alpaca_owner_claim_unreadable",
+                    "alpaca_owner_claim_generation_mismatch",
+                }
+            ):
+                le["deadman_close_handoff_priority_block"] = {
+                    "reason": handoff_error,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+                _commit_le(sess, le)
+                db.flush()
+                return {
+                    "ok": False,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "deadman_handoff_reconcile_pending": True,
+                    "error": handoff_error,
+                }
+            if durable_handoff is not None:
+                successor = (
+                    durable_handoff.get("successor_order_request")
+                    or durable_handoff.get("successor_intent")
+                )
+                successor = dict(successor) if isinstance(successor, dict) else {}
+                handoff_qty = _float_or_none(successor.get("base_size"))
+                handoff_cid = str(
+                    durable_handoff.get("successor_client_order_id") or ""
+                ).strip()
+                handoff_kind = str(
+                    durable_handoff.get("successor_transport_kind") or ""
+                ).strip().lower()
+                handoff_phase = str(
+                    durable_handoff.get("phase") or ""
+                ).strip().lower()
+                handoff_reason = str(
+                    durable_handoff.get("reason") or ""
+                ).strip()
+                if (
+                    handoff_qty is None
+                    or handoff_qty <= 0.0
+                    or not handoff_cid
+                    or not handoff_reason
+                ):
+                    le["deadman_close_handoff_priority_block"] = {
+                        "reason": "durable_successor_identity_invalid",
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    db.flush()
+                    return {
+                        "ok": False,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "deadman_handoff_reconcile_pending": True,
+                    }
+
+                current_transport = owner_meta.get("owner_transport")
+                current_transport = (
+                    dict(current_transport)
+                    if isinstance(current_transport, dict)
+                    else None
+                )
+
+                if handoff_phase == "replacement_lineage_containment_prepared":
+                    prepared_containment = durable_handoff.get(
+                        "replacement_lineage_containment"
+                    )
+                    prepared_containment = (
+                        dict(prepared_containment)
+                        if isinstance(prepared_containment, dict)
+                        else {}
+                    )
+                    predecessor_cid = str(
+                        prepared_containment.get("predecessor_client_order_id")
+                        or ""
+                    ).strip()
+                    successor_oid = str(
+                        prepared_containment.get("successor_broker_order_id")
+                        or ""
+                    ).strip()
+                    successor_request = prepared_containment.get(
+                        "successor_order_request"
+                    )
+                    successor_request = (
+                        dict(successor_request)
+                        if isinstance(successor_request, dict)
+                        else {}
+                    )
+                    predecessor_state, predecessor_order = (
+                        _strict_client_order_id_truth(adapter, predecessor_cid)
+                    )
+                    successor_state, successor_order = (
+                        _strict_broker_order_id_truth(adapter, successor_oid)
+                    )
+                    if not (
+                        current_transport is not None
+                        and predecessor_state == "found"
+                        and predecessor_order is not None
+                        and successor_state == "found"
+                        and successor_order is not None
+                    ):
+                        le["deadman_close_handoff_priority_block"] = {
+                            "reason": "replacement_containment_recovery_truth_unavailable",
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_reconcile_pending": True,
+                            "error": "replacement_containment_recovery_truth_unavailable",
+                        }
+                    containment = _service_deadman_replacement_containment(
+                        db,
+                        sess,
+                        adapter,
+                        le=le,
+                        product_id=product_id,
+                        predecessor_transport=current_transport,
+                        predecessor_order=predecessor_order,
+                        successor_order=successor_order,
+                        successor_order_request=successor_request,
+                        avg_entry_price=avg,
+                        software_stop_price=stop_px,
+                        prepared=prepared_containment,
+                    )
+                    db.flush()
+                    return {
+                        **containment,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "deadman_handoff_priority_serviced": True,
+                    }
+
+                # A child close/stop may have been committed independently after
+                # its predecessor stop became terminal while the outer session
+                # accounting later rolled back.  Replay the oldest unwatermarked
+                # protective generation before adopting, rotating, or retiring
+                # any child.  The active child remains broker protection during
+                # this accounting-only pulse.
+                lineage = owner_meta.get("protective_terminal_ledger")
+                if not isinstance(lineage, list) or not lineage:
+                    lineage = durable_handoff.get(
+                        "protective_terminal_generations"
+                    )
+                lineage = list(lineage) if isinstance(lineage, list) else []
+                if not lineage:
+                    fallback_fill = _float_or_none(
+                        durable_handoff.get("deadman_terminal_filled_size")
+                    )
+                    fallback_remaining = _float_or_none(
+                        durable_handoff.get("deadman_broker_remaining_quantity")
+                    )
+                    fallback_request = durable_handoff.get("deadman_order_request")
+                    fallback_request = (
+                        fallback_request if isinstance(fallback_request, dict) else {}
+                    )
+                    if (
+                        fallback_fill is not None
+                        and fallback_remaining is not None
+                        and fallback_request
+                    ):
+                        lineage.append({
+                            "identity_contract": "alpaca_protective_terminal_generation_v1",
+                            "client_order_id": durable_handoff.get(
+                                "deadman_client_order_id"
+                            ),
+                            "broker_order_id": durable_handoff.get(
+                                "deadman_broker_order_id"
+                            ),
+                            "order_request": fallback_request,
+                            "broker_order_status": durable_handoff.get(
+                                "deadman_terminal_status"
+                            ),
+                            "filled_size": fallback_fill,
+                            "remaining_quantity": fallback_remaining,
+                        })
+                applied_deadman_markers = le.get("deadman_applied_fill_watermarks")
+                applied_deadman_markers = (
+                    applied_deadman_markers
+                    if isinstance(applied_deadman_markers, list)
+                    else []
+                )
+
+                def _lineage_marker_exact(generation: dict[str, Any]) -> bool:
+                    fill = _float_or_none(generation.get("filled_size"))
+                    remaining = _float_or_none(generation.get("remaining_quantity"))
+                    if fill is None or remaining is None:
+                        return False
+                    if fill <= 1e-12:
+                        return True
+                    matches = []
+                    for marker in applied_deadman_markers:
+                        if not isinstance(marker, dict):
+                            continue
+                        marker_transport = marker.get("owner_transport")
+                        marker_transport = (
+                            marker_transport
+                            if isinstance(marker_transport, dict)
+                            else {}
+                        )
+                        marker_fill = _float_or_none(
+                            marker.get("applied_filled_size")
+                        )
+                        marker_remaining = _float_or_none(
+                            marker.get("broker_remaining_quantity")
+                        )
+                        if (
+                            str(marker.get("client_order_id") or "").strip()
+                            == str(generation.get("client_order_id") or "").strip()
+                            and str(marker.get("order_id") or "").strip()
+                            == str(generation.get("broker_order_id") or "").strip()
+                            and marker_transport.get("order_request")
+                            == generation.get("order_request")
+                            and marker_fill is not None
+                            and marker_remaining is not None
+                            and abs(marker_fill - fill)
+                            <= max(1e-9, abs(fill) * 1e-8)
+                            and abs(marker_remaining - remaining)
+                            <= max(1e-9, abs(remaining) * 1e-8)
+                        ):
+                            matches.append(marker)
+                    return len(matches) == 1
+
+                pending_lineage = next(
+                    (
+                        dict(generation)
+                        for generation in lineage
+                        if isinstance(generation, dict)
+                        and (_float_or_none(generation.get("filled_size")) or 0.0)
+                        > 1e-12
+                        and not _lineage_marker_exact(generation)
+                    ),
+                    None,
+                )
+                if pending_lineage is not None:
+                    lineage_cid = str(
+                        pending_lineage.get("client_order_id") or ""
+                    ).strip()
+                    lineage_oid = str(
+                        pending_lineage.get("broker_order_id") or ""
+                    ).strip()
+                    lineage_request = pending_lineage.get("order_request")
+                    lineage_request = (
+                        dict(lineage_request)
+                        if isinstance(lineage_request, dict)
+                        else {}
+                    )
+                    owner_history = owner_meta.get("owner_transport_history")
+                    owner_history = owner_history if isinstance(owner_history, list) else []
+                    protective_ledger = owner_meta.get(
+                        "protective_terminal_ledger"
+                    )
+                    protective_ledger = (
+                        protective_ledger
+                        if isinstance(protective_ledger, list)
+                        else []
+                    )
+                    lineage_transports = [
+                        dict(candidate)
+                        for candidate in [
+                            owner_meta.get("owner_transport"),
+                            *owner_history,
+                            *protective_ledger,
+                        ]
+                        if isinstance(candidate, dict)
+                        and str(candidate.get("transport_kind") or "").strip().lower()
+                        == "deadman"
+                        and str(candidate.get("client_order_id") or "").strip()
+                        == lineage_cid
+                        and str(candidate.get("broker_order_id") or "").strip()
+                        == lineage_oid
+                        and candidate.get("order_request") == lineage_request
+                        and str(candidate.get("phase") or "").strip().lower()
+                        == "resolved"
+                    ]
+                    lineage_state, lineage_order = _strict_client_order_id_truth(
+                        adapter,
+                        lineage_cid,
+                    )
+                    if not (
+                        len(lineage_transports) >= 1
+                        and lineage_state == "found"
+                        and lineage_order is not None
+                        and str(getattr(lineage_order, "order_id", "") or "").strip()
+                        == lineage_oid
+                        and str(getattr(lineage_order, "status", "") or "").strip().lower()
+                        in _ORDER_TERMINAL_STATUSES
+                        and _owner_transport_order_matches(
+                            lineage_order,
+                            lineage_transports[-1],
+                        )
+                    ):
+                        le["deadman_close_handoff_priority_block"] = {
+                            "reason": "protective_terminal_lineage_unreadable",
+                            "client_order_id": lineage_cid,
+                            "broker_order_id": lineage_oid,
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_reconcile_pending": True,
+                            "error": "protective_terminal_lineage_unreadable",
+                        }
+                    le["deadman_stop"] = {
+                        "order_id": lineage_oid,
+                        "client_order_id": lineage_cid,
+                        "stop_price": lineage_request.get("stop_price"),
+                        "qty": lineage_request.get("base_size"),
+                        "phase": "submitted",
+                        "owner_transport": lineage_transports[-1],
+                    }
+                    local_position = le.get("position")
+                    local_position = (
+                        local_position if isinstance(local_position, dict) else {}
+                    )
+                    replay = _ensure_alpaca_deadman_stop(
+                        db,
+                        sess,
+                        adapter,
+                        le=le,
+                        product_id=product_id,
+                        quantity=float(lineage_request.get("base_size")),
+                        avg_entry_price=(
+                            _float_or_none(local_position.get("avg_entry_price")) or avg
+                        ),
+                        software_stop_price=(
+                            _float_or_none(local_position.get("stop_price")) or stop_px
+                        ),
+                        rearm_after_terminal=False,
+                        terminal_remaining_override=float(
+                            pending_lineage["remaining_quantity"]
+                        ),
+                    )
+                    db.flush()
+                    return {
+                        "ok": bool(replay.get("ok")),
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "protective_terminal_lineage_replayed": bool(
+                            replay.get("ok")
+                        ),
+                        "deadman_position_closed": bool(
+                            replay.get("position_closed")
+                        ),
+                        "error": replay.get("error"),
+                    }
+
+                def _priority_reprotect() -> dict[str, Any]:
+                    current_position = le.get("position")
+                    current_position = (
+                        current_position
+                        if isinstance(current_position, dict)
+                        else {}
+                    )
+                    if le.get("scale_limit_order_id"):
+                        released_scale_qty = _cancel_scale_limit_and_clamp(
+                            db,
+                            sess,
+                            adapter,
+                            le=le,
+                            requested_qty=(
+                                _float_or_none(current_position.get("quantity"))
+                                or 0.0
+                            ),
+                            reason="deadman_handoff_priority_reprotect",
+                        )
+                        if released_scale_qty is None:
+                            le["operator_flatten_requested_utc"] = str(
+                                le.get("operator_flatten_requested_utc")
+                                or _utcnow().isoformat()
+                            )
+                            le["deadman_close_handoff_priority_block"] = {
+                                "reason": (
+                                    "scale_limit_release_unconfirmed_before_"
+                                    "deadman_reprotect"
+                                ),
+                                "recorded_at_utc": _utcnow().isoformat(),
+                            }
+                            _commit_le(sess, le)
+                            db.flush()
+                            return {
+                                "ok": False,
+                                "session_id": sess.id,
+                                "state": sess.state,
+                                "deadman_handoff_reconcile_pending": True,
+                                "error": (
+                                    "scale_limit_release_unconfirmed_before_"
+                                    "deadman_reprotect"
+                                ),
+                            }
+                        current_position = le.get("position")
+                        current_position = (
+                            current_position
+                            if isinstance(current_position, dict)
+                            else {}
+                        )
+                    try:
+                        exact_broker_qty = float(
+                            adapter.get_position_quantity(product_id)
+                        )
+                    except Exception:
+                        exact_broker_qty = math.nan
+                    current_avg = _float_or_none(
+                        current_position.get("avg_entry_price")
+                    )
+                    current_stop = _float_or_none(
+                        current_position.get("stop_price")
+                    )
+                    current_local_qty = _float_or_none(
+                        current_position.get("quantity")
+                    )
+                    quantity_generation_exact = bool(
+                        math.isfinite(exact_broker_qty)
+                        and exact_broker_qty > 1e-9
+                        and current_local_qty is not None
+                        and abs(current_local_qty - exact_broker_qty)
+                        <= max(1e-9, exact_broker_qty * 1e-8)
+                    )
+                    protection = (
+                        _ensure_alpaca_deadman_stop(
+                            db,
+                            sess,
+                            adapter,
+                            le=le,
+                            product_id=product_id,
+                            quantity=exact_broker_qty,
+                            avg_entry_price=current_avg or 0.0,
+                            software_stop_price=current_stop or 0.0,
+                        )
+                        if (
+                            quantity_generation_exact
+                            and current_avg is not None
+                            and current_avg > 0.0
+                            and current_stop is not None
+                            and current_stop > 0.0
+                        )
+                        else {
+                            "ok": False,
+                            "error": (
+                                "replacement_deadman_quantity_generation_mismatch"
+                                if math.isfinite(exact_broker_qty)
+                                and exact_broker_qty > 1e-9
+                                else "replacement_deadman_envelope_unavailable"
+                            ),
+                        }
+                    )
+                    if protection.get("ok"):
+                        (
+                            _ctx,
+                            _claim,
+                            _meta,
+                            remaining_handoff,
+                            remaining_handoff_error,
+                        ) = _read_exact_alpaca_deadman_handoff(sess)
+                        if (
+                            remaining_handoff is None
+                            and remaining_handoff_error is None
+                        ):
+                            le.pop("deadman_released_for_close", None)
+                            le.pop("deadman_close_handoff_priority_block", None)
+                    else:
+                        le["operator_flatten_requested_utc"] = str(
+                            le.get("operator_flatten_requested_utc")
+                            or _utcnow().isoformat()
+                        )
+                    _commit_le(sess, le)
+                    db.flush()
+                    return {
+                        "ok": bool(protection.get("ok")),
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "deadman_handoff_priority_serviced": True,
+                        "deadman_rearmed": bool(protection.get("ok")),
+                        "deadman_handoff_reconcile_pending": not bool(
+                            protection.get("ok")
+                        ),
+                        "error": protection.get("error"),
+                    }
+                successor_phases = {
+                    "successor_leased",
+                    "successor_submitted",
+                    "successor_submit_indeterminate",
+                    "successor_terminal",
+                }
+                if handoff_phase in successor_phases:
+                    exact_current = bool(
+                        current_transport is not None
+                        and str(current_transport.get("transport_kind") or "").strip().lower()
+                        == handoff_kind
+                        and str(current_transport.get("client_order_id") or "").strip()
+                        == handoff_cid
+                        and current_transport.get("order_request") == successor
+                    )
+                    if not exact_current:
+                        le["deadman_close_handoff_priority_block"] = {
+                            "reason": "durable_successor_transport_mismatch",
+                            "phase": handoff_phase,
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_reconcile_pending": True,
+                            "error": "durable_successor_transport_mismatch",
+                        }
+                    successor_state, successor_order = _strict_client_order_id_truth(
+                        adapter,
+                        handoff_cid,
+                    )
+                    if successor_state == "found" and successor_order is not None:
+                        if not _owner_transport_order_matches(
+                            successor_order,
+                            current_transport,
+                        ):
+                            handoff_error = "durable_successor_broker_identity_mismatch"
+                        else:
+                            successor_status = str(
+                                getattr(successor_order, "status", "") or ""
+                            ).strip().lower()
+                            if (
+                                handoff_phase == "successor_terminal"
+                                and successor_status not in _ORDER_TERMINAL_STATUSES
+                            ):
+                                handoff_error = "durable_successor_terminal_truth_mismatch"
+                            else:
+                                successor_oid = str(
+                                    getattr(successor_order, "order_id", "") or ""
+                                ).strip()
+                                if handoff_phase == "successor_terminal":
+                                    terminal_fill = _float_or_none(
+                                        current_transport.get("filled_size")
+                                    )
+                                    terminal_remaining = _float_or_none(
+                                        current_transport.get("remaining_quantity")
+                                    )
+                                    locally_accounted = bool(
+                                        terminal_fill is not None
+                                        and terminal_fill <= 1e-12
+                                        and terminal_remaining is not None
+                                        and terminal_remaining > 1e-9
+                                    )
+                                    if (
+                                        terminal_fill is not None
+                                        and terminal_fill > 1e-12
+                                        and terminal_remaining is not None
+                                        and terminal_remaining > 1e-9
+                                    ):
+                                        markers = le.get(
+                                            "alpaca_exit_applied_fill_watermarks"
+                                        )
+                                        markers = (
+                                            markers
+                                            if isinstance(markers, list)
+                                            else []
+                                        )
+                                        local_qty = _float_or_none(
+                                            (le.get("position") or {}).get("quantity")
+                                        )
+                                        exact_markers = []
+                                        for marker in markers:
+                                            if not isinstance(marker, dict):
+                                                continue
+                                            marker_fill = _float_or_none(
+                                                marker.get("applied_filled_size")
+                                            )
+                                            marker_remaining = _float_or_none(
+                                                marker.get(
+                                                    "broker_remaining_quantity"
+                                                )
+                                            )
+                                            if (
+                                                str(
+                                                    marker.get("client_order_id")
+                                                    or ""
+                                                ).strip()
+                                                == handoff_cid
+                                                and str(
+                                                    marker.get("broker_order_id")
+                                                    or ""
+                                                ).strip()
+                                                == successor_oid
+                                                and marker.get("order_request")
+                                                == successor
+                                                and marker_fill is not None
+                                                and marker_remaining is not None
+                                                and abs(marker_fill - terminal_fill)
+                                                <= max(
+                                                    1e-9,
+                                                    terminal_fill * 1e-8,
+                                                )
+                                                and abs(
+                                                    marker_remaining
+                                                    - terminal_remaining
+                                                )
+                                                <= max(
+                                                    1e-9,
+                                                    terminal_remaining * 1e-8,
+                                                )
+                                            ):
+                                                exact_markers.append(marker)
+                                        locally_accounted = bool(
+                                            len(exact_markers) == 1
+                                            and local_qty is not None
+                                            and abs(local_qty - terminal_remaining)
+                                            <= max(1e-9, terminal_remaining * 1e-8)
+                                        )
+                                    if locally_accounted:
+                                        return _priority_reprotect()
+                                le["exit_order_id"] = successor_oid
+                                le["exit_client_order_id"] = handoff_cid
+                                le["pending_exit_reason"] = handoff_reason
+                                le["pending_exit_quantity"] = float(handoff_qty)
+                                le["pending_exit_submitted_at_utc"] = str(
+                                    current_transport.get("created_at_utc")
+                                    or durable_handoff.get("created_at_utc")
+                                    or _utcnow().isoformat()
+                                )
+                                le["alpaca_active_exit_owner_transport"] = dict(
+                                    current_transport
+                                )
+                                le.pop("deadman_close_handoff_priority_block", None)
+                                _commit_le(sess, le)
+                                db.flush()
+                                return {
+                                    "ok": True,
+                                    "session_id": sess.id,
+                                    "state": sess.state,
+                                    "deadman_handoff_priority_serviced": True,
+                                    "pending_exit": True,
+                                    "recovered_successor": True,
+                                    "successor_status": successor_status,
+                                }
+                    elif successor_state != "absent":
+                        handoff_error = "durable_successor_cid_truth_unknown"
+                    elif handoff_phase in {"successor_submitted", "successor_terminal"}:
+                        handoff_error = "accepted_successor_cid_absent"
+                    elif not _owner_transport_lease_expired(current_transport):
+                        handoff_error = "successor_cid_absent_lease_active"
+
+                    if handoff_error is not None:
+                        le["deadman_close_handoff_priority_block"] = {
+                            "reason": handoff_error,
+                            "phase": handoff_phase,
+                            "client_order_id": handoff_cid,
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_reconcile_pending": True,
+                            "error": handoff_error,
+                        }
+
+                if handoff_phase == "successor_proven_no_transport":
+                    return _priority_reprotect()
+
+                replacement_phases = {
+                    "replacement_deadman_leased",
+                    "replacement_deadman_submitted",
+                    "replacement_deadman_submit_indeterminate",
+                    "replacement_deadman_terminal",
+                    "replacement_deadman_proven_no_transport",
+                    "replacement_deadman_active",
+                }
+                if handoff_phase in replacement_phases:
+                    replacement_request = durable_handoff.get(
+                        "replacement_deadman_order_request"
+                    )
+                    replacement_request = (
+                        dict(replacement_request)
+                        if isinstance(replacement_request, dict)
+                        else {}
+                    )
+                    replacement_cid = str(
+                        durable_handoff.get("replacement_deadman_client_order_id")
+                        or ""
+                    ).strip()
+                    replacement_exact = bool(
+                        current_transport is not None
+                        and str(
+                            current_transport.get("transport_kind") or ""
+                        ).strip().lower()
+                        == "deadman"
+                        and str(
+                            current_transport.get("client_order_id") or ""
+                        ).strip()
+                        == replacement_cid
+                        and current_transport.get("order_request")
+                        == replacement_request
+                    )
+                    if not replacement_exact:
+                        le["deadman_close_handoff_priority_block"] = {
+                            "reason": "replacement_deadman_transport_mismatch",
+                            "phase": handoff_phase,
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_reconcile_pending": True,
+                            "error": "replacement_deadman_transport_mismatch",
+                        }
+                    if handoff_phase == "replacement_deadman_proven_no_transport":
+                        le.pop("deadman_stop", None)
+                        return _priority_reprotect()
+
+                    def _service_terminal_replacement(
+                        terminal_order: Any,
+                        terminal_transport: dict[str, Any],
+                        *,
+                        service_adapter: Any | None = None,
+                    ) -> dict[str, Any]:
+                        exact_adapter = service_adapter or adapter
+                        try:
+                            replacement_remaining = float(
+                                exact_adapter.get_position_quantity(product_id)
+                            )
+                        except Exception:
+                            replacement_remaining = math.nan
+                        if not (
+                            math.isfinite(replacement_remaining)
+                            and replacement_remaining >= 0.0
+                        ):
+                            return {
+                                "ok": False,
+                                "session_id": sess.id,
+                                "state": sess.state,
+                                "deadman_handoff_reconcile_pending": True,
+                                "error": (
+                                    "replacement_deadman_terminal_position_unreadable"
+                                ),
+                            }
+                        terminal_oid = str(
+                            getattr(terminal_order, "order_id", "") or ""
+                        ).strip()
+                        le["deadman_stop"] = {
+                            "order_id": terminal_oid,
+                            "client_order_id": replacement_cid,
+                            "stop_price": float(
+                                replacement_request["stop_price"]
+                            ),
+                            "qty": float(replacement_request["base_size"]),
+                            "phase": "submitted",
+                            "owner_transport": dict(terminal_transport),
+                        }
+                        _commit_le(sess, le)
+                        current_position = le.get("position")
+                        current_position = (
+                            current_position
+                            if isinstance(current_position, dict)
+                            else {}
+                        )
+                        terminal_outcome = _ensure_alpaca_deadman_stop(
+                            db,
+                            sess,
+                            exact_adapter,
+                            le=le,
+                            product_id=product_id,
+                            quantity=float(replacement_request["base_size"]),
+                            avg_entry_price=(
+                                _float_or_none(
+                                    current_position.get("avg_entry_price")
+                                )
+                                or avg
+                            ),
+                            software_stop_price=(
+                                _float_or_none(current_position.get("stop_price"))
+                                or stop_px
+                            ),
+                            rearm_after_terminal=True,
+                            terminal_remaining_override=replacement_remaining,
+                        )
+                        db.flush()
+                        return {
+                            "ok": bool(terminal_outcome.get("ok")),
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_priority_serviced": True,
+                            "deadman_position_closed": bool(
+                                terminal_outcome.get("position_closed")
+                            ),
+                            "deadman_rearmed": bool(
+                                terminal_outcome.get("protected")
+                            ),
+                            "error": terminal_outcome.get("error"),
+                        }
+
+                    def _strict_order_id_truth(
+                        broker_order_id: str,
+                    ) -> tuple[str, Any | None]:
+                        getter = getattr(adapter, "get_order_truth", None)
+                        if not callable(getter):
+                            return "unknown", None
+                        try:
+                            truth = getter(str(broker_order_id))
+                        except Exception:
+                            return "unknown", None
+                        if not isinstance(truth, dict) or not truth.get("readable"):
+                            return "unknown", None
+                        if truth.get("found") and truth.get("order") is not None:
+                            return "found", truth["order"]
+                        if truth.get("found") is False:
+                            return "absent", None
+                        return "unknown", None
+
+                    replacement_state, replacement_order = (
+                        _strict_client_order_id_truth(adapter, replacement_cid)
+                    )
+                    if replacement_state == "found" and replacement_order is not None:
+                        if not _owner_transport_order_matches(
+                            replacement_order,
+                            current_transport,
+                        ):
+                            handoff_error = "replacement_deadman_broker_identity_mismatch"
+                        else:
+                            replacement_oid = str(
+                                getattr(replacement_order, "order_id", "") or ""
+                            ).strip()
+                            replacement_status = str(
+                                getattr(replacement_order, "status", "") or ""
+                            ).strip().lower()
+                            if replacement_status in _ORDER_TERMINAL_STATUSES:
+                                return _service_terminal_replacement(
+                                    replacement_order,
+                                    current_transport,
+                                )
+                            else:
+                                lifecycle = _alpaca_protective_order_lifecycle(
+                                    replacement_order
+                                )
+                                active_replacement = (
+                                    _alpaca_protective_order_is_certifiably_active(
+                                        replacement_order
+                                    )
+                                )
+                                if not active_replacement:
+                                    le["deadman_stop"] = {
+                                        "order_id": replacement_oid,
+                                        "client_order_id": replacement_cid,
+                                        "stop_price": float(
+                                            replacement_request["stop_price"]
+                                        ),
+                                        "qty": float(
+                                            replacement_request["base_size"]
+                                        ),
+                                        "phase": "submitted",
+                                        "owner_transport": dict(current_transport),
+                                    }
+                                    le["deadman_close_handoff_priority_block"] = {
+                                        "reason": (
+                                            "replacement_deadman_nonactive_cancel_in_progress"
+                                        ),
+                                        "alpaca_lifecycle": lifecycle,
+                                        "client_order_id": replacement_cid,
+                                        "broker_order_id": replacement_oid,
+                                        "recorded_at_utc": _utcnow().isoformat(),
+                                    }
+                                    _commit_le(sess, le)
+                                    account_ok, account_identity = (
+                                        _strict_alpaca_account_identity(adapter, sess)
+                                    )
+                                    if not account_ok:
+                                        handoff_error = str(
+                                            account_identity.get("reason")
+                                            or "alpaca_account_identity_blocked"
+                                        )
+                                    elif lifecycle in {
+                                        "pending_replace",
+                                        "replaced",
+                                    }:
+                                        if lifecycle == "pending_replace":
+                                            handoff_error = (
+                                                "replacement_deadman_predecessor_not_inert"
+                                            )
+                                            le[
+                                                "deadman_close_handoff_priority_block"
+                                            ] = {
+                                                "reason": handoff_error,
+                                                "alpaca_lifecycle": lifecycle,
+                                                "client_order_id": replacement_cid,
+                                                "broker_order_id": replacement_oid,
+                                                "recorded_at_utc": _utcnow().isoformat(),
+                                            }
+                                            _commit_le(sess, le)
+                                            db.flush()
+                                            return {
+                                                "ok": False,
+                                                "session_id": sess.id,
+                                                "state": sess.state,
+                                                "deadman_handoff_reconcile_pending": True,
+                                                "error": handoff_error,
+                                            }
+                                        return _dispatch_alpaca_replaced_deadman_successor(
+                                            db,
+                                            sess,
+                                            adapter,
+                                            le=le,
+                                            product_id=product_id,
+                                            predecessor_transport=current_transport,
+                                            predecessor_order=replacement_order,
+                                            avg_entry_price=avg,
+                                            software_stop_price=stop_px,
+                                            rearm_after_terminal=True,
+                                        )
+                                    else:
+                                        if lifecycle != "pending_cancel":
+                                            cancel = getattr(
+                                                adapter,
+                                                "cancel_order_by_id",
+                                                None,
+                                            )
+                                            if not callable(cancel):
+                                                handoff_error = (
+                                                    "replacement_deadman_cancel_unsupported"
+                                                )
+                                            else:
+                                                try:
+                                                    cancel(replacement_oid)
+                                                except Exception:
+                                                    logger.warning(
+                                                        "[live_runner] replacement deadman cancel failed",
+                                                        exc_info=True,
+                                                    )
+                                        post_state, post_order = (
+                                            _strict_client_order_id_truth(
+                                                adapter,
+                                                replacement_cid,
+                                            )
+                                        )
+                                        if (
+                                            post_state == "found"
+                                            and post_order is not None
+                                            and str(
+                                                getattr(post_order, "order_id", "")
+                                                or ""
+                                            ).strip()
+                                            == replacement_oid
+                                            and _owner_transport_order_matches(
+                                                post_order,
+                                                current_transport,
+                                            )
+                                        ):
+                                            post_status = str(
+                                                getattr(post_order, "status", "")
+                                                or ""
+                                            ).strip().lower()
+                                            if post_status in _ORDER_TERMINAL_STATUSES:
+                                                return _service_terminal_replacement(
+                                                    post_order,
+                                                    current_transport,
+                                                )
+                                            handoff_error = (
+                                                "replacement_deadman_cancel_not_terminal"
+                                            )
+                                        elif post_state == "absent":
+                                            handoff_error = (
+                                                "replacement_deadman_post_cancel_cid_absent"
+                                            )
+                                        else:
+                                            handoff_error = (
+                                                "replacement_deadman_post_cancel_truth_unknown"
+                                            )
+                                if str(
+                                    current_transport.get("phase") or ""
+                                ).strip().lower() != "submitted" and active_replacement and handoff_error is None:
+                                    advanced = advance_owner_transport_committed(
+                                        **owner_context,
+                                        client_order_id=replacement_cid,
+                                        lease_token=str(
+                                            current_transport.get("lease_token") or ""
+                                        ),
+                                        phase="submitted",
+                                        broker_order_id=replacement_oid,
+                                        metadata={
+                                            "recovered_replacement_deadman": True
+                                        },
+                                    )
+                                    if not advanced:
+                                        handoff_error = (
+                                            "replacement_deadman_advance_failed"
+                                        )
+                                if active_replacement and handoff_error is None:
+                                    active_transport = {
+                                        **current_transport,
+                                        "phase": "submitted",
+                                        "broker_order_id": replacement_oid,
+                                    }
+                                    if not certify_deadman_handoff_reprotected_committed(
+                                        **owner_context,
+                                        client_order_id=replacement_cid,
+                                        broker_order_id=replacement_oid,
+                                        broker_order_status=replacement_status,
+                                        broker_order_lifecycle=lifecycle,
+                                    ):
+                                        handoff_error = (
+                                            "replacement_deadman_active_certification_pending"
+                                        )
+                                    else:
+                                        le["deadman_stop"] = {
+                                            "order_id": replacement_oid,
+                                            "client_order_id": replacement_cid,
+                                            "stop_price": float(
+                                                replacement_request["stop_price"]
+                                            ),
+                                            "qty": float(
+                                                replacement_request["base_size"]
+                                            ),
+                                            "phase": "submitted",
+                                            "owner_transport": active_transport,
+                                        }
+                                        lineage_retired = (
+                                            retire_deadman_handoff_reprotected_committed(
+                                                **owner_context,
+                                                client_order_id=replacement_cid,
+                                                broker_order_id=replacement_oid,
+                                                broker_order_status=replacement_status,
+                                                broker_order_lifecycle=lifecycle,
+                                            )
+                                        )
+                                        if lineage_retired:
+                                            le.pop("deadman_released_for_close", None)
+                                            le.pop(
+                                                "deadman_close_handoff_priority_block",
+                                                None,
+                                            )
+                                        _commit_le(sess, le)
+                                        db.flush()
+                                        return {
+                                            "ok": True,
+                                            "session_id": sess.id,
+                                            "state": sess.state,
+                                            "deadman_handoff_priority_serviced": True,
+                                            "deadman_rearmed": True,
+                                            "deadman_lineage_reconcile_pending": not bool(
+                                                lineage_retired
+                                            ),
+                                        }
+                    elif replacement_state != "absent":
+                        handoff_error = "replacement_deadman_cid_truth_unknown"
+                    elif handoff_phase in {
+                        "replacement_deadman_submitted",
+                        "replacement_deadman_terminal",
+                        "replacement_deadman_active",
+                    }:
+                        handoff_error = "accepted_replacement_deadman_cid_absent"
+                    elif not _owner_transport_lease_expired(current_transport):
+                        handoff_error = "replacement_deadman_cid_absent_lease_active"
+                    else:
+                        le["deadman_stop"] = {
+                            "order_id": None,
+                            "client_order_id": replacement_cid,
+                            "stop_price": float(replacement_request["stop_price"]),
+                            "qty": float(replacement_request["base_size"]),
+                            "phase": "submitting",
+                            "owner_transport": dict(current_transport),
+                        }
+                        _commit_le(sess, le)
+                        return _priority_reprotect()
+
+                    le["deadman_close_handoff_priority_block"] = {
+                        "reason": handoff_error
+                        or "replacement_deadman_reconcile_pending",
+                        "phase": handoff_phase,
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    db.flush()
+                    return {
+                        "ok": False,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "deadman_handoff_reconcile_pending": True,
+                        "error": handoff_error
+                        or "replacement_deadman_reconcile_pending",
+                    }
+                if handoff_phase not in {
+                    "intent_frozen",
+                    "deadman_terminal",
+                    "successor_ready",
+                    "successor_leased",
+                    "successor_submit_indeterminate",
+                }:
+                    le["deadman_close_handoff_priority_block"] = {
+                        "reason": "deadman_handoff_phase_not_dispatchable",
+                        "phase": handoff_phase,
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+                    db.flush()
+                    return {
+                        "ok": False,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "deadman_handoff_reconcile_pending": True,
+                        "error": "deadman_handoff_phase_not_dispatchable",
+                    }
+                sr = _submit_live_market_exit(
+                    db,
+                    sess,
+                    adapter,
+                    le=le,
+                    product_id=product_id,
+                    quantity=handoff_qty,
+                    client_order_id=handoff_cid,
+                    reason=handoff_reason,
+                    bid=bid,
+                    ask=ask,
+                    mid=mid,
+                    extra={"deadman_close_handoff_priority": True},
+                    quote_independent_authority=(handoff_kind == "emergency_exit"),
+                    emergency_exit_authority=None,
+                    alpaca_handoff_recovery=durable_handoff,
+                )
+                if sr.get("pre_place_blocked") and not sr.get("order_id"):
+                    (
+                        recovery_context,
+                        _recovery_claim,
+                        recovery_meta,
+                        recovery_handoff,
+                        recovery_error,
+                    ) = _read_exact_alpaca_deadman_handoff(sess)
+                    recovery_meta = recovery_meta or {}
+                    if recovery_error is not None or recovery_handoff is None:
+                        le["deadman_close_handoff_priority_block"] = {
+                            "reason": recovery_error
+                            or "deadman_no_post_handoff_missing",
+                            "pre_place_error": sr.get("error"),
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_reconcile_pending": True,
+                            "error": recovery_error
+                            or "deadman_no_post_handoff_missing",
+                        }
+                    recovery_phase = str(
+                        recovery_handoff.get("phase") or ""
+                    ).strip().lower()
+                    if recovery_phase == "intent_frozen":
+                        old_cid = str(
+                            recovery_handoff.get("deadman_client_order_id") or ""
+                        ).strip()
+                        old_oid = str(
+                            recovery_handoff.get("deadman_broker_order_id") or ""
+                        ).strip()
+                        old_request = recovery_handoff.get("deadman_order_request")
+                        old_request = (
+                            dict(old_request)
+                            if isinstance(old_request, dict)
+                            else {}
+                        )
+                        old_candidates = [recovery_meta.get("owner_transport")]
+                        recovery_history = recovery_meta.get("owner_transport_history")
+                        if isinstance(recovery_history, list):
+                            old_candidates.extend(recovery_history)
+                        old_transports = [
+                            dict(candidate)
+                            for candidate in old_candidates
+                            if isinstance(candidate, dict)
+                            and str(
+                                candidate.get("transport_kind") or ""
+                            ).strip().lower()
+                            == "deadman"
+                            and str(
+                                candidate.get("client_order_id") or ""
+                            ).strip()
+                            == old_cid
+                            and str(
+                                candidate.get("broker_order_id") or old_oid
+                            ).strip()
+                            == old_oid
+                            and candidate.get("order_request") == old_request
+                        ]
+                        old_state, old_order = _strict_client_order_id_truth(
+                            adapter,
+                            old_cid,
+                        )
+                        if (
+                            len(old_transports) == 1
+                            and old_state == "found"
+                            and old_order is not None
+                            and str(getattr(old_order, "order_id", "") or "").strip()
+                            == old_oid
+                            and _owner_transport_order_matches(
+                                old_order,
+                                old_transports[0],
+                            )
+                        ):
+                            if _alpaca_protective_order_is_certifiably_active(old_order):
+                                db.flush()
+                                return {
+                                    "ok": True,
+                                    "session_id": sess.id,
+                                    "state": sess.state,
+                                    "deadman_handoff_priority_serviced": True,
+                                    "deadman_retained_active": True,
+                                    "pre_place_error": sr.get("error"),
+                                }
+                            old_lifecycle = _alpaca_protective_order_lifecycle(
+                                old_order
+                            )
+                            if old_lifecycle == "done_for_day" and hasattr(
+                                adapter,
+                                "cancel_order_by_id",
+                            ):
+                                try:
+                                    adapter.cancel_order_by_id(old_oid)
+                                except Exception:
+                                    pass
+                                old_state, old_order = _strict_client_order_id_truth(
+                                    adapter,
+                                    old_cid,
+                                )
+                            old_status = str(
+                                getattr(old_order, "status", "") or ""
+                            ).strip().lower() if old_order is not None else ""
+                            if (
+                                old_state == "found"
+                                and old_order is not None
+                                and old_status in _ORDER_TERMINAL_STATUSES
+                                and _owner_transport_order_matches(
+                                    old_order,
+                                    old_transports[0],
+                                )
+                            ):
+                                try:
+                                    old_remaining = float(
+                                        adapter.get_position_quantity(product_id)
+                                    )
+                                except Exception:
+                                    old_remaining = math.nan
+                                if math.isfinite(old_remaining) and old_remaining >= 0.0:
+                                    le["deadman_stop"] = {
+                                        "order_id": old_oid,
+                                        "client_order_id": old_cid,
+                                        "stop_price": old_request.get("stop_price"),
+                                        "qty": old_request.get("base_size"),
+                                        "phase": "submitted",
+                                        "owner_transport": old_transports[0],
+                                    }
+                                    current_position = le.get("position")
+                                    current_position = (
+                                        current_position
+                                        if isinstance(current_position, dict)
+                                        else {}
+                                    )
+                                    recovered_protection = _ensure_alpaca_deadman_stop(
+                                        db,
+                                        sess,
+                                        adapter,
+                                        le=le,
+                                        product_id=product_id,
+                                        quantity=float(old_request["base_size"]),
+                                        avg_entry_price=(
+                                            _float_or_none(
+                                                current_position.get("avg_entry_price")
+                                            )
+                                            or avg
+                                        ),
+                                        software_stop_price=(
+                                            _float_or_none(
+                                                current_position.get("stop_price")
+                                            )
+                                            or stop_px
+                                        ),
+                                        rearm_after_terminal=True,
+                                        terminal_remaining_override=old_remaining,
+                                    )
+                                    db.flush()
+                                    return {
+                                        "ok": bool(recovered_protection.get("ok")),
+                                        "session_id": sess.id,
+                                        "state": sess.state,
+                                        "deadman_handoff_priority_serviced": True,
+                                        "deadman_rearmed": bool(
+                                            recovered_protection.get("protected")
+                                        ),
+                                        "deadman_position_closed": bool(
+                                            recovered_protection.get("position_closed")
+                                        ),
+                                        "pre_place_error": sr.get("error"),
+                                        "error": recovered_protection.get("error"),
+                                    }
+                        le["deadman_close_handoff_priority_block"] = {
+                            "reason": "intent_frozen_predecessor_not_protected",
+                            "pre_place_error": sr.get("error"),
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        le["operator_flatten_requested_utc"] = str(
+                            le.get("operator_flatten_requested_utc")
+                            or _utcnow().isoformat()
+                        )
+                        _commit_le(sess, le)
+                        db.flush()
+                        return {
+                            "ok": False,
+                            "session_id": sess.id,
+                            "state": sess.state,
+                            "deadman_handoff_reconcile_pending": True,
+                            "error": "intent_frozen_predecessor_not_protected",
+                        }
+                    if recovery_phase in {
+                        "deadman_terminal",
+                        "successor_ready",
+                        "successor_proven_no_transport",
+                    }:
+                        return _priority_reprotect()
+                succeeded = _live_exit_submit_succeeded(
+                    db,
+                    sess,
+                    adapter=adapter,
+                    le=le,
+                    result=sr,
+                    reason=handoff_reason,
+                )
+                db.flush()
+                return {
+                    "ok": bool(succeeded or sr.get("deferred")),
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "deadman_handoff_priority_serviced": True,
+                    "pending_exit": bool(sr.get("order_id")),
+                    "error": sr.get("error"),
+                }
+            deadman_state = _ensure_alpaca_deadman_stop(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                quantity=qty,
+                avg_entry_price=avg,
+                software_stop_price=stop_px,
+            )
+            if deadman_state.get("position_closed"):
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "deadman_position_closed": True,
+                }
+            if deadman_state.get("pending") or deadman_state.get("unprotected"):
+                db.flush()
+                return {
+                    "ok": False,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "deadman_reconcile_pending": bool(deadman_state.get("pending")),
+                    "full_close_queued": bool(deadman_state.get("full_close_queued")),
+                    "error": deadman_state.get("error"),
+                }
         opened_raw = pos.get("opened_at_utc")
         try:
             t0 = datetime.fromisoformat(str(opened_raw).replace("Z", "+00:00")).replace(tzinfo=None)
@@ -11672,6 +26815,13 @@ def tick_live_session(
 
         # C1: Per-trade loss enforcement
         max_loss_usd = float(caps.get("max_loss_per_trade_usd") or 0)
+        _c1_alpaca_cap = alpaca_paper_hard_loss_cap_usd(ef)
+        if _c1_alpaca_cap is not None:
+            max_loss_usd = (
+                min(max_loss_usd, float(_c1_alpaca_cap))
+                if math.isfinite(max_loss_usd) and max_loss_usd > 0.0
+                else float(_c1_alpaca_cap)
+            )
         if max_loss_usd > 0 and st != STATE_LIVE_BAILOUT:
             unrealized_pnl = (bid - avg) * qty
             # FRESH-QUOTE GUARD (2026-06-30, PULLBACK-SCALP-ENABLE): the C1 1x max-loss
@@ -12226,7 +27376,9 @@ def tick_live_session(
                 extra={"unrealized_pnl_usd": (bid - avg) * qty},
                 hard_floor_price=_bailout_floor,
             )
-            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="bailout"):
+            if not _live_exit_submit_succeeded(
+                db, sess, adapter=adapter, le=le, result=sr, reason="bailout"
+            ):
                 db.flush()
                 return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
             poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="bailout", quantity=qty)
@@ -12344,7 +27496,9 @@ def tick_live_session(
                 mid=mid,
                 extra={"held_seconds": held, "max_hold_seconds": max_hold},
             )
-            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="max_hold"):
+            if not _live_exit_submit_succeeded(
+                db, sess, adapter=adapter, le=le, result=sr, reason="max_hold"
+            ):
                 db.flush()
                 return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
             poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="max_hold", quantity=qty)
@@ -13546,6 +28700,8 @@ def tick_live_session(
                         and _sis.get("fired")
                         and _sis.get("action") == "sell_limit"
                         and not le.get("scale_limit_order_id")
+                        and normalize_execution_family(sess.execution_family)
+                        not in ALPACA_EXECUTION_FAMILIES
                     ):
                         _ll_px = _float_or_none(_sis.get("limit_px"))
                         _ll_qty = _float_or_none(_sis.get("sell_qty"))
@@ -13560,6 +28716,10 @@ def tick_live_session(
                             )
                             if not _le_side_long(le):
                                 _ll_kwargs["position_intent"] = "buy_to_close"  # SHORT-P2 pricing caveat
+                            elif normalize_execution_family(
+                                sess.execution_family
+                            ) in ALPACA_EXECUTION_FAMILIES:
+                                _ll_kwargs["position_intent"] = "sell_to_close"
                             if not sess.symbol.endswith("-USD"):
                                 # EQUITY: a DAY order (auto-cancels at the close — the
                                 # free-option expires daily, never a stale resting GTC);
@@ -13654,11 +28814,18 @@ def tick_live_session(
                                 le.pop("anticipation_add_order_id", None)
                                 le.pop("anticipation_add_limit_px", None)
                                 _commit_le(sess, le)
+                            _resolve_alpaca_entry_claim_from_terminal_order(
+                                sess,
+                                _ano,
+                                le=le,
+                                durable_adopted=_ant_filled > 0.0,
+                            )
                     # PHASE 2 — submit the remainder ONCE when armed + confirmed green + idle.
                     _ant_rem = _float_or_none(le.get("anticipation_remainder_qty"))
                     if (
                         le.get("anticipation_armed")
                         and _le_side_long(le)  # v1: shorts never add
+                        and not _alpaca_owner_recovery_blocks_entries
                         and not le.get("anticipation_add_order_id")
                         and not le.get("anticipation_completed")
                         and _ant_rem is not None and _ant_rem > 0
@@ -13683,7 +28850,16 @@ def tick_live_session(
                             _ant_ext = _ant_sess_now(sess.symbol) != "regular"
                         except Exception:
                             _ant_ext = False
-                        _ant_res = adapter.place_limit_order_gtc(
+                        _ant_res = _governed_place(
+                            adapter,
+                            adapter.place_limit_order_gtc,
+                            sess=sess,
+                            alpaca_order_role="anticipation",
+                            alpaca_risk_stop_price=pos.get("stop_price"),
+                            alpaca_role_metadata={
+                                "anticipation_remainder_qty": float(_ant_rem),
+                                "anticipation_place_count": _ant_place_n,
+                            },
                             product_id=product_id,
                             side="buy",
                             base_size=_fmt_base_size(_ant_rem),
@@ -13691,6 +28867,12 @@ def tick_live_session(
                             client_order_id=_ant_cid,
                             extended_hours=_ant_ext,
                             time_in_force="gfd",
+                            **(
+                                {"position_intent": "buy_to_open"}
+                                if normalize_execution_family(sess.execution_family)
+                                in ALPACA_EXECUTION_FAMILIES
+                                else {}
+                            ),
                         ) or {}
                         if _ant_res.get("ok") and _ant_res.get("order_id"):
                             le["anticipation_add_order_id"] = str(_ant_res["order_id"])
@@ -13806,6 +28988,12 @@ def tick_live_session(
                                 le.pop("pyramid_prev_stop", None)
                                 le.pop("pyramid_confirm_ofi", None)
                                 _commit_le(sess, le)
+                            _resolve_alpaca_entry_claim_from_terminal_order(
+                                sess,
+                                _pno,
+                                le=le,
+                                durable_adopted=_pyr_filled > 0.0,
+                            )
                         # else: still working — leave it in flight, do NOT submit again.
 
                     # PHASE 2 — TRIGGER a new add (only if none in flight + under cap).
@@ -13816,7 +29004,11 @@ def tick_live_session(
                     # crypto L2 coverage is complete. (project_l2_integration)
                     _is_equity_pyr = not str(sess.symbol or "").upper().endswith("-USD")
                     _max_adds = int(getattr(settings, "chili_momentum_pyramid_max_adds", 1) or 1)
-                    if st == STATE_LIVE_TRAILING and not le.get("pyramid_order_id"):
+                    if (
+                        st == STATE_LIVE_TRAILING
+                        and not _alpaca_owner_recovery_blocks_entries
+                        and not le.get("pyramid_order_id")
+                    ):
                         # R0 = the STARTER's ORIGINAL structural risk = d0 * q0, where
                         # d0 is the frozen entry stop_distance (the C1b basis) and q0,a0
                         # are the STARTER size/avg. Use original_quantity as q0 so a
@@ -14216,8 +29408,27 @@ def tick_live_session(
                                         client_order_id=_pyr_cid,
                                         extended_hours=_pyr_ext,
                                         time_in_force="gfd",
+                                        **(
+                                            {"position_intent": "buy_to_open"}
+                                            if normalize_execution_family(sess.execution_family)
+                                            in ALPACA_EXECUTION_FAMILIES
+                                            else {}
+                                        ),
                                     )
-                                    _pyr_res = adapter.place_limit_order_gtc(**_pyr_kwargs) or {}
+                                    _pyr_res = _governed_place(
+                                        adapter,
+                                        adapter.place_limit_order_gtc,
+                                        sess=sess,
+                                        alpaca_order_role="pyramid",
+                                        alpaca_risk_stop_price=stop_px,
+                                        alpaca_role_metadata={
+                                            "pyramid_pending_R0": float(_R0),
+                                            "pyramid_prev_stop": float(stop_px),
+                                            "pyramid_confirm_ofi": _pyr_ofi,
+                                            "pyramid_place_count": _pyr_place_n,
+                                        },
+                                        **_pyr_kwargs,
+                                    ) or {}
                                     if _pyr_res.get("ok") and _pyr_res.get("order_id"):
                                         # Stash in-flight state. Mutate pos ONLY on the
                                         # confirmed poll (PHASE 1) — NEVER on submit.
@@ -14393,6 +29604,12 @@ def tick_live_session(
                                 le.pop("micropullback_confirm_ofi", None)
                                 le.pop("micropullback_confirm_trade_flow", None)
                                 _commit_le(sess, le)
+                            _resolve_alpaca_entry_claim_from_terminal_order(
+                                sess,
+                                _mno,
+                                le=le,
+                                durable_adopted=_mpr_filled > 0.0,
+                            )
 
                     # PHASE 2 — TRIGGER a new re-load (only if none in flight + under cap
                     # + cooldown elapsed). EQUITY-FIRST (crypto deferred per the pyramid
@@ -14405,6 +29622,7 @@ def tick_live_session(
                         _is_equity_mpr
                         and st == STATE_LIVE_TRAILING
                         and not le.get("micropullback_reentry_order_id")
+                        and not _alpaca_owner_recovery_blocks_entries
                         and not le.get("pyramid_order_id")  # never two adds in flight at once
                     ):
                         _mpr_count = int(le.get("micropullback_reentry_count") or 0)
@@ -14596,15 +29814,33 @@ def tick_live_session(
                                                     })
                                                 else:
                                                     _mpr_limit_str = _fmt_limit_price_buy(_mpr_guard_ask)
-                                                    _mpr_cid = (
-                                                        f"chili_ml_mpr_{sess.id}_{uuid.uuid4().hex[:12]}"
-                                                    )
+                                                    _mpr_place_n = int(
+                                                        le.get("micropullback_reentry_place_count") or 0
+                                                    ) + 1
+                                                    le["micropullback_reentry_place_count"] = _mpr_place_n
+                                                    _mpr_suffix = hashlib.sha1(
+                                                        f"{sess.id}|{sess.correlation_id or 'x'}|micro|{_mpr_place_n}".encode("utf-8")
+                                                    ).hexdigest()[:12]
+                                                    _mpr_cid = f"chili_ml_mpr_{sess.id}_{_mpr_suffix}"[:120]
                                                     try:
                                                         from .market_profile import market_session_now as _mpr_sess_now
                                                         _mpr_ext = _mpr_sess_now(sess.symbol) != "regular"
                                                     except Exception:
                                                         _mpr_ext = False
-                                                    _mpr_res = adapter.place_limit_order_gtc(
+                                                    _mpr_res = _governed_place(
+                                                        adapter,
+                                                        adapter.place_limit_order_gtc,
+                                                        sess=sess,
+                                                        alpaca_order_role="micro",
+                                                        alpaca_risk_stop_price=stop_px,
+                                                        alpaca_role_metadata={
+                                                            "micropullback_reentry_pending_R0": float(_R0_m),
+                                                            "micropullback_reentry_place_count": _mpr_place_n,
+                                                            "micropullback_prev_stop": float(stop_px),
+                                                            "micropullback_pending_dip_low": _float_or_none(_det.get("dip_low")),
+                                                            "micropullback_confirm_ofi": _mpr_ofi,
+                                                            "micropullback_confirm_trade_flow": _mpr_tf,
+                                                        },
                                                         product_id=product_id,
                                                         side="buy",
                                                         base_size=_fmt_base_size(_qa_m),
@@ -14612,6 +29848,12 @@ def tick_live_session(
                                                         client_order_id=_mpr_cid,
                                                         extended_hours=_mpr_ext,
                                                         time_in_force="gfd",
+                                                        **(
+                                                            {"position_intent": "buy_to_open"}
+                                                            if normalize_execution_family(sess.execution_family)
+                                                            in ALPACA_EXECUTION_FAMILIES
+                                                            else {}
+                                                        ),
                                                     ) or {}
                                                     if _mpr_res.get("ok") and _mpr_res.get("order_id"):
                                                         le["micropullback_reentry_order_id"] = str(_mpr_res["order_id"])
@@ -14758,6 +30000,12 @@ def tick_live_session(
                                 le.pop("pullback_add_confirm_strength", None)
                                 le.pop("pullback_add_confirm_ofi", None)
                                 _commit_le(sess, le)
+                            _resolve_alpaca_entry_claim_from_terminal_order(
+                                sess,
+                                _pbno,
+                                le=le,
+                                durable_adopted=_pba_filled > 0.0,
+                            )
 
                     # PHASE 2 — TRIGGER a new pullback-add (only if none in flight + under
                     # cap + cooldown elapsed + NO other add in flight). EQUITY-FIRST.
@@ -14769,6 +30017,7 @@ def tick_live_session(
                     if (
                         st == STATE_LIVE_TRAILING
                         and not le.get("pullback_add_order_id")
+                        and not _alpaca_owner_recovery_blocks_entries
                     ):
                         # STARTER structural risk R0 = d0 * q0 (the frozen entry stop_distance
                         # * the starter qty), funded off the full starter so a post-partial
@@ -15064,15 +30313,33 @@ def tick_live_session(
                                     })
                                 else:
                                     _pba_limit_str = _fmt_limit_price_buy(_pba_guard_ask)
-                                    _pba_cid = (
-                                        f"chili_ml_pba_{sess.id}_{uuid.uuid4().hex[:12]}"
-                                    )
+                                    _pba_place_n = int(le.get("pullback_add_place_count") or 0) + 1
+                                    le["pullback_add_place_count"] = _pba_place_n
+                                    _pba_suffix = hashlib.sha1(
+                                        f"{sess.id}|{sess.correlation_id or 'x'}|pullback|{_pba_place_n}".encode("utf-8")
+                                    ).hexdigest()[:12]
+                                    _pba_cid = f"chili_ml_pba_{sess.id}_{_pba_suffix}"[:120]
                                     try:
                                         from .market_profile import market_session_now as _pba_sess_now
                                         _pba_ext = _pba_sess_now(sess.symbol) != "regular"
                                     except Exception:
                                         _pba_ext = False
-                                    _pba_res = adapter.place_limit_order_gtc(
+                                    _pba_res = _governed_place(
+                                        adapter,
+                                        adapter.place_limit_order_gtc,
+                                        sess=sess,
+                                        alpaca_order_role="pullback",
+                                        alpaca_risk_stop_price=stop_px,
+                                        alpaca_role_metadata={
+                                            "pullback_add_pending_R0": float(_R0_p),
+                                            "pullback_add_place_count": _pba_place_n,
+                                            "pullback_add_prev_stop": float(stop_px),
+                                            "pullback_add_pending_low": _float_or_none(_decn_p.get("add_stop")),
+                                            "pullback_add_confirm_strength": (
+                                                None if _fs_score_p is None else round(float(_fs_score_p), 4)
+                                            ),
+                                            "pullback_add_confirm_ofi": _fs_ofi_lvl_p,
+                                        },
                                         product_id=product_id,
                                         side="buy",
                                         base_size=_fmt_base_size(_qa_p),
@@ -15080,6 +30347,12 @@ def tick_live_session(
                                         client_order_id=_pba_cid,
                                         extended_hours=_pba_ext,
                                         time_in_force="gfd",
+                                        **(
+                                            {"position_intent": "buy_to_open"}
+                                            if normalize_execution_family(sess.execution_family)
+                                            in ALPACA_EXECUTION_FAMILIES
+                                            else {}
+                                        ),
                                     ) or {}
                                     if _pba_res.get("ok") and _pba_res.get("order_id"):
                                         le["pullback_add_order_id"] = str(_pba_res["order_id"])
@@ -15248,6 +30521,12 @@ def tick_live_session(
                                 le.pop("flag_breakout_add_confirm_strength", None)
                                 le.pop("flag_breakout_add_confirm_ofi", None)
                                 _commit_le(sess, le)
+                            _resolve_alpaca_entry_claim_from_terminal_order(
+                                sess,
+                                _fbno,
+                                le=le,
+                                durable_adopted=_fba_filled > 0.0,
+                            )
 
                     # PHASE 2 — TRIGGER a new flag-breakout add (only if none in flight + under
                     # cap + cooldown elapsed + NO other add in flight). EQUITY-FIRST.
@@ -15261,6 +30540,7 @@ def tick_live_session(
                     if (
                         st == STATE_LIVE_TRAILING
                         and not le.get("flag_breakout_add_order_id")
+                        and not _alpaca_owner_recovery_blocks_entries
                     ):
                         # STARTER structural risk R0 = d0 * q0 (the frozen entry stop_distance *
                         # the starter qty), funded off the full starter so a post-partial runner
@@ -15527,15 +30807,33 @@ def tick_live_session(
                                     })
                                 else:
                                     _fba_limit_str = _fmt_limit_price_buy(_fba_guard_ask)
-                                    _fba_cid = (
-                                        f"chili_ml_fba_{sess.id}_{uuid.uuid4().hex[:12]}"
-                                    )
+                                    _fba_place_n = int(le.get("flag_breakout_add_place_count") or 0) + 1
+                                    le["flag_breakout_add_place_count"] = _fba_place_n
+                                    _fba_suffix = hashlib.sha1(
+                                        f"{sess.id}|{sess.correlation_id or 'x'}|flag|{_fba_place_n}".encode("utf-8")
+                                    ).hexdigest()[:12]
+                                    _fba_cid = f"chili_ml_fba_{sess.id}_{_fba_suffix}"[:120]
                                     try:
                                         from .market_profile import market_session_now as _fba_sess_now
                                         _fba_ext = _fba_sess_now(sess.symbol) != "regular"
                                     except Exception:
                                         _fba_ext = False
-                                    _fba_res = adapter.place_limit_order_gtc(
+                                    _fba_res = _governed_place(
+                                        adapter,
+                                        adapter.place_limit_order_gtc,
+                                        sess=sess,
+                                        alpaca_order_role="flag",
+                                        alpaca_risk_stop_price=stop_px,
+                                        alpaca_role_metadata={
+                                            "flag_breakout_add_pending_R0": float(_R0_fb),
+                                            "flag_breakout_add_place_count": _fba_place_n,
+                                            "flag_breakout_add_prev_stop": float(stop_px),
+                                            "flag_breakout_add_pending_high": _float_or_none(_flag_high),
+                                            "flag_breakout_add_confirm_strength": (
+                                                None if _fs_score_fb is None else round(float(_fs_score_fb), 4)
+                                            ),
+                                            "flag_breakout_add_confirm_ofi": _fs_ofi_lvl_fb,
+                                        },
                                         product_id=product_id,
                                         side="buy",
                                         base_size=_fmt_base_size(_qa_fb2),
@@ -15543,6 +30841,12 @@ def tick_live_session(
                                         client_order_id=_fba_cid,
                                         extended_hours=_fba_ext,
                                         time_in_force="gfd",
+                                        **(
+                                            {"position_intent": "buy_to_open"}
+                                            if normalize_execution_family(sess.execution_family)
+                                            in ALPACA_EXECUTION_FAMILIES
+                                            else {}
+                                        ),
                                     ) or {}
                                     if _fba_res.get("ok") and _fba_res.get("order_id"):
                                         le["flag_breakout_add_order_id"] = str(_fba_res["order_id"])
@@ -15606,6 +30910,16 @@ def tick_live_session(
                 le["stop_breach_pending_utc"] = _utcnow().isoformat()
                 _commit_le(sess, le)
                 _emit(db, sess, "stop_breach_pending_confirm", {"bid": bid, "stop_price": stop_px})
+                try:
+                    from .live_runner_loop import schedule_live_runner_stop_confirmation
+
+                    schedule_live_runner_stop_confirmation(int(sess.id))
+                except Exception:
+                    _log.debug(
+                        "[momentum_live] stop-confirm dispatch schedule failed sid=%s",
+                        sess.id,
+                        exc_info=True,
+                    )
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "stop_pending_confirm": True}
             try:
@@ -15662,6 +30976,16 @@ def tick_live_session(
                         "bid": bid, "stop_price": stop_px, "hold_n": _holds + 1,
                         "max_ticks": _l2_max_ticks, "held_s": round(_held_s, 2),
                     })
+                    try:
+                        from .live_runner_loop import schedule_live_runner_stop_confirmation
+
+                        schedule_live_runner_stop_confirmation(int(sess.id))
+                    except Exception:
+                        _log.debug(
+                            "[momentum_live] L2 stop-hold redispatch schedule failed sid=%s",
+                            sess.id,
+                            exc_info=True,
+                        )
                     db.flush()
                     return {"ok": True, "session_id": sess.id, "state": sess.state, "stop_chop_hold": True}
             except Exception:
@@ -15695,7 +31019,9 @@ def tick_live_session(
                 mid=mid,
                 extra={"stop_price": stop_px, "high_water_mark": _float_or_none(pos.get("high_water_mark"))},
             )
-            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason=_stop_reason):
+            if not _live_exit_submit_succeeded(
+                db, sess, adapter=adapter, le=le, result=sr, reason=_stop_reason
+            ):
                 db.flush()
                 return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
             poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason=_stop_reason, quantity=qty)
@@ -15765,9 +31091,17 @@ def tick_live_session(
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
             if bid is not None and bid >= target_px * 1.02 and _no_sl is not None and _order_open(_no_sl):
-                _cancel_scale_limit_and_clamp(
+                _scale_release = _cancel_scale_limit_and_clamp(
                     db, sess, adapter, le=le, requested_qty=0.0, reason="stale_scale_limit"
                 )
+                if _scale_release is None:
+                    db.flush()
+                    return {
+                        "ok": False,
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "scale_limit_release_blocked": True,
+                    }
                 # cleared — the reactive path below takes over this pulse
 
         # First-target (2:1) reached and not yet scaled — take the Ross partial.
@@ -15839,7 +31173,12 @@ def tick_live_session(
                 base_increment=inc,
                 base_min_size=mn,
             )
-            scaling = can_split and not pos.get("partial_taken")
+            scaling = bool(
+                can_split
+                and not pos.get("partial_taken")
+                and normalize_execution_family(sess.execution_family)
+                not in ALPACA_EXECUTION_FAMILIES
+            )
             exit_qty = scale_qty if scaling else qty
             exit_reason = "scale_out_target" if scaling else "target"
             cid = f"chili_ml_{'so' if scaling else 'p'}_{sess.id}_{uuid.uuid4().hex[:12]}"
@@ -15861,7 +31200,9 @@ def tick_live_session(
                     "runner_qty": runner_qty if scaling else 0.0,
                 },
             )
-            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason=exit_reason):
+            if not _live_exit_submit_succeeded(
+                db, sess, adapter=adapter, le=le, result=sr, reason=exit_reason
+            ):
                 db.flush()
                 return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
             if scaling:

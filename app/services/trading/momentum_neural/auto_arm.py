@@ -212,7 +212,7 @@ def _venue_broker_ready_for(symbol: str, cache: dict[str, bool]) -> bool:
     if (
         str(symbol or "").strip().upper().endswith("-USD")
         and ef == "coinbase_spot"
-        and bool(getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", True))
+        and bool(getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", False))
     ):
         return False
     if ef in cache:
@@ -4305,6 +4305,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                 if (
                     bool(getattr(settings, "chili_momentum_alpaca_twin_arm_enabled", True))
                     and _exec_family in ("robinhood_spot", "coinbase_spot")
+                    and not str(chosen.symbol or "").strip().upper().endswith("-USD")
                     and bool(getattr(settings, "chili_alpaca_enabled", False))
                     and bool(getattr(settings, "chili_alpaca_paper", True))
                     and str(getattr(settings, "chili_alpaca_api_key", "") or "")

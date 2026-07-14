@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -17,6 +18,8 @@ from app.services.trading.momentum_neural.viability import score_viability
 from app.services.trading.momentum_neural.variants import get_family
 from app.services.trading.momentum_neural.automation_query import get_automation_session_detail
 from app.services.trading.momentum_neural.operator_actions import create_paper_draft_session
+
+pytestmark = pytest.mark.usefixtures("stable_non_alpaca_account_identity")
 from app.services.trading.momentum_neural.risk_evaluator import evaluate_proposed_momentum_automation
 from app.services.trading.momentum_neural.risk_policy import (
     RISK_SNAPSHOT_KEY,
@@ -226,6 +229,103 @@ def test_live_equity_risk_accepts_ross_universe_profile(monkeypatch, db: Session
     assert check["detail"]["reason"] == "ross_universe_profile_ok"
 
 
+def test_aggregate_risk_uses_candidate_venue_and_positive_planned_risk(
+    monkeypatch, db: Session
+) -> None:
+    import app.services.trading.momentum_neural.risk_policy as risk_policy
+    import app.services.trading.momentum_neural.risk_evaluator as risk_evaluator
+
+    monkeypatch.setattr(settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_max_aggregate_risk_pct_of_equity", 0.03, raising=False
+    )
+    vid, _ = _seed_equity_live_row(
+        db,
+        symbol="MOVE",
+        signal={"price": 4.25, "todays_change_perc": 18.0, "volume": 400_000},
+    )
+    uid = _uid(db, "aggregate_alpaca")
+    equity_calls: list[tuple[tuple, dict]] = []
+    loss_calls: list[tuple[float, str | None]] = []
+
+    def _equity(*args, **kwargs):
+        equity_calls.append((args, kwargs))
+        return 10_000.0
+
+    def _loss(fixed, family=None):
+        loss_calls.append((float(fixed), family))
+        return 100.0
+
+    monkeypatch.setattr(risk_policy, "_account_equity_usd", _equity)
+    monkeypatch.setattr(risk_policy, "equity_relative_loss_cap", _loss)
+    monkeypatch.setattr(
+        risk_evaluator, "aggregate_open_risk_usd", lambda *_args, **_kwargs: (150.0, [])
+    )
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="MOVE",
+        variant_id=vid,
+        mode="live",
+        execution_family="alpaca_spot",
+    )
+    check = next(c for c in ev["checks"] if c["id"] == "aggregate_open_risk_cap")
+
+    assert (("alpaca_spot",), {"prefer_equity": True}) in equity_calls
+    assert any(family == "alpaca_spot" and fixed > 0 for fixed, family in loss_calls)
+    assert check["detail"]["planned_risk_usd"] == 100.0
+    assert check["detail"]["open_risk_usd"] == 150.0
+    assert check["detail"]["cap_usd"] == 300.0
+
+
+def test_alpaca_risk_gate_uses_broker_daily_stop_when_generic_flag_is_off(
+    monkeypatch, db: Session
+) -> None:
+    import app.services.trading.governance as governance
+    import app.services.trading.momentum_neural.risk_policy as risk_policy
+
+    monkeypatch.setattr(settings, "chili_per_broker_daily_loss_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_ross_equity_universe_required", True, raising=False
+    )
+    vid, _ = _seed_equity_live_row(
+        db,
+        symbol="MOVE",
+        signal={"price": 4.25, "todays_change_perc": 18.0, "volume": 400_000},
+    )
+    uid = _uid(db, "alpaca_daily_stop_flag_off")
+    calls: list[tuple[str, int | None]] = []
+
+    def _peek(_db, family, *, user_id=None):
+        calls.append((family, user_id))
+        return True, {
+            "family": family,
+            "realized": -300.0,
+            "cap": 250.0,
+            "source": "alpaca_momentum_fixed_usd_clamp",
+            "data_source": "alpaca_account_equity_delta",
+        }
+
+    monkeypatch.setattr(governance, "_peek_broker_breach", _peek)
+    monkeypatch.setattr(risk_policy, "_account_equity_usd", lambda *a, **k: 100_000.0)
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="MOVE",
+        variant_id=vid,
+        mode="live",
+        execution_family="alpaca_spot",
+    )
+    check = next(c for c in ev["checks"] if c["id"] == "global_daily_loss_cap")
+
+    assert calls == [("alpaca_spot", uid)]
+    assert check["ok"] is False
+    assert check["severity"] == "block"
+    assert check["detail"]["data_source"] == "alpaca_account_equity_delta"
+
+
 def test_concurrency_blocks_second_paper_draft(monkeypatch, db: Session) -> None:
     monkeypatch.setattr(settings, "chili_momentum_risk_max_concurrent_sessions", 1)
     vid, _ = _seed_live_eligible_row(db, symbol="CC1-USD")
@@ -283,6 +383,8 @@ def test_get_risk_evaluate_route_paired(paired_client, db: Session) -> None:
 
 
 def test_confirm_live_arm_blocked_if_kill_switch_after_arm(paired_client, db: Session, monkeypatch) -> None:
+    import app.services.trading.momentum_neural.risk_policy as risk_policy
+
     monkeypatch.setattr(
         "app.services.trading.momentum_neural.operator_readiness.get_all_broker_statuses",
         lambda: {
@@ -296,6 +398,10 @@ def test_confirm_live_arm_blocked_if_kill_switch_after_arm(paired_client, db: Se
     # request reaches the kill-switch risk check. docs/DESIGN/MOMENTUM_LANE.md
     monkeypatch.setattr("app.services.coinbase_service.can_trade", lambda: True)
     monkeypatch.setattr(settings, "chili_coinbase_spot_adapter_enabled", True)
+    # This test isolates the confirm-time kill-switch transition.  Give the
+    # begin-arm aggregate-risk gate a deterministic, readable account equity;
+    # unknown broker equity is intentionally fail-closed in production.
+    monkeypatch.setattr(risk_policy, "_account_equity_usd", lambda *a, **k: 100_000.0)
     vid, _ = _seed_live_eligible_row(db, symbol="CFK-USD")
     db.commit()
     c, _user = paired_client
@@ -304,7 +410,7 @@ def test_confirm_live_arm_blocked_if_kill_switch_after_arm(paired_client, db: Se
             "/api/trading/momentum/arm-live",
             json={"symbol": "CFK-USD", "variant_id": vid},
         )
-    assert r1.status_code == 200
+    assert r1.status_code == 200, r1.json()
     tok = r1.json()["arm_token"]
     with patch("app.services.trading.momentum_neural.risk_evaluator.is_kill_switch_active", return_value=True):
         r2 = c.post(

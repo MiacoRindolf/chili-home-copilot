@@ -23,6 +23,8 @@ from app.config import settings
 from app.models.core import User
 from app.models.trading import MomentumSymbolViability, TradingAutomationSession
 from app.services.trading.momentum_neural import operator_actions
+
+pytestmark = pytest.mark.usefixtures("stable_non_alpaca_account_identity")
 from app.services.trading.momentum_neural.live_fsm import STATE_WATCHING_LIVE
 from app.services.trading.momentum_neural.paper_fsm import STATE_LIVE_ARM_PENDING
 from app.services.trading.momentum_neural.persistence import create_trading_automation_session

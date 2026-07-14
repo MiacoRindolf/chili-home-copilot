@@ -8,7 +8,14 @@ live_error (which orphans the filled position, unmanaged). ``_is_dup_reference_r
 is the narrow detector that routes such a reject into the reconcile-and-adopt branch.
 """
 
-from app.services.trading.momentum_neural.live_runner import _is_dup_reference_reject
+from unittest.mock import MagicMock
+
+from app.services.trading.momentum_neural.live_runner import (
+    _bind_recovered_entry_order,
+    _is_dup_reference_reject,
+    _recover_entry_order_by_client_id,
+)
+from app.services.trading.venue.protocol import NormalizedOrder
 
 
 # The EXACT error string that stranded BJDX session 10484 (from
@@ -35,10 +42,59 @@ def test_ignores_unrelated_rejects():
     assert _is_dup_reference_reject("API error 409: rate limited") is False
     assert _is_dup_reference_reject("EQUITY_SUITABILITY: not tradable") is False
     assert _is_dup_reference_reject("401 not available for agentic trading") is False
-    # An unrelated 'must be unique' (e.g. some other field) is not a Reference-ID 409.
-    assert _is_dup_reference_reject("client_order_id must be unique") is False
+    # Alpaca's exact idempotency confirmation (40010001) is the same condition.
+    assert _is_dup_reference_reject("client_order_id must be unique") is True
 
 
 def test_empty_and_none_are_false():
     assert _is_dup_reference_reject(None) is False
     assert _is_dup_reference_reject("") is False
+
+
+def test_client_id_recovery_requires_exact_broker_order_id():
+    adapter = MagicMock()
+    recovered = NormalizedOrder(
+        order_id="alpaca-98143",
+        client_order_id="chili_ml_e_actu",
+        product_id="ACTU",
+        side="buy",
+        status="filled",
+        order_type="limit",
+        filled_size=17991.0,
+        average_filled_price=1.48,
+    )
+    adapter.get_order_by_client_order_id.return_value = (recovered, None)
+
+    assert _recover_entry_order_by_client_id(adapter, "chili_ml_e_actu") is recovered
+    adapter.get_order_by_client_order_id.assert_called_once_with("chili_ml_e_actu")
+
+    adapter.get_order_by_client_order_id.return_value = (None, None)
+    assert _recover_entry_order_by_client_id(adapter, "chili_ml_e_missing") is None
+
+
+def test_binding_recovered_order_clears_reconcile_marker_and_tracks_history():
+    le = {
+        "entry_submitted": True,
+        "entry_client_order_id": "chili_ml_e_actu",
+        "entry_reconcile_pending_client_order_id": "chili_ml_e_actu",
+        "entry_reconcile_pending_since_utc": "2026-07-13T16:04:29",
+    }
+    recovered = NormalizedOrder(
+        order_id="alpaca-98143",
+        client_order_id="chili_ml_e_actu",
+        product_id="ACTU",
+        side="buy",
+        status="open",
+        order_type="limit",
+        filled_size=0.0,
+        average_filled_price=None,
+    )
+
+    oid = _bind_recovered_entry_order(le, recovered)
+
+    assert oid == "alpaca-98143"
+    assert le["entry_order_id"] == "alpaca-98143"
+    assert le["entry_order_ids_all"] == ["alpaca-98143"]
+    assert le["entry_submitted"] is True
+    assert "entry_reconcile_pending_client_order_id" not in le
+    assert "entry_reconcile_pending_since_utc" not in le
