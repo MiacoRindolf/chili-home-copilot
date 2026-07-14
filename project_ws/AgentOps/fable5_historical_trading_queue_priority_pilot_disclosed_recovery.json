@@ -1,0 +1,560 @@
+{
+  "accepted_diagnosis_count": 1,
+  "average_case_duration_ms": 4920.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 0,
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "causal_status": "accepted",
+        "causal_sufficiency": "isolated",
+        "dimension": "state",
+        "repair_progress_validated": true,
+        "stage": "deterministic_contract_repair_validated",
+        "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 535,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-5gtukxm8\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] FAILED [ 16%]\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] FAILED [ 33%]\ntests/test_feedback.py::test_unprotected_incoming_cause_never_sheds PASSED [ 50%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 66%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 83%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n_ test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] _\ntests\\test_feedback.py:38: in test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity\n    assert event_id == 4\nE   assert -1 == 4\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] - assert -1 == 4\nFAILED tests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] - assert -1 == 4\n========================= 2 failed, 4 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 518,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-fq1pr_7c\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 8 items\n\ntests/test_final.py::test_fresh_imminent_rows_are_not_shed PASSED        [ 12%]\ntests/test_final.py::test_non_imminent_stale_rows_are_not_shed PASSED    [ 25%]\ntests/test_final.py::test_over_cap_queue_never_sheds PASSED              [ 37%]\ntests/test_final.py::test_exhausted_correlation_rejects_before_shedding PASSED [ 50%]\ntests/test_final.py::test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed FAILED [ 62%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 75%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 87%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n================================== FAILURES ===================================\n_______ test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed _______\ntests\\test_final.py:80: in test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed\n    assert _enqueue(db, now=datetime(2026, 6, 4, 2, 0, tzinfo=timezone.utc)) == 4\nE   assert -1 == 4\nE    +  where -1 = _enqueue(<mesh_queue.repository.MemorySession object at 0x000001C9F2CB28B0>, now=datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc))\nE    +    where datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc) = datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc)\nE    +      where datetime.timezone.utc = timezone.utc\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed - assert -1 == 4\n +  where -1 = _enqueue(<mesh_queue.repository.MemorySession object at 0x000001C9F2CB28B0>, now=datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc))\n +    where datetime.datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc) = datetime(2026, 6, 4, 2, 0, tzinfo=datetime.timezone.utc)\n +      where datetime.timezone.utc = timezone.utc\n========================= 1 failed, 7 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 441,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-5gtukxm8\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 33%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 66%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n============================== 3 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_protected_refresh_queue_priority",
+      "changed_files": [
+        "mesh_queue/repository.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "proposed_dimension": "state",
+        "selected_files": [
+          "mesh_queue/repository.py"
+        ],
+        "warnings": []
+      },
+      "deterministic_diagnosis_fast_path": true,
+      "deterministic_only": true,
+      "diagnosis_dimension": "state",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "state",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "causal_status": "accepted",
+          "causal_sufficiency": "isolated",
+          "dimension": "state",
+          "repair_progress_validated": true,
+          "stage": "deterministic_contract_repair_validated",
+          "validation_evidence": "Recognized source-structural repair preserved public contracts and resolved every disclosed feedback contract."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [],
+          "hypothesis_id": "recognized-state-contract",
+          "reason": "Prompt invariants and candidate source shape activate a guarded repair; validation remains authoritative.",
+          "status": "provisional"
+        },
+        "experiments": [],
+        "hypotheses": [
+          {
+            "claim": "Protected queue replacement is one ordered state transition at fixed capacity: reject an exhausted incoming correlation before mutation; only when pending depth equals the cap may protected causes [brain_market_snapshots, momentum_context_refresh] replace one pending sheddable cause [imminent_eval] that is at least 1800 seconds old. Select the oldest unlocked row with stable id ties, retain it as dead with processed time and payload audit metadata, then recheck capacity and admit the protected event. Unprotected input, fresh or wrong-cause rows, no eligible row, and an already over-cap queue never shed state.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Apply only the guarded owner repair and rerun pinned contracts.",
+            "hypothesis_id": "recognized-state-contract",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {},
+      "diagnosis_report": {
+        "conclusion": {
+          "blockers": [
+            "No source intervention has been validated yet."
+          ],
+          "causal_sufficiency": "direct_artifact",
+          "claim": "Protected queue replacement is one ordered state transition at fixed capacity: reject an exhausted incoming correlation before mutation; only when pending depth equals the cap may protected causes [brain_market_snapshots, momentum_context_refresh] replace one pending sheddable cause [imminent_eval] that is at least 1800 seconds old. Select the oldest unlocked row with stable id ties, retain it as dead with processed time and payload audit metadata, then recheck capacity and admit the protected event. Unprotected input, fresh or wrong-cause rows, no eligible row, and an already over-cap queue never shed state.",
+          "confidence": 0.0,
+          "dimension": "state",
+          "evidence_ids": [],
+          "hypothesis_id": "recognized-state-contract",
+          "reason": "Prompt invariants and candidate source shape activate a guarded repair; validation remains authoritative.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [
+          "Protected queue replacement is one ordered state transition at fixed capacity: reject an exhausted incoming correlation before mutation; only when pending depth equals the cap may protected causes [brain_market_snapshots, momentum_context_refresh] replace one pending sheddable cause [imminent_eval] that is at least 1800 seconds old. Select the oldest unlocked row with stable id ties, retain it as dead with processed time and payload audit metadata, then recheck capacity and admit the protected event. Unprotected input, fresh or wrong-cause rows, no eligible row, and an already over-cap queue never shed state."
+        ],
+        "decision": "instrument_first",
+        "errors": [],
+        "hypothesis_results": [],
+        "valid": true
+      },
+      "diagnosis_stages": [],
+      "diagnosis_status": "provisional",
+      "duration_ms": 4920,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 462,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-k02gpd2k\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[brain_market_snapshots] PASSED [ 16%]\ntests/test_feedback.py::test_protected_refresh_replaces_oldest_stale_imminent_at_exact_capacity[momentum_context_refresh] PASSED [ 33%]\ntests/test_feedback.py::test_unprotected_incoming_cause_never_sheds PASSED [ 50%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 66%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 83%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n============================== 6 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 455,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-i16ymeb1\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 8 items\n\ntests/test_final.py::test_fresh_imminent_rows_are_not_shed PASSED        [ 12%]\ntests/test_final.py::test_non_imminent_stale_rows_are_not_shed PASSED    [ 25%]\ntests/test_final.py::test_over_cap_queue_never_sheds PASSED              [ 37%]\ntests/test_final.py::test_exhausted_correlation_rejects_before_shedding PASSED [ 50%]\ntests/test_final.py::test_locked_oldest_row_is_skipped_and_next_eligible_row_is_shed PASSED [ 62%]\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 75%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 87%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n============================== 8 passed in 0.05s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_protected_refresh_queue_priority",
+          "path": "cases/python_protected_refresh_queue_priority.json",
+          "sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "size_bytes": 5299
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+          "path": "oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "size_bytes": 2865
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_protected_refresh_queue_priority",
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "size_bytes": 3451
+        }
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "state",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "artifact": "case:python_protected_refresh_queue_priority",
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "path": "cases/python_protected_refresh_queue_priority.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T06:25:22.297795+00:00"
+        },
+        {
+          "actual_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "path": "oracles/python_protected_refresh_queue_priority.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T06:25:23.827329+00:00"
+        },
+        {
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 0,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T06:25:25.629321+00:00"
+        },
+        {
+          "actual_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "artifact": "final_oracle:python_protected_refresh_queue_priority",
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T06:25:25.629538+00:00"
+        },
+        {
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "sequence": 11,
+          "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "timestamp_utc": "2026-07-14T06:25:25.629584+00:00"
+        },
+        {
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T06:25:25.634194+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": true,
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T06:25:27.215298+00:00"
+        },
+        {
+          "actual_count": 0,
+          "case_id": "python_protected_refresh_queue_priority",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 0,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T06:25:27.215313+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 0,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": true,
+      "patch_warnings": [
+        "Applied a recognized mechanical contract repair before generative editing."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 449,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_protected_refresh_queue_priority-k02gpd2k\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_public.py::test_enqueue_below_capacity_preserves_normal_behavior PASSED [ 33%]\ntests/test_public.py::test_full_queue_rejects_without_deleting_existing_rows PASSED [ 66%]\ntests/test_public.py::test_correlation_limit_rejects_below_global_capacity PASSED [100%]\n\n============================== 3 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [],
+      "retained_diagnosis_dimension": "state",
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "mesh_queue/repository.py",
+      "selected_files": [
+        "mesh_queue/repository.py"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 0,
+      "successful_live_model_call_count": 0,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 100.0,
+  "causally_accepted_diagnosis_count": 1,
+  "created_at": "2026-07-14T06:25:27.234897+00:00",
+  "deterministic_only_case_count": 1,
+  "deterministic_only_case_rate": 100.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 100.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 0.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 0,
+  "diagnostic_stage_json_parse_rate": 0.0,
+  "diagnostic_stage_schema_acceptance_rate": 0.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_protected_refresh_queue_priority",
+          "path": "cases/python_protected_refresh_queue_priority.json",
+          "sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+          "size_bytes": 5299
+        },
+        "case_id": "python_protected_refresh_queue_priority",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+          "path": "oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+          "size_bytes": 2865
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_protected_refresh_queue_priority",
+          "path": "final_oracles/python_protected_refresh_queue_priority.json",
+          "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+          "size_bytes": 3451
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "size_bytes": 582
+    }
+  },
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "size_bytes": 582,
+      "timestamp_utc": "2026-07-14T06:25:19.548837+00:00"
+    },
+    {
+      "artifact": "case:python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_protected_refresh_queue_priority.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+      "size_bytes": 5299,
+      "timestamp_utc": "2026-07-14T06:25:19.551278+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_protected_refresh_queue_priority.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+      "size_bytes": 2865,
+      "timestamp_utc": "2026-07-14T06:25:19.551732+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_protected_refresh_queue_priority.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "size_bytes": 3451,
+      "timestamp_utc": "2026-07-14T06:25:19.552185+00:00"
+    },
+    {
+      "actual_sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "876627f6a955e30acaa37658a9c88fc9567118f2506d00921dd7fe7d0279447e",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T06:25:19.557450+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_QUEUE_PRIORITY_PILOT_DISCLOSED_RECOVERY_CHECKPOINT.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T06:25:22.296645+00:00"
+    },
+    {
+      "actual_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+      "artifact": "case:python_protected_refresh_queue_priority",
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "2f228a335771721213bbcdfe76263646138826a985c05fd936fc7f0a1565cbff",
+      "path": "cases/python_protected_refresh_queue_priority.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T06:25:22.297795+00:00"
+    },
+    {
+      "actual_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+      "artifact": "feedback_oracle:python_protected_refresh_queue_priority",
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e0bb1983e78ecbd1e0fc63a5f54f9d2bb014daab15952dc6485bffc6639df121",
+      "path": "oracles/python_protected_refresh_queue_priority.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T06:25:23.827329+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 0,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T06:25:25.629321+00:00"
+    },
+    {
+      "actual_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "artifact": "final_oracle:python_protected_refresh_queue_priority",
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "path": "final_oracles/python_protected_refresh_queue_priority.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T06:25:25.629538+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_protected_refresh_queue_priority.json",
+      "sequence": 11,
+      "sha256": "98076823abc39fa3f96c675e976855b186b7ac777b9d8dcb21a55d9f619917f3",
+      "timestamp_utc": "2026-07-14T06:25:25.629584+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T06:25:25.634194+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": true,
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T06:25:27.215298+00:00"
+    },
+    {
+      "actual_count": 0,
+      "case_id": "python_protected_refresh_queue_priority",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 0,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T06:25:27.215313+00:00"
+    },
+    {
+      "case_id": "python_protected_refresh_queue_priority",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T06:25:27.218850+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T06:25:27.234848+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 0,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "562a242e65ee40b0ae84795f867a3d2d38f3bcf3c6c114be3f329720e9092481",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_QUEUE_PRIORITY_PILOT_DISCLOSED_RECOVERY_CHECKPOINT.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 0,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 0,
+  "verdict": "needs_improvement"
+}
