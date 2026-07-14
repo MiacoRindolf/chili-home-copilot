@@ -5563,8 +5563,65 @@ def test_plan_prompt_challenges_primitive_owner_with_caller_profiles():
 
     assert benchmark.diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC in prompt
     assert "primitive that already supports the required operation stays context" in prompt
-    assert '"policy_caller"' in prompt
-    assert '"execution_primitive"' in prompt
+    assert '"candidate_owner_path": "caller.py"' in prompt
+    assert '"context_primitive_path": "store.py"' in prompt
+    assert '"defined_symbols"' not in prompt
+
+
+def test_scope_lane_owner_preflight_is_compact_and_seeds_correct_fallback(tmp_path):
+    case = json.loads(
+        (
+            FABLE5_TRADING_SCOPE_LANE_PILOT_FIXTURE_ROOT
+            / "cases"
+            / "python_split_candidate_scope_lanes.json"
+        ).read_text(encoding="utf-8")
+    )
+    repo = tmp_path / "repo"
+    benchmark._init_repo(repo, case["repo_files"])
+    diagnostic_case = benchmark.diagnostic_reasoning.build_case_from_prompt(
+        case["prompt"],
+        case_id=case["case_id"],
+        repo_path=repo,
+        candidate_paths=case["candidate_paths"],
+    )
+    hints = diagnostic_case["constraints"]["boundary_owner_hints"]
+    profiles = diagnostic_case["constraints"]["candidate_source_profiles"]
+
+    assert hints == [
+        {
+            "candidate_owner_path": "trading/auto_trader.py",
+            "context_primitive_path": "trading/query_store.py",
+            "shared_decision_literals": ["or"],
+            "confidence": "structural_hypothesis",
+            "reason": (
+                "The primitive exposes multiple modes and this caller selects one; verify the caller "
+                "policy before mutating the primitive."
+            ),
+        }
+    ]
+    fallback = benchmark.diagnostic_reasoning.heuristic_packet(diagnostic_case)
+    assert fallback["hypotheses"][0]["owner_paths"] == [
+        "trading/auto_trader.py"
+    ]
+    investigator_prompt = benchmark.diagnostic_reasoning.investigator_prompt(
+        diagnostic_case
+    )
+    assert len(investigator_prompt) < 20_000
+    assert '"candidate_source_profiles"' not in investigator_prompt
+    assert '"candidate_owner_path":"trading/auto_trader.py"' in investigator_prompt
+
+    plan_prompt = benchmark._plan_prompt(
+        case["prompt"],
+        case["candidate_paths"],
+        benchmark._candidate_context(repo, case["candidate_paths"]),
+        {"conclusion": {"status": "provisional", "dimension": "data"}},
+        2,
+        "",
+        profiles,
+    )
+    assert len(plan_prompt) < 11_000
+    assert '"candidate_owner_path": "trading/auto_trader.py"' in plan_prompt
+    assert '"defined_symbols"' not in plan_prompt
 
 
 def test_disclosed_fable5_mesh_pressure_operator_passes_feedback_and_final(

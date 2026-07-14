@@ -10721,6 +10721,44 @@ def _boundary_ownership_challenges(
     return challenges[:8]
 
 
+def derive_boundary_owner_hints(
+    profiles: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compress caller/callee structure into bounded, non-authoritative owner hints."""
+    hints: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for profile in profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        primitive_path = str(profile.get("path") or "")
+        if not primitive_path:
+            continue
+        for challenge in _boundary_ownership_challenges(
+            profiles,
+            [primitive_path],
+        ):
+            owner_path = str(challenge.get("policy_caller_path") or "")
+            key = (owner_path, primitive_path)
+            if not owner_path or key in seen:
+                continue
+            seen.add(key)
+            hints.append(
+                {
+                    "candidate_owner_path": owner_path,
+                    "context_primitive_path": primitive_path,
+                    "shared_decision_literals": list(
+                        challenge.get("shared_decision_literals") or []
+                    )[:6],
+                    "confidence": "structural_hypothesis",
+                    "reason": (
+                        "The primitive exposes multiple modes and this caller selects one; verify the caller "
+                        "policy before mutating the primitive."
+                    ),
+                }
+            )
+    return hints[:8]
+
+
 def collect_repo_evidence(
     repo_path: Path,
     prompt: str,
@@ -10950,10 +10988,14 @@ def build_case_from_prompt(
         for index, statement in enumerate(segments)
     ]
     candidate_source_profiles: list[dict[str, Any]] = []
+    boundary_owner_hints: list[dict[str, Any]] = []
     if repo_path is not None:
         candidate_source_profiles = profile_candidate_sources(
             repo_path,
             candidate_paths,
+        )
+        boundary_owner_hints = derive_boundary_owner_hints(
+            candidate_source_profiles
         )
         observations.extend(
             collect_repo_evidence(
@@ -10981,6 +11023,7 @@ def build_case_from_prompt(
                 **(
                     {
                         "candidate_source_profiles": candidate_source_profiles,
+                        "boundary_owner_hints": boundary_owner_hints,
                         "boundary_ownership_rubric": BOUNDARY_OWNERSHIP_RUBRIC,
                     }
                     if candidate_source_profiles
@@ -12787,6 +12830,46 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
                 "status": "planned",
             }
         )
+    boundary_hints = [
+        item
+        for item in (case.get("constraints") or {}).get(
+            "boundary_owner_hints", []
+        )
+        if isinstance(item, Mapping)
+    ]
+    if boundary_hints:
+        hint = boundary_hints[0]
+        owner_path = str(hint.get("candidate_owner_path") or "")
+        context_path = str(hint.get("context_primitive_path") or "")
+        evidence_ids = [
+            str(item.get("evidence_id") or "")
+            for item in case.get("observations") or []
+            if isinstance(item, Mapping)
+            and str(item.get("source_path") or "")
+            in {owner_path, context_path}
+            and str(item.get("evidence_id") or "")
+        ][:12]
+        boundary_dimension = infer_dimension(case["problem_statement"])
+        hypotheses.insert(
+            0,
+            {
+                "hypothesis_id": "h-boundary-owner",
+                "claim": "A policy caller selects a primitive mode that violates the requested boundary.",
+                "dimension": boundary_dimension,
+                "support_evidence_ids": evidence_ids,
+                "contradict_evidence_ids": [],
+                "owner_paths": [owner_path] if owner_path else [],
+                "context_paths": [context_path] if context_path else [],
+                "causal_chain": [
+                    "Caller selects one primitive mode.",
+                    "The selected boundary conflicts with the requested policy.",
+                    "The downstream result exhibits the reported failure.",
+                ],
+                "falsification": (
+                    "Keep the primitive unchanged and vary only the caller-selected policy."
+                ),
+            },
+        )
     top = hypotheses[0] if hypotheses else {"hypothesis_id": "", "support_evidence_ids": []}
     return normalize_packet(
         {
@@ -12865,6 +12948,16 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "artifact_hash",
         "correlation_fingerprints",
     )
+    raw_constraints = (
+        case.get("constraints")
+        if isinstance(case.get("constraints"), Mapping)
+        else {}
+    )
+    prompt_constraints = {
+        key: value
+        for key, value in raw_constraints.items()
+        if key != "candidate_source_profiles"
+    }
     safe_case = {
         "case_id": case.get("case_id"),
         "problem_statement": case.get("problem_statement"),
@@ -12878,7 +12971,7 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
             if isinstance(item, Mapping)
         ],
         "prior_conclusion": case.get("prior_conclusion"),
-        "constraints": case.get("constraints"),
+        "constraints": prompt_constraints,
     }
     timeline = _structured_causal_timeline(case)
     if timeline:

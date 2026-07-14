@@ -6751,6 +6751,7 @@ def test_prompt_case_exposes_exact_candidate_paths_and_source_symbols(tmp_path: 
     prompt = reasoning.investigator_prompt(case)
     assert '"candidate_paths":["selector.py","provider.py"]' in prompt
     assert '"source_symbol":"select_candidates"' in prompt
+    assert '"candidate_source_profiles"' not in prompt
 
 
 def test_candidate_profiles_distinguish_policy_caller_from_execution_primitive(
@@ -6790,6 +6791,18 @@ def test_candidate_profiles_distinguish_policy_caller_from_execution_primitive(
     assert "policy_caller" in caller["structural_roles"]
     assert caller["outbound_candidate_paths"] == ["trading/query_store.py"]
     assert "or" in caller["decision_literals"]
+    assert reasoning.derive_boundary_owner_hints(profiles) == [
+        {
+            "candidate_owner_path": "trading/auto_trader.py",
+            "context_primitive_path": "trading/query_store.py",
+            "shared_decision_literals": ["or"],
+            "confidence": "structural_hypothesis",
+            "reason": (
+                "The primitive exposes multiple modes and this caller selects one; verify the caller "
+                "policy before mutating the primitive."
+            ),
+        }
+    ]
 
 
 def test_evidence_gate_challenges_primitive_owner_when_policy_caller_selects_mode(
@@ -6911,3 +6924,21 @@ def test_evidence_gate_challenges_primitive_owner_when_policy_caller_selects_mod
     assert "ownership challenge" in reasoning.report_context(wrong)
     assert right["conclusion"]["ownership_grounding"] == "grounded"
     assert right["conclusion"]["ownership_challenges"] == []
+
+    hinted_case = {
+        **case,
+        "constraints": {
+            **case["constraints"],
+            "boundary_owner_hints": reasoning.derive_boundary_owner_hints(
+                profiles
+            ),
+        },
+    }
+    fallback = reasoning.heuristic_packet(hinted_case)
+    assert fallback["conclusion"]["hypothesis_id"] == "h-boundary-owner"
+    assert fallback["hypotheses"][0]["owner_paths"] == [
+        "trading/auto_trader.py"
+    ]
+    assert fallback["hypotheses"][0]["context_paths"] == [
+        "trading/query_store.py"
+    ]

@@ -2501,6 +2501,9 @@ def _plan_prompt(
 ) -> str:
     invariants = diagnostic_reasoning.derive_contract_invariants(prompt)
     obligations = _prompt_contract_obligations(prompt)
+    boundary_owner_hints = diagnostic_reasoning.derive_boundary_owner_hints(
+        source_profiles
+    )
     return (
         "Return one JSON object only. Classify the causal owner with the supplied dimension rubric, then select "
         "only the owning source files required for the diagnosed bug. "
@@ -2521,8 +2524,8 @@ def _plan_prompt(
         f"polarity):\n{json.dumps(obligations, indent=2, sort_keys=True)}\n\n"
         f"Evidence decision:\n{diagnostic_reasoning.report_context(report)}\n\n"
         f"Boundary ownership counterfactual:\n{diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC}\n\n"
-        "Read-only caller/callee profiles (structural hints, not automatic edit authority):\n"
-        f"{json.dumps(list(source_profiles), indent=2, sort_keys=True)}\n\n"
+        "Compact caller/callee owner hints (structural hypotheses, not automatic edit authority):\n"
+        f"{json.dumps(boundary_owner_hints, indent=2, sort_keys=True)}\n\n"
         f"Read-only public contracts that must remain green:\n{public_context or '(unavailable)'}\n\n"
         f"Allowed candidate paths: {json.dumps(candidates)}\n\n"
         f"Candidate contents:\n{context}"
@@ -4465,6 +4468,9 @@ def _generate_patch(
         repo,
         candidates,
     )
+    boundary_owner_hints = diagnostic_reasoning.derive_boundary_owner_hints(
+        source_profiles
+    )
     evidence_context = _supporting_evidence_context(diagnosis)
     if evidence_context:
         context += f"\n\n### Strongest causal evidence\n{evidence_context}"
@@ -4566,6 +4572,9 @@ def _repair_after_failure(
         repo,
         candidates,
     )
+    boundary_owner_hints = diagnostic_reasoning.derive_boundary_owner_hints(
+        source_profiles
+    )
     max_files = _case_max_files(case)
     failed_contract_ids = _normalized_failed_contract_ids(contract_evidence)
     feedback_owner_hints = _feedback_exercised_candidates(
@@ -4603,8 +4612,8 @@ def _repair_after_failure(
         f"Dimension rubric:\n{json.dumps(REPAIR_DIMENSION_RUBRIC, indent=2)}\n\n"
         f"Evidence decision:\n{diagnostic_reasoning.report_context(report)}\n"
         f"Boundary ownership counterfactual:\n{diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC}\n\n"
-        "Read-only caller/callee profiles (challenge provider/context ownership before editing):\n"
-        f"{json.dumps(source_profiles, indent=2, sort_keys=True)}\n\n"
+        "Compact caller/callee owner hints (challenge primitive ownership before editing):\n"
+        f"{json.dumps(boundary_owner_hints, indent=2, sort_keys=True)}\n\n"
         f"Strongest evidence:\n{evidence_context or '(none)'}\n\n"
         f"Deterministic mechanism invariants:\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
         "Required prompt obligation ids (copy each id verbatim into exactly one contract field and preserve "
@@ -4697,13 +4706,13 @@ def _repair_after_failure(
         "undefined means the behavior must not occur. A failed in-flight operation must not recursively await "
         "its own cached promise. Include a contract_coverage entry for every independent assertion. Every "
         "owner_paths value must be an allowed source candidate, never a test path. Required JSON schema:\n"
-        "Use the caller/callee profiles to reject a provider or primitive owner when an upstream policy caller "
+        "Use the caller/callee owner hints to reject a provider or primitive owner when an upstream policy caller "
         "chooses the contradicted mode, ordering, count, merge, or lifecycle. "
         f"{json.dumps(REPAIR_PLAN_SCHEMA, indent=2)}\n\n"
         f"Allowed candidates (max {max_files}): {json.dumps(candidates)}\n\n"
         f"Dimension rubric:\n{json.dumps(REPAIR_DIMENSION_RUBRIC, indent=2)}\n\n"
         f"Boundary ownership counterfactual:\n{diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC}\n\n"
-        f"Read-only caller/callee profiles:\n{json.dumps(source_profiles, indent=2, sort_keys=True)}\n\n"
+        f"Compact caller/callee owner hints:\n{json.dumps(boundary_owner_hints, indent=2, sort_keys=True)}\n\n"
         f"Original operator contract (must also remain true):\n{case.get('prompt')}\n\n"
         "Deterministic mechanism invariants (must be implemented by their causal source owner, not merely "
         f"reviewed):\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
