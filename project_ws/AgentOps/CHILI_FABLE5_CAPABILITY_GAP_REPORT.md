@@ -746,6 +746,12 @@ did not materially improve. The explicit ownership packet made the error visible
 callee policy ownership. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_LIVE_REASONING_ABLATION_RECEIPT.md`.
 
+The first caller/callee graph remediation correctly distinguished policy callers from execution primitives in its
+bounded unit contracts, but exposing the full graph to each model stage regressed the disclosed replay to
+**25/100**. Five of seven model calls timed out, the fallback selected `clock`, and no patch survived. This negative
+result requires a compact deterministic owner hint rather than repeated verbose graph serialization. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_CALLER_CALLEE_ATTEMPT_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.

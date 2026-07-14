@@ -1,0 +1,1419 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 486166.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 0,
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "clock",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 644,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-2e703uq0\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 694,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-jyl249nw\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap FAILED [ 16%]\ntests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit FAILED [ 33%]\ntests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once FAILED [ 50%]\ntests/test_final.py::test_mixed_naive_and_aware_timestamps_have_stable_recency_order PASSED [ 66%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 83%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n____________ test_id_first_mode_merges_lanes_under_one_global_cap _____________\ntests\\test_final.py:16: in test_id_first_mode_merges_lanes_under_one_global_cap\n    assert len(store.calls) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\nE    +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x0000022CF7C70980>.calls\n___________ test_each_lane_gets_local_capacity_before_global_limit ____________\ntests\\test_final.py:26: in test_each_lane_gets_local_capacity_before_global_limit\n    assert [call[\"limit\"] for call in store.calls] == [1, 1]\nE   assert [1] == [1, 1]\nE     \nE     Right contains one more item: 1\nE     \nE     Full diff:\nE       [\nE           1,\nE     -     1,\nE       ]\n____________ test_duplicate_identity_across_lanes_is_returned_once ____________\ntests\\test_final.py:33: in test_duplicate_identity_across_lanes_is_returned_once\n    assert [row_id for row_id, _at in refs] == [4, 5]\nE   assert [4, 4, 5] == [4, 5]\nE     \nE     At index 1 diff: 4 != 5\nE     Left contains one more item: 5\nE     \nE     Full diff:\nE       [\nE     +     4,\nE           4,\nE           5,\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap - AssertionError: assert 1 == 2\n +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\n +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x0000022CF7C70980>.calls\nFAILED tests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit - assert [1] == [1, 1]\n  \n  Right contains one more item: 1\n  \n  Full diff:\n    [\n        1,\n  -     1,\n    ]\nFAILED tests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once - assert [4, 4, 5] == [4, 5]\n  \n  At index 1 diff: 4 != 5\n  Left contains one more item: 5\n  \n  Full diff:\n    [\n  +     4,\n        4,\n        5,\n    ]\n========================= 3 failed, 3 passed in 0.12s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 575,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-2e703uq0\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 50%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_split_candidate_scope_lanes",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": false,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": false,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "disabled_for_live_reasoning_ablation": true,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "deterministic_diagnosis_fast_path": false,
+      "deterministic_only": false,
+      "diagnosis_dimension": "clock",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "clock",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-11",
+            "source-12"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "isolate-test_harness",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h-test_harness"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-state"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "causal_chain": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "context_paths": [],
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "owner_paths": [],
+            "support_evidence_ids": [
+              "source-11",
+              "source-12"
+            ]
+          },
+          {
+            "causal_chain": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "context_paths": [],
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "owner_paths": [],
+            "support_evidence_ids": [
+              "operator-1",
+              "contract-source-1"
+            ]
+          },
+          {
+            "causal_chain": [],
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "context_paths": [],
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "owner_paths": [],
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          },
+          {
+            "causal_chain": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "context_paths": [],
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "owner_paths": [],
+            "support_evidence_ids": [
+              "operator-4"
+            ]
+          }
+        ],
+        "problem_statement": "An AutoTrader candidate table contains 7 explicit-user imminent alerts and about 98,000 system alerts with user_id NULL. The current `(user_id = uid OR user_id IS NULL)` selector forces the explicit-user path through the broad system backlog instead of its narrow index. Preserve the accepted candidate set, global limit, recent-first or id-first ordering, and downstream gates. Replace the mixed predicate with exactly two scope-pure query lanes, each locally bounded, then merge and deduplicate references in memory under one global cap so neither lane can starve the other.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {},
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "python_split_candidate_scope_lanes",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_chain": [],
+          "causal_sufficiency": "observational",
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.0,
+          "context_paths": [],
+          "dimension": "clock",
+          "evidence_ids": [
+            "source-11",
+            "source-12"
+          ],
+          "grounded_owner_paths": [],
+          "hypothesis_id": "h-clock",
+          "owner_evidence_ids": {},
+          "owner_paths": [],
+          "ownership_challenges": [],
+          "ownership_grounding": "unspecified",
+          "promotion_reason": "",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "requested_status": "provisional",
+          "status": "inconclusive",
+          "ungrounded_owner_paths": []
+        },
+        "contract_invariants": [
+          "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+        ],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "state_reconciliation"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_chain": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_paths": [],
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0.9,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-clock",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false,
+            "ungrounded_owner_paths": []
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_chain": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by data drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_paths": [],
+            "context_weight": 0.318,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 1.59,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-data",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-1",
+              "contract-source-1"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false,
+            "ungrounded_owner_paths": []
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_chain": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_paths": [],
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-test_harness",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false,
+            "ungrounded_owner_paths": []
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_chain": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by state drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_paths": [],
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-state",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-4"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false,
+            "ungrounded_owner_paths": []
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h-test_harness",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "dimension": "state",
+            "experiment_id": "falsify-h-state",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_chain": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.0,
+            "context_paths": [],
+            "dimension": "clock",
+            "evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-clock",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive",
+            "ungrounded_owner_paths": []
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_chain": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.0,
+            "context_paths": [],
+            "dimension": "clock",
+            "evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-clock",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive",
+            "ungrounded_owner_paths": []
+          },
+          "errors": [],
+          "initial_json_parsed": false,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": false,
+          "json_parsed": false,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": false,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 0,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_chain": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.0,
+            "context_paths": [],
+            "dimension": "clock",
+            "evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-clock",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive",
+            "ungrounded_owner_paths": []
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_chain": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.0,
+            "context_paths": [],
+            "dimension": "clock",
+            "evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "grounded_owner_paths": [],
+            "hypothesis_id": "h-clock",
+            "owner_evidence_ids": {},
+            "owner_paths": [],
+            "ownership_challenges": [],
+            "ownership_grounding": "unspecified",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "inconclusive",
+            "ungrounded_owner_paths": []
+          },
+          "errors": [],
+          "initial_json_parsed": false,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": false,
+          "json_parsed": false,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": false,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-11",
+              "source-12"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 0,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 486166,
+      "evaluation_role": "development_regression",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 654,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-ljsxj5sc\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 550,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-5rxuslds\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap FAILED [ 16%]\ntests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit FAILED [ 33%]\ntests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once FAILED [ 50%]\ntests/test_final.py::test_mixed_naive_and_aware_timestamps_have_stable_recency_order PASSED [ 66%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 83%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n____________ test_id_first_mode_merges_lanes_under_one_global_cap _____________\ntests\\test_final.py:16: in test_id_first_mode_merges_lanes_under_one_global_cap\n    assert len(store.calls) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\nE    +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x000001AA27930980>.calls\n___________ test_each_lane_gets_local_capacity_before_global_limit ____________\ntests\\test_final.py:26: in test_each_lane_gets_local_capacity_before_global_limit\n    assert [call[\"limit\"] for call in store.calls] == [1, 1]\nE   assert [1] == [1, 1]\nE     \nE     Right contains one more item: 1\nE     \nE     Full diff:\nE       [\nE           1,\nE     -     1,\nE       ]\n____________ test_duplicate_identity_across_lanes_is_returned_once ____________\ntests\\test_final.py:33: in test_duplicate_identity_across_lanes_is_returned_once\n    assert [row_id for row_id, _at in refs] == [4, 5]\nE   assert [4, 4, 5] == [4, 5]\nE     \nE     At index 1 diff: 4 != 5\nE     Left contains one more item: 5\nE     \nE     Full diff:\nE       [\nE     +     4,\nE           4,\nE           5,\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap - AssertionError: assert 1 == 2\n +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\n +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x000001AA27930980>.calls\nFAILED tests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit - assert [1] == [1, 1]\n  \n  Right contains one more item: 1\n  \n  Full diff:\n    [\n        1,\n  -     1,\n    ]\nFAILED tests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once - assert [4, 4, 5] == [4, 5]\n  \n  At index 1 diff: 4 != 5\n  Left contains one more item: 5\n  \n  Full diff:\n    [\n  +     4,\n        4,\n        5,\n    ]\n========================= 3 failed, 3 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "size_bytes": 3647
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "size_bytes": 1283
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "size_bytes": 1867
+        }
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "clock",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T08:10:21.464843+00:00"
+        },
+        {
+          "actual_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T08:17:05.353335+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 7,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T08:18:25.590192+00:00"
+        },
+        {
+          "actual_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T08:18:25.590625+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sequence": 11,
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "timestamp_utc": "2026-07-14T08:18:25.590711+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T08:18:25.594991+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": false,
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T08:18:27.628816+00:00"
+        },
+        {
+          "actual_count": 7,
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 7,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T08:18:27.628842+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 105032,
+          "load_duration_ns": 0,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 20639,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 105.0,
+          "response": "",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "insufficient_visible_answer_budget",
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 105032
+        },
+        {
+          "case_budget_remaining_before_sec": 374.9671584999887,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 44.9670969999861,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 44994,
+          "load_duration_ns": 0,
+          "logical_attempt": 2,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_remaining_before_sec": 44.9670969999861,
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 20923,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "recovery_trigger": "call_timeout",
+          "requested_timeout_sec": 44.9670969999861,
+          "response": "",
+          "retry_for_invalid_json": true,
+          "stage": "diagnosis_investigator_json_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 44994
+        },
+        {
+          "case_budget_remaining_before_sec": 329.97232190001523,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 105008,
+          "load_duration_ns": 0,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:3",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 25940,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 105.0,
+          "response": "",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 105008
+        },
+        {
+          "case_budget_remaining_before_sec": 224.96407620003447,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 44.99170449998928,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 45011,
+          "load_duration_ns": 0,
+          "logical_attempt": 2,
+          "logical_call_id": "diagnosis_judge:3",
+          "logical_remaining_before_sec": 44.99170449998928,
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 26217,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "recovery_trigger": "call_timeout",
+          "requested_timeout_sec": 44.99170449998928,
+          "response": "",
+          "retry_for_invalid_json": true,
+          "stage": "diagnosis_judge_json_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 45012
+        },
+        {
+          "case_budget_remaining_before_sec": 179.9520738000283,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 45404978000,
+          "latency_ms": 61351,
+          "load_duration_ns": 177464600,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 11572,
+          "prompt_eval_count": 2569,
+          "prompt_eval_duration_ns": 12288346000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"clock\",\n  \"analysis\": \"The observed failure is primarily caused by clock drift, which affects the timestamp calculation in the Alert class. The current logic assumes a naive timestamp without timezone handling, leading to incorrect ordering and deduplication of alerts.\",\n  \"files\": [\n    {\n      \"path\": \"trading/query_store.py\",\n      \"action\": \"modify\",\n      \"description\": \"Fix timestamp handling to account for timezone drift and ensure consistent ordering of alerts.\",\n      \"algorithm\": \"Update the _rank function to handle timezone-aware datetime objects and ensure consistent timestamp calculation across all alerts.\",\n      \"required_primitives\": [\"datetime\", \"timezone\", \"math\"],\n      \"forbidden_shortcuts\": [\"tzinfo\", \"timestamp\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"prompt_obligation::forbidden::5aa40a6e7da3\",\n      \"owner_paths\": [\"trading/query_store.py\"],\n      \"postcondition\": \"The query_scope method must issue one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicate candidate identity and apply one mode-aware global order and limit in memory.\",\n      \"polarity\": \"forbidden\"\n    },\n    {\n      \"contract\": \"prompt_obligation::required::2b97d7823f4e\",\n      \"owner_paths\": [\"trading/query_store.py\"],\n      \"postcondition\": \"The query_scope method must issue one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicate candidate identity and apply one mode-aware global order and limit in memory.\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The _rank function in trading/query_store.py must be updated to handle timezone-aware datetime objects and ensure consistent timestamp calculation across all alerts. This will prevent clock drift from affecting the ordering and deduplication of alerts.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 402,
+          "wall_deadline_clamped": false,
+          "wall_ms": 61351
+        },
+        {
+          "case_budget_remaining_before_sec": 118.60022390005179,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 118.60022390005179,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 11270967000,
+          "latency_ms": 40697,
+          "load_duration_ns": 20510885500,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 9741,
+          "prompt_eval_count": 2115,
+          "prompt_eval_duration_ns": 8868369000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n        if value.tzinfo is None:\n            value = value.replace(tzinfo=timezone.utc)\n        timestamp = value.timestamp()\n    else:\n        timestamp = -math.inf\n    return (timestamp, int(alert.id))\n=======\n        if value.tzinfo is None:\n            value = value.replace(tzinfo=timezone.utc)\n        timestamp = value.timestamp() + value.utcoffset().total_seconds()\n    else:\n        timestamp = -math.inf\n    return (timestamp, int(alert.id))\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "unsupported_model_or_mode",
+          "tokens_out": 112,
+          "wall_deadline_clamped": false,
+          "wall_ms": 40697
+        },
+        {
+          "case_budget_remaining_before_sec": 77.90261720004492,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 77.90261720004492,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "case_budget_timeout",
+          "eval_duration_ns": 0,
+          "latency_ms": 77907,
+          "load_duration_ns": 0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": true,
+          "ok": false,
+          "prompt_chars": 19010,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 150.0,
+          "response": "",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "thinking_policy_reason": "non_hypothesis_stage",
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 77907
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 7,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": false,
+      "patch_warnings": [
+        "contract invariant guard: trading/auto_trader.py still mixes scope query shape or omits global merge semantics",
+        "Rolled back edit group because the resulting source contradicted a mechanism invariant.",
+        "Repair plan was empty or invalid; no review or edit authority was granted.",
+        "Stopped local repair because the per-case model wall budget was exhausted."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": false,
+      "prompt_contract_closure_warnings": {
+        "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+      },
+      "public_tests": {
+        "duration_ms": 533,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-ljsxj5sc\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 50%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [
+        {
+          "adapter_rejection": "CHILI adapter rejected the attempted edit:\nRepair plan was empty or invalid; no review or edit authority was granted.",
+          "after_failure_signature": "6bff0dbcc2e54b51ea2863dac6bb08cfe51834859d35f7763047af134a1c9590",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "prompt_contract_details": {
+              "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+            },
+            "prompt_obligation_details": {
+              "prompt_obligation::forbidden::5aa40a6e7da3": {
+                "polarity": "forbidden",
+                "statement": "Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              "prompt_obligation::required::2b97d7823f4e": {
+                "polarity": "required",
+                "statement": "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              }
+            }
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-ljsxj5sc\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.10s =========================\n\nPRIOR SOURCE-ADAPTER OR INVARIANT REJECTIONS (do not repeat these mechanisms):\n- contract invariant guard: trading/auto_trader.py still mixes scope query shape or omits global merge semantics\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n- prompt_contract::d02e8d819248: trading/auto_trader.py still mixes scope query shape or omits global merge semantics",
+          "before_failure_signature": "6bff0dbcc2e54b51ea2863dac6bb08cfe51834859d35f7763047af134a1c9590",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "prompt_contract_details": {
+              "prompt_contract::d02e8d819248": "trading/auto_trader.py still mixes scope query shape or omits global merge semantics"
+            },
+            "prompt_obligation_details": {
+              "prompt_obligation::forbidden::5aa40a6e7da3": {
+                "polarity": "forbidden",
+                "statement": "Do not introduce or retain any shortcut explicitly prohibited by this invariant: Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              },
+              "prompt_obligation::required::2b97d7823f4e": {
+                "polarity": "required",
+                "statement": "Scope-asymmetric candidate selection keeps query execution and selection policy separate: the orchestrator issues one locally bounded explicit-user query and one locally bounded system-NULL query, then deduplicates candidate identity and applies one mode-aware global order and limit in memory. A mixed OR predicate, lane concatenation, provider mutation, or limiting before both lanes participate is not equivalent. Nonpositive limits perform no query; recent ordering normalizes naive and aware event times with stable id ties, while non-recent mode orders by id."
+              }
+            }
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-ljsxj5sc\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.10s =========================\n\nPRIOR SOURCE-ADAPTER OR INVARIANT REJECTIONS (do not repeat these mechanisms):\n- contract invariant guard: trading/auto_trader.py still mixes scope query shape or omits global merge semantics\n\nUNRESOLVED PROMPT-DERIVED CONTRACT CLOSURE:\n- prompt_contract::d02e8d819248: trading/auto_trader.py still mixes scope query shape or omits global merge semantics",
+          "escalated": false,
+          "feedback_context_files": [],
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [],
+          "patch_applied": false,
+          "plan": {},
+          "proposed_diagnosis_dimension": "",
+          "round": 1,
+          "selected_file": "",
+          "selected_files": [],
+          "transport_failed": true,
+          "warnings": [
+            "Repair plan was empty or invalid; no review or edit authority was granted."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "clock",
+      "score": 25,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "trading/query_store.py"
+      ],
+      "split": "disclosed_replay",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 0,
+      "successful_live_model_call_count": 2,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-14T08:18:27.650370+00:00",
+  "deterministic_contracts_disabled": true,
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 1,
+  "development_regression_score": 25.0,
+  "diagnosis_accuracy": 0.0,
+  "diagnosis_correct_count": 0,
+  "diagnostic_stage_acceptance_rate": 0.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 0.0,
+  "diagnostic_stage_schema_acceptance_rate": 0.0,
+  "escalation_model": "",
+  "evaluation_context": "disclosed_replay",
+  "evaluation_verdict": "disclosed_replay_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "size_bytes": 3647
+        },
+        "case_id": "python_split_candidate_scope_lanes",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "size_bytes": 1283
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "size_bytes": 1867
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "size_bytes": 554
+    }
+  },
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "size_bytes": 554,
+      "timestamp_utc": "2026-07-14T08:10:18.722430+00:00"
+    },
+    {
+      "artifact": "case:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "size_bytes": 3647,
+      "timestamp_utc": "2026-07-14T08:10:18.725410+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "size_bytes": 1283,
+      "timestamp_utc": "2026-07-14T08:10:18.726020+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "size_bytes": 1867,
+      "timestamp_utc": "2026-07-14T08:10:18.726556+00:00"
+    },
+    {
+      "actual_sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T08:10:18.731104+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_LIVE_REASONING_DISCLOSED_RECOVERY_CHECKPOINT.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T08:10:21.463455+00:00"
+    },
+    {
+      "actual_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "artifact": "case:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "path": "cases/python_split_candidate_scope_lanes.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T08:10:21.464843+00:00"
+    },
+    {
+      "actual_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "path": "oracles/python_split_candidate_scope_lanes.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T08:17:05.353335+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 7,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T08:18:25.590192+00:00"
+    },
+    {
+      "actual_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "artifact": "final_oracle:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T08:18:25.590625+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "sequence": 11,
+      "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "timestamp_utc": "2026-07-14T08:18:25.590711+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T08:18:25.594991+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": false,
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T08:18:27.628816+00:00"
+    },
+    {
+      "actual_count": 7,
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 7,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T08:18:27.628842+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T08:18:27.631758+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T08:18:27.650308+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 5,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 25.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "7bbb67b05d07c3568726bf7915b7f94778f294f17daba67b38bff0e248f7c2b8",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_LIVE_REASONING_DISCLOSED_RECOVERY_CHECKPOINT.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 0,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 7,
+  "verdict": "needs_improvement"
+}
