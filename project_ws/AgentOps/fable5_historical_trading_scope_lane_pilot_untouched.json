@@ -1,0 +1,1435 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 489435.0,
+  "blinded_holdout_case_count": 1,
+  "blinded_holdout_score": 40.0,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 1,
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "data",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 527,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-k_hj7pzt\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.09s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 590,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-hwutjzpl\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap FAILED [ 16%]\ntests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit FAILED [ 33%]\ntests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once FAILED [ 50%]\ntests/test_final.py::test_mixed_naive_and_aware_timestamps_have_stable_recency_order PASSED [ 66%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 83%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n____________ test_id_first_mode_merges_lanes_under_one_global_cap _____________\ntests\\test_final.py:16: in test_id_first_mode_merges_lanes_under_one_global_cap\n    assert len(store.calls) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\nE    +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x00000234130A0980>.calls\n___________ test_each_lane_gets_local_capacity_before_global_limit ____________\ntests\\test_final.py:26: in test_each_lane_gets_local_capacity_before_global_limit\n    assert [call[\"limit\"] for call in store.calls] == [1, 1]\nE   assert [1] == [1, 1]\nE     \nE     Right contains one more item: 1\nE     \nE     Full diff:\nE       [\nE           1,\nE     -     1,\nE       ]\n____________ test_duplicate_identity_across_lanes_is_returned_once ____________\ntests\\test_final.py:33: in test_duplicate_identity_across_lanes_is_returned_once\n    assert [row_id for row_id, _at in refs] == [4, 5]\nE   assert [4, 4, 5] == [4, 5]\nE     \nE     At index 1 diff: 4 != 5\nE     Left contains one more item: 5\nE     \nE     Full diff:\nE       [\nE     +     4,\nE           4,\nE           5,\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap - AssertionError: assert 1 == 2\n +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\n +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x00000234130A0980>.calls\nFAILED tests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit - assert [1] == [1, 1]\n  \n  Right contains one more item: 1\n  \n  Full diff:\n    [\n        1,\n  -     1,\n    ]\nFAILED tests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once - assert [4, 4, 5] == [4, 5]\n  \n  At index 1 diff: 4 != 5\n  Left contains one more item: 5\n  \n  Full diff:\n    [\n  +     4,\n        4,\n        5,\n    ]\n========================= 3 failed, 3 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 500,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-k_hj7pzt\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 50%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_split_candidate_scope_lanes",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "deterministic_diagnosis_fast_path": false,
+      "deterministic_only": false,
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "data",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Selector forces broad scan",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "Scan uses broad backlog",
+            "expected_if_true": "Scan uses narrow index",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "data",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "app"
+              ],
+              "probe_id": "p1",
+              "query": "broad scan",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Mixed predicate causes broad backlog scan",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Query should use narrow index",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Global limit not enforced per lane",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Merge deduped refs under cap",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-4"
+            ]
+          },
+          {
+            "claim": "Selector forces broad scan over narrow index",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Use separate lanes for user/system",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-6"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 25,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "data"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "Scan uses broad backlog",
+            "expected_if_true": "Scan uses narrow index",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T06:34:50.370358+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "data"
+            ],
+            "dimension": "data",
+            "duration_ms": 20,
+            "exit_code": 1,
+            "expected_if_false": "Scan uses broad backlog",
+            "expected_if_true": "Scan uses narrow index",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "state"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T06:34:50.370358+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "python_split_candidate_scope_lanes",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Mixed predicate causes broad backlog scan",
+          "confidence": 0.3939,
+          "dimension": "data",
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Selector forces broad scan",
+          "requested_status": "inconclusive",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "state_reconciliation"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [
+              "operator-2"
+            ],
+            "causal_support_weight": 0.65,
+            "claim": "Mixed predicate causes broad backlog scan",
+            "coarse_reset_support": false,
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Query should use narrow index",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "support_weight": 0.65,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Global limit not enforced per lane",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0.65,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Merge deduped refs under cap",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "operator-4"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [
+              "operator-2"
+            ],
+            "causal_support_weight": 0.65,
+            "claim": "Selector forces broad scan over narrow index",
+            "coarse_reset_support": false,
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "Use separate lanes for user/system",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-6"
+            ],
+            "support_weight": 0.65,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Query should use narrow index",
+            "dimension": "data",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Merge deduped refs under cap",
+            "dimension": "state",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Use separate lanes for user/system",
+            "dimension": "code",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog scan",
+            "confidence": 0.3939,
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Selector forces broad scan",
+            "requested_status": "inconclusive",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog scan",
+            "confidence": 0.3939,
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Selector forces broad scan",
+            "requested_status": "inconclusive",
+            "status": "provisional"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Selector forces broad scan",
+            "status": "inconclusive"
+          },
+          "response_chars": 1175,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog scan",
+            "confidence": 0.3939,
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Selector forces broad scan",
+            "requested_status": "inconclusive",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Mixed predicate causes broad backlog scan",
+            "confidence": 0.3939,
+            "dimension": "data",
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Selector forces broad scan",
+            "requested_status": "inconclusive",
+            "status": "provisional"
+          },
+          "errors": [
+            "x2: Unknown diagnostic probe kind: bounded_file_excerpt."
+          ],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Selector forces broad scan",
+            "status": "provisional"
+          },
+          "response_chars": 1926,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 489435,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 587,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.08s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 621,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-_1z59yta\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 6 items\n\ntests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap FAILED [ 16%]\ntests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit FAILED [ 33%]\ntests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once FAILED [ 50%]\ntests/test_final.py::test_mixed_naive_and_aware_timestamps_have_stable_recency_order PASSED [ 66%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 83%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n____________ test_id_first_mode_merges_lanes_under_one_global_cap _____________\ntests\\test_final.py:16: in test_id_first_mode_merges_lanes_under_one_global_cap\n    assert len(store.calls) == 2\nE   AssertionError: assert 1 == 2\nE    +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\nE    +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x0000023708340980>.calls\n___________ test_each_lane_gets_local_capacity_before_global_limit ____________\ntests\\test_final.py:26: in test_each_lane_gets_local_capacity_before_global_limit\n    assert [call[\"limit\"] for call in store.calls] == [1, 1]\nE   assert [1] == [1, 1]\nE     \nE     Right contains one more item: 1\nE     \nE     Full diff:\nE       [\nE           1,\nE     -     1,\nE       ]\n____________ test_duplicate_identity_across_lanes_is_returned_once ____________\ntests\\test_final.py:33: in test_duplicate_identity_across_lanes_is_returned_once\n    assert [row_id for row_id, _at in refs] == [4, 5]\nE   assert [4, 4, 5] == [4, 5]\nE     \nE     At index 1 diff: 4 != 5\nE     Left contains one more item: 5\nE     \nE     Full diff:\nE       [\nE     +     4,\nE           4,\nE           5,\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_id_first_mode_merges_lanes_under_one_global_cap - AssertionError: assert 1 == 2\n +  where 1 = len([{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}])\n +    where [{'scope': ('or', 7, None), 'limit': 3, 'recent_first': False}] = <trading.query_store.QueryStore object at 0x0000023708340980>.calls\nFAILED tests/test_final.py::test_each_lane_gets_local_capacity_before_global_limit - assert [1] == [1, 1]\n  \n  Right contains one more item: 1\n  \n  Full diff:\n    [\n        1,\n  -     1,\n    ]\nFAILED tests/test_final.py::test_duplicate_identity_across_lanes_is_returned_once - assert [4, 4, 5] == [4, 5]\n  \n  At index 1 diff: 4 != 5\n  Left contains one more item: 5\n  \n  Full diff:\n    [\n  +     4,\n        4,\n        5,\n    ]\n========================= 3 failed, 3 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "size_bytes": 3647
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "size_bytes": 1283
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "size_bytes": 1867
+        }
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "data",
+      "initial_public_regression_correction": {},
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T06:31:27.426302+00:00"
+        },
+        {
+          "actual_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T06:37:27.086634+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 10,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T06:39:34.922158+00:00"
+        },
+        {
+          "actual_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T06:39:34.922435+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sequence": 11,
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "timestamp_utc": "2026-07-14T06:39:34.922482+00:00"
+        },
+        {
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T06:39:34.925152+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": false,
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T06:39:36.860930+00:00"
+        },
+        {
+          "actual_count": 10,
+          "case_id": "python_split_candidate_scope_lanes",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 10,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T06:39:36.860952+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "call_timeout",
+          "eval_duration_ns": 0,
+          "json_object_valid": false,
+          "latency_ms": 105034,
+          "load_duration_ns": 0,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": false,
+          "prompt_chars": 16776,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 105.0,
+          "response": "",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 105034
+        },
+        {
+          "case_budget_remaining_before_sec": 374.9657970999833,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 44.96575699996902,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 21952729000,
+          "json_object_valid": true,
+          "latency_ms": 37397,
+          "load_duration_ns": 174645500,
+          "logical_attempt": 2,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_remaining_before_sec": 44.96575699996902,
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 17060,
+          "prompt_eval_count": 4217,
+          "prompt_eval_duration_ns": 14859331000,
+          "recovery_trigger": "call_timeout",
+          "requested_timeout_sec": 44.96575699996902,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Mixed predicate causes broad backlog scan\",\"dimension\":\"data\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Query should use narrow index\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Global limit not enforced per lane\",\"dimension\":\"state\",\"support_evidence_ids\":[\"operator-4\"],\"contradict_evidence_ids\":[],\"falsification\":\"Merge deduped refs under cap\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Selector forces broad scan over narrow index\",\"dimension\":\"code\",\"support_evidence_ids\":[\"operator-2\",\"source-6\"],\"contradict_evidence_ids\":[],\"falsification\":\"Use separate lanes for user/system\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"data\"],\"held_constant_dimensions\":[\"code\",\"state\"],\"expected_if_true\":\"Scan uses narrow index\",\"expected_if_false\":\"Scan uses broad backlog\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"app\"],\"query\":\"broad scan\",\"dimension\":\"data\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"inconclusive\",\"evidence_ids\":[\"operator-1\",\"operator-2\"],\"reason\":\"Selector forces broad scan\"}}",
+          "retry_for_invalid_json": true,
+          "stage": "diagnosis_investigator_json_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 285,
+          "wall_deadline_clamped": false,
+          "wall_ms": 37397
+        },
+        {
+          "case_budget_remaining_before_sec": 337.5685147999902,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 41434882000,
+          "json_object_valid": true,
+          "latency_ms": 59663,
+          "load_duration_ns": 165585300,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:3",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 20198,
+          "prompt_eval_count": 4977,
+          "prompt_eval_duration_ns": 17747730000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"Mixed predicate causes broad backlog scan\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"operator-1\", \"operator-2\"],\n      \"falsification\": \"Query should use narrow index\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Global limit not enforced per lane\",\n      \"dimension\": \"state\",\n      \"support_evidence_ids\": [\"operator-4\"],\n      \"falsification\": \"Merge deduped refs under cap\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"Selector forces broad scan over narrow index\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"operator-2\", \"source-6\"],\n      \"falsification\": \"Use separate lanes for user/system\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"experiment_id\": \"x1\",\n      \"hypothesis_ids\": [\"h1\"],\n      \"changed_dimensions\": [\"data\"],\n      \"held_constant_dimensions\": [\"code\", \"state\"],\n      \"expected_if_true\": \"Scan uses narrow index\",\n      \"expected_if_false\": \"Scan uses broad backlog\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p1\",\n        \"kind\": \"search\",\n        \"paths\": [\"app\"],\n        \"query\": \"broad scan\",\n        \"dimension\": \"data\"\n      }\n    },\n    {\n      \"experiment_id\": \"x2\",\n      \"hypothesis_ids\": [\"h2\"],\n      \"changed_dimensions\": [\"state\"],\n      \"held_constant_dimensions\": [\"code\", \"data\"],\n      \"expected_if_true\": \"Merge deduped refs under cap\",\n      \"expected_if_false\": \"No merge under cap\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p2\",\n        \"kind\": \"bounded_file_excerpt\",\n        \"paths\": [\"app\"],\n        \"query\": \"merge deduped refs\",\n        \"dimension\": \"state\"\n      }\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-2\"],\n    \"reason\": \"Selector forces broad scan\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 527,
+          "wall_deadline_clamped": false,
+          "wall_ms": 59663
+        },
+        {
+          "case_budget_remaining_before_sec": 277.9048691999633,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 32544434000,
+          "latency_ms": 37653,
+          "load_duration_ns": 166207100,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 6771,
+          "prompt_eval_count": 1529,
+          "prompt_eval_duration_ns": 4597308000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The mixed predicate `(user_id = uid OR user_id IS NULL)` causes a broad scan of the system backlog, which is inefficient. This requires splitting the query into two pure scope lanes: one for user alerts and one for system alerts. The `QueryStore` class in `trading/query_store.py` is responsible for query execution and must be modified to support this split.\",\n  \"files\": [\n    {\n      \"path\": \"trading/query_store.py\",\n      \"action\": \"modify\",\n      \"description\": \"Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate under a global cap.\",\n      \"algorithm\": \"1. Split the query into two lanes: user alerts and system alerts.\\n2. Execute each lane separately using their respective narrow indexes.\\n3. Merge and deduplicate the results under a global cap.\\n4. Return the final deduplicated list.\",\n      \"required_primitives\": [\"QueryStore\", \"Alert\", \"_rank\"],\n      \"forbidden_shortcuts\": [\"broad scan\", \"mixed predicate\", \"single index\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"query_scope\",\n      \"owner_paths\": [\"trading/query_store.py\"],\n      \"postcondition\": \"The query_scope method returns a list of alerts that are either user-specific or system-specific, merged and deduplicated under a global cap.\",\n      \"polarity\": \"required\"\n    },\n    {\n      \"contract\": \"select_candidate_refs\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"postcondition\": \"The select_candidate_refs method returns a list of alerts that are either user-specific or system-specific, merged and deduplicated under a global cap.\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The `QueryStore` class must be modified to support two pure scope lanes for user and system alerts. The `select_candidate_refs` method must be updated to use these lanes and merge the results under a global cap.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 435,
+          "wall_deadline_clamped": false,
+          "wall_ms": 37653
+        },
+        {
+          "case_budget_remaining_before_sec": 240.2513683999423,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 17705450000,
+          "latency_ms": 36053,
+          "load_duration_ns": 14893682100,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 7908,
+          "prompt_eval_count": 1759,
+          "prompt_eval_duration_ns": 3429854000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n        elif kind == \"or\":\n            uid = int(scope[1])\n            rows = [alert for alert in self.alerts if alert.user_id == uid or alert.user_id is None]\n        elif kind == \"user\":\n            uid = int(scope[1])\n            rows = [alert for alert in self.alerts if alert.user_id == uid]\n        elif kind == \"system\":\n            rows = [alert for alert in self.alerts if alert.user_id is None]\n        else:\n            raise ValueError(f\"unknown scope: {scope}\")\n=======\n        elif kind == \"or\":\n            uid = int(scope[1])\n            user_rows = [alert for alert in self.alerts if alert.user_id == uid]\n            system_rows = [alert for alert in self.alerts if alert.user_id is None]\n            rows = user_rows + system_rows\n        elif kind == \"user\":\n            uid = int(scope[1])\n            user_rows = [alert for alert in self.alerts if alert.user_id == uid]\n            rows = user_rows\n        elif kind == \"system\":\n            system_rows = [alert for alert in self.alerts if alert.user_id is None]\n            rows = system_rows\n        else:\n            raise ValueError(f\"unknown scope: {scope}\")\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 270,
+          "wall_deadline_clamped": false,
+          "wall_ms": 36053
+        },
+        {
+          "case_budget_remaining_before_sec": 204.19805769994855,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 81978422000,
+          "latency_ms": 82430,
+          "load_duration_ns": 162595900,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 8429,
+          "prompt_eval_count": 1873,
+          "prompt_eval_duration_ns": 233417000,
+          "requested_timeout_sec": 150.0,
+          "response": "I apologize for the oversight. Let's correct the SEARCH and REPLACE blocks based on the current content of `trading/query_store.py`.\n\n## File: trading/query_store.py\n```\nfrom dataclasses import dataclass\nfrom datetime import datetime, timezone\nimport math\n\n\n@dataclass(frozen=True)\nclass Alert:\n    id: int\n    user_id: int | None\n    alerted_at: datetime | None\n\n\ndef _rank(alert):\n    value = alert.alerted_at\n    if isinstance(value, datetime):\n        if value.tzinfo is None:\n            value = value.replace(tzinfo=timezone.utc)\n        timestamp = value.timestamp()\n    else:\n        timestamp = -math.inf\n    return (timestamp, int(alert.id))\n\n\nclass QueryStore:\n    def __init__(self, alerts):\n        self.alerts = list(alerts)\n        self.calls = []\n\n    def query_scope(self, scope, *, limit, recent_first):\n        self.calls.append({\"scope\": scope, \"limit\": int(limit), \"recent_first\": bool(recent_first)})\n        kind = scope[0]\n        if kind == \"or\":\n            uid = int(scope[1])\n            rows = [alert for alert in self.alerts if alert.user_id == uid or alert.user_id is None]\n        elif kind == \"user\":\n            uid = int(scope[1])\n            rows = [alert for alert in self.alerts if alert.user_id == uid]\n        elif kind == \"system\":\n            rows = [alert for alert in self.alerts if alert.user_id is None]\n        else:\n            raise ValueError(f\"unknown scope: {scope}\")\n        if recent_first:\n            rows.sort(key=_rank, reverse=True)\n        else:\n            rows.sort(key=lambda alert: int(alert.id))\n        return [(int(alert.id), alert.alerted_at) for alert in rows[: max(0, int(limit))]]\n\n```\n\n## Required Change\nSplit the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate under a global cap.\n\nApproved causal plan and cross-file contracts:\n{\n  \"analysis\": \"The mixed predicate `(user_id = uid OR user_id IS NULL)` causes a broad scan of the system backlog, which is inefficient. This requires splitting the query into two pure scope lanes: one for user alerts and one for system alerts. The `QueryStore` class in `trading/query_store.py` is responsible for query execution and must be modified to support this split.\",\n  \"contract_coverage\": [\n    {\n      \"contract\": \"query_scope\",\n      \"owner_paths\": [\n        \"trading/query_store.py\"\n      ],\n      \"postcondition\": \"The query_scope method returns a list of alerts that are either user-specific or system-specific, merged and deduplicated under a global cap.\"\n    },\n    {\n      \"contract\": \"select_candidate_refs\",\n      \"owner_paths\": [\n        \"trading/auto_trader.py\"\n      ],\n      \"postcondition\": \"The select_candidate_refs method returns a list of alerts that are either user-specific or system-specific, merged and deduplicated under a global cap.\"\n    }\n  ],\n  \"dimension\": \"data\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"algorithm\": \"1. Split the query into two lanes: user alerts and system alerts.\\n2. Execute each lane separately using their respective narrow indexes.\\n3. Merge and deduplicate the results under a global cap.\\n4. Return the final deduplicated list.\",\n      \"forbidden_shortcuts\": [\n        \"broad scan\",\n        \"mixed predicate\",\n        \"single index\"\n      ],\n      \"path\": \"trading/query_store.py\",\n      \"required_primitives\": [\n        \"QueryStore\",\n        \"Alert\",\n        \"_rank\"\n      ],\n      \"responsibility\": \"Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate under a global cap.\"\n    }\n  ],\n  \"notes\": \"The `QueryStore` class must be modified to support two pure scope lanes for user and system alerts. The `select_candidate_refs` method must be updated to use these lanes and merge the results under a global cap.\",\n  \"target_path\": \"trading/query_store.py\"\n}\n\nOverall request:\nAn AutoTrader candidate table contains 7 explicit-user imminent alerts and about 98,000 system alerts with user_id NULL. The current `(user_id = uid OR user_id IS NULL)` selector forces the explicit-user path through the broad system backlog instead of its narrow index. Preserve the accepted candidate set, global limit, recent-first or id-first ordering, and downstream gates. Replace the mixed predicate with exactly two scope-pure query lanes, each locally bounded, then merge and deduplicate references in memory under one global cap so neither lane can starve the other.\n\nEvidence-gated diagnosis:\nDiagnostic evidence gate:\n- decision: instrument_first\n- conclusion: provisional / data\n- claim: Mixed predicate causes broad backlog scan\n- confidence: 0.3939\n- baseline drift findings: 0\n- conclusion retractions: 0\n- next experiment (isolated): Query should use narrow index\n- next experiment (isolated): Merge deduped refs under cap\n- next experiment (isolated): Use separate lanes for user/system\n- diagnostic lens: expected_vs_observed\n- diagnostic lens: causal_timeline\n- diagnostic lens: root_cause_vs_downstream_symptom\n- diagnostic lens: safety_boundary\n- diagnostic lens: post_change_proof\n- diagnostic lens: state_reconciliation\nStrongest causal evidence:\n- An AutoTrader candidate table contains 7 explicit-user imminent alerts and about 98,000 system alerts with user_id NULL.\n- The current `(user_id = uid OR user_id IS NULL)`",
+          "stage": "edit_1_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 1200,
+          "wall_deadline_clamped": false,
+          "wall_ms": 82430
+        },
+        {
+          "case_budget_remaining_before_sec": 121.76727729995036,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 121.76727729995036,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 31672446000,
+          "latency_ms": 46291,
+          "load_duration_ns": 5139347600,
+          "model": "qwen3:8b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 12259,
+          "prompt_eval_count": 2969,
+          "prompt_eval_duration_ns": 9439216000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The mixed predicate `(user_id = uid OR user_id IS NULL)` causes the query to scan the entire backlog instead of using the narrow index. This results in the incorrect scope identifier 'or' being used, which fails the test expecting 'user' and 'system' as separate lanes.\",\n  \"files\": [\n    {\n      \"path\": \"trading/auto_trader.py\",\n      \"action\": \"modify\",\n      \"description\": \"Replace the mixed predicate with two scope-pure query lanes for user and system alerts.\",\n      \"algorithm\": \"Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate references under a global cap.\",\n      \"required_primitives\": [\"QueryStore.query_scope\", \"list comprehensions\", \"sort\"],\n      \"forbidden_shortcuts\": [\"mixed predicates\", \"single query scan\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"postcondition\": \"The query should use two scope-pure lanes for user and system alerts, and merge deduped references under a global cap.\",\n      \"polarity\": \"required\"\n    },\n    {\n      \"contract\": \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\",\n      \"owner_paths\": [\"trading/auto_trader.py\"],\n      \"postcondition\": \"The scope identifier should be 'user' for user alerts and 'system' for system alerts.\",\n      \"polarity\": \"forbidden\"\n    }\n  ],\n  \"notes\": \"The repair must ensure that the query uses two separate lanes for user and system alerts, preserving the global limit and ordering, and avoiding the mixed predicate that causes the broad scan.\"\n}",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 406,
+          "wall_deadline_clamped": false,
+          "wall_ms": 46291
+        },
+        {
+          "case_budget_remaining_before_sec": 75.47532959992532,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 75.47532959992532,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 9597240000,
+          "latency_ms": 23109,
+          "load_duration_ns": 5053283100,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 12637,
+          "prompt_eval_count": 3036,
+          "prompt_eval_duration_ns": 8404505999,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n    if safe_limit <= 0:\n        return []\n    return store.query_scope(\n        (\"or\", int(uid), None),\n        limit=safe_limit,\n        recent_first=recent_first,\n    )\n=======\n    user_query = store.query_scope(\n        (\"user\", int(uid)),\n        limit=safe_limit,\n        recent_first=recent_first,\n    )\n    system_query = store.query_scope(\n        (\"system\", None),\n        limit=safe_limit,\n        recent_first=recent_first,\n    )\n    all_queries = user_query + system_query\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 145,
+          "wall_deadline_clamped": false,
+          "wall_ms": 23109
+        },
+        {
+          "case_budget_remaining_before_sec": 52.36536569992313,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 52.36536569992313,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 3878114000,
+          "latency_ms": 6023,
+          "load_duration_ns": 172657500,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 4439,
+          "prompt_eval_count": 982,
+          "prompt_eval_duration_ns": 1868147000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n=======\n    return sorted(all_queries, key=lambda x: (-x[1].timestamp(), int(x[0])))[:safe_limit]\n>>>>>>> REPLACE\n```",
+          "stage": "repair_public_regression_correction_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 61,
+          "wall_deadline_clamped": false,
+          "wall_ms": 6023
+        },
+        {
+          "case_budget_remaining_before_sec": 46.34141779993661,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 46.34141779993661,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "case_budget_timeout",
+          "eval_duration_ns": 0,
+          "latency_ms": 46351,
+          "load_duration_ns": 0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": true,
+          "ok": false,
+          "prompt_chars": 19005,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 150.0,
+          "response": "",
+          "stage": "repair_plan_2",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 46351
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 10,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": false,
+      "patch_warnings": [
+        "full-file fallback made no change",
+        "Rolled back multi-file edit group after trading/query_store.py was rejected.",
+        "Rolled back public-regression correction because the public contract remained red.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Repair plan was empty or invalid; no review or edit authority was granted."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 540,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 50%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "87d7288f388fc97719942191f0882e441b25137afe605e84702c44a86be88a65",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": []
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [\n      \"TypeError: bad operand type for unary -: 'datetime.datetime'\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit\"\n    ]\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: store.calls == []\",\n      \"assertion: [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\",\n      \"TypeError: bad operand type for unary -: 'datetime.datetime'\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\",\n      \"tests/test_public.py::test_nonpositive_limit_short_circuits_without_query\",\n      \"tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert store.calls == []\n- assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n- observed: TypeError: bad operand type for unary -: 'datetime.datetime'\n- observed: AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n- observed: E   AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n- observed: FAILED tests/test_public.py::test_nonpositive_limit_short_circuits_without_query - AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit FAILED [ 50%]\n\n================================== FAILURES ===================================\n___ test_selector_preserves_user_plus_system_candidate_set_and_global_limit ___\ntests\\test_public.py:15: in test_selector_preserves_user_plus_system_candidate_set_and_global_limit\n    refs = select_candidate_refs(store, 7, limit=3, recent_first=True)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in select_candidate_refs\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in <lambda>\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n                                              ^^^^^\nE   TypeError: bad operand type for unary -: 'datetime.datetime'\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit - TypeError: bad operand type for unary -: 'datetime.datetime'\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n============================== 1 failed in 0.09s ==============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\nt_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    refs = select_candidate_refs(store, 7, limit=3, recent_first=True)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in select_candidate_refs\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in <lambda>\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n                                              ^^^^^\nE   TypeError: bad operand type for unary -: 'datetime.datetime'\n___ test_selector_preserves_user_plus_system_candidate_set_and_global_limit ___\ntests\\test_public.py:15: in test_selector_preserves_user_plus_system_candidate_set_and_global_limit\n    refs = select_candidate_refs(store, 7, limit=3, recent_first=True)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in select_candidate_refs\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in <lambda>\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n                                              ^^^^^\nE   TypeError: bad operand type for unary -: 'datetime.datetime'\n_____________ test_nonpositive_limit_short_circuits_without_query _____________\ntests\\test_public.py:23: in test_nonpositive_limit_short_circuits_without_query\n    assert store.calls == []\nE   AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\nE     \nE     Left contains 2 more items, first extra item: {'limit': 0, 'recent_first': False, 'scope': ('user', 7)}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'limit': 0,\nE     +         'recent_first': False,\nE     +         'scope': (\nE     +             'user',\nE     +             7,\nE     +         ),\nE     +     },\nE     +     {\nE     +         'limit': 0,\nE     +         'recent_first': False,\nE     +         'scope': (\nE     +             'system',\nE     +             None,\nE     +         ),\nE     +     },\nE     + ]\n=========================== short test sum",
+          "applied_files": [
+            "trading/auto_trader.py"
+          ],
+          "attempt_fingerprint": "bdb478ef35143e0590ac3c8c1e2ba9a78207f0e743436cecbc2c168956ed869f",
+          "attempted_diff": "--- a/trading/auto_trader.py\n+++ b/trading/auto_trader.py\n@@ -1,9 +1,14 @@\n def select_candidate_refs(store, uid, *, limit, recent_first):\n     safe_limit = max(0, int(limit or 0))\n-    if safe_limit <= 0:\n-        return []\n-    return store.query_scope(\n-        (\"or\", int(uid), None),\n+    user_query = store.query_scope(\n+        (\"user\", int(uid)),\n         limit=safe_limit,\n         recent_first=recent_first,\n     )\n+    system_query = store.query_scope(\n+        (\"system\", None),\n+        limit=safe_limit,\n+        recent_first=recent_first,\n+    )\n+    all_queries = user_query + system_query\n+    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n",
+          "before_failure_signature": "e2076d89fbfcdff5bdac30aeda869dccefc6e2e0179dc8b23960093eea4df960",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.08s =========================",
+          "escalated": false,
+          "feedback_context_files": [
+            "trading/auto_trader.py",
+            "trading/query_store.py"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The mixed predicate `(user_id = uid OR user_id IS NULL)` causes the query to scan the entire backlog instead of using the narrow index. This results in the incorrect scope identifier 'or' being used, which fails the test expecting 'user' and 'system' as separate lanes.",
+            "contract_coverage": [
+              {
+                "contract": "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+                "owner_paths": [
+                  "trading/auto_trader.py"
+                ],
+                "polarity": "required",
+                "postcondition": "The query should use two scope-pure lanes for user and system alerts, and merge deduped references under a global cap."
+              },
+              {
+                "contract": "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+                "owner_paths": [
+                  "trading/auto_trader.py"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "The scope identifier should be 'user' for user alerts and 'system' for system alerts."
+              }
+            ],
+            "dimension": "code",
+            "files": [
+              {
+                "action": "modify",
+                "algorithm": "Split the query into two lanes: one for user alerts and one for system alerts, then merge and deduplicate references under a global cap.",
+                "description": "Replace the mixed predicate with two scope-pure query lanes for user and system alerts.",
+                "forbidden_shortcuts": [
+                  "mixed predicates",
+                  "single query scan"
+                ],
+                "path": "trading/auto_trader.py",
+                "required_primitives": [
+                  "QueryStore.query_scope",
+                  "list comprehensions",
+                  "sort"
+                ]
+              }
+            ],
+            "notes": "The repair must ensure that the query uses two separate lanes for user and system alerts, preserving the global limit and ordering, and avoiding the mixed predicate that causes the broad scan.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "42869cb1d70931ba67cecee71ac89b12fb72967ca223273675b7b58fe36913f7",
+          "proposed_diagnosis_dimension": "code",
+          "public_regression_correction": {
+            "applied_files": [
+              "trading/auto_trader.py"
+            ],
+            "attempted": true,
+            "attempted_diff": "--- a/trading/auto_trader.py\n+++ b/trading/auto_trader.py\n@@ -11,4 +11,4 @@\n         recent_first=recent_first,\n     )\n     all_queries = user_query + system_query\n-    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n+    return sorted(all_queries, key=lambda x: (-x[1].timestamp(), int(x[0])))[:safe_limit]\n",
+            "eligible_paths": [
+              "trading/auto_trader.py"
+            ],
+            "public_tests": {
+              "duration_ms": 577,
+              "exit_code": 1,
+              "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 50%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query FAILED [100%]\n\n================================== FAILURES ===================================\n_____________ test_nonpositive_limit_short_circuits_without_query _____________\ntests\\test_public.py:23: in test_nonpositive_limit_short_circuits_without_query\n    assert store.calls == []\nE   AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\nE     \nE     Left contains 2 more items, first extra item: {'limit': 0, 'recent_first': False, 'scope': ('user', 7)}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'limit': 0,\nE     +         'recent_first': False,\nE     +         'scope': (\nE     +             'user',\nE     +             7,\nE     +         ),\nE     +     },\nE     +     {\nE     +         'limit': 0,\nE     +         'recent_first': False,\nE     +         'scope': (\nE     +             'system',\nE     +             None,\nE     +         ),\nE     +     },\nE     + ]\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_nonpositive_limit_short_circuits_without_query - AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n  \n  Left contains 2 more items, first extra item: {'limit': 0, 'recent_first': False, 'scope': ('user', 7)}\n  \n  Full diff:\n  - []\n  + [\n  +     {\n  +         'limit': 0,\n  +         'recent_first': False,\n  +         'scope': (\n  +             'user',\n  +             7,\n  +         ),\n  +     },\n  +     {\n  +         'limit': 0,\n  +         'recent_first': False,\n  +         'scope': (\n  +             'system',\n  +             None,\n  +         ),\n  +     },\n  + ]\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n========================= 1 failed, 1 passed in 0.08s =========================",
+              "passed": false,
+              "runner": "pytest",
+              "seeded_file_integrity_verified": true,
+              "test_process_count": 1
+            },
+            "succeeded": false,
+            "warnings": [
+              "Rolled back public-regression correction because the public contract remained red."
+            ]
+          },
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "trading/auto_trader.py",
+          "selected_files": [
+            "trading/auto_trader.py"
+          ],
+          "skipped_optional_files": [],
+          "validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [\n      \"TypeError: bad operand type for unary -: 'datetime.datetime'\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit\"\n    ]\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: store.calls == []\",\n      \"assertion: [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\",\n      \"TypeError: bad operand type for unary -: 'datetime.datetime'\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\",\n      \"tests/test_public.py::test_nonpositive_limit_short_circuits_without_query\",\n      \"tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert store.calls == []\n- assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n- observed: TypeError: bad operand type for unary -: 'datetime.datetime'\n- observed: AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n- observed: E   AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n- observed: FAILED tests/test_public.py::test_nonpositive_limit_short_circuits_without_query - AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit FAILED [ 50%]\n\n================================== FAILURES ===================================\n___ test_selector_preserves_user_plus_system_candidate_set_and_global_limit ___\ntests\\test_public.py:15: in test_selector_preserves_user_plus_system_candidate_set_and_global_limit\n    refs = select_candidate_refs(store, 7, limit=3, recent_first=True)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in select_candidate_refs\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in <lambda>\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n                                              ^^^^^\nE   TypeError: bad operand type for unary -: 'datetime.datetime'\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit - TypeError: bad operand type for unary -: 'datetime.datetime'\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n============================== 1 failed in 0.09s ==============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\nt_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    refs = select_candidate_refs(store, 7, limit=3, recent_first=True)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in select_candidate_refs\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in <lambda>\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n                                              ^^^^^\nE   TypeError: bad operand type for unary -: 'datetime.datetime'\n___ test_selector_preserves_user_plus_system_candidate_set_and_global_limit ___\ntests\\test_public.py:15: in test_selector_preserves_user_plus_system_candidate_set_and_global_limit\n    refs = select_candidate_refs(store, 7, limit=3, recent_first=True)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in select_candidate_refs\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntrading\\auto_trader.py:14: in <lambda>\n    return sorted(all_queries, key=lambda x: (-x[1], int(x[0])))[:safe_limit]\n                                              ^^^^^\nE   TypeError: bad operand type for unary -: 'datetime.datetime'\n_____________ test_nonpositive_limit_short_circuits_without_query _____________\ntests\\test_public.py:23: in test_nonpositive_limit_short_circuits_without_query\n    assert store.calls == []\nE   AssertionError: assert [{'scope': ('user', 7), 'limit': 0, 'recent_first': False}, {'scope': ('system', None), 'limit': 0, 'recent_first': False}] == []\nE     \nE     Left contains 2 more items, first extra item: {'limit': 0, 'recent_first': False, 'scope': ('user', 7)}\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     {\nE     +         'limit': 0,\nE     +         'recent_first': False,\nE     +         'scope': (\nE     +             'user',\nE     +             7,\nE     +         ),\nE     +     },\nE     +     {\nE     +         'limit': 0,\nE     +         'recent_first': False,\nE     +         'scope': (\nE     +             'system',\nE     +             None,\nE     +         ),\nE     +     },\nE     + ]\n=========================== short test sum",
+          "validation_regression": {
+            "after_failure_signature": "87d7288f388fc97719942191f0882e441b25137afe605e84702c44a86be88a65",
+            "after_quality": 0,
+            "before_failure_signature": "e2076d89fbfcdff5bdac30aeda869dccefc6e2e0179dc8b23960093eea4df960",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back public-regression correction because the public contract remained red.",
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "adapter_rejection": "CHILI adapter rejected the attempted edit:\nRepair plan was empty or invalid; no review or edit authority was granted.",
+          "after_failure_signature": "e2076d89fbfcdff5bdac30aeda869dccefc6e2e0179dc8b23960093eea4df960",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ]
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.08s =========================",
+          "before_failure_signature": "e2076d89fbfcdff5bdac30aeda869dccefc6e2e0179dc8b23960093eea4df960",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order",
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_nonpositive_limit_short_circuits_without_query",
+              "tests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: [call[\\\"scope\\\"] for call in store.calls] == [(\\\"user\\\", 7), (\\\"system\\\", None)]\",\n      \"assertion: [('or', 7, None)] == [('user', 7), ('system', None)]\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n- assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: E   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n- observed: FAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_split_candidate_scope_lanes-66wq5jci\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 3 items\n\ntests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order FAILED [ 33%]\ntests/test_public.py::test_selector_preserves_user_plus_system_candidate_set_and_global_limit PASSED [ 66%]\ntests/test_public.py::test_nonpositive_limit_short_circuits_without_query PASSED [100%]\n\n================================== FAILURES ===================================\n__ test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order __\ntests\\test_feedback.py:17: in test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\nE   AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\nE     \nE     At index 0 diff: ('or', 7, None) != ('user', 7)\nE     Right contains one more item: ('system', None)\nE     \nE     Full diff:\nE       [\nE           (\nE     -         'user',\nE     ?          ^^^\nE     +         'or',\nE     ?          ^\nE               7,\nE     -     ),\nE     -     (\nE     -         'system',\nE               None,\nE           ),\nE       ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order - AssertionError: assert [('or', 7, None)] == [('user', 7), ('system', None)]\n  \n  At index 0 diff: ('or', 7, None) != ('user', 7)\n  Right contains one more item: ('system', None)\n  \n  Full diff:\n    [\n        (\n  -         'user',\n  ?          ^^^\n  +         'or',\n  ?          ^\n            7,\n  -     ),\n  -     (\n  -         'system',\n            None,\n        ),\n    ]\n========================= 1 failed, 2 passed in 0.08s =========================",
+          "escalated": false,
+          "feedback_context_files": [],
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [],
+          "patch_applied": false,
+          "plan": {},
+          "proposed_diagnosis_dimension": "",
+          "round": 2,
+          "selected_file": "",
+          "selected_files": [],
+          "transport_failed": true,
+          "warnings": [
+            "Repair plan was empty or invalid; no review or edit authority was granted."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "data",
+      "score": 40,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "trading/query_store.py",
+        "trading/auto_trader.py"
+      ],
+      "split": "holdout-sealed-fable5-trading-scope-lane-pilot",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 2,
+      "successful_live_model_call_count": 8,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-14T06:39:36.880527+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 0,
+  "development_regression_score": 0.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 50.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "protocol",
+  "evaluation_verdict": "blinded_evaluation_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_split_candidate_scope_lanes",
+          "path": "cases/python_split_candidate_scope_lanes.json",
+          "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+          "size_bytes": 3647
+        },
+        "case_id": "python_split_candidate_scope_lanes",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+          "path": "oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+          "size_bytes": 1283
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_split_candidate_scope_lanes",
+          "path": "final_oracles/python_split_candidate_scope_lanes.json",
+          "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+          "size_bytes": 1867
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "size_bytes": 554
+    }
+  },
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 1,
+  "holdout_score": 40.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "size_bytes": 554,
+      "timestamp_utc": "2026-07-14T06:31:24.708366+00:00"
+    },
+    {
+      "artifact": "case:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "size_bytes": 3647,
+      "timestamp_utc": "2026-07-14T06:31:24.710504+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "size_bytes": 1283,
+      "timestamp_utc": "2026-07-14T06:31:24.710933+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "size_bytes": 1867,
+      "timestamp_utc": "2026-07-14T06:31:24.711340+00:00"
+    },
+    {
+      "actual_sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "db22af6100487ba75114d4e46a40753389d16413ced2ea0917c715f2ba7bc2e2",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T06:31:24.714598+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_UNTOUCHED_CHECKPOINT.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T06:31:27.425082+00:00"
+    },
+    {
+      "actual_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "artifact": "case:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "17a771af4976006d053bf82bcef686f2a68bb00b451720b7dafa2b9552136187",
+      "path": "cases/python_split_candidate_scope_lanes.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T06:31:27.426302+00:00"
+    },
+    {
+      "actual_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "artifact": "feedback_oracle:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "ed883b129617be7e40ac085cd94b9340191bbe729681ab3b3db02797f80948e0",
+      "path": "oracles/python_split_candidate_scope_lanes.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T06:37:27.086634+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 10,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T06:39:34.922158+00:00"
+    },
+    {
+      "actual_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "artifact": "final_oracle:python_split_candidate_scope_lanes",
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T06:39:34.922435+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_split_candidate_scope_lanes.json",
+      "sequence": 11,
+      "sha256": "7f346b47af0471983bcbf8bc2e4553a200b5fa1b26118afb6537447626036f54",
+      "timestamp_utc": "2026-07-14T06:39:34.922482+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T06:39:34.925152+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": false,
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T06:39:36.860930+00:00"
+    },
+    {
+      "actual_count": 10,
+      "case_id": "python_split_candidate_scope_lanes",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 10,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T06:39:36.860952+00:00"
+    },
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T06:39:36.861850+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T06:39:36.880447+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 2,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 40.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "f9665bba099d55edd82873da188a32b16ad1f6ebad76467bf445bfd53b6ea3c8",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_UNTOUCHED_CHECKPOINT.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 2,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 10,
+  "verdict": "needs_improvement"
+}
