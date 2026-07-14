@@ -1,0 +1,15 @@
+{
+  "case_id": "python_split_candidate_scope_lanes",
+  "expected_dimension": "data",
+  "expected_contracts": [
+    "explicit-user and system-null scopes use separate bounded queries",
+    "in-memory merge preserves one global order and limit",
+    "candidate identity is deduplicated across scope lanes"
+  ],
+  "expected_files": [
+    "trading/auto_trader.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback.py": "from datetime import datetime, timedelta\n\nfrom trading.auto_trader import select_candidate_refs\nfrom trading.query_store import Alert, QueryStore\n\n\ndef test_selector_uses_two_scope_pure_bounded_lanes_then_global_recency_order():\n    now = datetime(2026, 6, 4, 1, 0)\n    store = QueryStore([\n        Alert(10, 7, now - timedelta(seconds=4)),\n        Alert(11, 7, now - timedelta(seconds=1)),\n        Alert(20, None, now),\n        Alert(21, None, now - timedelta(seconds=2)),\n    ])\n    refs = select_candidate_refs(store, 7, limit=3, recent_first=True)\n    assert [row_id for row_id, _at in refs] == [20, 11, 21]\n    assert [call[\"scope\"] for call in store.calls] == [(\"user\", 7), (\"system\", None)]\n    assert all(call[\"limit\"] == 3 for call in store.calls)\n    assert not any(call[\"scope\"][0] == \"or\" for call in store.calls)\n"
+  }
+}

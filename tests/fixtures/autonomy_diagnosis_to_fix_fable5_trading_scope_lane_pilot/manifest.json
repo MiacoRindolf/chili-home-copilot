@@ -1,0 +1,15 @@
+{
+  "reference_family": "claude-fable-5",
+  "fixture_set": "autonomy_diagnosis_to_fix_fable5_trading_scope_lane_pilot_v1",
+  "cases": [
+    {
+      "case_id": "python_split_candidate_scope_lanes",
+      "language": "python",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-fable5-trading-scope-lane-pilot",
+      "case": "cases/python_split_candidate_scope_lanes.json",
+      "oracle": "oracles/python_split_candidate_scope_lanes.json",
+      "final_oracle": "final_oracles/python_split_candidate_scope_lanes.json"
+    }
+  ]
+}
