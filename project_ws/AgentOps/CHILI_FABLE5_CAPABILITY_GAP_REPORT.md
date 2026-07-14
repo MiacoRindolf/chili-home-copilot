@@ -738,6 +738,14 @@ and fresh-final checks, and used **zero model calls and zero premium calls**. Fu
 Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_DISCLOSED_RECOVERY_RECEIPT.md`.
 
+A post-remediation live-reasoning ablation then disabled every recognized-contract diagnosis and repair path. It
+still scored **40/100**, solved **0/1** sealed finals, selected `trading/query_store.py` instead of the caller-owned
+`trading/auto_trader.py`, retained no patch, used **8 local calls** with one timeout, and took **486.7 seconds**.
+Compared with the untouched run, call count fell from 10 to 8 and errors from two to one, but correctness and latency
+did not materially improve. The explicit ownership packet made the error visible; it did not resolve caller-versus-
+callee policy ownership. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_LIVE_REASONING_ABLATION_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -774,7 +782,7 @@ Full details:
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
-10. Four historical Fable 5 trading pilots scored 25/100, 40/100, 40/100, and 40/100 untouched. Disclosed deterministic recovery now solves all four recognized families at 100/100 and zero premium calls, but every first encounter exhausted nearly the full local budget and retained no patch. System coverage is growing; unknown-mechanism reasoning, causal synthesis, and ownership remain the bottleneck.
+10. Four historical Fable 5 trading pilots scored 25/100, 40/100, 40/100, and 40/100 untouched. Disclosed deterministic recovery solves all four recognized families at 100/100 and zero premium calls. A contract-disabled live-reasoning ablation on the fourth case remained 40/100 and selected the execution primitive instead of its policy caller. System coverage is growing; unknown-mechanism reasoning, caller/callee ownership, causal synthesis, and latency remain the bottlenecks.
 
 ## Promotion Gate
 
