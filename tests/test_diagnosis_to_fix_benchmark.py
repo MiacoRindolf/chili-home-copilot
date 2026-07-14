@@ -5527,6 +5527,46 @@ def test_live_reasoning_ablation_disables_initial_and_feedback_contract_paths(
     assert case_result["final_tests"]["passed"] is False
 
 
+def test_plan_prompt_challenges_primitive_owner_with_caller_profiles():
+    profiles = [
+        {
+            "path": "caller.py",
+            "structural_roles": ["orchestrator", "policy_caller"],
+            "outbound_candidate_paths": ["store.py"],
+            "decision_literals": ["combined"],
+        },
+        {
+            "path": "store.py",
+            "structural_roles": ["execution_primitive"],
+            "inbound_candidate_paths": ["caller.py"],
+            "decision_literals": ["combined", "left", "right"],
+        },
+    ]
+
+    prompt = benchmark._plan_prompt(
+        "Split the caller-selected mode and merge results.",
+        ["caller.py", "store.py"],
+        "### caller.py\ncall store\n### store.py\nexecute one mode",
+        {
+            "conclusion": {
+                "status": "provisional",
+                "dimension": "data",
+                "claim": "Store owns the mixed mode.",
+                "owner_paths": ["store.py"],
+                "ownership_grounding": "challenged",
+            }
+        },
+        2,
+        "",
+        profiles,
+    )
+
+    assert benchmark.diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC in prompt
+    assert "primitive that already supports the required operation stays context" in prompt
+    assert '"policy_caller"' in prompt
+    assert '"execution_primitive"' in prompt
+
+
 def test_disclosed_fable5_mesh_pressure_operator_passes_feedback_and_final(
     tmp_path,
 ):

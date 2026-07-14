@@ -25,6 +25,12 @@ PACKET_SCHEMA = "chili.diagnostic-packet.v1"
 REPORT_SCHEMA = "chili.diagnostic-report.v1"
 DEBATE_SCHEMA = "chili.local-diagnostic-debate.v1"
 
+BOUNDARY_OWNERSHIP_RUBRIC = (
+    "Caller/callee counterfactual: if a callee already supports the required primitive and its caller chooses "
+    "the wrong mode, argument, ordering, count, merge, or lifecycle, mutate the caller and keep the callee as "
+    "context. Mutate the callee only when its primitive contract is itself wrong."
+)
+
 DIMENSIONS = (
     "code",
     "data",
@@ -10432,6 +10438,289 @@ def _nearest_source_symbol(lines: Sequence[str], line_number: int) -> str:
     return ""
 
 
+_POLICY_PARAMETER_NAMES = frozenset(
+    {
+        "scope",
+        "mode",
+        "kind",
+        "policy",
+        "strategy",
+        "direction",
+        "side",
+        "limit",
+        "order",
+        "ordering",
+        "recent_first",
+        "options",
+        "config",
+        "timeout",
+        "retry",
+    }
+)
+_EXECUTION_PRIMITIVE_PATH_MARKERS = frozenset(
+    {"adapter", "client", "dao", "gateway", "provider", "repository", "store"}
+)
+_POLICY_CALLER_PATH_MARKERS = frozenset(
+    {
+        "controller",
+        "coordinator",
+        "manager",
+        "orchestrator",
+        "scheduler",
+        "selector",
+        "service",
+        "trader",
+        "worker",
+    }
+)
+
+
+def _python_call_name(call: ast.Call) -> str:
+    target = call.func
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return ""
+
+
+def _bounded_literal_tokens(node: ast.AST) -> list[str]:
+    values: list[str] = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Constant):
+            continue
+        value = child.value
+        if not isinstance(value, (str, int, float, bool)):
+            continue
+        rendered = _clip(value, 60)
+        if rendered and rendered not in values:
+            values.append(rendered)
+    return values[:16]
+
+
+def _candidate_source_profile(path: str, content: str) -> dict[str, Any]:
+    defined_symbols: set[str] = set()
+    parameter_names: set[str] = set()
+    outbound_calls: set[str] = set()
+    decision_literals: list[str] = []
+    control_flow_count = 0
+    merge_signal_count = 0
+    parse_status = "lexical"
+    if path.lower().endswith(".py"):
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            tree = None
+        if tree is not None:
+            parse_status = "python_ast"
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    defined_symbols.add(node.name)
+                    parameter_names.update(
+                        argument.arg
+                        for argument in [
+                            *node.args.posonlyargs,
+                            *node.args.args,
+                            *node.args.kwonlyargs,
+                        ]
+                    )
+                    if node.args.vararg:
+                        parameter_names.add(node.args.vararg.arg)
+                    if node.args.kwarg:
+                        parameter_names.add(node.args.kwarg.arg)
+                elif isinstance(node, ast.ClassDef):
+                    defined_symbols.add(node.name)
+                elif isinstance(node, ast.Call):
+                    call_name = _python_call_name(node)
+                    if call_name:
+                        outbound_calls.add(call_name)
+                    for value in _bounded_literal_tokens(node):
+                        if value not in decision_literals:
+                            decision_literals.append(value)
+                elif isinstance(node, (ast.Compare, ast.MatchValue)):
+                    for value in _bounded_literal_tokens(node):
+                        if value not in decision_literals:
+                            decision_literals.append(value)
+                elif isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Match)):
+                    control_flow_count += 1
+                if isinstance(node, ast.Call) and _python_call_name(node) in {
+                    "append",
+                    "extend",
+                    "sort",
+                    "sorted",
+                    "update",
+                }:
+                    merge_signal_count += 1
+            decision_literals = decision_literals[:16]
+    if parse_status == "lexical":
+        for line in content.splitlines():
+            for pattern in _SOURCE_SYMBOL_PATTERNS:
+                match = pattern.search(line)
+                if match:
+                    defined_symbols.add(match.group(1))
+        outbound_calls.update(
+            match.group(1)
+            for match in re.finditer(r"\.([A-Za-z_$][\w$]*)\s*\(", content)
+        )
+        control_flow_count = len(
+            re.findall(r"\b(?:if|for|while|switch|when)\b", content)
+        )
+        merge_signal_count = len(
+            re.findall(r"\b(?:append|extend|concat|merge|sort|sorted|dedup)\b", content, re.IGNORECASE)
+        )
+
+    path_tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", path.lower())
+        if token
+    }
+    policy_parameters = sorted(
+        name for name in parameter_names if name.lower() in _POLICY_PARAMETER_NAMES
+    )
+    return {
+        "path": path,
+        "parse_status": parse_status,
+        "defined_symbols": sorted(defined_symbols)[:24],
+        "parameter_names": sorted(parameter_names)[:32],
+        "policy_parameters": policy_parameters[:16],
+        "outbound_calls": sorted(outbound_calls)[:32],
+        "decision_literals": decision_literals[:16],
+        "control_flow_count": min(99, control_flow_count),
+        "merge_signal_count": min(99, merge_signal_count),
+        "execution_path_hint": bool(
+            path_tokens & _EXECUTION_PRIMITIVE_PATH_MARKERS
+        ),
+        "policy_path_hint": bool(path_tokens & _POLICY_CALLER_PATH_MARKERS),
+    }
+
+
+def profile_candidate_sources(
+    repo_path: Path,
+    candidate_paths: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Build a bounded caller/callee ownership graph for candidate source files."""
+    root = repo_path.resolve()
+    profiles: dict[str, dict[str, Any]] = {}
+    for path in _normalized_source_paths(candidate_paths):
+        candidate = (root / path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if (
+            not candidate.is_file()
+            or candidate.suffix.lower() not in _SOURCE_SUFFIXES
+            or candidate.stat().st_size > 600_000
+        ):
+            continue
+        try:
+            content = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        profiles[path] = _candidate_source_profile(path, content)
+
+    definition_paths: dict[str, set[str]] = defaultdict(set)
+    for path, profile in profiles.items():
+        for symbol in profile.get("defined_symbols") or []:
+            definition_paths[str(symbol)].add(path)
+
+    outbound_targets: dict[str, set[str]] = defaultdict(set)
+    inbound_callers: dict[str, set[str]] = defaultdict(set)
+    for path, profile in profiles.items():
+        for call_name in profile.get("outbound_calls") or []:
+            for target_path in definition_paths.get(str(call_name), set()):
+                if target_path == path:
+                    continue
+                outbound_targets[path].add(target_path)
+                inbound_callers[target_path].add(path)
+
+    results: list[dict[str, Any]] = []
+    for path in sorted(profiles):
+        profile = profiles[path]
+        targets = sorted(outbound_targets.get(path, set()))
+        callers = sorted(inbound_callers.get(path, set()))
+        roles: list[str] = []
+        if targets:
+            roles.append("orchestrator")
+        if targets and (
+            profile.get("decision_literals")
+            or int(profile.get("control_flow_count") or 0) > 0
+            or profile.get("policy_path_hint")
+        ):
+            roles.append("policy_caller")
+        if callers and (
+            profile.get("policy_parameters")
+            or profile.get("execution_path_hint")
+        ):
+            roles.append("execution_primitive")
+        if profile.get("execution_path_hint") and "execution_primitive" not in roles:
+            roles.append("execution_context")
+        results.append(
+            {
+                "path": path,
+                "defined_symbols": list(profile.get("defined_symbols") or [])[:16],
+                "policy_parameters": list(profile.get("policy_parameters") or [])[:12],
+                "outbound_calls": list(profile.get("outbound_calls") or [])[:20],
+                "decision_literals": list(profile.get("decision_literals") or [])[:12],
+                "outbound_candidate_paths": targets[:12],
+                "inbound_candidate_paths": callers[:12],
+                "structural_roles": roles,
+            }
+        )
+    return results[:16]
+
+
+def _boundary_ownership_challenges(
+    profiles: Sequence[Mapping[str, Any]],
+    owner_paths: Sequence[str],
+) -> list[dict[str, Any]]:
+    by_path = {
+        str(profile.get("path") or ""): profile
+        for profile in profiles
+        if isinstance(profile, Mapping) and str(profile.get("path") or "")
+    }
+    challenges: list[dict[str, Any]] = []
+    for owner_path in owner_paths:
+        owner = by_path.get(str(owner_path))
+        if not owner or "execution_primitive" not in set(
+            owner.get("structural_roles") or []
+        ):
+            continue
+        owner_literals = {
+            str(value).strip().lower()
+            for value in owner.get("decision_literals") or []
+            if str(value).strip() and not str(value).strip().replace(".", "", 1).isdigit()
+        }
+        if len(owner_literals) < 2:
+            continue
+        for caller_path in owner.get("inbound_candidate_paths") or []:
+            caller = by_path.get(str(caller_path))
+            if not caller or "policy_caller" not in set(
+                caller.get("structural_roles") or []
+            ):
+                continue
+            caller_literals = {
+                str(value).strip().lower()
+                for value in caller.get("decision_literals") or []
+                if str(value).strip()
+            }
+            shared_literals = sorted(owner_literals & caller_literals)
+            if not shared_literals:
+                continue
+            challenges.append(
+                {
+                    "claimed_owner_path": str(owner_path),
+                    "policy_caller_path": str(caller_path),
+                    "shared_decision_literals": shared_literals[:8],
+                    "reason": (
+                        "The claimed owner exposes multiple policy modes while a caller selects one of them; "
+                        "apply the caller/callee counterfactual before mutating the primitive."
+                    ),
+                }
+            )
+    return challenges[:8]
+
+
 def collect_repo_evidence(
     repo_path: Path,
     prompt: str,
@@ -10660,7 +10949,12 @@ def build_case_from_prompt(
         }
         for index, statement in enumerate(segments)
     ]
+    candidate_source_profiles: list[dict[str, Any]] = []
     if repo_path is not None:
+        candidate_source_profiles = profile_candidate_sources(
+            repo_path,
+            candidate_paths,
+        )
         observations.extend(
             collect_repo_evidence(
                 repo_path,
@@ -10684,6 +10978,14 @@ def build_case_from_prompt(
                 "contract_invariants": derive_contract_invariants(prompt),
                 "diagnostic_lenses": derive_diagnostic_lenses(prompt),
                 "candidate_paths": _normalized_source_paths(candidate_paths),
+                **(
+                    {
+                        "candidate_source_profiles": candidate_source_profiles,
+                        "boundary_ownership_rubric": BOUNDARY_OWNERSHIP_RUBRIC,
+                    }
+                    if candidate_source_profiles
+                    else {}
+                ),
             },
         }
     )
@@ -11643,6 +11945,13 @@ def evaluate_packet(
     )
     provenance_break_evidence_id = str(first_broken_edge.get("evidence_id") or "")
     provenance_break_dimension = str(first_broken_edge.get("dimension") or "unknown")
+    candidate_source_profiles = [
+        item
+        for item in (case.get("constraints") or {}).get(
+            "candidate_source_profiles", []
+        )
+        if isinstance(item, Mapping)
+    ]
 
     hypotheses = [
         *packet["hypotheses"],
@@ -11741,6 +12050,12 @@ def evaluate_packet(
             if grounded_owner_paths
             else "ungrounded"
         )
+        ownership_challenges = _boundary_ownership_challenges(
+            candidate_source_profiles,
+            owner_paths,
+        )
+        if ownership_challenges:
+            ownership_grounding = "challenged"
         explicit_contradict_records = [
             evidence[value]
             for value in contradict_ids
@@ -11907,6 +12222,10 @@ def evaluate_packet(
             blockers.append(
                 "Claimed mutation owners lack linked source evidence."
             )
+        elif ownership_grounding == "challenged":
+            blockers.append(
+                "Caller/callee source structure contradicts the claimed mutation owner."
+            )
         downstream_only = bool(linked_support_records) and not (
             causal_support_records or context_records or implicit_contradict_records
         )
@@ -12015,6 +12334,7 @@ def evaluate_packet(
                 "grounded_owner_paths": grounded_owner_paths,
                 "ungrounded_owner_paths": ungrounded_owner_paths,
                 "owner_evidence_ids": owner_evidence_ids,
+                "ownership_challenges": ownership_challenges,
                 "context_paths": context_paths,
                 "dimension_alignment_weight": dimension_alignment_weight,
                 "dimension_mismatch_weight": dimension_mismatch_weight,
@@ -12325,6 +12645,9 @@ def evaluate_packet(
             "owner_evidence_ids": dict(
                 chosen.get("owner_evidence_ids") or {}
             ) if chosen else {},
+            "ownership_challenges": list(
+                chosen.get("ownership_challenges") or []
+            ) if chosen else [],
             "promotion_reason": promotion_reason,
             "blockers": list(chosen.get("blockers") or []) if chosen else [],
         },
@@ -12664,6 +12987,7 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
                     "grounded_owner_paths",
                     "ungrounded_owner_paths",
                     "owner_evidence_ids",
+                    "ownership_challenges",
                     "attribution_gap_blocked",
                     "blockers",
                 )
@@ -12695,6 +13019,7 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
                     "grounded_owner_paths",
                     "ungrounded_owner_paths",
                     "owner_evidence_ids",
+                    "ownership_challenges",
                     "blockers",
                 )
                 if _has_prompt_value(conclusion.get(key))
@@ -13389,6 +13714,15 @@ def report_context(report: Mapping[str, Any]) -> str:
         lines.append(f"- causal chain {index}: {_clip(step, 300)}")
     for blocker in (conclusion.get("blockers") or [])[:5]:
         lines.append(f"- diagnosis blocker: {_clip(blocker, 300)}")
+    for challenge in (conclusion.get("ownership_challenges") or [])[:4]:
+        if not isinstance(challenge, Mapping):
+            continue
+        lines.append(
+            "- ownership challenge: "
+            f"{_clip(challenge.get('claimed_owner_path'), 180)} is called by "
+            f"{_clip(challenge.get('policy_caller_path'), 180)}; "
+            f"{_clip(challenge.get('reason'), 300)}"
+        )
     timeline = report.get("causal_timeline") if isinstance(report.get("causal_timeline"), Mapping) else {}
     earliest_break = timeline.get("earliest_break") if isinstance(timeline.get("earliest_break"), Mapping) else {}
     if earliest_break:

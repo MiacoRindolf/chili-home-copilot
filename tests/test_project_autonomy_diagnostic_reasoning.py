@@ -6751,3 +6751,163 @@ def test_prompt_case_exposes_exact_candidate_paths_and_source_symbols(tmp_path: 
     prompt = reasoning.investigator_prompt(case)
     assert '"candidate_paths":["selector.py","provider.py"]' in prompt
     assert '"source_symbol":"select_candidates"' in prompt
+
+
+def test_candidate_profiles_distinguish_policy_caller_from_execution_primitive(
+    tmp_path: Path,
+):
+    trading = tmp_path / "trading"
+    trading.mkdir()
+    (trading / "query_store.py").write_text(
+        "class QueryStore:\n"
+        "    def query_scope(self, scope, *, limit, recent_first):\n"
+        "        kind = scope[0]\n"
+        "        if kind == 'or': return []\n"
+        "        if kind == 'user': return []\n"
+        "        if kind == 'system': return []\n"
+        "        raise ValueError('unknown scope')\n",
+        encoding="utf-8",
+    )
+    (trading / "auto_trader.py").write_text(
+        "def select_candidate_refs(store, uid, *, limit, recent_first):\n"
+        "    if limit <= 0:\n"
+        "        return []\n"
+        "    return store.query_scope(('or', uid, None), limit=limit, recent_first=recent_first)\n",
+        encoding="utf-8",
+    )
+
+    profiles = reasoning.profile_candidate_sources(
+        tmp_path,
+        ["trading/query_store.py", "trading/auto_trader.py"],
+    )
+    by_path = {item["path"]: item for item in profiles}
+
+    store = by_path["trading/query_store.py"]
+    caller = by_path["trading/auto_trader.py"]
+    assert "execution_primitive" in store["structural_roles"]
+    assert store["inbound_candidate_paths"] == ["trading/auto_trader.py"]
+    assert {"or", "user", "system"} <= set(store["decision_literals"])
+    assert "policy_caller" in caller["structural_roles"]
+    assert caller["outbound_candidate_paths"] == ["trading/query_store.py"]
+    assert "or" in caller["decision_literals"]
+
+
+def test_evidence_gate_challenges_primitive_owner_when_policy_caller_selects_mode(
+    tmp_path: Path,
+):
+    trading = tmp_path / "trading"
+    trading.mkdir()
+    (trading / "query_store.py").write_text(
+        "class QueryStore:\n"
+        "    def query_scope(self, scope, *, limit, recent_first):\n"
+        "        if scope[0] == 'or': return []\n"
+        "        if scope[0] == 'user': return []\n"
+        "        if scope[0] == 'system': return []\n",
+        encoding="utf-8",
+    )
+    (trading / "auto_trader.py").write_text(
+        "def select_candidate_refs(store, uid, *, limit, recent_first):\n"
+        "    return store.query_scope(('or', uid, None), limit=limit, recent_first=recent_first)\n",
+        encoding="utf-8",
+    )
+    profiles = reasoning.profile_candidate_sources(
+        tmp_path,
+        ["trading/query_store.py", "trading/auto_trader.py"],
+    )
+    case = {
+        "case_id": "boundary-owner-challenge",
+        "problem_statement": "Split caller-selected scope lanes and merge globally.",
+        "constraints": {
+            "candidate_paths": [
+                "trading/query_store.py",
+                "trading/auto_trader.py",
+            ],
+            "candidate_source_profiles": profiles,
+            "minimum_hypothesis_dimensions": 1,
+        },
+        "observations": [
+            {
+                "evidence_id": "store-source",
+                "statement": "QueryStore exposes or, user, and system modes.",
+                "dimension": "data",
+                "dimension_origin": "inferred",
+                "kind": "artifact",
+                "causal_role": "context",
+                "provenance": "trading/query_store.py:1",
+                "source_path": "trading/query_store.py",
+            },
+            {
+                "evidence_id": "caller-source",
+                "statement": "select_candidate_refs chooses the or mode.",
+                "dimension": "data",
+                "dimension_origin": "inferred",
+                "kind": "artifact",
+                "causal_role": "context",
+                "provenance": "trading/auto_trader.py:1",
+                "source_path": "trading/auto_trader.py",
+            },
+        ],
+    }
+
+    wrong = reasoning.evaluate_packet(
+        case,
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "wrong-owner",
+                    "claim": "Query primitive owns split policy.",
+                    "dimension": "data",
+                    "support_evidence_ids": ["store-source", "caller-source"],
+                    "contradict_evidence_ids": [],
+                    "owner_paths": ["trading/query_store.py"],
+                    "context_paths": ["trading/auto_trader.py"],
+                    "causal_chain": ["query_scope", "or mode", "broad backlog"],
+                    "falsification": "Change caller mode only.",
+                }
+            ],
+            "experiments": [],
+            "conclusion": {
+                "hypothesis_id": "wrong-owner",
+                "status": "provisional",
+                "evidence_ids": ["store-source"],
+                "reason": "Primitive contains branches.",
+            },
+        },
+    )
+    right = reasoning.evaluate_packet(
+        case,
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "right-owner",
+                    "claim": "Caller owns selected scope policy.",
+                    "dimension": "data",
+                    "support_evidence_ids": ["caller-source", "store-source"],
+                    "contradict_evidence_ids": [],
+                    "owner_paths": ["trading/auto_trader.py"],
+                    "context_paths": ["trading/query_store.py"],
+                    "causal_chain": ["caller selects or", "lanes mix", "backlog dominates"],
+                    "falsification": "Change primitive only.",
+                }
+            ],
+            "experiments": [],
+            "conclusion": {
+                "hypothesis_id": "right-owner",
+                "status": "provisional",
+                "evidence_ids": ["caller-source"],
+                "reason": "Caller selects mode.",
+            },
+        },
+    )
+
+    assert wrong["conclusion"]["ownership_grounding"] == "challenged"
+    assert wrong["conclusion"]["ownership_challenges"][0][
+        "policy_caller_path"
+    ] == "trading/auto_trader.py"
+    assert any(
+        "Caller/callee source structure" in blocker
+        for blocker in wrong["conclusion"]["blockers"]
+    )
+    assert "ownership challenge" in reasoning.report_context(wrong)
+    assert right["conclusion"]["ownership_grounding"] == "grounded"
+    assert right["conclusion"]["ownership_challenges"] == []

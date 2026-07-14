@@ -2497,12 +2497,16 @@ def _plan_prompt(
     report: Mapping[str, Any],
     max_files: int,
     public_context: str = "",
+    source_profiles: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     invariants = diagnostic_reasoning.derive_contract_invariants(prompt)
     obligations = _prompt_contract_obligations(prompt)
     return (
         "Return one JSON object only. Classify the causal owner with the supplied dimension rubric, then select "
         "only the owning source files required for the diagnosed bug. "
+        "Apply the caller/callee counterfactual before trusting a diagnosed owner path: a primitive that already "
+        "supports the required operation stays context when its caller chooses the wrong mode, order, count, "
+        "merge, or lifecycle. "
         f"Use at most {max_files} files; use more than one only when the behavior crosses an interface. "
         "Do not select tests or invent paths. Give each file a specific coordinated responsibility. For each file, "
         "state an executable ordered algorithm, name the exact existing platform/project primitives it must use, "
@@ -2516,6 +2520,9 @@ def _plan_prompt(
         "Prompt obligation ledger (copy every id into one contract_coverage.contract and preserve its exact "
         f"polarity):\n{json.dumps(obligations, indent=2, sort_keys=True)}\n\n"
         f"Evidence decision:\n{diagnostic_reasoning.report_context(report)}\n\n"
+        f"Boundary ownership counterfactual:\n{diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC}\n\n"
+        "Read-only caller/callee profiles (structural hints, not automatic edit authority):\n"
+        f"{json.dumps(list(source_profiles), indent=2, sort_keys=True)}\n\n"
         f"Read-only public contracts that must remain green:\n{public_context or '(unavailable)'}\n\n"
         f"Allowed candidate paths: {json.dumps(candidates)}\n\n"
         f"Candidate contents:\n{context}"
@@ -4454,6 +4461,10 @@ def _generate_patch(
         if rel and (repo / rel).is_file()
     ]
     context = _candidate_context(repo, candidates)
+    source_profiles = diagnostic_reasoning.profile_candidate_sources(
+        repo,
+        candidates,
+    )
     evidence_context = _supporting_evidence_context(diagnosis)
     if evidence_context:
         context += f"\n\n### Strongest causal evidence\n{evidence_context}"
@@ -4472,6 +4483,7 @@ def _generate_patch(
                     report,
                     max_files,
                     public_context,
+                    source_profiles,
                 ),
             },
         ],
@@ -4550,6 +4562,10 @@ def _repair_after_failure(
     report = diagnosis.get("report") if isinstance(diagnosis.get("report"), Mapping) else {}
     evidence_context = _supporting_evidence_context(diagnosis)
     context = _candidate_context(repo, candidates)
+    source_profiles = diagnostic_reasoning.profile_candidate_sources(
+        repo,
+        candidates,
+    )
     max_files = _case_max_files(case)
     failed_contract_ids = _normalized_failed_contract_ids(contract_evidence)
     feedback_owner_hints = _feedback_exercised_candidates(
@@ -4574,6 +4590,8 @@ def _repair_after_failure(
         "Use the failure output and read-only feedback tests to propose a causal dimension, reconsider ownership, "
         "and select only the source files required for a compatible "
         f"repair, up to {max_files}. Use multiple files when the failure crosses an interface. "
+        "Apply the caller/callee counterfactual before retaining the previous owner; do not mutate an existing "
+        "primitive when its caller owns the wrong mode, order, count, merge, or lifecycle. "
         "Map every independent failing contract to its causal source owner and a concrete postcondition. Files "
         "imported by a test are read-only context unless the evidence shows they must change. Never select a test. "
         "Every contract_coverage.owner_paths value must be an allowed source candidate, never a test path. "
@@ -4584,6 +4602,9 @@ def _repair_after_failure(
         f"Original request:\n{case.get('prompt')}\n\n"
         f"Dimension rubric:\n{json.dumps(REPAIR_DIMENSION_RUBRIC, indent=2)}\n\n"
         f"Evidence decision:\n{diagnostic_reasoning.report_context(report)}\n"
+        f"Boundary ownership counterfactual:\n{diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC}\n\n"
+        "Read-only caller/callee profiles (challenge provider/context ownership before editing):\n"
+        f"{json.dumps(source_profiles, indent=2, sort_keys=True)}\n\n"
         f"Strongest evidence:\n{evidence_context or '(none)'}\n\n"
         f"Deterministic mechanism invariants:\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
         "Required prompt obligation ids (copy each id verbatim into exactly one contract field and preserve "
@@ -4676,9 +4697,13 @@ def _repair_after_failure(
         "undefined means the behavior must not occur. A failed in-flight operation must not recursively await "
         "its own cached promise. Include a contract_coverage entry for every independent assertion. Every "
         "owner_paths value must be an allowed source candidate, never a test path. Required JSON schema:\n"
+        "Use the caller/callee profiles to reject a provider or primitive owner when an upstream policy caller "
+        "chooses the contradicted mode, ordering, count, merge, or lifecycle. "
         f"{json.dumps(REPAIR_PLAN_SCHEMA, indent=2)}\n\n"
         f"Allowed candidates (max {max_files}): {json.dumps(candidates)}\n\n"
         f"Dimension rubric:\n{json.dumps(REPAIR_DIMENSION_RUBRIC, indent=2)}\n\n"
+        f"Boundary ownership counterfactual:\n{diagnostic_reasoning.BOUNDARY_OWNERSHIP_RUBRIC}\n\n"
+        f"Read-only caller/callee profiles:\n{json.dumps(source_profiles, indent=2, sort_keys=True)}\n\n"
         f"Original operator contract (must also remain true):\n{case.get('prompt')}\n\n"
         "Deterministic mechanism invariants (must be implemented by their causal source owner, not merely "
         f"reviewed):\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
