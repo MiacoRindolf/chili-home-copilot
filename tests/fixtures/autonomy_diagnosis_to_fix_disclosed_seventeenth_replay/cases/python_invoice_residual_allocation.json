@@ -1,0 +1,15 @@
+{
+  "case_id": "python_invoice_residual_allocation",
+  "language": "python",
+  "test_runner": "pytest",
+  "prompt": "A billing export occasionally disagrees with the posted invoice by one minor unit when a small charge or refund is distributed across several lines. The discrepancy is concentrated in currencies whose settlement precision differs from the most common configuration, while ordinary two-line invoices remain correct. Repair the monetary boundary so allocations are deterministic, preserve the rounded invoice total exactly, and behave symmetrically for refunds.",
+  "candidate_paths": ["billing/money.py", "billing/allocation.py", "billing/ledger.py"],
+  "max_files": 2,
+  "repo_files": {
+    "billing/__init__.py": "",
+    "billing/money.py": "from decimal import Decimal, ROUND_HALF_UP\n\n\ndef minor_unit(currency):\n    if currency.upper() == \"JPY\":\n        return Decimal(\"1\")\n    return Decimal(\"0.01\")\n\n\ndef round_minor(amount, currency):\n    return Decimal(amount).quantize(minor_unit(currency), rounding=ROUND_HALF_UP)\n",
+    "billing/allocation.py": "from decimal import Decimal\n\nfrom .money import round_minor\n\n\ndef allocate(total, weights, currency):\n    normalized = [Decimal(weight) for weight in weights]\n    if not normalized or any(weight < 0 for weight in normalized):\n        raise ValueError(\"weights must be non-negative and non-empty\")\n    weight_sum = sum(normalized, Decimal(0))\n    if weight_sum == 0:\n        raise ValueError(\"at least one weight must be positive\")\n    rounded_total = round_minor(total, currency)\n    return [round_minor(rounded_total * weight / weight_sum, currency) for weight in normalized]\n",
+    "billing/ledger.py": "def allocation_reference(invoice_id, line_index):\n    return f\"{invoice_id}:{line_index}\"\n\n\ndef allocation_entries(invoice_id, shares):\n    return [\n        {\"reference\": allocation_reference(invoice_id, index), \"amount\": share}\n        for index, share in enumerate(shares)\n    ]\n",
+    "tests/test_public.py": "from decimal import Decimal\n\nfrom billing.allocation import allocate\nfrom billing.ledger import allocation_entries\nfrom billing.money import round_minor\n\n\ndef test_even_dollar_allocation_flows_into_ledger_entries():\n    shares = allocate(Decimal(\"10.00\"), [1, 1], \"USD\")\n    entries = allocation_entries(\"invoice-7\", shares)\n    assert entries == [\n        {\"reference\": \"invoice-7:0\", \"amount\": Decimal(\"5.00\")},\n        {\"reference\": \"invoice-7:1\", \"amount\": Decimal(\"5.00\")},\n    ]\n\n\ndef test_whole_unit_currency_and_rounding():\n    assert round_minor(Decimal(\"300.4\"), \"JPY\") == Decimal(\"300\")\n    assert allocate(Decimal(\"300\"), [1, 2], \"JPY\") == [Decimal(\"100\"), Decimal(\"200\")]\n"
+  }
+}

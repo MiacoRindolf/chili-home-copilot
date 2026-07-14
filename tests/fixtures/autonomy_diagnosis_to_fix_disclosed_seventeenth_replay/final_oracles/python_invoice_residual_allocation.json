@@ -1,0 +1,6 @@
+{
+  "case_id": "python_invoice_residual_allocation",
+  "final_files": {
+    "tests/test_final.py": "from decimal import Decimal, ROUND_HALF_EVEN\n\nimport billing.allocation as allocation_module\nfrom billing.allocation import allocate\nfrom billing.money import minor_unit, round_minor\n\n\ndef test_money_contract_exposes_native_precision_and_tie_policy():\n    assert minor_unit(\"BHD\") == Decimal(\"0.001\")\n    assert round_minor(Decimal(\"1.2345\"), \"BHD\") == Decimal(\"1.234\")\n\n\ndef test_allocation_conserves_residuals_with_money_helpers_isolated(monkeypatch):\n    unit = Decimal(\"0.001\")\n    monkeypatch.setattr(allocation_module, \"minor_unit\", lambda currency: unit, raising=False)\n    monkeypatch.setattr(\n        allocation_module,\n        \"round_minor\",\n        lambda amount, currency: Decimal(amount).quantize(unit, rounding=ROUND_HALF_EVEN),\n    )\n    shares = allocation_module.allocate(Decimal(\"-0.007\"), [1, 1, 1], \"TEST\")\n    assert shares == [Decimal(\"-0.003\"), Decimal(\"-0.002\"), Decimal(\"-0.002\")]\n    assert sum(shares) == Decimal(\"-0.007\")\n\n\ndef test_integrated_three_decimal_allocation_preserves_invoice_total():\n    shares = allocate(Decimal(\"0.011\"), [2, 3, 5], \"BHD\")\n    assert shares == [Decimal(\"0.002\"), Decimal(\"0.003\"), Decimal(\"0.006\")]\n    assert sum(shares) == Decimal(\"0.011\")\n"
+  }
+}

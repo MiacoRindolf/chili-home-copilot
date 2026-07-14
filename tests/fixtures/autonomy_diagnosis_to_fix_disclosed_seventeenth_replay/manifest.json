@@ -1,0 +1,14 @@
+{
+  "reference_family": "claude-fable-5",
+  "fixture_set": "autonomy_diagnosis_to_fix_disclosed_seventeenth_replay_v1",
+  "cases": [
+    {"case_id": "node_coalesced_abort_poison", "language": "javascript", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_javascript_multifile", "case": "cases/node_coalesced_abort_poison.json", "oracle": "oracles/node_coalesced_abort_poison.json", "final_oracle": "final_oracles/node_coalesced_abort_poison.json"},
+    {"case_id": "node_wrapped_sequence_window", "language": "javascript", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_javascript_multifile", "case": "cases/node_wrapped_sequence_window.json", "oracle": "oracles/node_wrapped_sequence_window.json", "final_oracle": "final_oracles/node_wrapped_sequence_window.json"},
+    {"case_id": "python_persisted_rate_window", "language": "python", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_python_multifile", "case": "cases/python_persisted_rate_window.json", "oracle": "oracles/python_persisted_rate_window.json", "final_oracle": "final_oracles/python_persisted_rate_window.json"},
+    {"case_id": "python_invoice_residual_allocation", "language": "python", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_python_multifile", "case": "cases/python_invoice_residual_allocation.json", "oracle": "oracles/python_invoice_residual_allocation.json", "final_oracle": "final_oracles/python_invoice_residual_allocation.json"},
+    {"case_id": "dart_streaming_event_text", "language": "dart", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_dart_multifile", "case": "cases/dart_streaming_event_text.json", "oracle": "oracles/dart_streaming_event_text.json", "final_oracle": "final_oracles/dart_streaming_event_text.json"},
+    {"case_id": "dart_sensor_sentinel_signedness", "language": "dart", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_dart_multifile", "case": "cases/dart_sensor_sentinel_signedness.json", "oracle": "oracles/dart_sensor_sentinel_signedness.json", "final_oracle": "final_oracles/dart_sensor_sentinel_signedness.json"},
+    {"case_id": "sqlite_effective_price_intervals", "language": "sql", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_sql_multifile", "case": "cases/sqlite_effective_price_intervals.json", "oracle": "oracles/sqlite_effective_price_intervals.json", "final_oracle": "final_oracles/sqlite_effective_price_intervals.json"},
+    {"case_id": "sqlite_tenant_external_identity", "language": "sql", "evaluation_role": "development_regression", "split": "disclosed_seventeenth_sql_multifile", "case": "cases/sqlite_tenant_external_identity.json", "oracle": "oracles/sqlite_tenant_external_identity.json", "final_oracle": "final_oracles/sqlite_tenant_external_identity.json"}
+  ]
+}

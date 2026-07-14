@@ -1,0 +1,9 @@
+{
+  "case_id": "python_persisted_rate_window",
+  "expected_dimension": "clock",
+  "expected_contracts": ["portable snapshot clock declaration", "restart-aware elapsed-time restoration", "integrated skew-safe refill"],
+  "expected_files": ["quota/snapshot.py", "quota/limiter.py"],
+  "feedback_files": {
+    "tests/test_feedback.py": "import json\n\nimport quota.limiter as limiter_module\nfrom quota.limiter import TokenBucket\nfrom quota.snapshot import decode_snapshot, encode_snapshot\n\n\ndef test_snapshot_declares_a_portable_clock_domain():\n    payload = encode_snapshot(3.5, 1700.0)\n    encoded = json.loads(payload)\n    assert encoded[\"clock\"] == \"unix\"\n    assert encoded[\"captured_at\"] == 1700.0\n    assert decode_snapshot(payload) == encoded\n\n\ndef test_restore_uses_the_persisted_clock_domain_independent_of_decoder(monkeypatch):\n    monkeypatch.setattr(\n        limiter_module,\n        \"decode_snapshot\",\n        lambda payload: {\"version\": 1, \"clock\": \"unix\", \"tokens\": 1.0, \"captured_at\": 1000.0},\n    )\n    restored = TokenBucket.restore(\"opaque\", 5, 1, lambda: 2.0, lambda: 1003.0)\n    assert restored.tokens == 4.0\n\n\ndef test_restart_refills_from_elapsed_real_time_when_runtime_origin_changes():\n    old = {\"mono\": 900.0, \"wall\": 5000.0}\n    bucket = TokenBucket(10, 1, lambda: old[\"mono\"], lambda: old[\"wall\"])\n    assert bucket.consume(8)\n    payload = bucket.snapshot()\n    restarted = {\"mono\": 3.0, \"wall\": 5004.0}\n    restored = TokenBucket.restore(payload, 10, 1, lambda: restarted[\"mono\"], lambda: restarted[\"wall\"])\n    assert restored.tokens == 6.0\n"
+  }
+}

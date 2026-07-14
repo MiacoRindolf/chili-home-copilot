@@ -1,0 +1,6 @@
+{
+  "case_id": "dart_sensor_sentinel_signedness",
+  "final_files": {
+    "tests/final_test.dart": "import '../lib/packet_decoder.dart';\nimport '../lib/temperature.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final cold = decodeSensorFrame([0x85, 0xff, 0x01]);\n  final unavailable = decodeSensorFrame([0x00, 0x80, 0x01]);\n  check(cold.rawTemperature == -123, 'decoder signed near-zero value');\n  check(unavailable.rawTemperature == -32768, 'decoder sentinel representation');\n\n  check(temperatureCelsius(const SensorFrame(-250, 1)) == -2.5, 'domain negative conversion');\n  check(temperatureCelsius(const SensorFrame(-32768, 1)) == null, 'domain sentinel conversion');\n\n  check(temperatureCelsius(cold) == -1.23, 'integrated cold reading');\n  check(temperatureCelsius(unavailable) == null, 'integrated unavailable reading');\n}\n"
+  }
+}

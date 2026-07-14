@@ -1,0 +1,9 @@
+{
+  "case_id": "dart_sensor_sentinel_signedness",
+  "expected_dimension": "data",
+  "expected_contracts": ["signed wire-value decoding", "missing-sample domain preservation"],
+  "expected_files": ["lib/packet_decoder.dart", "lib/temperature.dart"],
+  "feedback_files": {
+    "tests/feedback_test.dart": "import '../lib/packet_decoder.dart';\nimport '../lib/temperature.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final cold = decodeSensorFrame([0xda, 0xfd, 0x01]);\n  check(cold.rawTemperature == -550, 'decoder preserves signed reading');\n  check(temperatureCelsius(const SensorFrame(-550, 1)) == -5.5, 'domain converts negative reading');\n  check(temperatureCelsius(const SensorFrame(1250, 0)) == null, 'domain rejects invalid-status sample');\n}\n"
+  }
+}

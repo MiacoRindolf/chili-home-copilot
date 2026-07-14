@@ -1,0 +1,9 @@
+{
+  "case_id": "node_coalesced_abort_poison",
+  "expected_dimension": "state",
+  "expected_contracts": ["subscriber-scoped shared-work lifecycle", "success-only result retention", "integrated cancellation and retry isolation"],
+  "expected_files": ["src/flightPool.js", "src/resourceClient.js"],
+  "feedback_files": {
+    "tests/feedback.test.js": "'use strict';\n\nconst test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { FlightPool } = require('../src/flightPool');\nconst { ResourceClient } = require('../src/resourceClient');\n\ntest('shared work gives each direct pool subscriber its own cancellation outcome', async () => {\n  let release;\n  const pool = new FlightPool((key, signal) => new Promise((resolve, reject) => {\n    release = resolve;\n    signal.addEventListener('abort', () => reject(signal.reason || new Error('aborted')), { once: true });\n  }));\n  const closed = new AbortController();\n  const cancelled = pool.load('direct', closed.signal);\n  const cancelledCheck = assert.rejects(cancelled);\n  const survivor = pool.load('direct');\n  await Promise.resolve();\n  closed.abort(new Error('closed'));\n  release('available');\n  await cancelledCheck;\n  assert.equal(await survivor, 'available');\n});\n\ntest('a failed client read is not retained with pool behavior isolated', async () => {\n  let calls = 0;\n  const isolatedPool = {\n    async load() {\n      calls += 1;\n      if (calls === 1) throw new Error('temporary');\n      return 'restored';\n    },\n  };\n  const client = new ResourceClient(null, isolatedPool);\n  await assert.rejects(client.get('retryable'));\n  assert.equal(await client.get('retryable'), 'restored');\n  assert.equal(calls, 2);\n});\n"
+  }
+}
