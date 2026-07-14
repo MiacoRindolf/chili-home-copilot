@@ -1,0 +1,125 @@
+{
+  "schema": "chili.seventeenth-fixture-validation-receipt.v1",
+  "created_at": "2026-07-14T01:11:56.4547786Z",
+  "reference_family": "claude-fable-5",
+  "author": {
+    "agent_isolated": true,
+    "fork_context": false,
+    "initial_commit": "4b87927ea7287e6bceb8dd6c8529aeeb2a3447e2",
+    "canonical_commit": "50c1ca105afb5b22ecf9ba9b1231d2832a028881",
+    "safe_wrapper_commit": "c649ba340cda94503659e9b56e6ebc03bb19f277",
+    "final_semantic_commit": "ab6f606483a3119f1a634f955bc0663602872148",
+    "final_commit_tree": "4ede748fba85be34a852290c9681db26bde4e2ec",
+    "final_fixture_subtree": "8f747f3d389436de473afcc08a739d144ee34ac2",
+    "final_changed_path_count": 16,
+    "outside_author_fixture_path_count": 0,
+    "commit_in_contestant_history": false,
+    "independence_declared": true
+  },
+  "implementation_freeze": {
+    "commit": "19de897466158027d65742f06d5e562e4597d2f1",
+    "tree": "e7b93517dc121668579634afe8895f6681f5448c",
+    "runner_sha256": "676654f7965fae75ae003092761b355fcb90843b4f75289f15025237f40dca6c",
+    "diagnostic_reasoning_sha256": "e2e9316701768e503cbcbf30c82395b42bc4fbd6bda5e536de350cff56ab8156",
+    "audited_source_changed_after_freeze": false
+  },
+  "model_freeze": {
+    "commit": "d1f88f2811dc531374d926bad4ab9a167d89ad8a",
+    "receipt": "project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_BLINDED_SEVENTEENTH_MODEL_FREEZE.json",
+    "receipt_sha256": "df14d621f2288c32fa60fe530010881c936cc47666bf7ae9f66ac2ebf81b2663",
+    "selected_before_fixture_payload_delivery": true
+  },
+  "contestant_fixture": {
+    "path": "tests/fixtures/autonomy_diagnosis_to_fix_blinded_seventeenth",
+    "commit": "a46fb494869a2fda53cf18dc000736e4a4e96019",
+    "commit_tree": "f341db3963a78130189880b0ca19bd8d064f5174",
+    "subtree": "8f747f3d389436de473afcc08a739d144ee34ac2",
+    "file_count": 25,
+    "author_byte_mismatches": 0,
+    "validation_or_author_files_in_fixture": 0,
+    "inventory_digest_algorithm": "sha256(canonical-json[{path,sha256,size_bytes}])",
+    "inventory_sha256": "771349edc51643904217b59323cfb4d8f21997283e8b517bad87b0d194bc63a7"
+  },
+  "case_distribution": {
+    "case_count": 8,
+    "javascript": 2,
+    "python": 2,
+    "dart": 2,
+    "sql": 2,
+    "max_files_exactly_two": 8,
+    "expected_owner_count_exactly_two": 8
+  },
+  "author_validation": {
+    "public_baselines_passed": 8,
+    "feedback_baselines_failed_as_expected": 8,
+    "final_baselines_failed_as_expected": 8,
+    "disposable_two_owner_repairs_passed": 8,
+    "reference_one_owner_variants_failed_as_expected": 16,
+    "adversarial_one_owner_variants_failed_as_expected": 16,
+    "feedback_final_exact_behavior_overlap": 0,
+    "plausible_non_required_distractors": 8,
+    "sql_integrity_controls_passed": 2,
+    "dart_boundary_gates_passed": 2,
+    "unsafe_test_actions_detected": 0,
+    "model_calls": 0
+  },
+  "model_independent_runner_validation": {
+    "command_mode": "--validate-fixtures --evaluation-context protocol",
+    "validator_source_commit": "19de897466158027d65742f06d5e562e4597d2f1",
+    "valid": true,
+    "cases_valid": 8,
+    "public_baselines_passed": 8,
+    "feedback_baselines_failed_as_expected": 8,
+    "external_final_baselines_failed_as_expected": 8,
+    "sealed_final_cases": 8,
+    "seeded_file_integrity_required": true,
+    "test_source_static_safety_scan_required": true,
+    "model_calls": 0,
+    "premium_calls": 0
+  },
+  "independent_semantic_validation": {
+    "context_isolated": true,
+    "read_only": true,
+    "status": "pass",
+    "fixture_parity": "25/25",
+    "blinding_and_fairness": "8/8",
+    "genuine_two_owner_necessity": "8/8",
+    "public_feedback_final_separation": "8/8",
+    "integrity_contract_coverage": "8/8",
+    "plausible_non_required_distractors": "8/8",
+    "realistic_novel_mechanisms": "8/8",
+    "hermetic_safe_tests": "8/8",
+    "dart_unicode_boundary_preservation": "2/2",
+    "sql_wrapper_integrity_safety": "6/6",
+    "non_answer_bearing_blockers": 0,
+    "model_calls": 0
+  },
+  "rejected_drafts": [
+    {
+      "draft": "initial author fixture plus controller adapter",
+      "counted_as_evidence": false,
+      "reason": "One reference one-owner variant and three adversarial one-owner audits failed; a Dart adapter also lost Unicode."
+    },
+    {
+      "draft": "canonical author v2",
+      "counted_as_evidence": false,
+      "reason": "Frozen safety preflight rejected subprocess-based SQL wrappers before model access."
+    },
+    {
+      "draft": "safe-wrapper semantic draft",
+      "counted_as_evidence": false,
+      "reason": "Independent review found one alternate one-owner bypass, two missing integrity invariants, one feedback/final overlap, and three inert distractors."
+    }
+  ],
+  "runtime_versions": {
+    "node": "v24.15.0",
+    "python": "3.13.11",
+    "dart": "3.11.1 stable windows_x64",
+    "sqlite": "3.51.0"
+  },
+  "residual_risks": [
+    "The independent semantic validator was static and read-only; disposable repair execution remained with the isolated author.",
+    "Static source scanning plus seeded-file hash checks are not a hostile-process operating-system sandbox proof.",
+    "No authenticated same-task Fable 5 output exists, so this fixture can measure CHILI transfer but cannot establish Fable 5 parity by itself."
+  ]
+}
