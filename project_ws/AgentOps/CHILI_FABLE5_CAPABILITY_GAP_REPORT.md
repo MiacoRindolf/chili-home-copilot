@@ -726,6 +726,18 @@ This adds a distinct capability gap: cross-boundary ownership must separate quer
 and split-lane repairs must synthesize local limits plus a mode-aware global merge as one contract. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_UNTOUCHED_RECEIPT.md`.
 
+Generic remediation added a scope-asymmetric query invariant, selector-versus-provider ownership analysis, guarded
+repairs for both small provider-call selectors and the historical SQLAlchemy shape, per-lane capacity, identity
+deduplication, timezone-safe mode-aware ordering, zero-limit preservation, and fail-closed ambiguity checks. A
+read-only probe against the complete historical parent selected only `app/services/trading/auto_trader.py`, left the
+provider unchanged, compiled the result, and closed all warnings.
+
+The disclosed recovery scored **100/100** in **5.7 seconds**, selected the exact owner, passed all public, feedback,
+and fresh-final checks, and used **zero model calls and zero premium calls**. Full affected validation passed
+**336 tests**. It is `deterministic_only`, earns no live-reasoning credit, and does not replace the untouched 40/100.
+Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_DISCLOSED_RECOVERY_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -762,7 +774,7 @@ and split-lane repairs must synthesize local limits plus a mode-aware global mer
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
-10. Four historical Fable 5 trading pilots scored 25/100, 40/100, 40/100, and 40/100 untouched. Disclosed deterministic recovery solves the first three recognized families at 100/100 and zero premium calls, but every first encounter exhausted nearly the full local budget and retained no patch. System coverage is growing; unknown-mechanism reasoning and ownership remain the bottleneck.
+10. Four historical Fable 5 trading pilots scored 25/100, 40/100, 40/100, and 40/100 untouched. Disclosed deterministic recovery now solves all four recognized families at 100/100 and zero premium calls, but every first encounter exhausted nearly the full local budget and retained no patch. System coverage is growing; unknown-mechanism reasoning, causal synthesis, and ownership remain the bottleneck.
 
 ## Promotion Gate
 
