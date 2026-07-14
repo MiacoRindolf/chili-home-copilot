@@ -1811,6 +1811,28 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "live subscriber leaves. In-flight work remains coalesced, while the result cache stores only resolved "
             "success values and never retains rejection or cancellation for a later retry."
         )
+    directional_position_contract = bool(
+        any(
+            token in lowered
+            for token in (
+                "direction short",
+                "direction=short",
+                "short entry",
+                "short position",
+                "short orb",
+                "directional",
+            )
+        )
+        and any(token in lowered for token in ("entry", "position", "trade", "paper"))
+        and any(token in lowered for token in ("stop", "target", "risk sizing", "risk distance", "geometry"))
+    )
+    if directional_position_contract:
+        invariants.append(
+            "Directional position ownership is normalized once and propagated unchanged through risk sizing, "
+            "telemetry, and persistence. Long geometry uses stop < entry < target and loss distance entry - stop; "
+            "short geometry uses target < entry < stop and loss distance stop - entry. Side-specific default stops "
+            "preserve the same inequalities, and an unknown side keeps the established long-compatible behavior."
+        )
     if (
         any(token in lowered for token in ("ttl", "expiration", "expires", "expiry"))
         and any(token in lowered for token in ("injected clock", "replay time", "refresh"))
@@ -4085,6 +4107,27 @@ def contract_invariant_warnings(
                 warnings.append(
                     f"{path} does not retain only a successfully resolved result value"
                 )
+    if any("Directional position ownership is normalized once" in value for value in invariants):
+        for path, content in files.items():
+            lowered = content.lower()
+            risk_owner = bool(
+                "risk_per_share" in lowered
+                and "def " in lowered
+                and "entry" in lowered
+                and "stop" in lowered
+            )
+            propagation_owner = bool(
+                any(marker in content for marker in ("SizingSignal", "EmitterSignal"))
+                and "size_position" in content
+                and any(marker in content for marker in ("open_trade", "open_paper_trade"))
+                and "dict(" in content
+            )
+            if (
+                risk_owner or propagation_owner
+            ) and _repair_directional_position_contract(content) != content:
+                warnings.append(
+                    f"{path} does not preserve normalized direction through side-aware geometry and ownership"
+                )
     return list(dict.fromkeys(warnings))
 
 
@@ -5123,6 +5166,393 @@ def _insert_python_import(content: str, statement: str) -> str:
             insertion_line += 1
     lines.insert(insertion_line, f"{statement}\n")
     return "".join(lines)
+
+
+def _python_node_offsets(content: str, node: ast.AST) -> tuple[int, int] | None:
+    if not all(
+        isinstance(getattr(node, name, None), int)
+        for name in ("lineno", "col_offset", "end_lineno", "end_col_offset")
+    ):
+        return None
+    lines = content.splitlines(keepends=True)
+    start_line = int(node.lineno) - 1
+    end_line = int(node.end_lineno) - 1
+    if start_line < 0 or end_line >= len(lines):
+        return None
+    start = sum(len(line) for line in lines[:start_line]) + int(node.col_offset)
+    end = sum(len(line) for line in lines[:end_line]) + int(node.end_col_offset)
+    return start, end
+
+
+def _apply_python_node_replacements(
+    content: str,
+    replacements: Sequence[tuple[int, int, str]],
+) -> str:
+    updated = content
+    for start, end, replacement in sorted(replacements, reverse=True):
+        updated = updated[:start] + replacement + updated[end:]
+    try:
+        ast.parse(updated)
+    except SyntaxError:
+        return content
+    return updated
+
+
+def _python_call_with_direction(
+    content: str,
+    call: ast.Call,
+) -> tuple[int, int, str] | None:
+    span = _python_node_offsets(content, call)
+    if span is None:
+        return None
+    for keyword in call.keywords:
+        if keyword.arg != "direction":
+            continue
+        value_span = _python_node_offsets(content, keyword.value)
+        if value_span is None:
+            return None
+        if isinstance(keyword.value, ast.Name) and keyword.value.id == "direction":
+            return value_span[0], value_span[1], "direction"
+        return value_span[0], value_span[1], "direction"
+    segment = content[span[0] : span[1]]
+    closing = segment.rfind(")")
+    if closing < 0:
+        return None
+    before = segment[:closing]
+    closing_line = re.search(r"\n([ \t]*)$", before)
+    if closing_line:
+        closing_indent = closing_line.group(1)
+        argument_indents = re.findall(r"\n([ \t]+)\S", before[: closing_line.start()])
+        argument_indent = argument_indents[-1] if argument_indents else closing_indent + "    "
+        body = before[: closing_line.start()].rstrip()
+        separator = "" if body.endswith(("(", ",")) else ","
+        replacement = (
+            body
+            + separator
+            + "\n"
+            + argument_indent
+            + "direction=direction,\n"
+            + closing_indent
+            + segment[closing:]
+        )
+        return span[0], span[1], replacement
+    separator = "" if before.rstrip().endswith(("(", ",")) else ","
+    spacing = " " if separator else ""
+    replacement = (
+        before
+        + separator
+        + spacing
+        + "direction=direction"
+        + segment[closing:]
+    )
+    return span[0], span[1], replacement
+
+
+def _repair_directional_position_contract(content: str) -> str:
+    """Repair recognized Python side-aware sizing and entry-propagation owners."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    updated = content
+    risk_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    risk_assignment: ast.Assign | None = None
+    risk_candidates = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and "risk_per_share" in (ast.get_source_segment(content, node) or "")
+        and any("entry" in argument.arg for argument in node.args.args)
+        and any("stop" in argument.arg for argument in node.args.args)
+    ]
+    risk_candidates.sort(key=lambda node: ("size" not in node.name.lower(), node.lineno))
+    for candidate in risk_candidates:
+        candidate_assignment = next(
+            (
+                node
+                for node in ast.walk(candidate)
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "risk_per_share"
+                    for target in node.targets
+                )
+                and (
+                    isinstance(node.value, ast.IfExp)
+                    or (
+                        isinstance(node.value, ast.BinOp)
+                        and isinstance(node.value.op, ast.Sub)
+                    )
+                )
+            ),
+            None,
+        )
+        if candidate_assignment is not None:
+            risk_function = candidate
+            risk_assignment = candidate_assignment
+            break
+    if risk_function is not None and risk_assignment is not None:
+            risk_source = ast.get_source_segment(content, risk_assignment.value) or ""
+            risk_names = {
+                node.id
+                for node in ast.walk(risk_assignment.value)
+                if isinstance(node, ast.Name)
+            }
+            entry_name = next(
+                (name for name in sorted(risk_names) if "entry" in name.lower()),
+                "",
+            )
+            stop_name = next(
+                (name for name in sorted(risk_names) if "stop" in name.lower()),
+                "",
+            )
+            if not entry_name or not stop_name or entry_name == stop_name:
+                return content
+            direction_argument = next(
+                (argument for argument in risk_function.args.args if argument.arg == "direction"),
+                None,
+            )
+            risk_ok = bool(
+                direction_argument is not None
+                and f"{stop_name} - {entry_name}" in risk_source
+                and f"{entry_name} - {stop_name}" in risk_source
+                and "short" in risk_source.lower()
+            )
+            if not risk_ok:
+                assignment_span = _python_node_offsets(content, risk_assignment)
+                first_body_span = _python_node_offsets(content, risk_function.body[0])
+                function_span = _python_node_offsets(content, risk_function)
+                if assignment_span and first_body_span and function_span:
+                    replacements: list[tuple[int, int, str]] = []
+                    if direction_argument is None:
+                        header_start = function_span[0]
+                        header_end = first_body_span[0]
+                        header = content[header_start:header_end]
+                        closing = header.rfind(")")
+                        if closing < 0:
+                            return content
+                        before = header[:closing]
+                        closing_line = re.search(r"\n([ \t]*)$", before)
+                        if closing_line:
+                            closing_indent = closing_line.group(1)
+                            argument_indents = re.findall(
+                                r"\n([ \t]+)\S",
+                                before[: closing_line.start()],
+                            )
+                            argument_indent = (
+                                argument_indents[-1]
+                                if argument_indents
+                                else closing_indent + "    "
+                            )
+                            body = before[: closing_line.start()].rstrip()
+                            separator = "" if body.endswith(("(", ",")) else ","
+                            header = (
+                                body
+                                + separator
+                                + "\n"
+                                + argument_indent
+                                + 'direction="long",\n'
+                                + closing_indent
+                                + header[closing:]
+                            )
+                        else:
+                            separator = "" if before.rstrip().endswith(("(", ",")) else ","
+                            spacing = " " if separator else ""
+                            header = (
+                                before
+                                + separator
+                                + spacing
+                                + 'direction="long"'
+                                + header[closing:]
+                            )
+                        replacements.append((header_start, header_end, header))
+                    indent = " " * int(risk_assignment.col_offset)
+                    replacements.append(
+                        (
+                            assignment_span[0],
+                            assignment_span[1],
+                            'side = str(direction or "long").strip().lower()\n'
+                            + indent
+                            + f'risk_per_share = {stop_name} - {entry_name} if side == "short" else '
+                            + f'{entry_name} - {stop_name}',
+                        )
+                    )
+                    repaired = _apply_python_node_replacements(content, replacements)
+                    if repaired == content:
+                        return content
+                    updated = repaired
+
+    try:
+        tree = ast.parse(updated)
+    except SyntaxError:
+        return content
+    orchestration = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and "size_position" in (ast.get_source_segment(updated, node) or "")
+            and "dict(" in (ast.get_source_segment(updated, node) or "")
+            and any(
+                marker in (ast.get_source_segment(updated, node) or "")
+                for marker in ("SizingSignal", "EmitterSignal")
+            )
+            and any(
+                marker in (ast.get_source_segment(updated, node) or "")
+                for marker in ("open_trade", "open_paper_trade")
+            )
+        ),
+        None,
+    )
+    if orchestration is None:
+        return updated
+
+    signal_assignment = next(
+        (
+            node
+            for node in ast.walk(orchestration)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "dict"
+        ),
+        None,
+    )
+    signal_name = (
+        signal_assignment.targets[0].id
+        if signal_assignment is not None and isinstance(signal_assignment.targets[0], ast.Name)
+        else ""
+    )
+    direction_assignment = next(
+        (
+            node
+            for node in ast.walk(orchestration)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "direction"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
+    default_stop = next(
+        (
+            node
+            for node in ast.walk(orchestration)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and "stop" in target.id
+                for target in node.targets
+            )
+            and "0.97" in (ast.get_source_segment(updated, node.value) or "")
+        ),
+        None,
+    )
+    size_call = next(
+        (
+            node
+            for node in ast.walk(orchestration)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "size_position"
+        ),
+        None,
+    )
+    telemetry_call = next(
+        (
+            node
+            for node in ast.walk(orchestration)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"SizingSignal", "EmitterSignal"}
+        ),
+        None,
+    )
+    persistence_call = next(
+        (
+            node
+            for node in ast.walk(orchestration)
+            if isinstance(node, ast.Call)
+            and (
+                (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"open_trade", "open_paper_trade"}
+                )
+                or (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in {"open_trade", "open_paper_trade"}
+                )
+            )
+        ),
+        None,
+    )
+    default_ok = bool(
+        default_stop is not None
+        and "1.03" in (ast.get_source_segment(updated, default_stop.value) or "")
+        and "direction" in (ast.get_source_segment(updated, default_stop.value) or "")
+    )
+    required_nodes = (signal_assignment, default_stop, size_call, telemetry_call, persistence_call)
+    if not signal_name or any(node is None for node in required_nodes):
+        return content
+
+    replacements = []
+    if direction_assignment is None:
+        signal_span = _python_node_offsets(updated, signal_assignment)
+        if signal_span is None:
+            return content
+        line_end = updated.find("\n", signal_span[1])
+        insertion = len(updated) if line_end < 0 else line_end + 1
+        indent = " " * int(signal_assignment.col_offset)
+        replacements.append(
+            (
+                insertion,
+                insertion,
+                indent
+                + f'direction = "short" if str({signal_name}.get("direction") or "").strip().lower() == "short" else "long"\n',
+            )
+        )
+    if not default_ok:
+        value_span = _python_node_offsets(updated, default_stop.value)
+        default_source = ast.get_source_segment(updated, default_stop.value) or ""
+        entry_match = re.search(r"\b([A-Za-z_]\w*)\s*\*\s*0\.97\b", default_source)
+        if value_span is None or entry_match is None:
+            return content
+        entry_name = entry_match.group(1)
+        replacements.append(
+            (
+                value_span[0],
+                value_span[1],
+                f'{entry_name} * (1.03 if direction == "short" else 0.97)',
+            )
+        )
+    direction_calls = [
+        node
+        for node in ast.walk(orchestration)
+        if isinstance(node, ast.Call)
+        and any(keyword.arg == "direction" for keyword in node.keywords)
+    ]
+    calls_to_bind: list[ast.Call] = []
+    seen_calls: set[tuple[int, int, int, int]] = set()
+    for call in (size_call, telemetry_call, persistence_call, *direction_calls):
+        identity = (
+            int(call.lineno),
+            int(call.col_offset),
+            int(call.end_lineno or call.lineno),
+            int(call.end_col_offset or call.col_offset),
+        )
+        if identity in seen_calls:
+            continue
+        seen_calls.add(identity)
+        calls_to_bind.append(call)
+    for call in calls_to_bind:
+        replacement = _python_call_with_direction(updated, call)
+        if replacement is None:
+            return content
+        replacements.append(replacement)
+    repaired = _apply_python_node_replacements(updated, replacements)
+    return repaired if repaired != updated or updated != content else content
 
 
 def _repair_canonical_base64url(content: str) -> str:
@@ -7027,6 +7457,8 @@ def contract_repair_proposals(
             updated = _repair_half_open_effective_history_sql(updated)
         if any("Shared work has subscriber-scoped cancellation" in value for value in invariants):
             updated = _repair_subscriber_scoped_shared_work(updated)
+        if any("Directional position ownership is normalized once" in value for value in invariants):
+            updated = _repair_directional_position_contract(updated)
         if any(
             token in value
             for value in invariants
@@ -7289,6 +7721,7 @@ _CONTRACT_INVARIANT_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("A claimed job attempt is a fencing token", "state"),
     ("Contiguous effective-history rows use half-open", "data"),
     ("Shared work has subscriber-scoped cancellation", "state"),
+    ("Directional position ownership is normalized once", "data"),
 )
 
 
@@ -7346,6 +7779,7 @@ def contract_repair_dimension(
         ("A nullable suppression target cannot participate", "data", _repair_nullable_suppression_anti_join),
         ("Contiguous effective-history rows use half-open", "data", _repair_half_open_effective_history_sql),
         ("Shared work has subscriber-scoped cancellation", "state", _repair_subscriber_scoped_shared_work),
+        ("Directional position ownership is normalized once", "data", _repair_directional_position_contract),
     )
     active_dimensions: set[str] = set()
     for invariant_marker, dimension, operator in operators:

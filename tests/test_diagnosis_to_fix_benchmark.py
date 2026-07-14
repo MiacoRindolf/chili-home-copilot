@@ -34,6 +34,11 @@ DISCLOSED_SEVENTEENTH_FIXTURE_ROOT = (
     / "fixtures"
     / "autonomy_diagnosis_to_fix_disclosed_seventeenth_replay"
 )
+FABLE5_TRADING_PILOT_FIXTURE_ROOT = (
+    Path(__file__).parent
+    / "fixtures"
+    / "autonomy_diagnosis_to_fix_fable5_trading_pilot"
+)
 
 
 def _write_protocol_fixture(
@@ -5257,6 +5262,62 @@ def test_disclosed_seventeenth_subscriber_cancellation_operator_passes_feedback_
         case["prompt"],
         candidates,
     ) == "state"
+
+    repo = tmp_path / "repo"
+    benchmark._init_repo(repo, case["repo_files"])
+    for path, content in proposals.items():
+        (repo / path).write_text(content, encoding="utf-8")
+    public = benchmark._run_case_tests(repo, case, public_only=True)
+    benchmark._write_files(repo, oracle["feedback_files"])
+    feedback = benchmark._run_case_tests(repo, case, public_only=False)
+    final = benchmark._run_final_adjudication(
+        case,
+        final_oracle["final_files"],
+        candidate_repo=repo,
+    )
+
+    assert public["passed"] is True, public["output"]
+    assert feedback["passed"] is True, feedback["output"]
+    assert final["passed"] is True, final["output"]
+
+
+def test_disclosed_fable5_trading_direction_operator_passes_feedback_and_final(
+    tmp_path,
+):
+    case_id = "python_short_paper_direction"
+    case = benchmark._read_json(
+        FABLE5_TRADING_PILOT_FIXTURE_ROOT / "cases" / f"{case_id}.json"
+    )
+    oracle = benchmark._read_json(
+        FABLE5_TRADING_PILOT_FIXTURE_ROOT / "oracles" / f"{case_id}.json"
+    )
+    final_oracle = benchmark._read_json(
+        FABLE5_TRADING_PILOT_FIXTURE_ROOT / "final_oracles" / f"{case_id}.json"
+    )
+    candidates = {
+        path: case["repo_files"][path] for path in case["candidate_paths"]
+    }
+
+    proposals = benchmark.diagnostic_reasoning.contract_repair_proposals(
+        case["prompt"],
+        candidates,
+    )
+    projected = {
+        path: proposals.get(path, content) for path, content in candidates.items()
+    }
+
+    assert set(proposals) == {
+        "trading/paper_trading.py",
+        "trading/portfolio_risk.py",
+    }
+    assert benchmark.diagnostic_reasoning.contract_invariant_warnings(
+        case["prompt"],
+        projected,
+    ) == []
+    assert benchmark.diagnostic_reasoning.contract_repair_dimension(
+        case["prompt"],
+        candidates,
+    ) == "data"
 
     repo = tmp_path / "repo"
     benchmark._init_repo(repo, case["repo_files"])

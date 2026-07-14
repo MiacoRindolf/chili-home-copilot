@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import sqlite3
 from pathlib import Path
@@ -3722,6 +3723,107 @@ def test_subscriber_scoped_shared_work_operator_ignores_unrelated_abort_owner():
         "src/audit.js": (
             "export const remember = (events, event) => events.set(event.id, event);\n"
         ),
+    }
+
+    assert reasoning.contract_repair_proposals(prompt, files) == {}
+
+
+def test_directional_position_incident_yields_side_geometry_and_propagation_contract():
+    prompt = (
+        "A paper trade with direction short has entry 100, stop 105, and target 94 but is rejected. "
+        "Long positions remain healthy. Diagnose directional risk sizing, telemetry, and persisted trade geometry."
+    )
+
+    invariants = reasoning.derive_contract_invariants(prompt)
+
+    contract = next(
+        value for value in invariants if "Directional position ownership" in value
+    )
+    assert "stop < entry < target" in contract
+    assert "target < entry < stop" in contract
+    assert "entry - stop" in contract
+    assert "stop - entry" in contract
+    assert "propagated unchanged through risk sizing, telemetry, and persistence" in contract
+    assert reasoning.contract_invariant_dimension(prompt) == "data"
+
+
+def test_directional_position_operator_transfers_across_alternate_python_names():
+    prompt = (
+        "A selected short position with entry 50, stop 54, and target 45 is rejected. Preserve directional "
+        "geometry through risk sizing, sizing telemetry, and the persisted trade while long entries stay healthy."
+    )
+    files = {
+        "risk_math.py": (
+            "def compute_trade_risk(entry_value, stop_value, quantity, capital, direction='long'):\n"
+            "    side = str(direction).lower()\n"
+            "    if side == 'short':\n"
+            "        risk_per_share = max(stop_value - entry_value, 0.0)\n"
+            "    else:\n"
+            "        risk_per_share = max(entry_value - stop_value, 0.0)\n"
+            "    return risk_per_share * quantity / capital\n\n"
+            "def calculate_size(\n"
+            "    capital: float,\n"
+            "    entry_value: float,\n"
+            "    stop_value: float,\n"
+            "    risk_pct: float = 1.0,\n"
+            ") -> int:\n"
+            "    risk_amount = capital * risk_pct / 100.0\n"
+            "    risk_per_share = entry_value - stop_value\n"
+            "    if risk_per_share <= 0:\n"
+            "        return 0\n"
+            "    return int(risk_amount / risk_per_share)\n"
+        ),
+        "entry_lane.py": (
+            "from risk_math import calculate_size as size_position\n\n"
+            "def process_candidates(book, rows, capital):\n"
+            "    entered = 0\n"
+            "    for raw in rows:\n"
+            "        payload = dict(raw)\n"
+            "        entry = float(payload['entry'])\n"
+            "        stop = payload.get('stop')\n"
+            "        if stop is None:\n"
+            "            stop = entry * 0.97\n"
+            "        qty = size_position(capital, entry, stop)\n"
+            "        score(NetEdgeContext(direction=payload.get('direction'), entry=entry, stop=stop))\n"
+            "        emit(EmitterSignal(direction='long', entry=entry, stop=stop, quantity=qty))\n"
+            "        trade = open_paper_trade(entry=entry, stop=stop, quantity=qty, payload=payload)\n"
+            "        if trade is not None:\n"
+            "            entered += 1\n"
+            "    return entered\n"
+        ),
+        "labels.py": "SHORT_LABEL = 'short'\n",
+    }
+
+    rejected = reasoning.contract_invariant_warnings(prompt, files)
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert len(rejected) == 2
+    assert set(proposals) == {"risk_math.py", "entry_lane.py"}
+    assert '    direction="long",\n) -> int:' in proposals["risk_math.py"]
+    assert "stop_value - entry_value" in proposals["risk_math.py"]
+    assert "entry_value - stop_value" in proposals["risk_math.py"]
+    assert "payload.get(\"direction\")" in proposals["entry_lane.py"]
+    assert '1.03 if direction == "short" else 0.97' in proposals["entry_lane.py"]
+    assert proposals["entry_lane.py"].count("direction=direction") == 4
+    ast.parse(proposals["risk_math.py"])
+    ast.parse(proposals["entry_lane.py"])
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+    assert reasoning.contract_repair_dimension(prompt, files) == "data"
+
+
+def test_directional_position_operator_ignores_unrecognized_risk_math():
+    prompt = (
+        "A short position with entry, stop, and target needs directional geometry through risk sizing and trade "
+        "persistence."
+    )
+    files = {
+        "metrics.py": (
+            "def summarize(high, low):\n"
+            "    risk_per_share = max(high - low, 0)\n"
+            "    return {'risk_per_share': risk_per_share}\n"
+        ),
+        "labels.py": "def direction_label(value):\n    return str(value)\n",
     }
 
     assert reasoning.contract_repair_proposals(prompt, files) == {}
