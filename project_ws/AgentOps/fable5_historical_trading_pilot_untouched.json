@@ -1,0 +1,1582 @@
+{
+  "accepted_diagnosis_count": 0,
+  "average_case_duration_ms": 491786.0,
+  "blinded_holdout_case_count": 1,
+  "blinded_holdout_score": 25.0,
+  "cases": [
+    {
+      "accepted_causal_reasoning_stage_count": 2,
+      "accepted_diagnosis_conclusion": {
+        "accepted": false,
+        "causal_status": "working_hypothesis",
+        "dimension": "code",
+        "json_parsed": true,
+        "stage": "diagnostic_judge",
+        "taxonomy_advisory_dimension": "",
+        "validation_evidence": "pre-repair evidence decision"
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 576,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-cwa3z7j2\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry FAILED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry FAILED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_short_position_sizing_uses_stop_above_entry _______________\ntests\\test_feedback.py:6: in test_short_position_sizing_uses_stop_above_entry\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n______ test_short_signal_preserves_direction_across_entry_and_telemetry _______\ntests\\test_feedback.py:24: in test_short_signal_preserves_direction_across_entry_and_telemetry\n    assert entered == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry - TypeError: size_position() got an unexpected keyword argument 'direction'\nFAILED tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry - assert 0 == 1\n========================= 2 failed, 2 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_final_tests": {
+        "duration_ms": 616,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-a3qzdut3\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default FAILED [ 20%]\ntests/test_final.py::test_invalid_short_stop_is_not_rescued_by_quantity_fallback PASSED [ 40%]\ntests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable FAILED [ 60%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 80%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n_________ test_uppercase_short_without_stop_gets_side_correct_default _________\ntests\\test_final.py:18: in test_uppercase_short_without_stop_gets_side_correct_default\n    assert entered == 1\nE   assert 0 == 1\n_____ test_unknown_direction_remains_long_and_long_behavior_stays_stable ______\ntests\\test_final.py:60: in test_unknown_direction_remains_long_and_long_behavior_stays_stable\n    assert size_position(10_000.0, 100.0, 95.0, limits=RiskLimits(), direction=\"sideways\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default - assert 0 == 1\nFAILED tests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable - TypeError: size_position() got an unexpected keyword argument 'direction'\n========================= 2 failed, 3 passed in 0.12s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "baseline_public_tests": {
+        "duration_ms": 543,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-cwa3z7j2\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 50%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 2 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "case_id": "python_short_paper_direction",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": false,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "prompt_contract_closure": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "proposed_dimension": "unknown",
+        "selected_files": [],
+        "warnings": []
+      },
+      "deterministic_only": false,
+      "diagnosis_dimension": "code",
+      "diagnosis_history": [
+        {
+          "accepted": false,
+          "causal_status": "working_hypothesis",
+          "dimension": "code",
+          "json_parsed": true,
+          "stage": "diagnostic_judge",
+          "taxonomy_advisory_dimension": "",
+          "validation_evidence": "pre-repair evidence decision"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "stop < entry for short",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "stop > entry for short",
+            "expected_if_true": "stop < entry for short",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "code",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "app"
+              ],
+              "probe_id": "p1",
+              "query": "short entry stop validation",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          },
+          {
+            "auto_execute": true,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [],
+            "expected_if_false": "risk_per_share <= 0 for short",
+            "expected_if_true": "risk_per_share > 0 for short",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {
+              "aggregate": "",
+              "aggregate_column": "",
+              "case_sensitive": false,
+              "dimension": "data",
+              "filters": {},
+              "group_by": "",
+              "kind": "search",
+              "lookback_minutes": 0,
+              "max_groups": 15,
+              "max_lines": 80,
+              "max_results": 40,
+              "paths": [
+                "app"
+              ],
+              "probe_id": "p2",
+              "query": "risk_per_share for short",
+              "schema": "chili.diagnostic-probe.v1",
+              "selector": "",
+              "start_line": 1,
+              "table": "",
+              "tail_lines": 5000,
+              "timeout_sec": 30.0,
+              "timestamp_column": ""
+            },
+            "result_evidence_ids": [],
+            "safety": "read_only",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "stop logic fails for short entries",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "stop < entry for short",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-2"
+            ]
+          },
+          {
+            "claim": "risk calculation blocks short trades",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "risk_per_share > 0 for short",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-8"
+            ]
+          },
+          {
+            "claim": "test harness misclassifies short stops",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "stop validation matches short logic",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_probe_run": {
+        "duration_ms": 45,
+        "errors": [],
+        "evidence": [
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "code"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p1",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p1",
+            "expected_if_false": "stop > entry for short",
+            "expected_if_true": "stop < entry for short",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "independence_key": "diagnostic_probe:p1",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T04:31:43.936172+00:00",
+            "provenance": "diagnostic_probe:p1",
+            "reliability": 0.6,
+            "sequence": 0,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          },
+          {
+            "actual_state": "completed",
+            "causal_role": "context",
+            "changed_dimensions": [
+              "data"
+            ],
+            "correlation_fingerprints": [],
+            "dimension": "unknown",
+            "dimension_origin": "unknown",
+            "discriminating": false,
+            "entity_id": "probe:p2",
+            "event_type": "typed_probe_search",
+            "evidence_id": "probe-p2",
+            "expected_if_false": "risk_per_share <= 0 for short",
+            "expected_if_true": "risk_per_share > 0 for short",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "independence_key": "diagnostic_probe:p2",
+            "intervention_scope": "none",
+            "kind": "metric",
+            "observed_at": "2026-07-14T04:31:43.959011+00:00",
+            "provenance": "diagnostic_probe:p2",
+            "reliability": 0.6,
+            "sequence": 1,
+            "service_id": "",
+            "statement": "Typed search probe status=completed exit=1: Probe completed with no output."
+          }
+        ],
+        "rejudge_skipped_reason": "probe evidence was contextual, not contrastive",
+        "results": [
+          {
+            "changed_dimensions": [
+              "code"
+            ],
+            "dimension": "code",
+            "duration_ms": 18,
+            "exit_code": 1,
+            "expected_if_false": "stop > entry for short",
+            "expected_if_true": "stop < entry for short",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "data",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T04:31:43.936172+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p1",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "changed_dimensions": [
+              "data"
+            ],
+            "dimension": "data",
+            "duration_ms": 18,
+            "exit_code": 1,
+            "expected_if_false": "risk_per_share <= 0 for short",
+            "expected_if_true": "risk_per_share > 0 for short",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "kind": "search",
+            "observed_at": "2026-07-14T04:31:43.959011+00:00",
+            "output": "Probe completed with no output.",
+            "probe_id": "p2",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "python_short_paper_direction",
+        "causal_timeline": {},
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "stop logic fails for short entries",
+          "confidence": 0.0,
+          "dimension": "code",
+          "evidence_ids": [
+            "source-2"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "stop < entry for short",
+          "requested_status": "inconclusive",
+          "status": "inconclusive"
+        },
+        "contract_invariants": [],
+        "decision": "investigate",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "strategy_contract",
+          "state_reconciliation"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "stop logic fails for short entries",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "stop < entry for short",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-2"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "risk calculation blocks short trades",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "risk_per_share > 0 for short",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "source-8"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_dimension_alignment_weight": 0,
+            "causal_dimension_mismatch_weight": 0,
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "test harness misclassifies short stops",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.196,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0.98,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "explicit_owner_aligned_causal_support": false,
+            "falsification": "stop validation matches short logic",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [
+              "baseline-public-contracts"
+            ],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "stop < entry for short",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "risk_per_share > 0 for short",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "stop validation matches short logic",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "stop logic fails for short entries",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "stop < entry for short",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "stop logic fails for short entries",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "stop < entry for short",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "stop < entry for short",
+            "status": "inconclusive"
+          },
+          "response_chars": 1156,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "stop logic fails for short entries",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "stop < entry for short",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "stop logic fails for short entries",
+            "confidence": 0.0,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "stop < entry for short",
+            "requested_status": "inconclusive",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "initial_json_parsed": true,
+          "initial_raw_schema_errors": [],
+          "initial_raw_schema_valid": true,
+          "json_parsed": true,
+          "preserved_hypothesis_dimensions": [],
+          "raw_schema_errors": [],
+          "raw_schema_valid": true,
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "stop < entry for short",
+            "status": "inconclusive"
+          },
+          "response_chars": 2039,
+          "retractions": [],
+          "schema_correction_attempted": false,
+          "schema_correction_json_parsed": null,
+          "schema_correction_raw_schema_valid": null,
+          "schema_correction_response_chars": 0,
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "inconclusive",
+      "duration_ms": 491786,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "fable5_class_reasoning_claim_eligible": false,
+      "feedback_tests": {
+        "duration_ms": 595,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry FAILED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry FAILED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_short_position_sizing_uses_stop_above_entry _______________\ntests\\test_feedback.py:6: in test_short_position_sizing_uses_stop_above_entry\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n______ test_short_signal_preserves_direction_across_entry_and_telemetry _______\ntests\\test_feedback.py:24: in test_short_signal_preserves_direction_across_entry_and_telemetry\n    assert entered == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry - TypeError: size_position() got an unexpected keyword argument 'direction'\nFAILED tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry - assert 0 == 1\n========================= 2 failed, 2 passed in 0.12s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "final_tests": {
+        "duration_ms": 665,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-30f2l2vo\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 5 items\n\ntests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default FAILED [ 20%]\ntests/test_final.py::test_invalid_short_stop_is_not_rescued_by_quantity_fallback PASSED [ 40%]\ntests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable FAILED [ 60%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 80%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n_________ test_uppercase_short_without_stop_gets_side_correct_default _________\ntests\\test_final.py:18: in test_uppercase_short_without_stop_gets_side_correct_default\n    assert entered == 1\nE   assert 0 == 1\n_____ test_unknown_direction_remains_long_and_long_behavior_stays_stable ______\ntests\\test_final.py:60: in test_unknown_direction_remains_long_and_long_behavior_stays_stable\n    assert size_position(10_000.0, 100.0, 95.0, limits=RiskLimits(), direction=\"sideways\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n=========================== short test summary info ===========================\nFAILED tests/test_final.py::test_uppercase_short_without_stop_gets_side_correct_default - assert 0 == 1\nFAILED tests/test_final.py::test_unknown_direction_remains_long_and_long_behavior_stays_stable - TypeError: size_position() got an unexpected keyword argument 'direction'\n========================= 2 failed, 3 passed in 0.11s =========================",
+        "passed": false,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "fixture_digest_inventory": {
+        "case": {
+          "artifact": "case:python_short_paper_direction",
+          "path": "cases/python_short_paper_direction.json",
+          "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "size_bytes": 6067
+        },
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "path": "oracles/python_short_paper_direction.json",
+          "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "size_bytes": 1584
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_short_paper_direction",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "size_bytes": 1930
+        }
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "code",
+      "initial_public_regression_correction": {
+        "applied_files": [],
+        "attempted": false,
+        "eligible_paths": [],
+        "succeeded": false,
+        "warnings": []
+      },
+      "integrity_audit_events": [
+        {
+          "actual_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "artifact": "case:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "path": "cases/python_short_paper_direction.json",
+          "phase": "case_load",
+          "sequence": 7,
+          "timestamp_utc": "2026-07-14T04:28:05.649948+00:00"
+        },
+        {
+          "actual_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "path": "oracles/python_short_paper_direction.json",
+          "phase": "feedback_oracle_load",
+          "sequence": 8,
+          "timestamp_utc": "2026-07-14T04:33:12.419437+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "model_call_ledger_frozen",
+          "model_call_count": 11,
+          "sequence": 9,
+          "timestamp_utc": "2026-07-14T04:36:15.351392+00:00"
+        },
+        {
+          "actual_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "artifact": "final_oracle:python_short_paper_direction",
+          "case_id": "python_short_paper_direction",
+          "event": "fixture_digest_verified",
+          "expected_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "phase": "sealed_final_oracle_read",
+          "sequence": 10,
+          "timestamp_utc": "2026-07-14T04:36:15.351644+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "final_oracle_opened",
+          "external": true,
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sequence": 11,
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "timestamp_utc": "2026-07-14T04:36:15.351693+00:00"
+        },
+        {
+          "case_id": "python_short_paper_direction",
+          "event": "final_adjudication_started",
+          "sequence": 12,
+          "timestamp_utc": "2026-07-14T04:36:15.353916+00:00"
+        },
+        {
+          "baseline_passed": false,
+          "candidate_passed": false,
+          "case_id": "python_short_paper_direction",
+          "event": "final_adjudication_completed",
+          "sequence": 13,
+          "timestamp_utc": "2026-07-14T04:36:17.429673+00:00"
+        },
+        {
+          "actual_count": 11,
+          "case_id": "python_short_paper_direction",
+          "event": "post_final_model_call_count_verified",
+          "expected_count": 11,
+          "ledger_frozen": true,
+          "sequence": 14,
+          "timestamp_utc": "2026-07-14T04:36:17.429693+00:00"
+        }
+      ],
+      "language": "python",
+      "live_reasoning_qualified": false,
+      "model_calls": [
+        {
+          "case_budget_remaining_before_sec": 480.0,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 85781982000,
+          "json_object_valid": false,
+          "latency_ms": 104431,
+          "load_duration_ns": 176132900,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 21455,
+          "prompt_eval_count": 5484,
+          "prompt_eval_duration_ns": 18005630000,
+          "requested_timeout_sec": 105.0,
+          "response": "",
+          "stage": "diagnosis_investigator",
+          "thinking_budget_exhausted": true,
+          "thinking_chars": 4001,
+          "thinking_enabled": true,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 1000,
+          "wall_deadline_clamped": false,
+          "wall_ms": 104432
+        },
+        {
+          "case_budget_remaining_before_sec": 375.56797239999287,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 45.56791899999371,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 22619422000,
+          "json_object_valid": true,
+          "latency_ms": 43668,
+          "load_duration_ns": 164504900,
+          "logical_attempt": 2,
+          "logical_call_id": "diagnosis_investigator:1",
+          "logical_remaining_before_sec": 45.56791899999371,
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 21739,
+          "prompt_eval_count": 5543,
+          "prompt_eval_duration_ns": 20439235000,
+          "recovery_trigger": "thinking_budget_exhausted",
+          "requested_timeout_sec": 45.56791899999371,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"stop logic fails for short entries\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"stop < entry for short\"},{\"hypothesis_id\":\"h2\",\"claim\":\"risk calculation blocks short trades\",\"dimension\":\"data\",\"support_evidence_ids\":[\"source-8\"],\"contradict_evidence_ids\":[],\"falsification\":\"risk_per_share > 0 for short\"},{\"hypothesis_id\":\"h3\",\"claim\":\"test harness misclassifies short stops\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"baseline-public-contracts\"],\"contradict_evidence_ids\":[],\"falsification\":\"stop validation matches short logic\"}],\"experiments\":[{\"experiment_id\":\"x1\",\"hypothesis_ids\":[\"h1\"],\"changed_dimensions\":[\"code\"],\"held_constant_dimensions\":[\"data\",\"test_harness\"],\"expected_if_true\":\"stop < entry for short\",\"expected_if_false\":\"stop > entry for short\",\"safety\":\"read_only\",\"auto_execute\":true,\"probe\":{\"probe_id\":\"p1\",\"kind\":\"search\",\"paths\":[\"app\"],\"query\":\"short entry stop validation\",\"dimension\":\"code\"}}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"inconclusive\",\"evidence_ids\":[\"source-2\"],\"reason\":\"stop < entry for short\"}}",
+          "retry_for_invalid_json": true,
+          "stage": "diagnosis_investigator_json_retry",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 281,
+          "wall_deadline_clamped": false,
+          "wall_ms": 43668
+        },
+        {
+          "case_budget_remaining_before_sec": 331.8998083000188,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 105.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 45667868000,
+          "json_object_valid": true,
+          "latency_ms": 69233,
+          "load_duration_ns": 168754100,
+          "logical_attempt": 1,
+          "logical_call_id": "diagnosis_judge:3",
+          "logical_timeout_sec": 150.0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 24818,
+          "prompt_eval_count": 6291,
+          "prompt_eval_duration_ns": 23004915000,
+          "requested_timeout_sec": 105.0,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"stop logic fails for short entries\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"source-2\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"stop < entry for short\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"risk calculation blocks short trades\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"source-8\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"risk_per_share > 0 for short\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"test harness misclassifies short stops\",\n      \"dimension\": \"test_harness\",\n      \"support_evidence_ids\": [\"baseline-public-contracts\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"stop validation matches short logic\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"experiment_id\": \"x1\",\n      \"hypothesis_ids\": [\"h1\"],\n      \"changed_dimensions\": [\"code\"],\n      \"held_constant_dimensions\": [\"data\", \"test_harness\"],\n      \"expected_if_true\": \"stop < entry for short\",\n      \"expected_if_false\": \"stop > entry for short\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p1\",\n        \"kind\": \"search\",\n        \"paths\": [\"app\"],\n        \"query\": \"short entry stop validation\",\n        \"dimension\": \"code\"\n      }\n    },\n    {\n      \"experiment_id\": \"x2\",\n      \"hypothesis_ids\": [\"h2\"],\n      \"changed_dimensions\": [\"data\"],\n      \"held_constant_dimensions\": [\"code\", \"test_harness\"],\n      \"expected_if_true\": \"risk_per_share > 0 for short\",\n      \"expected_if_false\": \"risk_per_share <= 0 for short\",\n      \"safety\": \"read_only\",\n      \"auto_execute\": true,\n      \"probe\": {\n        \"probe_id\": \"p2\",\n        \"kind\": \"search\",\n        \"paths\": [\"app\"],\n        \"query\": \"risk_per_share for short\",\n        \"dimension\": \"data\"\n      }\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"inconclusive\",\n    \"evidence_ids\": [\"source-2\"],\n    \"reason\": \"stop < entry for short\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "timeout_recovery_reserve_sec": 45.0,
+          "tokens_out": 560,
+          "wall_deadline_clamped": false,
+          "wall_ms": 69233
+        },
+        {
+          "case_budget_remaining_before_sec": 262.66584060003515,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 40256359000,
+          "latency_ms": 47768,
+          "load_duration_ns": 163610600,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 9035,
+          "prompt_eval_count": 2090,
+          "prompt_eval_duration_ns": 6887724000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The bug is caused by incorrect validation logic for short entries in the `open_trade` method of `PaperBook`. The condition for short entries incorrectly checks if `stop_price > entry_price`, which is the opposite of what is required for short positions. This leads to valid short entries being rejected, as the stop price is not less than the entry price.\",\n  \"files\": [\n    {\n      \"path\": \"trading/paper_trading.py\",\n      \"action\": \"modify\",\n      \"description\": \"Fix the validation logic for short entries in the `open_trade` method to ensure that the stop price is less than the entry price.\",\n      \"algorithm\": \"Update the condition for short entries to `stop_price < entry_price` and ensure the target price is less than the entry price if provided.\",\n      \"required_primitives\": [\"PaperBook\", \"PaperTrade\", \"SizingSignal\"],\n      \"forbidden_shortcuts\": [\"replacing the condition with a hardcoded value\", \"removing the validation logic\"]\n    },\n    {\n      \"path\": \"trading/portfolio_risk.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure the `size_position` function correctly calculates the quantity for short positions by using the correct risk per share calculation.\",\n      \"algorithm\": \"Update the `risk_per_share` calculation to `stop_price - entry_price` for short positions.\",\n      \"required_primitives\": [\"RiskLimits\", \"size_position\"],\n      \"forbidden_shortcuts\": [\"replacing the risk per share calculation with a hardcoded value\", \"removing the risk per share logic\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"stop_price < entry_price for short entries\",\n      \"owner_paths\": [\"trading/paper_trading.py\"],\n      \"postcondition\": \"Short entries are validated correctly and allowed if the stop price is less than the entry price.\",\n      \"polarity\": \"required\"\n    },\n    {\n      \"contract\": \"risk_per_share = stop_price - entry_price for short positions\",\n      \"owner_paths\": [\"trading/portfolio_risk.py\"],\n      \"postcondition\": \"The risk per share is correctly calculated for short positions, ensuring proper risk sizing.\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The fix ensures that short entries are validated correctly and that the risk per share is calculated accurately for short positions, preserving the stop geometry and risk limits.\"\n}",
+          "stage": "plan",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 516,
+          "wall_deadline_clamped": false,
+          "wall_ms": 47768
+        },
+        {
+          "case_budget_remaining_before_sec": 214.8973797999788,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 14838132000,
+          "latency_ms": 40056,
+          "load_duration_ns": 20682810200,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 10031,
+          "prompt_eval_count": 2280,
+          "prompt_eval_duration_ns": 4478705000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"trading/paper_trading.py\",\n      \"blocks\": [\n        {\n          \"search\": \"valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\",\n          \"replace\": \"valid = stop_price < entry_price and (target_price is None or target_price < entry_price)\"\n        }\n      ]\n    },\n    {\n      \"path\": \"trading/paper_trading.py\",\n      \"blocks\": [\n        {\n          \"search\": \"valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\",\n          \"replace\": \"valid = stop_price < entry_price and (target_price is None or target_price < entry_price)\"\n        }\n      ]\n    },\n    {\n      \"path\": \"trading/portfolio_risk.py\",\n      \"blocks\": [\n        {\n          \"search\": \"risk_per_share = entry_f - stop_f\",\n          \"replace\": \"risk_per_share = stop_f - entry_f\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "edit_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 224,
+          "wall_deadline_clamped": false,
+          "wall_ms": 40056
+        },
+        {
+          "case_budget_remaining_before_sec": 174.84113959997194,
+          "case_deadline_clamped": false,
+          "effective_timeout_sec": 150.0,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 44317465000,
+          "latency_ms": 70892,
+          "load_duration_ns": 16050794500,
+          "model": "qwen3:8b",
+          "model_budget_clamped": false,
+          "ok": true,
+          "prompt_chars": 14640,
+          "prompt_eval_count": 3541,
+          "prompt_eval_duration_ns": 10474393000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The failure is caused by the `size_position` function not accepting the `direction` parameter, which is required for short positions. The `auto_enter_from_signals` function is attempting to pass `direction='short'` to `size_position`, but the function does not support it. This leads to a `TypeError` and incorrect validation of stop prices for short entries.\",\n  \"files\": [\n    {\n      \"path\": \"trading/portfolio_risk.py\",\n      \"action\": \"modify\",\n      \"description\": \"Update `size_position` to accept `direction` parameter and adjust risk calculation for short positions.\",\n      \"algorithm\": \"Calculate position size based on risk per share, which is `entry_price - stop_price` for long and `stop_price - entry_price` for short.\",\n      \"required_primitives\": [\"capital\", \"entry_price\", \"stop_price\", \"risk_pct\", \"limits\", \"direction\"],\n      \"forbidden_shortcuts\": [\"direct calculation without validation\", \"ignoring direction in risk calculation\"]\n    },\n    {\n      \"path\": \"trading/paper_trading.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure `auto_enter_from_signals` correctly passes `direction` to `size_position` and validates stop prices for short entries.\",\n      \"algorithm\": \"Validate that stop price is above entry price for short entries and below for long entries.\",\n      \"required_primitives\": [\"ticker\", \"entry_price\", \"stop_price\", \"target_price\", \"quantity\", \"signal_json\", \"direction\"],\n      \"forbidden_shortcuts\": [\"skipping validation for stop price\", \"ignoring direction in trade creation\"]\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry\",\n      \"owner_paths\": [\"trading/portfolio_risk.py\"],\n      \"postcondition\": \"size_position must return 0 when stop_price is below entry_price for short entries.\",\n      \"polarity\": \"forbidden\"\n    },\n    {\n      \"contract\": \"tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry\",\n      \"owner_paths\": [\"trading/paper_trading.py\"],\n      \"postcondition\": \"The trade must have direction 'short', stop_price above entry_price, and quantity > 0.\",\n      \"polarity\": \"required\"\n    }\n  ],\n  \"notes\": \"The `size_position` function must be updated to accept the `direction` parameter and adjust the risk calculation accordingly. The `auto_enter_from_signals` function must ensure that the `direction` is passed correctly and that stop price validation is performed for short entries.\"\n}",
+          "stage": "repair_plan_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 568,
+          "wall_deadline_clamped": false,
+          "wall_ms": 70892
+        },
+        {
+          "case_budget_remaining_before_sec": 103.94870170002105,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 103.94870170002105,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 27202279000,
+          "latency_ms": 42139,
+          "load_duration_ns": 4928398500,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 14377,
+          "prompt_eval_count": 3467,
+          "prompt_eval_duration_ns": 9962810000,
+          "requested_timeout_sec": 150.0,
+          "response": "{\n  \"edits\": [\n    {\n      \"path\": \"trading/portfolio_risk.py\",\n      \"blocks\": [\n        {\n          \"search\": \"def size_position(capital, entry_price, stop_price, risk_pct=None, limits=None):\",\n          \"replace\": \"def size_position(capital, entry_price, stop_price, risk_pct=None, limits=None, direction='long'):\"\n        },\n        {\n          \"search\": \"risk_per_share = entry_f - stop_f\",\n          \"replace\": \"if direction == 'short':\\n    risk_per_share = stop_f - entry_f\\nelse:\\n    risk_per_share = entry_f - stop_f\"\n        }\n      ]\n    },\n    {\n      \"path\": \"trading/paper_trading.py\",\n      \"blocks\": [\n        {\n          \"search\": \"def auto_enter_from_signals(book, signals, capital):\",\n          \"replace\": \"def auto_enter_from_signals(book, signals, capital):\"\n        },\n        {\n          \"search\": \"trade = book.open_trade(\",\n          \"replace\": \"direction = signal.get('direction', 'long')\\nif direction == 'short':\\n    valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\\nelse:\\n    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\\nif not valid:\\n    return None\\ntrade = book.open_trade(\",\n          \"insertion\": \"\\ndirection = signal.get('direction', 'long')\\nif direction == 'short':\\n    valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\\nelse:\\n    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\\nif not valid:\\n    return None\\n\"\n        }\n      ]\n    }\n  ]\n}",
+          "stage": "repair_edit_1_bundle",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 399,
+          "wall_deadline_clamped": false,
+          "wall_ms": 42139
+        },
+        {
+          "case_budget_remaining_before_sec": 61.80962340004044,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 61.80962340004044,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 4812810000,
+          "latency_ms": 7956,
+          "load_duration_ns": 170269400,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 3947,
+          "prompt_eval_count": 923,
+          "prompt_eval_duration_ns": 2856445000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\n    if direction == 'short':\n    risk_per_share = stop_f - entry_f\nelse:\n    risk_per_share = entry_f - stop_f\n=======\n    if direction == 'short':\n        risk_per_share = stop_f - entry_f\n    else:\n        risk_per_share = entry_f - stop_f\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_compiler_correction_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 74,
+          "wall_deadline_clamped": false,
+          "wall_ms": 7956
+        },
+        {
+          "case_budget_remaining_before_sec": 53.853378000087105,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 53.853378000087105,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 16394724999,
+          "latency_ms": 19116,
+          "load_duration_ns": 172542000,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 5701,
+          "prompt_eval_count": 1251,
+          "prompt_eval_duration_ns": 2484991000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\nif direction == 'short':\n    valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\nelse:\n    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\nif not valid:\n    return None\ntrade = book.open_trade(\n            ticker=ticker,\n            entry_price=entry,\n            stop_price=stop,\n            target_price=target,\n            quantity=qty,\n            signal_json=signal,\n        )\n        if trade is not None:\n            entered += 1\n    return entered\n=======\nif direction == 'short':\n    valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\nelse:\n    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\nif not valid:\n    return None\n\ntrade = book.open_trade(\n            ticker=ticker,\n            entry_price=entry,\n            stop_price=stop,\n            target_price=target,\n            quantity=qty,\n            signal_json=signal,\n            direction=direction\n        )\nif trade is not None:\n    entered += 1\nreturn entered\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_compiler_correction_2",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 246,
+          "wall_deadline_clamped": false,
+          "wall_ms": 19116
+        },
+        {
+          "case_budget_remaining_before_sec": 34.73649540008046,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 34.73649540008046,
+          "error": null,
+          "error_kind": "",
+          "eval_duration_ns": 31359977000,
+          "latency_ms": 33776,
+          "load_duration_ns": 164018200,
+          "model": "qwen2.5-coder:7b",
+          "model_budget_clamped": true,
+          "ok": true,
+          "prompt_chars": 7153,
+          "prompt_eval_count": 1645,
+          "prompt_eval_duration_ns": 2218814000,
+          "requested_timeout_sec": 150.0,
+          "response": "```\n<<<<<<< SEARCH\nif direction == 'short':\n    valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\nelse:\n    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\nif not valid:\n    return None\n\ntrade = book.open_trade(\n            ticker=ticker,\n            entry_price=entry,\n            stop_price=stop,\n            target_price=target,\n            quantity=qty,\n            signal_json=signal,\n            direction=direction\n        )\nif trade is not None:\n    entered += 1\nreturn entered\n=======\ndef auto_enter_from_signals(book, signals, capital):\n    entered = 0\n    for raw_signal in signals:\n        signal = dict(raw_signal)\n        if float(signal.get(\"confidence\") or 0.0) < 0.6:\n            continue\n        ticker = str(signal.get(\"ticker\") or \"\")\n        entry = _positive(signal.get(\"entry_price\"))\n        if not ticker or entry is None:\n            continue\n        stop = _positive(signal.get(\"stop_price\"))\n        target = _positive(signal.get(\"target_price\"))\n        if stop is None:\n            stop = entry * 0.97\n        qty = size_position(capital, entry, stop, risk_pct=0.5)\n        if qty <= 0:\n            qty = 10\n        book.emit(\n            SizingSignal(\n                ticker=ticker,\n                direction=\"long\",\n                entry_price=entry,\n                stop_price=stop,\n                quantity=qty,\n            )\n        )\n        direction = signal.get('direction', 'long')\n        if direction == 'short':\n            valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\n        else:\n            valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\n        if not valid:\n            continue\n\n        trade = book.open_trade(\n            ticker=ticker,\n            entry_price=entry,\n            stop_price=stop,\n            target_price=target,\n            quantity=qty,\n            signal_json=signal,\n            direction=direction\n        )\n        if trade is not None:\n            entered += 1\n    return entered\n>>>>>>> REPLACE\n```",
+          "stage": "repair_public_regression_correction_1",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 465,
+          "wall_deadline_clamped": false,
+          "wall_ms": 33776
+        },
+        {
+          "case_budget_remaining_before_sec": 0.9600374000729062,
+          "case_deadline_clamped": true,
+          "effective_timeout_sec": 0.9600374000729062,
+          "error": "http://127.0.0.1:11434: TimeoutError: timed out",
+          "error_kind": "case_budget_timeout",
+          "eval_duration_ns": 0,
+          "latency_ms": 976,
+          "load_duration_ns": 0,
+          "model": "qwen3:8b",
+          "model_budget_clamped": true,
+          "ok": false,
+          "prompt_chars": 22125,
+          "prompt_eval_count": 0,
+          "prompt_eval_duration_ns": 0,
+          "requested_timeout_sec": 150.0,
+          "response": "",
+          "stage": "repair_plan_2",
+          "thinking_budget_exhausted": false,
+          "thinking_chars": 0,
+          "thinking_enabled": false,
+          "tokens_out": 0,
+          "wall_deadline_clamped": false,
+          "wall_ms": 976
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 11,
+      "original_evaluation_role": "blinded_holdout",
+      "patch_applied": false,
+      "patch_warnings": [
+        "Rolled back initial patch because it regressed or made no validated progress.",
+        "Coordinated edit for trading/paper_trading.py contained an identity replacement.",
+        "Recovered the edit group with one bounded compiler-guided correction.",
+        "Rolled back public-regression correction because the public contract remained red.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Repair plan was empty or invalid; no review or edit authority was granted."
+      ],
+      "post_probe_conclusion_revision": {},
+      "premium_calls": 0,
+      "prompt_contract_closure_passed": true,
+      "prompt_contract_closure_warnings": {},
+      "public_tests": {
+        "duration_ms": 522,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 50%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n============================== 2 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest",
+        "seeded_file_integrity_verified": true,
+        "test_process_count": 1
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "4e85f2548572c7514d7f9de7f1c526f36019e3e7f06e0c939209c7e543e70e92",
+          "after_test_contracts": {
+            "complete": false,
+            "failed_ids": [],
+            "identity_available": false,
+            "observed_ids": [],
+            "passed_ids": []
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [\n      \"SyntaxError: 'return' outside function\"\n    ],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"SyntaxError: 'return' outside function\"\n    ],\n    \"failed_ids\": []\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: SyntaxError: 'return' outside function\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 0 items / 1 error\n\n=================================== ERRORS ====================================\n____________________ ERROR collecting tests/test_public.py ____________________\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\python.py:507: in importtestmodule\n    mod = import_path(\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\nC:\\Users\\rindo\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:197: in exec_module\n    exec(co, module.__dict__)\ntests\\test_public.py:1: in <module>\n    from trading.paper_trading import PaperBook, auto_enter_from_signals\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\\trading\\paper_trading.py\", line 86\nE       return None\nE       ^^^^^^^^^^^\nE   SyntaxError: 'return' outside function\n=========================== short test summary info ===========================\nERROR tests/test_public.py\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n============================== 1 error in 0.22s ===============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 0 items / 2 errors\n\n=================================== ERRORS ====================================\n___________________ ERROR collecting tests/test_feedback.py ___________________\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\python.py:507: in importtestmodule\n    mod = import_path(\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\nC:\\Users\\rindo\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:197: in exec_module\n    exec(co, module.__dict__)\ntests\\test_feedback.py:1: in <module>\n    from trading.paper_trading import PaperBook, auto_enter_from_signals\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\\trading\\paper_trading.py\", line 86\nE       return None\nE       ^^^^^^^^^^^\nE   SyntaxError: 'return' outside function\n____________________ ERROR collecting tests/test_public.py ____________________\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\python.py:507: in importtestmodule\n    mod = import_path(\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\nC:\\Users\\rindo\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:197: in exec_module\n    exec(co, module.__dict__)\ntests\\test_public.py:1: in <module>\n    from trading.paper_trading import PaperBook, auto_enter_from_signals\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\\trading\\paper_trading.py\", line 86\nE       return None\nE       ^^^^^^^^^^^\nE   SyntaxError: 'return' outside function\n=========================== short test summary info ===========================\nERROR tests/test_feedback.py\nERROR tests/test_public.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!\n============================== 2 errors in 0.30s ==============================",
+          "applied_files": [
+            "trading/portfolio_risk.py",
+            "trading/paper_trading.py"
+          ],
+          "attempt_fingerprint": "891bbecf3f98b3131fefaa392d06112dc3bf4f12b948f0b730bc8da9a02b28e8",
+          "attempted_diff": "--- a/trading/paper_trading.py\n+++ b/trading/paper_trading.py\n@@ -77,14 +77,23 @@\n                 quantity=qty,\n             )\n         )\n-        trade = book.open_trade(\n+        direction = signal.get('direction', 'long')\n+if direction == 'short':\n+    valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\n+else:\n+    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\n+if not valid:\n+    return None\n+\n+trade = book.open_trade(\n             ticker=ticker,\n             entry_price=entry,\n             stop_price=stop,\n             target_price=target,\n             quantity=qty,\n             signal_json=signal,\n+            direction=direction\n         )\n-        if trade is not None:\n-            entered += 1\n-    return entered\n+if trade is not None:\n+    entered += 1\n+return entered\n\n--- a/trading/portfolio_risk.py\n+++ b/trading/portfolio_risk.py\n@@ -7,7 +7,7 @@\n     max_risk_per_trade_pct: float = 1.0\n \n \n-def size_position(capital, entry_price, stop_price, risk_pct=None, limits=None):\n+def size_position(capital, entry_price, stop_price, risk_pct=None, limits=None, direction='long'):\n     \"\"\"Calculate long position size for a fixed loss budget.\"\"\"\n     limits = limits or RiskLimits()\n     risk_pct = limits.max_risk_per_trade_pct if risk_pct is None else risk_pct\n@@ -24,7 +24,10 @@\n     ):\n         return 0\n     risk_amount = capital_f * (risk_pct_f / 100.0)\n-    risk_per_share = entry_f - stop_f\n+    if direction == 'short':\n+        risk_per_share = stop_f - entry_f\n+    else:\n+        risk_per_share = entry_f - stop_f\n     if risk_per_share <= 0:\n         return 0\n     shares = int(risk_amount / risk_per_share)\n",
+          "before_failure_signature": "7220f845ccdff5c332602b7e689e552ad941cfd09d5dadaacf3602d64cbf4aab",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry",
+              "tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry",
+              "tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry",
+              "tests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit",
+              "tests/test_public.py::test_long_signal_enters_and_emits_long_geometry"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit",
+              "tests/test_public.py::test_long_signal_enters_and_emits_long_geometry"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\\\"short\\\") == 20\",\n      \"assertion: entered == 1\",\n      \"assertion: 0 == 1\",\n      \"TypeError: size_position() got an unexpected keyword argument 'direction'\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry\",\n      \"tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n- assert entered == 1\n- assert 0 == 1\n- observed: TypeError: size_position() got an unexpected keyword argument 'direction'\n- observed: assert 0 == 1\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry FAILED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry FAILED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_short_position_sizing_uses_stop_above_entry _______________\ntests\\test_feedback.py:6: in test_short_position_sizing_uses_stop_above_entry\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n______ test_short_signal_preserves_direction_across_entry_and_telemetry _______\ntests\\test_feedback.py:24: in test_short_signal_preserves_direction_across_entry_and_telemetry\n    assert entered == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry - TypeError: size_position() got an unexpected keyword argument 'direction'\nFAILED tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry - assert 0 == 1\n========================= 2 failed, 2 passed in 0.10s =========================",
+          "escalated": false,
+          "feedback_context_files": [
+            "trading/paper_trading.py",
+            "trading/portfolio_risk.py"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "optional_rejected_diffs": [],
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is caused by the `size_position` function not accepting the `direction` parameter, which is required for short positions. The `auto_enter_from_signals` function is attempting to pass `direction='short'` to `size_position`, but the function does not support it. This leads to a `TypeError` and incorrect validation of stop prices for short entries.",
+            "contract_coverage": [
+              {
+                "contract": "tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry",
+                "owner_paths": [
+                  "trading/portfolio_risk.py"
+                ],
+                "polarity": "forbidden",
+                "postcondition": "size_position must return 0 when stop_price is below entry_price for short entries."
+              },
+              {
+                "contract": "tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry",
+                "owner_paths": [
+                  "trading/paper_trading.py"
+                ],
+                "polarity": "required",
+                "postcondition": "The trade must have direction 'short', stop_price above entry_price, and quantity > 0."
+              }
+            ],
+            "dimension": "code",
+            "files": [
+              {
+                "action": "modify",
+                "algorithm": "Calculate position size based on risk per share, which is `entry_price - stop_price` for long and `stop_price - entry_price` for short.",
+                "description": "Update `size_position` to accept `direction` parameter and adjust risk calculation for short positions.",
+                "forbidden_shortcuts": [
+                  "direct calculation without validation",
+                  "ignoring direction in risk calculation"
+                ],
+                "path": "trading/portfolio_risk.py",
+                "required_primitives": [
+                  "capital",
+                  "entry_price",
+                  "stop_price",
+                  "risk_pct",
+                  "limits",
+                  "direction"
+                ]
+              },
+              {
+                "action": "modify",
+                "algorithm": "Validate that stop price is above entry price for short entries and below for long entries.",
+                "description": "Ensure `auto_enter_from_signals` correctly passes `direction` to `size_position` and validates stop prices for short entries.",
+                "forbidden_shortcuts": [
+                  "skipping validation for stop price",
+                  "ignoring direction in trade creation"
+                ],
+                "path": "trading/paper_trading.py",
+                "required_primitives": [
+                  "ticker",
+                  "entry_price",
+                  "stop_price",
+                  "target_price",
+                  "quantity",
+                  "signal_json",
+                  "direction"
+                ]
+              }
+            ],
+            "notes": "The `size_position` function must be updated to accept the `direction` parameter and adjust the risk calculation accordingly. The `auto_enter_from_signals` function must ensure that the `direction` is passed correctly and that stop price validation is performed for short entries.",
+            "review_skipped_reason": "complete stable-contract ownership made another generative review redundant"
+          },
+          "plan_fingerprint": "9ed2de1355530db700b5fbe2e506a166cc6e517fcb7ee7cbf2520d73a07c11ff",
+          "proposed_diagnosis_dimension": "code",
+          "public_regression_correction": {
+            "applied_files": [
+              "trading/paper_trading.py"
+            ],
+            "attempted": true,
+            "attempted_diff": "--- a/trading/paper_trading.py\n+++ b/trading/paper_trading.py\n@@ -78,14 +78,41 @@\n             )\n         )\n         direction = signal.get('direction', 'long')\n-if direction == 'short':\n-    valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\n-else:\n-    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\n-if not valid:\n-    return None\n+def auto_enter_from_signals(book, signals, capital):\n+    entered = 0\n+    for raw_signal in signals:\n+        signal = dict(raw_signal)\n+        if float(signal.get(\"confidence\") or 0.0) < 0.6:\n+            continue\n+        ticker = str(signal.get(\"ticker\") or \"\")\n+        entry = _positive(signal.get(\"entry_price\"))\n+        if not ticker or entry is None:\n+            continue\n+        stop = _positive(signal.get(\"stop_price\"))\n+        target = _positive(signal.get(\"target_price\"))\n+        if stop is None:\n+            stop = entry * 0.97\n+        qty = size_position(capital, entry, stop, risk_pct=0.5)\n+        if qty <= 0:\n+            qty = 10\n+        book.emit(\n+            SizingSignal(\n+                ticker=ticker,\n+                direction=\"long\",\n+                entry_price=entry,\n+                stop_price=stop,\n+                quantity=qty,\n+            )\n+        )\n+        direction = signal.get('direction', 'long')\n+        if direction == 'short':\n+            valid = stop_price > entry_price and (target_price is None or target_price < entry_price)\n+        else:\n+            valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\n+        if not valid:\n+            continue\n \n-trade = book.open_trade(\n+        trade = book.open_trade(\n             ticker=ticker,\n             entry_price=entry,\n             stop_price=stop,\n@@ -94,6 +121,6 @@\n             signal_json=signal,\n             direction=direction\n         )\n-if trade is not None:\n-    entered += 1\n-return entered\n+        if trade is not None:\n+            entered += 1\n+    return entered\n",
+            "eligible_paths": [
+              "trading/paper_trading.py"
+            ],
+            "public_tests": {
+              "duration_ms": 607,
+              "exit_code": 1,
+              "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 50%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry FAILED [100%]\n\n================================== FAILURES ===================================\n_______________ test_long_signal_enters_and_emits_long_geometry _______________\ntests\\test_public.py:12: in test_long_signal_enters_and_emits_long_geometry\n    entered = auto_enter_from_signals(\ntrading\\paper_trading.py:111: in auto_enter_from_signals\n    valid = stop_price < entry_price and (target_price is None or target_price > entry_price)\n            ^^^^^^^^^^\nE   NameError: name 'stop_price' is not defined\n=========================== short test summary info ===========================\nFAILED tests/test_public.py::test_long_signal_enters_and_emits_long_geometry - NameError: name 'stop_price' is not defined\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n========================= 1 failed, 1 passed in 0.10s =========================",
+              "passed": false,
+              "runner": "pytest",
+              "seeded_file_integrity_verified": true,
+              "test_process_count": 1
+            },
+            "succeeded": false,
+            "warnings": [
+              "Rolled back public-regression correction because the public contract remained red."
+            ]
+          },
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "trading/portfolio_risk.py",
+          "selected_files": [
+            "trading/portfolio_risk.py",
+            "trading/paper_trading.py"
+          ],
+          "skipped_optional_files": [],
+          "validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [\n      \"SyntaxError: 'return' outside function\"\n    ],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"SyntaxError: 'return' outside function\"\n    ],\n    \"failed_ids\": []\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- observed: SyntaxError: 'return' outside function\n\nPUBLIC REGRESSION (must be fixed without weakening prior behavior):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 0 items / 1 error\n\n=================================== ERRORS ====================================\n____________________ ERROR collecting tests/test_public.py ____________________\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\python.py:507: in importtestmodule\n    mod = import_path(\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\nC:\\Users\\rindo\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:197: in exec_module\n    exec(co, module.__dict__)\ntests\\test_public.py:1: in <module>\n    from trading.paper_trading import PaperBook, auto_enter_from_signals\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\\trading\\paper_trading.py\", line 86\nE       return None\nE       ^^^^^^^^^^^\nE   SyntaxError: 'return' outside function\n=========================== short test summary info ===========================\nERROR tests/test_public.py\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n============================== 1 error in 0.22s ===============================\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 0 items / 2 errors\n\n=================================== ERRORS ====================================\n___________________ ERROR collecting tests/test_feedback.py ___________________\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\python.py:507: in importtestmodule\n    mod = import_path(\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\nC:\\Users\\rindo\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:197: in exec_module\n    exec(co, module.__dict__)\ntests\\test_feedback.py:1: in <module>\n    from trading.paper_trading import PaperBook, auto_enter_from_signals\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\\trading\\paper_trading.py\", line 86\nE       return None\nE       ^^^^^^^^^^^\nE   SyntaxError: 'return' outside function\n____________________ ERROR collecting tests/test_public.py ____________________\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\python.py:507: in importtestmodule\n    mod = import_path(\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\nC:\\Users\\rindo\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:197: in exec_module\n    exec(co, module.__dict__)\ntests\\test_public.py:1: in <module>\n    from trading.paper_trading import PaperBook, auto_enter_from_signals\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\\trading\\paper_trading.py\", line 86\nE       return None\nE       ^^^^^^^^^^^\nE   SyntaxError: 'return' outside function\n=========================== short test summary info ===========================\nERROR tests/test_feedback.py\nERROR tests/test_public.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!\n============================== 2 errors in 0.30s ==============================",
+          "validation_regression": {
+            "after_failure_signature": "4e85f2548572c7514d7f9de7f1c526f36019e3e7f06e0c939209c7e543e70e92",
+            "after_quality": 0,
+            "before_failure_signature": "7220f845ccdff5c332602b7e689e552ad941cfd09d5dadaacf3602d64cbf4aab",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Coordinated edit for trading/paper_trading.py contained an identity replacement.",
+            "Recovered the edit group with one bounded compiler-guided correction.",
+            "Rolled back public-regression correction because the public contract remained red.",
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "adapter_rejection": "CHILI adapter rejected the attempted edit:\nRepair plan was empty or invalid; no review or edit authority was granted.",
+          "after_failure_signature": "7220f845ccdff5c332602b7e689e552ad941cfd09d5dadaacf3602d64cbf4aab",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry",
+              "tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry",
+              "tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry",
+              "tests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit",
+              "tests/test_public.py::test_long_signal_enters_and_emits_long_geometry"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit",
+              "tests/test_public.py::test_long_signal_enters_and_emits_long_geometry"
+            ]
+          },
+          "after_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\\\"short\\\") == 20\",\n      \"assertion: entered == 1\",\n      \"assertion: 0 == 1\",\n      \"TypeError: size_position() got an unexpected keyword argument 'direction'\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry\",\n      \"tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n- assert entered == 1\n- assert 0 == 1\n- observed: TypeError: size_position() got an unexpected keyword argument 'direction'\n- observed: assert 0 == 1\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry FAILED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry FAILED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_short_position_sizing_uses_stop_above_entry _______________\ntests\\test_feedback.py:6: in test_short_position_sizing_uses_stop_above_entry\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n______ test_short_signal_preserves_direction_across_entry_and_telemetry _______\ntests\\test_feedback.py:24: in test_short_signal_preserves_direction_across_entry_and_telemetry\n    assert entered == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry - TypeError: size_position() got an unexpected keyword argument 'direction'\nFAILED tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry - assert 0 == 1\n========================= 2 failed, 2 passed in 0.12s =========================",
+          "before_failure_signature": "7220f845ccdff5c332602b7e689e552ad941cfd09d5dadaacf3602d64cbf4aab",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry",
+              "tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry",
+              "tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry",
+              "tests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit",
+              "tests/test_public.py::test_long_signal_enters_and_emits_long_geometry"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit",
+              "tests/test_public.py::test_long_signal_enters_and_emits_long_geometry"
+            ]
+          },
+          "before_validation_output": "STRUCTURED FAILURE DELTAS (explain and resolve these before editing):\n{\n  \"public\": {\n    \"facts\": [],\n    \"failed_ids\": []\n  },\n  \"repair_feedback\": {\n    \"facts\": [\n      \"assertion: size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\\\"short\\\") == 20\",\n      \"assertion: entered == 1\",\n      \"assertion: 0 == 1\",\n      \"TypeError: size_position() got an unexpected keyword argument 'direction'\"\n    ],\n    \"failed_ids\": [\n      \"tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry\",\n      \"tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry\"\n    ]\n  }\n}\n\nNON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n- assert entered == 1\n- assert 0 == 1\n- observed: TypeError: size_position() got an unexpected keyword argument 'direction'\n- observed: assert 0 == 1\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-python_short_paper_direction-7yx9dr94\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry FAILED [ 25%]\ntests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry FAILED [ 50%]\ntests/test_public.py::test_long_position_sizing_preserves_fixed_fractional_limit PASSED [ 75%]\ntests/test_public.py::test_long_signal_enters_and_emits_long_geometry PASSED [100%]\n\n================================== FAILURES ===================================\n______________ test_short_position_sizing_uses_stop_above_entry _______________\ntests\\test_feedback.py:6: in test_short_position_sizing_uses_stop_above_entry\n    assert size_position(10_000.0, 100.0, 105.0, limits=RiskLimits(), direction=\"short\") == 20\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   TypeError: size_position() got an unexpected keyword argument 'direction'\n______ test_short_signal_preserves_direction_across_entry_and_telemetry _______\ntests\\test_feedback.py:24: in test_short_signal_preserves_direction_across_entry_and_telemetry\n    assert entered == 1\nE   assert 0 == 1\n=========================== short test summary info ===========================\nFAILED tests/test_feedback.py::test_short_position_sizing_uses_stop_above_entry - TypeError: size_position() got an unexpected keyword argument 'direction'\nFAILED tests/test_feedback.py::test_short_signal_preserves_direction_across_entry_and_telemetry - assert 0 == 1\n========================= 2 failed, 2 passed in 0.12s =========================",
+          "escalated": false,
+          "feedback_context_files": [],
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [],
+          "patch_applied": false,
+          "plan": {},
+          "proposed_diagnosis_dimension": "",
+          "round": 2,
+          "selected_file": "",
+          "selected_files": [],
+          "transport_failed": true,
+          "warnings": [
+            "Repair plan was empty or invalid; no review or edit authority was granted."
+          ]
+        }
+      ],
+      "retained_diagnosis_dimension": "code",
+      "score": 25,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "trading/paper_trading.py",
+        "trading/portfolio_risk.py"
+      ],
+      "split": "holdout-sealed-fable5-trading-pilot",
+      "successful_accepted_causal_reasoning_stage_count": 0,
+      "successful_causal_reasoning_call_count": 3,
+      "successful_live_model_call_count": 10,
+      "test_runner": "pytest",
+      "test_source_safety": {
+        "scanned_test_source_count": 3,
+        "static_safety_scan_passed": true
+      },
+      "test_subprocess_assurance": {
+        "hostile_process_proof": false,
+        "mode": "static_safety_scan_plus_seeded_sha256_guard",
+        "os_process_isolation": false,
+        "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+      }
+    }
+  ],
+  "causal_diagnosis_acceptance_rate": 0.0,
+  "causally_accepted_diagnosis_count": 0,
+  "created_at": "2026-07-14T04:36:17.461508+00:00",
+  "deterministic_only_case_count": 0,
+  "deterministic_only_case_rate": 0.0,
+  "development_regression_case_count": 0,
+  "development_regression_score": 0.0,
+  "diagnosis_accuracy": 0.0,
+  "diagnosis_correct_count": 0,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_causal_confirmation_rate": 0.0,
+  "diagnostic_stage_count": 2,
+  "diagnostic_stage_json_parse_rate": 100.0,
+  "diagnostic_stage_schema_acceptance_rate": 100.0,
+  "escalation_model": "",
+  "evaluation_context": "protocol",
+  "evaluation_verdict": "blinded_evaluation_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_class_reasoning_claim_blockers": [
+    "No authenticated same-task Fable 5 head-to-head was run.",
+    "No executable run policy was supplied and enforced.",
+    "At least one functionally scored case had no successful accepted live causal-reasoning stage."
+  ],
+  "fable5_class_reasoning_claim_supported": false,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "fixture_digest_inventory": {
+    "cases": [
+      {
+        "case": {
+          "artifact": "case:python_short_paper_direction",
+          "path": "cases/python_short_paper_direction.json",
+          "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+          "size_bytes": 6067
+        },
+        "case_id": "python_short_paper_direction",
+        "feedback_oracle": {
+          "artifact": "feedback_oracle:python_short_paper_direction",
+          "path": "oracles/python_short_paper_direction.json",
+          "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+          "size_bytes": 1584
+        },
+        "final_oracle": {
+          "artifact": "final_oracle:python_short_paper_direction",
+          "path": "final_oracles/python_short_paper_direction.json",
+          "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+          "size_bytes": 1930
+        }
+      }
+    ],
+    "manifest": {
+      "artifact": "manifest",
+      "path": "manifest.json",
+      "sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "size_bytes": 508
+    }
+  },
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 1,
+  "holdout_score": 25.0,
+  "integrity_audit_events": [
+    {
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "path": "manifest.json",
+      "phase": "preflight_binding",
+      "sequence": 1,
+      "sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "size_bytes": 508,
+      "timestamp_utc": "2026-07-14T04:28:02.919063+00:00"
+    },
+    {
+      "artifact": "case:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "cases/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 2,
+      "sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "size_bytes": 6067,
+      "timestamp_utc": "2026-07-14T04:28:02.921247+00:00"
+    },
+    {
+      "artifact": "feedback_oracle:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "oracles/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 3,
+      "sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "size_bytes": 1584,
+      "timestamp_utc": "2026-07-14T04:28:02.921685+00:00"
+    },
+    {
+      "artifact": "final_oracle:python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "path": "final_oracles/python_short_paper_direction.json",
+      "phase": "preflight_binding",
+      "sequence": 4,
+      "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "size_bytes": 1930,
+      "timestamp_utc": "2026-07-14T04:28:02.922146+00:00"
+    },
+    {
+      "actual_sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "artifact": "manifest",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e9de5d280a7c1fdf12006fc08fec0b3700ef8bf30fe3003e35a7d918042d71b4",
+      "path": "manifest.json",
+      "phase": "pre_model_manifest_recheck",
+      "sequence": 5,
+      "timestamp_utc": "2026-07-14T04:28:02.924592+00:00"
+    },
+    {
+      "checkpoint_path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_historical_trading_pilot_untouched.checkpoint.json",
+      "event": "run_checkpoint_initialized",
+      "sequence": 6,
+      "timestamp_utc": "2026-07-14T04:28:05.648795+00:00"
+    },
+    {
+      "actual_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "artifact": "case:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "e2840341852a4b4633ec178ee34e0716b904e6114083fe1e11c2fc56a285b2a3",
+      "path": "cases/python_short_paper_direction.json",
+      "phase": "case_load",
+      "sequence": 7,
+      "timestamp_utc": "2026-07-14T04:28:05.649948+00:00"
+    },
+    {
+      "actual_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "artifact": "feedback_oracle:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "d05b6fc04a420a51246d1da748a7ea294f7426dd1018ed966e7b1d1328587da1",
+      "path": "oracles/python_short_paper_direction.json",
+      "phase": "feedback_oracle_load",
+      "sequence": 8,
+      "timestamp_utc": "2026-07-14T04:33:12.419437+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "model_call_ledger_frozen",
+      "model_call_count": 11,
+      "sequence": 9,
+      "timestamp_utc": "2026-07-14T04:36:15.351392+00:00"
+    },
+    {
+      "actual_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "artifact": "final_oracle:python_short_paper_direction",
+      "case_id": "python_short_paper_direction",
+      "event": "fixture_digest_verified",
+      "expected_sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "path": "final_oracles/python_short_paper_direction.json",
+      "phase": "sealed_final_oracle_read",
+      "sequence": 10,
+      "timestamp_utc": "2026-07-14T04:36:15.351644+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "final_oracle_opened",
+      "external": true,
+      "path": "final_oracles/python_short_paper_direction.json",
+      "sequence": 11,
+      "sha256": "5111c992d66490d1f4d7da3ed90dec7525b2f45179e54c231383dd73908b71e6",
+      "timestamp_utc": "2026-07-14T04:36:15.351693+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "event": "final_adjudication_started",
+      "sequence": 12,
+      "timestamp_utc": "2026-07-14T04:36:15.353916+00:00"
+    },
+    {
+      "baseline_passed": false,
+      "candidate_passed": false,
+      "case_id": "python_short_paper_direction",
+      "event": "final_adjudication_completed",
+      "sequence": 13,
+      "timestamp_utc": "2026-07-14T04:36:17.429673+00:00"
+    },
+    {
+      "actual_count": 11,
+      "case_id": "python_short_paper_direction",
+      "event": "post_final_model_call_count_verified",
+      "expected_count": 11,
+      "ledger_frozen": true,
+      "sequence": 14,
+      "timestamp_utc": "2026-07-14T04:36:17.429693+00:00"
+    },
+    {
+      "case_id": "python_short_paper_direction",
+      "completed_case_count": 1,
+      "event": "run_checkpoint_case_committed",
+      "sequence": 15,
+      "timestamp_utc": "2026-07-14T04:36:17.436804+00:00"
+    },
+    {
+      "completed_case_count": 1,
+      "event": "run_checkpoint_all_cases_complete",
+      "restored_case_count": 0,
+      "sequence": 16,
+      "timestamp_utc": "2026-07-14T04:36:17.461396+00:00"
+    }
+  ],
+  "live_reasoning_qualified_case_count": 0,
+  "live_reasoning_qualified_case_rate": 0.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 0,
+  "max_repair_rounds": 2,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "model_call_error_count": 1,
+  "model_call_transport_error_count": 0,
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 25.0,
+  "premium_calls": 0,
+  "reasoning_model": "qwen3:8b",
+  "reference_family": "claude-fable-5",
+  "run_checkpoint": {
+    "binding_sha256": "cb0032fb93153f325faaebda712d3da19cf92619a2e8c1579f6a1adb233ccf5f",
+    "cleanup_after_atomic_outputs": true,
+    "completed_case_count": 1,
+    "path": "D:/dev/chili-home-copilot-fable5-seventeenth-contestant-558088/project_ws/AgentOps/fable5_historical_trading_pilot_untouched.checkpoint.json",
+    "restored_case_count": 0,
+    "resume_requested": false
+  },
+  "run_policy": {
+    "enforced": false
+  },
+  "schema": "chili.diagnosis-to-fix-results.v6",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "successful_accepted_causal_reasoning_stage_count": 0,
+  "successful_causal_reasoning_call_count": 3,
+  "test_subprocess_assurance": {
+    "hostile_process_proof": false,
+    "mode": "static_safety_scan_plus_seeded_sha256_guard",
+    "os_process_isolation": false,
+    "residual_risk": "Test subprocesses are screened statically and seeded repository files are hash-checked around each process, but this is not an OS sandbox and does not prove containment against hostile native or dynamically constructed behavior."
+  },
+  "total_model_calls": 11,
+  "verdict": "needs_improvement"
+}

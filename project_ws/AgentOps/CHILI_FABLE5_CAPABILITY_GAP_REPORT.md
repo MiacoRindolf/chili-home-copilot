@@ -601,6 +601,28 @@ symbolic repair, rollback, and sealed validation all contributed without a premi
 mechanism capture, not unknown-mechanism transfer or Fable 5 parity. Full details:
 `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_DISCLOSED_SEVENTEENTH_NODE_AB_RECEIPT.md`.
 
+### Historical Fable 5 Trading Pilot
+
+To test the user's intended replacement workflow directly, a post-source-freeze fixture reconstructed the
+direction-loss mechanism from historical commit `a9e5ea2b`, `Preserve short direction in paper auto entry`. The
+user identifies the source conversation as Fable 5 work; the commit is therefore user-attested historical
+reference evidence, not provider-authenticated same-task output. CHILI source was frozen at `ae5c0fb8` before the
+self-contained fixture was authored and validated. The fixture author was the current agent, so this is weaker than
+the independent-author promotion gate but still a legitimate first-run post-freeze transfer check.
+
+The untouched protocol run scored **25/100**, solved **0/1** sealed finals, retained no patch, and used zero premium
+calls. It planned the correct two owners but retained `code` instead of the expected `data` family, inverted short
+protective-stop polarity, damaged already-correct validation, and globally reversed risk distance instead of making
+it side-aware. Feedback led the next plan to the right missing `direction` parameter and formulas, but the editor
+inserted undefined, out-of-function code. Compiler/public-regression recovery failed safely, rollback preserved the
+public long behavior, and the final repair-plan call exhausted the case budget. The run made **11 local calls**,
+had one case-budget timeout, and took **491.8 seconds**.
+
+This result directly rejects the claim that current CHILI can already reproduce representative Fable 5-era trading
+fixes. It also pinpoints the next capability work: directional-polarity contracts, normalized cross-owner value
+propagation, AST-aware Python repair, and faster retained-progress refinement. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_PILOT_UNTOUCHED_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -637,6 +659,7 @@ mechanism capture, not unknown-mechanism transfer or Fable 5 parity. Full detail
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the fifteenth untouched suite averaged 278.8 seconds/case. Atomic per-case resume is now integration-tested, but a real OS/process host-loss recovery proof remains open, and unknown mechanisms can still take the full slow path.
 8. Compact 14B escalation reduced the fresh 12-case wall time from 243.3 to 59.9 minutes and failed only 1/15 calls. It now has a coordinated atomic edit-bundle path, while the 7B base lane keeps the more reliable per-file adapter with shared plan context. Untouched success on unknown multi-owner mechanisms remains open.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
+10. The historical Fable 5 trading pilot scored 25/100. The local reasoner inverted short-stop polarity despite explicit numeric evidence, and the editor could not serialize a valid two-owner Python repair before the case budget expired.
 
 ## Promotion Gate
 
