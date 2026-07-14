@@ -58,10 +58,12 @@ RUN_POLICY_SOURCE_PATHS = (
     "app/services/coding_task/envelope.py",
     "app/services/coding_task/validation_contracts.py",
     "app/services/coding_task/validator_runner.py",
+    "app/services/context_brain/ollama_client.py",
     "app/services/project_autonomy/diagnostic_probes.py",
     "app/services/project_autonomy/diagnostic_reasoning.py",
     "scripts/autopilot_diagnosis_to_fix_benchmark.py",
 )
+LOCAL_TIMEOUT_RECOVERY_POLICY = "bounded_same_model_v1"
 TEST_SUBPROCESS_ASSURANCE = {
     "mode": "static_safety_scan_plus_seeded_sha256_guard",
     "os_process_isolation": False,
@@ -88,6 +90,35 @@ class FixtureIntegrityError(RuntimeError):
 
 
 REPAIR_DIMENSION_RUBRIC = dict(diagnostic_reasoning.CAUSAL_DIMENSION_RUBRIC)
+
+
+def _validated_expected_dimension(
+    oracle: Mapping[str, Any],
+    *,
+    evaluation_context: str = "protocol",
+) -> str:
+    if "expected_dimensions" in oracle:
+        raise FixtureIntegrityError(
+            "Diagnosis-to-fix oracles require singular expected_dimension; "
+            "expected_dimensions is not a scoring field."
+        )
+    value = oracle.get("expected_dimension")
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise FixtureIntegrityError(
+            "Diagnosis-to-fix oracle expected_dimension must be one canonical string."
+        )
+    allowed = set(REPAIR_DIMENSION_RUBRIC)
+    if evaluation_context == "disclosed_replay":
+        allowed.add("unknown")
+    if value not in allowed:
+        raise FixtureIntegrityError(
+            "Diagnosis-to-fix oracle expected_dimension must be one of: "
+            + ", ".join(sorted(allowed))
+            + "."
+        )
+    return value
+
+
 REPAIR_PLAN_SCHEMA = {
     "type": "object",
     "required": ["dimension", "analysis", "files", "contract_coverage"],
@@ -2449,6 +2480,8 @@ def _local_call(
     deadline = getattr(calls, "deadline", None)
     remaining_before: float | None = None
     deadline_clamped = False
+    model_budget_clamped = False
+    wall_deadline_clamped = False
     model_budget = getattr(calls, "model_time_budget", None)
     model_time_used = float(getattr(calls, "model_time_used", 0.0) or 0.0)
     if isinstance(model_budget, (int, float)):
@@ -2474,7 +2507,8 @@ def _local_call(
             )
             return ""
         timeout = min(timeout, model_remaining)
-        deadline_clamped = timeout < requested_timeout
+        model_budget_clamped = timeout < requested_timeout
+        deadline_clamped = model_budget_clamped
     if isinstance(deadline, (int, float)):
         remaining = float(deadline) - time.monotonic()
         remaining_before = (
@@ -2502,7 +2536,8 @@ def _local_call(
             )
             return ""
         timeout = min(timeout, remaining)
-        deadline_clamped = deadline_clamped or timeout < requested_timeout
+        wall_deadline_clamped = timeout < requested_timeout
+        deadline_clamped = deadline_clamped or wall_deadline_clamped
     started = time.monotonic()
     options: dict[str, Any] = {
         "num_predict": num_predict,
@@ -2572,6 +2607,8 @@ def _local_call(
             "effective_timeout_sec": float(timeout),
             "case_budget_remaining_before_sec": remaining_before,
             "case_deadline_clamped": deadline_clamped,
+            "model_budget_clamped": model_budget_clamped,
+            "wall_deadline_clamped": wall_deadline_clamped,
         }
     )
     return result.text if result.ok else ""
@@ -2622,6 +2659,11 @@ def _diagnostic_json_call(
     calls: list[dict[str, Any]],
     timeout: float,
 ) -> str:
+    logical_started = time.monotonic()
+    logical_timeout = max(0.001, float(timeout))
+    recovery_reserve = min(45.0, logical_timeout * 0.3)
+    primary_timeout = max(0.001, logical_timeout - recovery_reserve)
+    logical_call_id = f"diagnosis_{stage}:{len(calls) + 1}"
     messages = [
         {
             "role": "system",
@@ -2634,18 +2676,41 @@ def _diagnostic_json_call(
         messages,
         stage=f"diagnosis_{stage}",
         calls=calls,
-        timeout=timeout,
+        timeout=primary_timeout,
         num_predict=1000,
         json_mode=True,
     )
     valid = diagnostic_reasoning.parse_json_object(response) is not None
     if calls:
         calls[-1]["json_object_valid"] = valid
+        calls[-1]["logical_call_id"] = logical_call_id
+        calls[-1]["logical_attempt"] = 1
+        calls[-1]["logical_timeout_sec"] = logical_timeout
+        calls[-1]["timeout_recovery_reserve_sec"] = recovery_reserve
     thinking_budget_exhausted = bool(
         calls and calls[-1].get("thinking_budget_exhausted")
     )
-    if valid or (not response and not thinking_budget_exhausted):
+    timeout_recovery = bool(
+        not response
+        and calls
+        and calls[-1].get("error_kind") == "call_timeout"
+    )
+    if valid or (not response and not thinking_budget_exhausted and not timeout_recovery):
         return response
+
+    logical_remaining = max(
+        0.0,
+        logical_timeout - (time.monotonic() - logical_started),
+    )
+    if logical_remaining <= 0.001 or bool(getattr(calls, "budget_exhausted", False)):
+        return ""
+    recovery_trigger = (
+        "call_timeout"
+        if timeout_recovery
+        else "thinking_budget_exhausted"
+        if thinking_budget_exhausted
+        else "invalid_json"
+    )
 
     retry = _local_call(
         model,
@@ -2660,7 +2725,8 @@ def _diagnostic_json_call(
             {
                 "role": "user",
                 "content": (
-                    f"The previous {stage} response exhausted its thinking budget, was truncated, or was invalid. "
+                    f"The previous {stage} response timed out, exhausted its thinking budget, was truncated, "
+                    "or was invalid. "
                     "Do not emit hidden reasoning. Re-answer this exact diagnostic "
                     f"request in the compact schema:\n\n{stage_prompt}"
                 ),
@@ -2668,14 +2734,19 @@ def _diagnostic_json_call(
         ],
         stage=f"diagnosis_{stage}_json_retry",
         calls=calls,
-        timeout=timeout,
-        num_predict=850,
+        timeout=logical_remaining,
+        num_predict=650 if timeout_recovery else 850,
         json_mode=True,
     )
     retry_valid = diagnostic_reasoning.parse_json_object(retry) is not None
     if calls:
         calls[-1]["json_object_valid"] = retry_valid
         calls[-1]["retry_for_invalid_json"] = True
+        calls[-1]["logical_call_id"] = logical_call_id
+        calls[-1]["logical_attempt"] = 2
+        calls[-1]["logical_timeout_sec"] = logical_timeout
+        calls[-1]["recovery_trigger"] = recovery_trigger
+        calls[-1]["logical_remaining_before_sec"] = logical_remaining
     return retry if retry_valid else ""
 
 
@@ -2802,7 +2873,7 @@ def _replacement_already_satisfied(
     meaningful = [
         (search, replace)
         for search, replace in blocks
-        if search.strip() and replace.strip()
+        if search.strip() and replace.strip() and search != replace
     ]
     return bool(meaningful) and all(
         search not in original and original.count(replace) == 1
@@ -2861,9 +2932,8 @@ def _apply_local_edit(
     outcome = parse_outcome(edit_text)
     new_content = outcome.get("new_content")
     initial_warnings = [str(value) for value in outcome.get("warnings") or []]
-    if not isinstance(new_content, str) and (
-        outcome.get("already_satisfied")
-        or _replacement_already_satisfied(original, blocks)
+    if not isinstance(new_content, str) and _replacement_already_satisfied(
+        original, blocks
     ):
         return {
             "patch_applied": False,
@@ -2922,7 +2992,7 @@ def _apply_local_edit(
                 ),
                 *(outcome.get("warnings") or []),
             ]
-        elif outcome.get("already_satisfied") or _replacement_already_satisfied(
+        elif _replacement_already_satisfied(
             original,
             retry_blocks,
         ):
@@ -3174,9 +3244,6 @@ def _apply_local_edit_bundle(
             }
         ]
     }
-    current_files = "\n\n".join(
-        f"### {relative}\n{content}" for relative, content in originals.items()
-    )
     system_prompt = (
         "You are CHILI's coordinated source editor. Return one JSON object only. "
         "Every approved path must appear exactly once. Each SEARCH value must be copied exactly "
@@ -3189,11 +3256,23 @@ def _apply_local_edit_bundle(
         "dependencies, or add prose."
     )
 
-    def request_bundle(stage_name: str, adapter_feedback: str = "") -> str:
+    def request_bundle(
+        stage_name: str,
+        adapter_feedback: str = "",
+        *,
+        requested_paths: Sequence[str] | None = None,
+        provisional_updates: Mapping[str, str] | None = None,
+    ) -> str:
+        requested = list(requested_paths or paths)
+        displayed_files = "\n\n".join(
+            f"### {relative}\n{(provisional_updates or {}).get(relative, originals[relative])}"
+            for relative in paths
+        )
         correction = (
             "\n\nThe previous bundle was rejected by the edit adapter. Re-read the exact current "
             "files and replace every stale or ambiguous SEARCH with a verbatim span that matches "
-            "exactly once in its owning file. Include every approved path again. "
+            "exactly once in its owning file. Include every still-unresolved approved path exactly once. "
+            "Treat provisional sibling content as the coordinated result that your unresolved edit must support. "
             f"Adapter feedback:\n{adapter_feedback[:2_000]}"
             if adapter_feedback
             else ""
@@ -3206,10 +3285,10 @@ def _apply_local_edit_bundle(
                     "role": "user",
                     "content": (
                         f"Required JSON shape:\n{json.dumps(schema, indent=2)}\n\n"
-                        f"Approved paths: {json.dumps(list(paths))}\n\n"
+                        f"Approved paths for this response: {json.dumps(requested)}\n\n"
                         f"Coordinated change:\n{change[:16_000]}\n\n"
                         f"{correction}"
-                        f"\n\nExact current files:\n{current_files[:24_000]}"
+                        f"\n\nExact coordinated files:\n{displayed_files[:24_000]}"
                     ),
                 },
             ],
@@ -3220,7 +3299,13 @@ def _apply_local_edit_bundle(
             json_mode=True,
         )
 
-    def evaluate_bundle(response: str) -> dict[str, Any]:
+    def evaluate_bundle(
+        response: str,
+        *,
+        required_paths: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        required = list(required_paths or paths)
+        required_set = set(required)
         payload: Mapping[str, Any] = {}
         decoder = json.JSONDecoder()
         for match in re.finditer(r"\{", response or ""):
@@ -3231,47 +3316,73 @@ def _apply_local_edit_bundle(
             if isinstance(value, Mapping) and isinstance(value.get("edits"), list):
                 payload = value
                 break
-        entries: dict[str, Mapping[str, Any]] = {}
+        entries: dict[str, list[Mapping[str, Any]]] = {}
         warnings: list[str] = []
+        fatal = False
         for item in payload.get("edits") or []:
             if not isinstance(item, Mapping):
                 continue
             relative = _safe_rel(item.get("path"))
-            if relative not in originals or relative in entries:
+            if relative not in originals or relative not in required_set:
                 warnings.append(
-                    "Coordinated edit contained an unapproved or duplicate path: "
+                    "Coordinated edit contained an unapproved path: "
                     f"{relative or '(invalid)'}."
                 )
+                fatal = True
                 continue
-            entries[relative] = item
-        missing = [relative for relative in paths if relative not in entries]
-        if missing or warnings:
-            return {
-                "patch_applied": False,
-                "applied_files": [],
-                "satisfied_files": [],
-                "warnings": [
-                    *warnings,
-                    *(
-                        f"Coordinated edit omitted required path {relative}."
-                        for relative in missing
-                    ),
-                ],
-                "_updates": {},
-            }
+            entries.setdefault(relative, []).append(item)
+        missing = [relative for relative in required if relative not in entries]
+        warnings.extend(
+            f"Coordinated edit omitted required path {relative}."
+            for relative in missing
+        )
         updates: dict[str, str] = {}
         satisfied: list[str] = []
-        for relative in paths:
-            blocks = [
-                (str(block.get("search") or ""), str(block.get("replace") or ""))
-                for block in entries[relative].get("blocks") or []
-                if isinstance(block, Mapping) and str(block.get("search") or "")
+        unresolved = list(missing)
+        merged_duplicates: list[str] = []
+        for relative in required:
+            if relative not in entries:
+                continue
+            raw_blocks = [
+                block
+                for entry in entries[relative]
+                for block in entry.get("blocks") or []
+                if isinstance(block, Mapping)
             ]
+            if len(entries[relative]) > 1:
+                merged_duplicates.append(relative)
+            block_map: dict[str, str] = {}
+            conflicting = False
+            for block in raw_blocks:
+                search = str(block.get("search") or "")
+                replace = str(block.get("replace") or "")
+                if not search:
+                    continue
+                if search == replace:
+                    warnings.append(
+                        f"Coordinated edit for {relative} contained an identity replacement."
+                    )
+                    continue
+                previous = block_map.get(search)
+                if previous is not None and previous != replace:
+                    warnings.append(
+                        f"Coordinated edit for {relative} contained conflicting duplicate SEARCH blocks."
+                    )
+                    conflicting = True
+                    break
+                block_map[search] = replace
+            blocks = list(block_map.items())
+            if conflicting or not blocks:
+                unresolved.append(relative)
+                if not conflicting:
+                    warnings.append(
+                        f"Coordinated edit for {relative} contained no meaningful replacement blocks."
+                    )
+                continue
             edit_outcome = code_agent._apply_search_replace(originals[relative], blocks)
             new_content = edit_outcome.get("new_content")
-            if not isinstance(new_content, str) and (
-                edit_outcome.get("already_satisfied")
-                or _replacement_already_satisfied(originals[relative], blocks)
+            if not isinstance(new_content, str) and _replacement_already_satisfied(
+                originals[relative], blocks
             ):
                 satisfied.append(relative)
                 continue
@@ -3279,72 +3390,154 @@ def _apply_local_edit_bundle(
                 not isinstance(new_content, str)
                 or new_content.rstrip() == originals[relative].rstrip()
             ):
-                return {
-                    "patch_applied": False,
-                    "applied_files": [],
-                    "satisfied_files": satisfied,
-                    "warnings": [
-                        *(str(value) for value in edit_outcome.get("warnings") or []),
-                        f"Coordinated edit for {relative} was rejected or made no change.",
-                    ],
-                    "_updates": {},
-                }
+                unresolved.append(relative)
+                warnings.extend(
+                    str(value) for value in edit_outcome.get("warnings") or []
+                )
+                warnings.append(
+                    f"Coordinated edit for {relative} was rejected or made no change."
+                )
+                continue
             semantic_warnings = code_agent._semantic_replacement_warnings(
                 relative,
                 new_content,
             )
             if semantic_warnings:
-                return {
-                    "patch_applied": False,
-                    "applied_files": [],
-                    "satisfied_files": satisfied,
-                    "warnings": [
-                        *(
-                            f"semantic polarity guard: {value}"
-                            for value in semantic_warnings
-                        ),
-                    ],
-                    "_updates": {},
-                }
+                unresolved.append(relative)
+                warnings.extend(
+                    f"semantic polarity guard: {value}"
+                    for value in semantic_warnings
+                )
+                continue
             updates[relative] = new_content
+        unresolved = list(dict.fromkeys(unresolved))
+        complete = not fatal and not unresolved
         return {
-            "patch_applied": bool(updates),
+            "patch_applied": complete and bool(updates),
             "applied_files": list(updates),
             "satisfied_files": satisfied,
-            "warnings": [],
+            "warnings": warnings,
+            "merged_duplicate_paths": merged_duplicates,
+            "transport_failed": False,
+            "_complete": complete,
+            "_fatal": fatal,
+            "_unresolved_paths": unresolved,
             "_updates": updates,
         }
 
-    result = evaluate_bundle(request_bundle(stage))
+    initial_response = request_bundle(stage)
+    if not initial_response and calls and calls[-1].get("error_kind"):
+        result = {
+            "patch_applied": False,
+            "applied_files": [],
+            "satisfied_files": [],
+            "warnings": [
+                "Coordinated edit transport failed before an edit bundle was returned: "
+                + str(calls[-1].get("error_kind") or "transport_error")
+            ],
+            "transport_failed": True,
+            "_complete": False,
+            "_fatal": True,
+            "_unresolved_paths": list(paths),
+            "_updates": {},
+        }
+    else:
+        result = evaluate_bundle(initial_response)
     if (
         allow_adapter_recovery
-        and not result.get("patch_applied")
-        and _retryable_edit_adapter_rejection(result.get("warnings") or [])
+        and not result.get("_complete")
+        and not result.get("_fatal")
+        and result.get("_unresolved_paths")
     ):
         initial_warnings = [str(value) for value in result.get("warnings") or []]
-        recovered = evaluate_bundle(
-            request_bundle(
-                f"{stage}_adapter_retry",
-                "\n".join(initial_warnings),
+        provisional_updates = dict(result.get("_updates") or {})
+        initial_satisfied = list(result.get("satisfied_files") or [])
+        unresolved_paths = list(result.get("_unresolved_paths") or [])
+        recovery_response = request_bundle(
+            f"{stage}_adapter_retry",
+            "\n".join(initial_warnings),
+            requested_paths=unresolved_paths,
+            provisional_updates=provisional_updates,
+        )
+        if not recovery_response and calls and calls[-1].get("error_kind"):
+            recovered = {
+                "patch_applied": False,
+                "applied_files": [],
+                "satisfied_files": [],
+                "warnings": [
+                    "Coordinated edit recovery transport failed: "
+                    + str(calls[-1].get("error_kind") or "transport_error")
+                ],
+                "_complete": False,
+                "_fatal": True,
+                "_unresolved_paths": unresolved_paths,
+                "_updates": {},
+            }
+        else:
+            recovered = evaluate_bundle(
+                recovery_response,
+                required_paths=unresolved_paths,
+            )
+        combined_updates = {
+            **provisional_updates,
+            **dict(recovered.get("_updates") or {}),
+        }
+        combined_satisfied = list(
+            dict.fromkeys(
+                [*initial_satisfied, *(recovered.get("satisfied_files") or [])]
             )
         )
-        if recovered.get("patch_applied"):
-            recovered["warnings"] = [
-                "Recovered the atomic bundle from one stale SEARCH rejection.",
-                *(recovered.get("warnings") or []),
-            ]
-            result = recovered
+        complete = bool(
+            recovered.get("_complete")
+            and set(combined_updates) | set(combined_satisfied) == set(paths)
+        )
+        if complete:
+            result = {
+                **recovered,
+                "patch_applied": bool(combined_updates),
+                "applied_files": list(combined_updates),
+                "satisfied_files": combined_satisfied,
+                "warnings": [
+                    "Recovered the atomic bundle by retrying only unresolved paths.",
+                    *initial_warnings,
+                    *(recovered.get("warnings") or []),
+                ],
+                "_complete": True,
+                "_updates": combined_updates,
+            }
         else:
             result = {
                 **recovered,
+                "patch_applied": False,
+                "applied_files": [],
+                "satisfied_files": combined_satisfied,
                 "warnings": [
                     *initial_warnings,
                     *(str(value) for value in recovered.get("warnings") or []),
-                    "Atomic bundle adapter recovery did not produce an applicable edit.",
+                    "Atomic bundle adapter recovery did not resolve every required path.",
                 ],
+                "_complete": False,
+                "_updates": combined_updates,
             }
-    for relative, content in dict(result.pop("_updates", {})).items():
-        (repo / relative).write_text(str(content), encoding="utf-8")
+    updates = dict(result.pop("_updates", {}))
+    complete = bool(result.pop("_complete", False))
+    result.pop("_fatal", None)
+    result.pop("_unresolved_paths", None)
+    if complete:
+        for relative, content in updates.items():
+            (repo / relative).write_text(str(content), encoding="utf-8")
+    else:
+        result["provisional_files"] = list(
+            dict.fromkeys(
+                [
+                    *(result.get("applied_files") or []),
+                    *(result.get("satisfied_files") or []),
+                ]
+            )
+        )
+        result["patch_applied"] = False
+        result["applied_files"] = []
+        result["satisfied_files"] = []
     return result
 
 
@@ -4278,8 +4471,14 @@ def _score_case(
     baseline_final: Mapping[str, Any],
     public_tests: Mapping[str, Any],
     final_tests: Mapping[str, Any],
+    *,
+    evaluation_context: str = "protocol",
 ) -> tuple[int, dict[str, bool]]:
     effective_dimension = _effective_diagnosis_dimension(diagnosis)
+    expected_dimension = _validated_expected_dimension(
+        oracle,
+        evaluation_context=evaluation_context,
+    )
     expected_files = {
         rel
         for rel in (
@@ -4298,7 +4497,7 @@ def _score_case(
     }
     checks = {
         "baseline_final_failure": not bool(baseline_final.get("passed")),
-        "diagnosis": effective_dimension == oracle.get("expected_dimension"),
+        "diagnosis": effective_dimension == expected_dimension,
         "file_selection": bool(expected_files) and changed_files == expected_files,
         "patch_applied": bool(patch.get("patch_applied")) and bool(changed_files),
         "public_tests": bool(public_tests.get("passed")),
@@ -4460,6 +4659,10 @@ def _preflight_fixture_integrity(
             raise ValueError("Feedback oracle case_id does not match the public case.")
         if final_oracle is not None and final_oracle.get("case_id") != case.get("case_id"):
             raise ValueError("Final oracle case_id does not match the public case.")
+        _validated_expected_dimension(
+            oracle,
+            evaluation_context=evaluation_context,
+        )
         role = str(entry.get("evaluation_role") or "")
         partitions = _oracle_test_partitions(
             oracle,
@@ -4687,10 +4890,19 @@ def _validate_run_policy(
     diagnostic_sha = _sha256_bytes(
         (ROOT / "app/services/project_autonomy/diagnostic_reasoning.py").read_bytes()
     )
+    ollama_client_sha = _sha256_bytes(
+        (ROOT / "app/services/context_brain/ollama_client.py").read_bytes()
+    )
     if runner_sha != str(policy.get("runner_sha256") or ""):
         raise FixtureIntegrityError("Run policy runner_sha256 mismatch.")
     if diagnostic_sha != str(policy.get("diagnostic_reasoning_sha256") or ""):
         raise FixtureIntegrityError("Run policy diagnostic_reasoning_sha256 mismatch.")
+    if ollama_client_sha != str(policy.get("ollama_client_sha256") or ""):
+        raise FixtureIntegrityError("Run policy ollama_client_sha256 mismatch.")
+    if policy.get("local_timeout_recovery_policy") != LOCAL_TIMEOUT_RECOVERY_POLICY:
+        raise FixtureIntegrityError(
+            "Run policy local_timeout_recovery_policy mismatch."
+        )
 
     fixture_commit = str(policy.get("fixture_commit") or "").strip()
     if fixture_commit:
@@ -4729,6 +4941,7 @@ def _validate_run_policy(
         "implementation_tree": implementation_tree,
         "fixture_commit": fixture_commit or None,
         "language_counts": language_counts,
+        "local_timeout_recovery_policy": LOCAL_TIMEOUT_RECOVERY_POLICY,
         "enforced": True,
         "_absolute_path": str(path),
     }
@@ -4764,6 +4977,7 @@ def validate_fixture(
     *,
     bindings: Mapping[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
+    evaluation_context: str = "protocol",
 ) -> dict[str, Any]:
     audit_events = events if events is not None else []
     if bindings is not None:
@@ -4799,6 +5013,10 @@ def validate_fixture(
         )
     if final_oracle is not None and final_oracle.get("case_id") != case.get("case_id"):
         raise ValueError("Final oracle case_id does not match the public case.")
+    expected_dimension = _validated_expected_dimension(
+        oracle,
+        evaluation_context=evaluation_context,
+    )
     partitions = _oracle_test_partitions(
         oracle,
         final_oracle=final_oracle,
@@ -4817,6 +5035,7 @@ def validate_fixture(
     final = _run_final_adjudication(case, partitions["final_files"])
     return {
         "case_id": case.get("case_id"),
+        "expected_dimension": expected_dimension,
         "test_runner": _case_test_runner(case),
         "public_passed": public["passed"],
         "feedback_failed": not feedback["passed"],
@@ -4887,6 +5106,7 @@ def _checkpoint_binding(
         "case_model_time_budget_sec": float(
             getattr(args, "case_model_time_budget", 690.0) or 690.0
         ),
+        "local_timeout_recovery_policy": LOCAL_TIMEOUT_RECOVERY_POLICY,
         "run_policy_sha256": str((run_policy_binding or {}).get("sha256") or ""),
         "implementation_commit": str(
             (run_policy_binding or {}).get("implementation_commit") or ""
@@ -5015,12 +5235,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     run_policy_binding: dict[str, Any] | None = None
     if args.validate_fixtures:
         validations = [
-            validate_fixture(
-                fixture_root,
-                prepared["entry"],
-                bindings=prepared["bindings"],
-                events=integrity_events,
-            )
+                validate_fixture(
+                    fixture_root,
+                    prepared["entry"],
+                    bindings=prepared["bindings"],
+                    events=integrity_events,
+                    evaluation_context=evaluation_context,
+                )
             for prepared in prepared_entries
         ]
         return {
@@ -5196,6 +5417,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 events=integrity_events,
                 phase="feedback_oracle_load",
                 case_id=case_id,
+            )
+            _validated_expected_dimension(
+                oracle,
+                evaluation_context=evaluation_context,
             )
             _validate_expected_ownership(case, oracle)
             if entry.get("final_oracle"):
@@ -5707,6 +5932,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 baseline_final,
                 public_tests,
                 final_tests,
+                evaluation_context=evaluation_context,
             )
             prompt_contract_closure = _prompt_contract_closure(repo, case)
             checks["prompt_contract_closure"] = not bool(prompt_contract_closure)

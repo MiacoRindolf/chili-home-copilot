@@ -329,7 +329,7 @@ def test_thinking_budget_exhaustion_gets_one_compact_non_thinking_retry(monkeypa
     assert calls[1]["json_object_valid"] is True
 
 
-def test_empty_transport_failure_does_not_consume_a_json_retry(monkeypatch):
+def test_non_timeout_transport_failure_does_not_consume_a_json_retry(monkeypatch):
     calls = []
 
     def fake_local_call(*_args, stage, calls, **_kwargs):
@@ -338,6 +338,7 @@ def test_empty_transport_failure_does_not_consume_a_json_retry(monkeypatch):
                 "stage": stage,
                 "response": "",
                 "thinking_budget_exhausted": False,
+                "error_kind": "transport_error",
             }
         )
         return ""
@@ -354,6 +355,53 @@ def test_empty_transport_failure_does_not_consume_a_json_retry(monkeypatch):
 
     assert response == ""
     assert [item["stage"] for item in calls] == ["diagnosis_judge"]
+
+
+def test_call_timeout_gets_one_compact_retry_inside_same_logical_lease(monkeypatch):
+    responses = iter(
+        [
+            ("", "call_timeout"),
+            ('{"hypotheses":[],"experiments":[],"conclusion":{}}', ""),
+        ]
+    )
+    monotonic = iter([100.0, 100.7])
+    monkeypatch.setattr(benchmark.time, "monotonic", lambda: next(monotonic))
+    calls = []
+    allocated = []
+
+    def fake_local_call(*_args, stage, calls, timeout, **_kwargs):
+        response, error_kind = next(responses)
+        allocated.append(timeout)
+        calls.append(
+            {
+                "stage": stage,
+                "response": response,
+                "thinking_budget_exhausted": False,
+                "error_kind": error_kind,
+            }
+        )
+        return response
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_local_call)
+
+    response = benchmark._diagnostic_json_call(
+        "qwen3:8b",
+        "investigator",
+        "Diagnose this case.",
+        calls,
+        1.0,
+    )
+
+    assert json.loads(response)["hypotheses"] == []
+    assert [item["stage"] for item in calls] == [
+        "diagnosis_investigator",
+        "diagnosis_investigator_json_retry",
+    ]
+    assert allocated == pytest.approx([0.7, 0.3])
+    assert sum(allocated) == pytest.approx(1.0)
+    assert calls[0]["logical_attempt"] == 1
+    assert calls[1]["logical_attempt"] == 2
+    assert calls[1]["recovery_trigger"] == "call_timeout"
 
 
 def test_local_call_uses_one_total_case_model_deadline(monkeypatch):
@@ -413,6 +461,8 @@ def test_local_call_records_prompt_timing_and_distinguishes_call_timeout(monkeyp
     assert calls[-1]["prompt_eval_count"] == 77
     assert calls[-1]["prompt_eval_duration_ns"] == 1234
     assert calls.model_time_used >= 0
+    assert calls[-1]["model_budget_clamped"] is False
+    assert calls[-1]["wall_deadline_clamped"] is False
 
 
 def test_qwen3_thinking_is_reserved_for_hypothesis_generation(monkeypatch):
@@ -526,6 +576,46 @@ def test_scoring_requires_real_final_repair_and_correct_ownership():
     assert weak_score < 70
     assert weak_checks["file_selection"] is False
     assert weak_checks["final_tests"] is False
+
+
+@pytest.mark.parametrize(
+    "oracle",
+    [
+        {},
+        {"expected_dimensions": ["code"]},
+        {"expected_dimension": "code", "expected_dimensions": ["code"]},
+        {"expected_dimension": "unknown"},
+        {"expected_dimension": "deployment"},
+        {"expected_dimension": " code"},
+        {"expected_dimension": ["code"]},
+    ],
+)
+def test_protocol_expected_dimension_schema_fails_closed(oracle):
+    with pytest.raises(benchmark.FixtureIntegrityError, match="expected_dimension"):
+        benchmark._validated_expected_dimension(oracle)
+
+
+def test_expected_dimension_schema_accepts_only_canonical_protocol_taxonomy():
+    assert {
+        benchmark._validated_expected_dimension({"expected_dimension": dimension})
+        for dimension in benchmark.REPAIR_DIMENSION_RUBRIC
+    } == set(benchmark.REPAIR_DIMENSION_RUBRIC)
+    assert benchmark._validated_expected_dimension(
+        {"expected_dimension": "unknown"},
+        evaluation_context="disclosed_replay",
+    ) == "unknown"
+
+
+def test_scoring_rejects_malformed_diagnosis_oracle():
+    with pytest.raises(benchmark.FixtureIntegrityError, match="singular"):
+        benchmark._score_case(
+            {"expected_dimensions": ["currency-specific precision"]},
+            {"report": {"conclusion": {"dimension": "data"}}},
+            {"changed_files": ["owner.py"], "patch_applied": True},
+            {"passed": False},
+            {"passed": True},
+            {"passed": True},
+        )
 
 
 def test_unaccepted_repair_plan_cannot_revise_diagnostic_conclusion():
@@ -1019,6 +1109,187 @@ def test_multifile_bundle_is_generated_once_and_applied_atomically(
     assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 2\n"
 
 
+def test_multifile_bundle_merges_nonconflicting_duplicate_approved_entries(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\nFLAG = False\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        benchmark,
+        "_local_call",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "producer.py",
+                        "blocks": [{"search": "VALUE = 1", "replace": "VALUE = 2"}],
+                    },
+                    {
+                        "path": "producer.py",
+                        "blocks": [
+                            {"search": "FLAG = False", "replace": "FLAG = True"}
+                        ],
+                    },
+                    {
+                        "path": "consumer.py",
+                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                    },
+                ]
+            }
+        ),
+    )
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Coordinate both files.",
+        "local-model",
+        [],
+        1.0,
+        stage="coordinated_bundle",
+    )
+
+    assert outcome["patch_applied"] is True
+    assert outcome["merged_duplicate_paths"] == ["producer.py"]
+    assert (repo / "producer.py").read_text(encoding="utf-8") == (
+        "VALUE = 2\nFLAG = True\n"
+    )
+    assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 2\n"
+
+
+def test_multifile_bundle_rejects_conflicting_duplicate_entries_without_writes(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        benchmark,
+        "_local_call",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "producer.py",
+                        "blocks": [{"search": "VALUE = 1", "replace": "VALUE = 2"}],
+                    },
+                    {
+                        "path": "producer.py",
+                        "blocks": [{"search": "VALUE = 1", "replace": "VALUE = 3"}],
+                    },
+                    {
+                        "path": "consumer.py",
+                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                    },
+                ]
+            }
+        ),
+    )
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Coordinate both files.",
+        "local-model",
+        [],
+        1.0,
+        stage="coordinated_bundle",
+        allow_adapter_recovery=False,
+    )
+
+    assert outcome["patch_applied"] is False
+    assert any("conflicting duplicate" in value for value in outcome["warnings"])
+    assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 1\n"
+
+
+def test_multifile_bundle_identity_replacement_is_explicit_no_progress(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        benchmark,
+        "_local_call",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "producer.py",
+                        "blocks": [{"search": "VALUE = 1", "replace": "VALUE = 1"}],
+                    },
+                    {
+                        "path": "consumer.py",
+                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                    },
+                ]
+            }
+        ),
+    )
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Coordinate both files.",
+        "local-model",
+        [],
+        1.0,
+        stage="coordinated_bundle",
+        allow_adapter_recovery=False,
+    )
+
+    assert outcome["patch_applied"] is False
+    assert any("identity replacement" in value for value in outcome["warnings"])
+    assert outcome["applied_files"] == []
+    assert outcome["satisfied_files"] == []
+    assert outcome["provisional_files"] == ["consumer.py"]
+    assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 1\n"
+
+
+def test_multifile_bundle_reports_transport_failure_without_omission_noise(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "producer.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "consumer.py").write_text("SEEN = 1\n", encoding="utf-8")
+    calls = []
+
+    def fake_call(*_args, stage, calls, **_kwargs):
+        calls.append({"stage": stage, "error_kind": "case_budget_timeout"})
+        return ""
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+
+    outcome = benchmark._apply_local_edit_bundle(
+        repo,
+        ["producer.py", "consumer.py"],
+        "Coordinate both files.",
+        "local-model",
+        calls,
+        1.0,
+        stage="coordinated_bundle",
+    )
+
+    assert outcome["patch_applied"] is False
+    assert outcome["transport_failed"] is True
+    assert len(calls) == 1
+    assert any("transport failed" in value for value in outcome["warnings"])
+    assert not any("omitted required path" in value for value in outcome["warnings"])
+    assert (repo / "producer.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (repo / "consumer.py").read_text(encoding="utf-8") == "SEEN = 1\n"
+
+
 def test_multifile_bundle_recovers_once_from_stale_search(
     tmp_path,
     monkeypatch,
@@ -1032,21 +1303,21 @@ def test_multifile_bundle_recovers_once_from_stale_search(
     def fake_call(*_args, stage, **_kwargs):
         stages.append(stage)
         producer_search = "VALUE = stale" if len(stages) == 1 else "VALUE = 1"
-        return json.dumps(
+        edits = [
             {
-                "edits": [
-                    {
-                        "path": "producer.py",
-                        "blocks": [
-                            {"search": producer_search, "replace": "VALUE = 2"}
-                        ],
-                    },
-                    {
-                        "path": "consumer.py",
-                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
-                    },
-                ]
+                "path": "producer.py",
+                "blocks": [{"search": producer_search, "replace": "VALUE = 2"}],
             }
+        ]
+        if len(stages) == 1:
+            edits.append(
+                {
+                    "path": "consumer.py",
+                    "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                }
+            )
+        return json.dumps(
+            {"edits": edits}
         )
 
     monkeypatch.setattr(benchmark, "_local_call", fake_call)
@@ -1101,22 +1372,22 @@ def test_multifile_bundle_recovers_once_from_nonunique_search(
             if len(stages) == 1
             else "PRIMARY = 2\nMARK = 2"
         )
-        return json.dumps(
+        edits = [
             {
-                "edits": [
-                    {
-                        "path": "producer.py",
-                        "blocks": [
-                            {"search": producer_search, "replace": producer_replace}
-                        ],
-                    },
-                    {
-                        "path": "consumer.py",
-                        "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
-                    },
-                ]
+                "path": "producer.py",
+                "blocks": [
+                    {"search": producer_search, "replace": producer_replace}
+                ],
             }
-        )
+        ]
+        if len(stages) == 1:
+            edits.append(
+                {
+                    "path": "consumer.py",
+                    "blocks": [{"search": "SEEN = 1", "replace": "SEEN = 2"}],
+                }
+            )
+        return json.dumps({"edits": edits})
 
     monkeypatch.setattr(benchmark, "_local_call", fake_call)
 
@@ -2755,6 +3026,38 @@ def test_blinded_run_rejects_missing_external_final_oracle_before_model_access(
         benchmark.run(args)
 
 
+@pytest.mark.parametrize("validate_fixtures", [False, True])
+def test_protocol_rejects_plural_mechanism_dimensions_before_model_access(
+    tmp_path,
+    monkeypatch,
+    validate_fixtures,
+):
+    fixture = tmp_path / "fixture"
+    paths = _write_protocol_fixture(fixture)
+    oracle = json.loads(paths["oracle"].read_text(encoding="utf-8"))
+    oracle.pop("expected_dimension")
+    oracle["expected_dimensions"] = [
+        "currency-specific precision",
+        "residual-conserving allocation",
+    ]
+    paths["oracle"].write_text(json.dumps(oracle), encoding="utf-8")
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: (_ for _ in ()).throw(AssertionError("model registry was accessed")),
+    )
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        case=[],
+        validate_fixtures=validate_fixtures,
+        evaluation_context="protocol",
+        model="local-model",
+    )
+
+    with pytest.raises(benchmark.FixtureIntegrityError, match="singular"):
+        benchmark.run(args)
+
+
 def test_fixture_paths_are_contained_and_exist_before_model_access(tmp_path, monkeypatch):
     fixture = tmp_path / "fixture"
     (fixture / "cases").mkdir(parents=True)
@@ -4194,6 +4497,10 @@ def _current_run_policy(
         "diagnostic_reasoning_sha256": benchmark._sha256_bytes(
             Path(benchmark.diagnostic_reasoning.__file__).read_bytes()
         ),
+        "ollama_client_sha256": benchmark._sha256_bytes(
+            Path(benchmark.ollama_client.__file__).read_bytes()
+        ),
+        "local_timeout_recovery_policy": benchmark.LOCAL_TIMEOUT_RECOVERY_POLICY,
     }
     path = tmp_path / "run-policy.json"
     path.write_text(json.dumps(policy), encoding="utf-8")
@@ -4242,6 +4549,10 @@ def test_run_policy_enforces_models_budgets_case_mix_and_source_freeze(
 
     assert binding["enforced"] is True
     assert binding["language_counts"] == {"node": 1, "python": 1}
+    assert (
+        binding["local_timeout_recovery_policy"]
+        == benchmark.LOCAL_TIMEOUT_RECOVERY_POLICY
+    )
     assert [item["event"] for item in events] == [
         "run_policy_verified",
         "run_policy_digest_reverified",
@@ -4284,6 +4595,57 @@ def test_run_policy_rejects_model_and_language_drift(tmp_path, monkeypatch):
     value["primary_model"] = "another-model"
     policy.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(benchmark.FixtureIntegrityError, match="primary_model mismatch"):
+        benchmark._validate_run_policy(policy, **common)
+
+
+def test_run_policy_seals_ollama_transport_and_timeout_recovery(tmp_path, monkeypatch):
+    implementation_commit = benchmark._require_git_success(
+        "rev-parse", "HEAD", label="test HEAD"
+    )
+    args = SimpleNamespace(
+        model="qwen2.5-coder:7b",
+        escalation_model="",
+        max_repairs=2,
+        max_escalation_repairs=0,
+        timeout=150.0,
+        case_model_time_budget=480.0,
+    )
+    common = {
+        "args": args,
+        "fixture_root": FIXTURE_ROOT,
+        "prepared_entries": [{"language": "python"}],
+        "evaluation_context": "protocol",
+        "reasoning_model": "qwen3:8b",
+        "repair_schedule": ["qwen2.5-coder:7b", "qwen2.5-coder:7b"],
+        "events": [],
+    }
+
+    policy = _current_run_policy(
+        tmp_path,
+        fixture_root=FIXTURE_ROOT,
+        implementation_commit=implementation_commit,
+        languages={"python": 1},
+    )
+    monkeypatch.setattr(benchmark, "_run_policy_path", lambda _value: policy)
+    value = json.loads(policy.read_text(encoding="utf-8"))
+    value["ollama_client_sha256"] = "0" * 64
+    policy.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(benchmark.FixtureIntegrityError, match="ollama_client_sha256"):
+        benchmark._validate_run_policy(policy, **common)
+
+    policy = _current_run_policy(
+        tmp_path,
+        fixture_root=FIXTURE_ROOT,
+        implementation_commit=implementation_commit,
+        languages={"python": 1},
+    )
+    value = json.loads(policy.read_text(encoding="utf-8"))
+    value["local_timeout_recovery_policy"] = "unbounded_retry"
+    policy.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(
+        benchmark.FixtureIntegrityError,
+        match="local_timeout_recovery_policy",
+    ):
         benchmark._validate_run_policy(policy, **common)
 
 
