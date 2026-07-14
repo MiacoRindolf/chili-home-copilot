@@ -752,6 +752,13 @@ bounded unit contracts, but exposing the full graph to each model stage regresse
 result requires a compact deterministic owner hint rather than repeated verbose graph serialization. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_CALLER_CALLEE_ATTEMPT_RECEIPT.md`.
 
+The compact-owner attempt still scored **25/100** and solved **0/1**, but it corrected the substantive ownership
+error: fallback, planner, and editor all chose `trading/auto_trader.py` and kept `trading/query_store.py` as context.
+The first patch issued separate locally bounded `user` and `system` calls, then failed to synthesize identity dedupe,
+global mode-aware ordering, and the final cap. Four diagnosis timeouts consumed 300 seconds, so feedback repair
+could not complete. Full details:
+`project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_COMPACT_OWNER_ATTEMPT_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
