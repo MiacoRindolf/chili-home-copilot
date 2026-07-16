@@ -43,6 +43,14 @@ _MAX_SOURCE_BYTES = 64 * 1024 * 1024
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_REQUEST_AGE_SECONDS = 60.0
 _MAX_ACCOUNT_SNAPSHOT_AGE_SECONDS = 30.0
+# Startup evidence is a process-instance/bundle-identity record, not broker
+# truth: the operator flow stages dependencies and runs its long-TTL probe
+# authorities (focused shard, rollback baseline, lifecycle) for several
+# minutes before the capture smoke consumes this bundle, so reusing the 30s
+# account-snapshot window made every real end-to-end run fail closed with
+# STALE_EVIDENCE. Account freshness at order time is enforced separately by
+# the 30s broker_account probe and the transport-boundary re-reads.
+_MAX_STARTUP_EVIDENCE_AGE_SECONDS = 900.0
 _MAX_FUTURE_SKEW_SECONDS = 5.0
 _MAX_PROJECTION_DEPTH = 16
 _MAX_PROJECTION_ITEMS = 10_000
@@ -1204,7 +1212,7 @@ def build_iqfeed_capture_bootstrap_bundle(
             "freshness_policy": {
                 "max_future_skew_seconds": _MAX_FUTURE_SKEW_SECONDS,
                 "resource_benchmark_max_age_seconds": 7 * 24 * 60 * 60.0,
-                "startup_evidence_max_age_seconds": _MAX_ACCOUNT_SNAPSHOT_AGE_SECONDS,
+                "startup_evidence_max_age_seconds": _MAX_STARTUP_EVIDENCE_AGE_SECONDS,
             },
             "resource_benchmark": {
                 "path": str(benchmark_path),
