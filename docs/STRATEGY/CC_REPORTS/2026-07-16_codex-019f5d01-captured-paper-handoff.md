@@ -169,6 +169,26 @@ Preserved at `codex/validate-s16-fixture-checkpoint-20260716` (`8fd9d95`). Triag
 
 All DIAGNOSTIC_ONLY / read-only; none certify activation. Newest last: `source_snapshot_rev3…`, `postfix_delta…`, `rolling_firstdip_redteam…`, `iqfeed_host_readiness…`, `capture_to_alpaca_paper_redteam…`, `alpaca_entry_state_model…`, `alpaca_entry_model_v2_redteam…` (verdict: reproducible but INVALID as replacement/proof), `ross_coverage_master_crosscheck{,_v2}…`, `ross_source_binding_contract…`, `capture_order_lifecycle_fault_model…`, `capture_order_policy_oracle_v1/v2…`, `captured_paper_implementation_closure_fable5_20260716T062223Z` (binding PASS, C1–C20 + W1–W8), `captured_paper_livehead_evidence_gate_fable5_20260716T080418Z` (**latest**; aggregate NOT-PASS; G1–G9). Each has a `.zip` + `.zip.sha256`.
 
+## 9b. Evidence-run state (LIVE, 2026-07-16 PM session — operator said "go")
+
+Operator approvals banked: production restore (full stack) ✓; migrations 318–348 on prod DB ✓; 4 legacy task paths → absolute System32 (2× UAC) ✓; old-lane-pause-at-activation policy ✓.
+
+| Step | Status | Artifact / value |
+|---|---|---|
+| Production stack restore | ✅ VERIFIED | postgres E:-data on 5433 healthy; web/scheduler/exec up (exec deliberately arming-OFF, healthcheck flags it — expected); exec db ping OK; postgres re-attached to `chili-home-copilot_default` with alias `postgres` (network was lost on stop) |
+| IQFeed bridges | ✅ | trade bridge restarted (was hung on stale D:-DB connection): 15,913 ticks/2min into prod DB; depth bridge started; both processes verified |
+| Migrations 315–348 on prod `chili` | ✅ | 315–317 pre-applied by Codex session; 318–348 applied this session (31 new, clean); `schema_version` now includes all |
+| Fresh host snapshot | ✅ VALIDATED | `D:\CHILI-Docker\captured-paper\host_snapshot_20260716T114601\b93cbf46…\` manifest sha `b93cbf46245c9598d0ea9e118982fb9a7f0f6bba638cc4059f48e0de0cbc2ad6`; reason `WRAPPER_RESTORE_AUTHORITY_CONTRACT_SATISFIED`; note: output-root must PRE-EXIST (else PATH_UNREADABLE) |
+| Sealed runtime env | ✅ BUILT | `D:\CHILI-Docker\captured-paper\runtime\captured-paper.env` output sha `e76649aab28c1868d7fa8e08823ddd1cb95492baae0030af805eb5a82705e605`; source = desktop `D:\dev\chili-home-copilot\.env` (sha `e8983289…`); bound to PAPER UUID + v3 bridge pin + channel `momentum_iqfeed_l1` |
+| Alpaca PAPER account | ✅ | UUID `3e0776af-76cd-4afd-8fe1-f2ee8dc6242f`, ACTIVE, not blocked, equity $71,868.33 |
+| v3 bridge pin | ✅ value | `iqfeed-l1-exact-print-provenance-v3+sha256:0ed10bccd46a548a` (candidate branch file; RUNNING bridge is legacy non-v3 by design until cutover Apply swaps it) |
+| Capture benchmark | ✅ (unretained run accepted 100k/100k) | retained rerun with `--keep` in flight; output under `D:\CHILI-Docker\chili-data\benchmarks\` |
+| Capture benchmark (retained) | ✅ | `D:\CHILI-Docker\chili-data\benchmarks\chili-replay-capture-benchmark-753b74d1…-i7biji50\reports\39dced05a9db7e5e253ae306644d54588767b3cfffd43270e83c000b35c1e2f3.json` (sha = filename; accepted; v4; run with `--keep`) |
+| Bootstrap bundle | ✅ BUILT | **activation_generation = `1136c251-3873-4238-9239-ac7cae05970c`** (UUID; dapat consistent sa buong chain). Manifest `D:\CHILI-Docker\captured-paper\bootstrap\artifacts\objects\51\5144d2374d2257bdc55972f151659589b09204e7bb4b0dad1557d8d040b04787.json` (sha `5144d237…`); startup evidence `22401feb…`; commit `afb67af0…`. Driver pattern: fresh GET /v2/account (seconds-old timestamps) + `_SOURCE_RELATIVE_PATHS` hashes + retained benchmark ref; request schema `chili.iqfeed-capture-bootstrap-build-request.v1` (valid shape: `tests/test_build_iqfeed_capture_bootstrap_bundle.py::_valid_request`) |
+| Operator plan → flow → probes | ⏳ | plan schema fields in `captured_paper_operator_flow.py::configuration_from_plan`; then ValidateOnly → **[APPROVAL #1]** Apply → NoOrderSmoke → finalize → **[APPROVAL #2]** ActivatePaper |
+
+Old-tree salvage triage DONE (see agent report in session): BIN-2 port candidates = `ross_transcript_bridge` (⭐ main imports it in 3 places but file never committed — silent no-op gate in prod!), `tight_false_break_entry`, `volnorm_exit`, `extreme_explosive_eligibility`, `feature_flags`+`operator_readiness` delta, `project_autonomy` skill layer; the 8 core trading files = superseded by July main (do not port).
+
 ## 10. Coordination
 
 - Claude session "Codex chat local setup" is active on this box (Docker recovery; author of the post-cutoff commits). Ownership split: infra recovery = that session; codex-broker completion run = this session; salvage = follow-up/parallel.
