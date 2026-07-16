@@ -81,6 +81,18 @@ def _build_authority():
                 "Alpaca open-order census capabilities are not serializable"
             )
 
+        # In-process copies must carry the SAME live authority object — a
+        # copy never re-mints payload/nonce/mac, so authority is neither
+        # duplicated nor lost. Without these, copy.deepcopy falls back to
+        # __reduce_ex__ and the operator flow's recorded GET-only read
+        # replay (which deep-copies census payloads to freeze them) fails
+        # closed. Serialization across process/disk stays refused above.
+        def __copy__(self):
+            return self
+
+        def __deepcopy__(self, memo):
+            return self
+
     def register(reader: Callable[..., Any]) -> None:
         nonlocal issuer_code
         code = getattr(reader, "__code__", None)

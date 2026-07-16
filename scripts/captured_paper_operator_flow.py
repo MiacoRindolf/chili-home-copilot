@@ -953,6 +953,11 @@ def build_live_operator_composition(
             capture_health_authority=health,
             trade_forced_symbols=(config.capture_certification_symbol,),
             depth_forced_symbols=(config.capture_certification_symbol,),
+            pressure_sampler=lambda: _measure_capture_pressure(
+                preflight=preflight,
+                wall_clock=wall_clock,
+                monotonic_clock=monotonic_clock,
+            ),
         )
         return run_capture_only_preactivation_smoke(
             smoke_config,
@@ -1050,6 +1055,20 @@ def _record_exact_broker_reads(
             "BROKER_ADAPTER_INVALID", "exact PAPER read adapter is unavailable"
         )
     try:
+        # The real adapter's connection receipt and audit snapshot both require
+        # a frozen PAPER account UUID, and the adapter never self-binds -- the
+        # account identity must be read and bound FIRST or every later exact
+        # read fails closed with an unbound-generation error.
+        account = adapter.get_account_snapshot()
+        account_id = str((account or {}).get("account_id") or "")
+        if (account or {}).get("ok") is False or account_id != str(
+            context.expected_account_id
+        ):
+            raise RuntimeError("exact PAPER account identity mismatch")
+        binder = getattr(adapter, "bind_account_id", None)
+        if callable(binder) and not getattr(adapter, "bound_account_id", None):
+            if binder(account_id) is not True:
+                raise RuntimeError("exact PAPER account bind was refused")
         connection = adapter.get_paper_connection_generation_receipt()
         audit_before = adapter.get_order_submission_audit_snapshot()
         connection_sha = str(connection.get("receipt_sha256") or "")
@@ -1062,7 +1081,6 @@ def _record_exact_broker_reads(
             "connection_receipt_sha256": connection_sha,
             "orders_submitted_before": before_count,
         }
-        account = adapter.get_account_snapshot()
         positions = adapter.get_paper_position_census(read_binding=binding)
         orders = adapter.get_paper_open_order_census(read_binding=binding)
         audit_after = adapter.get_order_submission_audit_snapshot()

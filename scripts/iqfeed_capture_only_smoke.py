@@ -410,6 +410,14 @@ class CaptureOnlySmokeConfiguration:
     reconnect_wait_seconds: float = 10.0
     trade_bridge: Any | None = None
     depth_bridge: Any | None = None
+    # The pinned resource policy expires a pressure sample after
+    # pressure_sample_max_age_seconds (5s in the benchmark-derived binding),
+    # which is shorter than this smoke's own observation window -- a single
+    # composition-time sample therefore goes stale MID-WINDOW and every ring
+    # promotion after that records a stale-pressure gap. A caller-supplied
+    # sampler lets the observation loop keep the controller fed for the whole
+    # window; None preserves the single-sample behavior for short windows.
+    pressure_sampler: Any | None = None
 
     def __post_init__(self) -> None:
         # Runtime-only imports keep module import and standalone fail-closed
@@ -453,6 +461,10 @@ class CaptureOnlySmokeConfiguration:
         if (self.trade_bridge is None) != (self.depth_bridge is None):
             raise CaptureOnlySmokeError(
                 "BRIDGE_ROSTER_INVALID", "L1 and L2 bridges must be supplied together"
+            )
+        if self.pressure_sampler is not None and not callable(self.pressure_sampler):
+            raise CaptureOnlySmokeError(
+                "PRESSURE_SAMPLE_UNAVAILABLE", "pressure sampler is not callable"
             )
 
 
@@ -1012,7 +1024,39 @@ def run_capture_only_preactivation_smoke(
         _validate_capture_only_composition_boundary(composition)
         deadline = monotonic_clock() + configuration.observation_timeout_seconds
         last_exact_print_error: CaptureOnlySmokeError | None = None
+        # Keep the pinned-policy pressure freshness window satisfied for the
+        # whole observation window (see CaptureOnlySmokeConfiguration).
+        pressure_refresh_interval: float | None = None
+        if configuration.pressure_sampler is not None:
+            try:
+                pressure_refresh_interval = (
+                    float(
+                        composition.pressure_controller.binding.policy.pressure_sample_max_age_seconds
+                    )
+                    / 2.0
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise CaptureOnlySmokeError(
+                    "PRESSURE_SAMPLE_UNAVAILABLE",
+                    "pressure freshness policy is unavailable",
+                ) from exc
+        last_pressure_refresh = monotonic_clock()
         while monotonic_clock() < deadline:
+            if (
+                pressure_refresh_interval is not None
+                and monotonic_clock() - last_pressure_refresh
+                >= pressure_refresh_interval
+            ):
+                try:
+                    composition.pressure_controller.observe(
+                        configuration.pressure_sampler()
+                    )
+                except BaseException as exc:
+                    raise CaptureOnlySmokeError(
+                        "PRESSURE_SAMPLE_UNAVAILABLE",
+                        "pressure re-sampling failed during observation",
+                    ) from exc
+                last_pressure_refresh = monotonic_clock()
             provider = host._supervisor.health() if host._supervisor else {}
             if provider.get("all_ready") is not True or provider.get("failures"):
                 raise CaptureOnlySmokeError(

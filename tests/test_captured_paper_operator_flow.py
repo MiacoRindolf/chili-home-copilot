@@ -769,9 +769,9 @@ def test_broker_read_is_recorded_in_memory_and_revalidated_without_post() -> Non
     assert result["paper_execution_only"] is True
     assert result["position_count"] == result["open_order_count"] == 0
     assert live.calls == [
+        "account",
         "connection",
         "audit",
-        "account",
         "positions",
         "orders",
         "audit",
