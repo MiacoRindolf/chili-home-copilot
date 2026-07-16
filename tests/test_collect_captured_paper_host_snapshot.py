@@ -342,7 +342,7 @@ def test_wrapper_chain_becomes_typed_restore_authority_without_claiming_provenan
             {key: item for key, item in value.items() if key != "contract_sha256"}
         )
     restore_raw = cutover._canonical_json_bytes(dict(collection.restore_plan_document))
-    restore_path = tmp_path / "wrapper-restore-plan-v3.json"
+    restore_path = tmp_path / "wrapper-restore-plan-v4.json"
     restore_path.write_bytes(restore_raw)
     parsed_restore = cutover._parse_restore_plan(
         path=restore_path,

@@ -1030,7 +1030,7 @@ def collect_host_snapshot(
     )
 
     # Reuse the exact downstream predicate.  The diagnostic projection above
-    # remains non-authoritative; only the typed restore-plan v3 contracts are
+    # remains non-authoritative; only the typed restore-plan v4 contracts are
     # admitted here.
     task_snapshot = host_cutover.TaskSnapshot(
         captured_at=captured_at.astimezone(UTC),
