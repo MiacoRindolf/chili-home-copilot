@@ -3740,68 +3740,6 @@ def persist_orphan_close_request(
         return False
 
 
-def consume_orphan_handoff_close_post_permission(
-    db: Session,
-    *,
-    symbol: str,
-    claim_token: str,
-    client_order_id: str,
-    close_request: dict[str, Any],
-    account_scope: str | None = None,
-) -> bool:
-    """Consume the sole handoff-close POST permission immediately before HTTP.
-
-    ``persist_orphan_close_request`` deliberately lets a byte-equal competitor
-    re-freeze the same instruction, so the freeze alone cannot stop two workers
-    from both crossing the adapter seam with the same CID — that duplicate-order
-    safety was delegated to broker-side CID dedup (livehead-audit gap G2).  This
-    CAS flips ``handoff_close_post_consumed`` exactly once per claim lifetime
-    for the byte-equal frozen request; a loser performs zero POSTs and recovers
-    only through the same-CID reconciliation path.  Absence/time never recycles
-    this permission — the neutered absent-rotation path already encodes that a
-    lost POST resolves through exact terminal reconciliation, not a re-POST.
-    """
-    scope = account_scope or alpaca_account_scope()
-    cid = str(client_order_id or "").strip()
-    request = dict(close_request or {})
-    if not cid or str(request.get("client_order_id") or "").strip() != cid:
-        return False
-    marker = {
-        "handoff_close_post_consumed": True,
-        "handoff_close_post_consumed_at_utc": (
-            datetime.now(timezone.utc).isoformat()
-        ),
-    }
-    try:
-        result = db.execute(text(
-            "UPDATE broker_symbol_action_claims SET "
-            " metadata_json = metadata_json || CAST(:marker AS jsonb),"
-            " updated_at = NOW() "
-            "WHERE account_scope = :scope AND symbol = :symbol "
-            "  AND claim_token = :token AND action = 'orphan_flatten' "
-            "  AND phase IN ('claimed', 'submit_indeterminate') "
-            "  AND client_order_id = :client_order_id "
-            "  AND metadata_json->'close_request' = CAST(:request AS jsonb) "
-            "  AND (metadata_json->>'handoff_close_post_consumed')"
-            "      IS DISTINCT FROM 'true'"
-        ), {
-            "scope": scope,
-            "symbol": _symbol(symbol),
-            "token": str(claim_token),
-            "client_order_id": cid,
-            "request": json.dumps(request, separators=(",", ":"), default=str),
-            "marker": json.dumps(marker, separators=(",", ":"), default=str),
-        })
-        return int(result.rowcount or 0) == 1
-    except Exception:
-        _log.warning(
-            "[alpaca_claim] handoff close post-permission consume failed for %s",
-            symbol,
-            exc_info=True,
-        )
-        return False
-
-
 def bind_orphan_close_request(
     db: Session,
     *,
@@ -6339,19 +6277,6 @@ def persist_orphan_close_request_committed(**kwargs: Any) -> bool:
     try:
         return bool(
             _with_short_session(lambda db: persist_orphan_close_request(db, **kwargs))
-        )
-    except Exception:
-        return False
-
-
-def consume_orphan_handoff_close_post_permission_committed(**kwargs: Any) -> bool:
-    try:
-        return bool(
-            _with_short_session(
-                lambda db: consume_orphan_handoff_close_post_permission(
-                    db, **kwargs
-                )
-            )
         )
     except Exception:
         return False
