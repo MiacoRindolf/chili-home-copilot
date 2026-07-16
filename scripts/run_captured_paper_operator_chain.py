@@ -1,10 +1,13 @@
 """Operator convenience driver: fresh bundle + host snapshot + plan -> operator flow.
 
 Bawat attempt ay bagong activation generation (append-only ang generations).
-Kailangan: TEST_DATABASE_URL na *_test; production postgres sa 5433; IQFeed up;
-REGULAR MARKET HOURS para sa exact-print smoke. Inner error codes ay tine-trace
-para hindi mawala sa sanitized na operator JSON.
+Kailangan: TEST_DATABASE_URL na *_test; production postgres sa 5433; IQFeed up
+AT umaagos ang ticks (premarket / RTH / after-hours - lahat OK, hindi
+market-hours-gated: ang certification symbol ay LIVE-DERIVED mula sa kung ano
+ang aktwal na nagpi-print ngayon). Inner error codes ay tine-trace para hindi
+mawala sa sanitized na operator JSON.
 """
+import hashlib
 import json
 import sys
 import uuid
@@ -24,6 +27,29 @@ print("BENCHMARK:", BENCH_PATH, flush=True)
 ACCOUNT_ID = "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f"
 GEN = str(uuid.uuid4())
 print("GENERATION:", GEN, flush=True)
+
+# The exact-print smoke certifies capture on ONE symbol and needs it to print
+# within a bounded window. A hardcoded mega-cap (e.g. AAPL) is dead outside
+# regular hours, so certify against whatever is actually flowing on the live
+# feed right now - this makes the smoke session-agnostic (premarket / RTH /
+# after-hours), which is the whole point of a capture-pipeline gate.
+import re as _re
+from sqlalchemy import create_engine as _ce, text as _t
+
+_eng = _ce("postgresql://chili:chili@localhost:5433/chili")
+with _eng.connect() as _c:
+    _cands = _c.execute(
+        _t(
+            "SELECT symbol, count(*) n FROM iqfeed_trade_ticks "
+            "WHERE observed_at > now() - interval '90 seconds' "
+            "GROUP BY symbol ORDER BY n DESC LIMIT 40"
+        )
+    ).fetchall()
+CERT_SYMBOL = next(
+    (str(s) for s, _n in _cands if _re.fullmatch(r"[A-Z]{1,6}", str(s))),
+    "SPY",
+)
+print("CERT_SYMBOL (live-derived):", CERT_SYMBOL, flush=True)
 
 # ---- error tracing (surface inner cutover codes) ----
 from scripts import captured_paper_host_cutover as hc
@@ -173,7 +199,7 @@ plan = {
     "process_snapshot_sha256": sha_of(proc),
     "restore_plan_path": str(rest),
     "restore_plan_sha256": sha_of(rest),
-    "capture_certification_symbol": "AAPL",
+    "capture_certification_symbol": CERT_SYMBOL,
     "allowed_read_roots": [
         str(REPO),
         str(CP),
