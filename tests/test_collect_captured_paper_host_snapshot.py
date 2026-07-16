@@ -5,6 +5,7 @@ from html import escape
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Mapping, Sequence
 
 import pytest
@@ -16,14 +17,36 @@ from scripts import collect_captured_paper_host_snapshot as collector
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
 
 
-def _task_xml(*, command: str, arguments: str, enabled: bool = True) -> bytes:
+def _task_xml(
+    *,
+    command: str,
+    arguments: str,
+    enabled: bool = True,
+    name: str = "CHILI-IQFeed-Trade-Bridge-Daily",
+    run_level: str = "LeastPrivilege",
+    triggers: str | None = None,
+) -> bytes:
     state = "true" if enabled else "false"
+    if triggers is None:
+        if name.endswith("-Logon"):
+            triggers = "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+        else:
+            triggers = (
+                "<CalendarTrigger><StartBoundary>2026-01-01T10:36:00</StartBoundary>"
+                "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>"
+                "</CalendarTrigger>"
+            )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<Task version="1.4" '
         'xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        f"<Triggers>{triggers}</Triggers>"
+        '<Principals><Principal id="Author">'
+        "<UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>"
+        "<LogonType>InteractiveToken</LogonType>"
+        f"<RunLevel>{run_level}</RunLevel></Principal></Principals>"
         f"<Settings><Enabled>{state}</Enabled></Settings>"
-        "<Actions><Exec>"
+        '<Actions Context="Author"><Exec>'
         f"<Command>{escape(command)}</Command>"
         f"<Arguments>{escape(arguments)}</Arguments>"
         "</Exec></Actions></Task>"
@@ -39,6 +62,28 @@ def test_schtasks_ascii_utf16_declaration_is_reencoded_without_guessing() -> Non
     assert normalized.startswith(b"\xff\xfe")
     assert cutover._task_enabled_from_xml(normalized) is True
     assert collector._normalize_schtasks_xml_output(normalized) == normalized
+
+
+def test_backend_and_collector_normalize_identical_schtasks_xml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The exact ASCII-declaring-UTF-16 payload the collector repairs must
+    # produce identical hash-authoritative bytes through the cutover backend.
+    observed = _task_xml(command=r"C:\Windows\wscript.exe", arguments="x.vbs")
+    observed = observed.replace(b'encoding="UTF-8"', b'encoding="UTF-16"')
+    normalized = collector._normalize_schtasks_xml_output(observed)
+
+    backend = cutover.WindowsHostCutoverBackend(bindings=())
+    monkeypatch.setattr(
+        backend,
+        "_task_command",
+        lambda arguments, **kwargs: SimpleNamespace(stdout=observed),
+    )
+    task = backend._get_task_unrestricted("CHILI-IQFeed-Trade-Bridge-Daily")
+
+    assert task is not None
+    assert task.xml == normalized
+    assert task.enabled is True
 
 
 def test_schtasks_non_ascii_misdeclared_xml_fails_closed() -> None:
@@ -151,6 +196,7 @@ def _direct_fixture(tmp_path: Path):
         raw = _task_xml(
             command=process.executable_path,
             arguments=cutover._quote_windows_arguments(process.cmdline[1:]),
+            name=name,
         )
         tasks[name] = cutover.TaskObservation(name=name, xml=raw, enabled=True)
     return tasks, (depth, trade)
@@ -218,7 +264,7 @@ def _wrapper_fixture(
         )
         arguments = cutover._quote_windows_arguments(argv)
         parsed_arguments[arguments] = argv
-        raw = _task_xml(command=command, arguments=arguments)
+        raw = _task_xml(command=command, arguments=arguments, name=name)
         tasks[name] = cutover.TaskObservation(name=name, xml=raw, enabled=True)
     return tasks, processes, parsed_arguments, wrapper, starters
 
@@ -511,6 +557,104 @@ def test_wrapper_authority_rejects_requires_module_directive(
         )
 
 
+def test_collection_rejects_contract_diagnostic_hash_skew_during_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A starter mutated between contract build and diagnostic build must not
+    # produce VALIDATED with the contract sealing old bytes while diagnostics
+    # attest new ones.
+    tasks, processes, parsed, _wrapper, starters = _wrapper_fixture(tmp_path)
+    real_build = collector.build_wrapper_chain_evidence_document
+
+    def mutate_then_build(**kwargs: object):
+        starters["iqfeed_trade_bridge"].write_bytes(
+            starters["iqfeed_trade_bridge"].read_bytes() + b"\n# skewed\n"
+        )
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(
+        collector, "build_wrapper_chain_evidence_document", mutate_then_build
+    )
+    with pytest.raises(
+        collector.CapturedPaperHostSnapshotError,
+        match="LAUNCH_CONTRACT_SOURCE_DRIFT|CONTRACT_DIAGNOSTIC_IDENTITY_SKEW",
+    ):
+        collector.collect_host_snapshot(
+            probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
+            legacy_root=tmp_path,
+            captured_at=NOW,
+            argv_parser=lambda value: parsed[value],
+        )
+
+
+def _rebuild_task(
+    task: cutover.TaskObservation, **overrides: object
+) -> cutover.TaskObservation:
+    projection = cutover._task_exec_projection_from_xml(task.xml)
+    raw = _task_xml(
+        command=projection["command"],
+        arguments=projection["arguments"],
+        name=task.name,
+        **overrides,  # type: ignore[arg-type]
+    )
+    return cutover.TaskObservation(name=task.name, xml=raw, enabled=True)
+
+
+def test_wrapper_authority_rejects_principal_run_level_divergence(
+    tmp_path: Path,
+) -> None:
+    # Daily=LeastPrivilege vs Logon=HighestAvailable is a different security
+    # context, not the same launch semantics with a different trigger.
+    tasks, processes, parsed, _wrapper, _starters = _wrapper_fixture(tmp_path)
+    name = "CHILI-IQFeed-Trade-Bridge-Logon"
+    tasks[name] = _rebuild_task(tasks[name], run_level="HighestAvailable")
+    with pytest.raises(
+        collector.CapturedPaperHostSnapshotError,
+        match="LEGACY_LAUNCH_PAIR_MISMATCH",
+    ):
+        collector.collect_host_snapshot(
+            probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
+            legacy_root=tmp_path,
+            captured_at=NOW,
+            argv_parser=lambda value: parsed[value],
+        )
+
+
+_LOGON_TRIGGER = "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+_CALENDAR_TRIGGER = (
+    "<CalendarTrigger><StartBoundary>2026-01-01T10:36:00</StartBoundary>"
+    "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>"
+    "</CalendarTrigger>"
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "triggers"),
+    [
+        ("CHILI-IQFeed-Trade-Bridge-Daily", ""),
+        ("CHILI-IQFeed-Trade-Bridge-Daily", _CALENDAR_TRIGGER + _LOGON_TRIGGER),
+        ("CHILI-IQFeed-Trade-Bridge-Daily", _LOGON_TRIGGER),
+        ("CHILI-IQFeed-Trade-Bridge-Logon", _CALENDAR_TRIGGER),
+    ],
+    ids=["missing-trigger", "extra-trigger", "daily-has-logon", "logon-has-daily"],
+)
+def test_wrapper_authority_rejects_missing_extra_or_swapped_triggers(
+    tmp_path: Path, name: str, triggers: str
+) -> None:
+    tasks, processes, parsed, _wrapper, _starters = _wrapper_fixture(tmp_path)
+    tasks[name] = _rebuild_task(tasks[name], triggers=triggers)
+    with pytest.raises(
+        collector.CapturedPaperHostSnapshotError,
+        match="TASK_SCHEDULER_SEMANTICS_INVALID",
+    ):
+        collector.collect_host_snapshot(
+            probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
+            legacy_root=tmp_path,
+            captured_at=NOW,
+            argv_parser=lambda value: parsed[value],
+        )
+
+
 def test_wrapper_authority_rejects_daily_logon_semantic_divergence(
     tmp_path: Path,
 ) -> None:
@@ -531,7 +675,7 @@ def test_wrapper_authority_rejects_daily_logon_semantic_divergence(
     parsed[arguments] = argv
     tasks[name] = cutover.TaskObservation(
         name=name,
-        xml=_task_xml(command=NATIVE_WSCRIPT, arguments=arguments),
+        xml=_task_xml(command=NATIVE_WSCRIPT, arguments=arguments, name=name),
         enabled=True,
     )
     with pytest.raises(

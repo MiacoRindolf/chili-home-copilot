@@ -91,12 +91,25 @@ def _task_xml(
     arguments: str = "/c exit 0",
 ) -> bytes:
     value = "true" if enabled else "false"
+    if name.endswith("-Logon"):
+        trigger = "<LogonTrigger><Enabled>true</Enabled></LogonTrigger>"
+    else:
+        trigger = (
+            "<CalendarTrigger><StartBoundary>2026-01-01T10:36:00</StartBoundary>"
+            "<ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>"
+            "</CalendarTrigger>"
+        )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<Task version="1.4" xmlns="{NS}">'
         f"<RegistrationInfo><Description>{name}</Description></RegistrationInfo>"
+        f"<Triggers>{trigger}</Triggers>"
+        '<Principals><Principal id="Author">'
+        "<UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>"
+        "<LogonType>InteractiveToken</LogonType>"
+        "<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>"
         f"<Settings><Enabled>{value}</Enabled></Settings>"
-        f"<Actions><Exec><Command>{command}</Command>"
+        f'<Actions Context="Author"><Exec><Command>{command}</Command>'
         f"<Arguments>{arguments}</Arguments></Exec></Actions></Task>"
     ).encode()
 
@@ -1516,6 +1529,52 @@ def test_candidate_task_semantic_weakening_is_rejected(
 
 def test_ads_path_alias_is_never_local_authority() -> None:
     assert not cutover._is_local_absolute(Path(r"C:\sealed\receipt.json:forged"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point TOCTOU")
+def test_stable_read_rejects_parent_junction_swapped_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    # The genuine file the validated lexical path names.
+    genuine_parent = tmp_path / "genuine"
+    genuine_parent.mkdir()
+    genuine = genuine_parent / "receipt.json"
+    genuine.write_bytes(b"genuine sealed bytes")
+
+    # The attacker's redirect target, and the mount point that will become a
+    # junction to it between validation and open.
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    (attacker / "receipt.json").write_bytes(b"forged redirect bytes")
+    mount = tmp_path / "mount"
+    lexical = mount / "receipt.json"
+
+    real_validate = cutover._strict_existing_file
+
+    def swap_then_return(value, *, roots, field):
+        # Validate the genuine path first so component checks pass...
+        cutover._reject_reparse_chain(genuine)
+        # ...then swap the parent to a junction pointing at the attacker dir,
+        # exactly in the validation->open window, and return the lexical path.
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(mount), str(attacker)],
+            check=True,
+            capture_output=True,
+        )
+        return lexical
+
+    monkeypatch.setattr(cutover, "_strict_existing_file", swap_then_return)
+    try:
+        with pytest.raises(
+            cutover.CapturedPaperHostCutoverError, match="REPARSE_REDIRECTION"
+        ):
+            cutover._stable_read(lexical, roots=(tmp_path,), field="receipt")
+    finally:
+        monkeypatch.setattr(cutover, "_strict_existing_file", real_validate)
+        if mount.exists():
+            os.rmdir(mount)
 
 
 def test_stale_service_owned_ready_receipt_compensates_before_apply_success(

@@ -177,33 +177,17 @@ def _strict_legacy_root(value: str | Path) -> Path:
 
 
 def _normalize_schtasks_xml_output(raw: bytes) -> bytes:
-    """Repair only the observed schtasks pipe encoding/declaration mismatch.
+    """Delegate to the shared cutover normalization.
 
-    On Windows, ``schtasks /Query /XML`` can write single-byte ASCII XML to a
-    pipe while retaining ``encoding="UTF-16"`` in the XML declaration.  Those
-    bytes are not parseable or safely restorable as declared.  When (and only
-    when) the entire payload is strict ASCII and declares UTF-16, re-encode it
-    as BOM-bearing UTF-16.  Non-ASCII ambiguous output fails closed instead of
-    guessing a console code page.
+    One implementation serves both the read-only collector and the cutover
+    backend so a payload collected here can never be rejected there (or vice
+    versa) over encoding repair differences.
     """
 
-    if not isinstance(raw, bytes) or not raw:
-        raise CapturedPaperHostSnapshotError(
-            "TASK_XML_INVALID", "task XML output is empty"
-        )
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in raw[:128]:
-        return raw
-    declaration = raw[:256]
-    if re.search(br"encoding\s*=\s*['\"]UTF-16['\"]", declaration, re.I):
-        try:
-            text = raw.decode("ascii", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise CapturedPaperHostSnapshotError(
-                "TASK_XML_ENCODING_UNINSPECTABLE",
-                "schtasks XML encoding differs from its UTF-16 declaration",
-            ) from exc
-        return text.encode("utf-16")
-    return raw
+    try:
+        return host_cutover._normalize_schtasks_xml_output(raw)
+    except host_cutover.CapturedPaperHostCutoverError as exc:
+        raise CapturedPaperHostSnapshotError(exc.code, exc.message) from exc
 
 
 class WindowsReadOnlyHostProbe:
@@ -848,6 +832,97 @@ def _assert_wrapper_evidence_files_stable(
                 )
 
 
+def _assert_contract_sources_stable(
+    launch_contracts: Mapping[str, host_cutover.LegacyTaskLaunchContract],
+    *,
+    wrapper_document: Mapping[str, Any],
+    legacy_root: Path,
+) -> None:
+    """Final fence for the sealed contracts and their diagnostic twins.
+
+    Diagnostic-evidence stability alone can validate a different chain than
+    the sealed contracts: a source changed between contract build and
+    diagnostic build reproduces the NEW bytes in the diagnostic hashes while
+    the contract retains the old ones.  Every sealed source is therefore
+    rehashed against its contract at the end of the capture interval, and
+    wrapper diagnostic identities must equal the sealed contract identities.
+    """
+
+    for task_name, contract in launch_contracts.items():
+        rooted = [
+            (
+                contract.expected_bridge_script_path,
+                contract.expected_bridge_script_sha256,
+                "bridge script",
+            )
+        ]
+        if contract.wrapper_path is not None:
+            rooted.append((contract.wrapper_path, contract.wrapper_sha256, "wrapper"))
+        if contract.starter_path is not None:
+            rooted.append((contract.starter_path, contract.starter_sha256, "starter"))
+        for path, expected, field in rooted:
+            _resolved, _raw, actual = _stable_hash_rooted(
+                path,
+                legacy_root=legacy_root,
+                field=f"{task_name} sealed {field} stability",
+            )
+            if actual != expected:
+                raise CapturedPaperHostSnapshotError(
+                    "LAUNCH_CONTRACT_SOURCE_DRIFT",
+                    f"{task_name} sealed {field} changed during capture",
+                )
+        _resolved, actual = _stable_hash_unrooted(
+            contract.expected_executable_path,
+            field=f"{task_name} sealed executable stability",
+        )
+        if actual != contract.expected_executable_sha256:
+            raise CapturedPaperHostSnapshotError(
+                "LAUNCH_CONTRACT_SOURCE_DRIFT",
+                f"{task_name} sealed executable changed during capture",
+            )
+        if contract.launch_kind != host_cutover.LEGACY_WRAPPER_LAUNCH_KIND:
+            continue
+        row = wrapper_document["tasks"][task_name]
+        pairs = (
+            (
+                row["vbs_wrapper"].get("path"),
+                row["vbs_wrapper"].get("sha256"),
+                contract.wrapper_path,
+                contract.wrapper_sha256,
+                "VBS wrapper",
+            ),
+            (
+                row["powershell_starter"].get("path"),
+                row["powershell_starter"].get("sha256"),
+                contract.starter_path,
+                contract.starter_sha256,
+                "PowerShell starter",
+            ),
+            (
+                row["powershell"].get("resolved_path"),
+                row["powershell"].get("sha256"),
+                contract.powershell_path,
+                contract.powershell_sha256,
+                "PowerShell executable",
+            ),
+        )
+        for diag_path, diag_sha, contract_path, contract_sha, field in pairs:
+            if not isinstance(diag_path, str) or not isinstance(diag_sha, str):
+                raise CapturedPaperHostSnapshotError(
+                    "WRAPPER_EVIDENCE_INCONSISTENT",
+                    f"{task_name} diagnostic {field} identity is missing",
+                )
+            if (
+                os.path.normcase(diag_path)
+                != os.path.normcase(str(contract_path or ""))
+                or diag_sha != contract_sha
+            ):
+                raise CapturedPaperHostSnapshotError(
+                    "CONTRACT_DIAGNOSTIC_IDENTITY_SKEW",
+                    f"{task_name} diagnostic {field} differs from its sealed contract",
+                )
+
+
 def _semantic_process_keys(
     values: Sequence[host_cutover.ProcessIdentity],
 ) -> tuple[tuple[Any, ...], ...]:
@@ -950,6 +1025,9 @@ def collect_host_snapshot(
         )
     _validate_process_files(after_processes, legacy_root=root)
     _assert_wrapper_evidence_files_stable(wrapper_document, legacy_root=root)
+    _assert_contract_sources_stable(
+        launch_contracts, wrapper_document=wrapper_document, legacy_root=root
+    )
 
     # Reuse the exact downstream predicate.  The diagnostic projection above
     # remains non-authoritative; only the typed restore-plan v3 contracts are

@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import argparse
 import base64
-import csv
 from contextlib import contextmanager
+import copy
+import csv
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -71,7 +72,7 @@ MANIFEST_SHA256_TOKEN = "@verified:manifest-file-sha256"
 
 TASK_SNAPSHOT_SCHEMA = "chili.captured-paper-host-task-snapshot.v1"
 PROCESS_SNAPSHOT_SCHEMA = "chili.captured-paper-host-process-snapshot.v1"
-RESTORE_PLAN_SCHEMA = "chili.captured-paper-host-restore-plan.v3"
+RESTORE_PLAN_SCHEMA = "chili.captured-paper-host-restore-plan.v4"
 CANDIDATE_ACTION_SCHEMA = "chili.captured-paper-host-cutover-action.v1"
 JOURNAL_EVENT_SCHEMA = "chili.captured-paper-host-cutover-journal-event.v1"
 JOURNAL_OBJECT_SCHEMA = "chili.captured-paper-host-cutover-journal-object.v1"
@@ -125,7 +126,8 @@ _LEGACY_LAUNCH_CONTRACT_FIELDS = frozenset(
         "expected_executable_path", "expected_executable_sha256",
         "expected_bridge_script_path", "expected_bridge_script_sha256",
         "expected_cmdline", "expected_cmdline_sha256",
-        "role_semantic_sha256", "contract_sha256",
+        "scheduler_principal_sha256", "scheduler_settings_sha256",
+        "trigger_profile", "role_semantic_sha256", "contract_sha256",
     }
 )
 
@@ -424,6 +426,47 @@ def _sealed_capsule_path(
     return absolute
 
 
+def _assert_handle_final_path(handle: Any, path: Path, *, field: str) -> None:
+    """Reject reparse redirection between path validation and open (TOCTOU).
+
+    Component validation releases its state before the file is reopened by
+    pathname, so a writable ancestor swapped to a junction in that window
+    redirects the open elsewhere.  The open handle's kernel-resolved final
+    path must therefore equal the validated lexical path while the handle is
+    still the one being read.
+    """
+
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        import msvcrt
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = int(
+            kernel32.GetFinalPathNameByHandleW(
+                ctypes.c_void_p(msvcrt.get_osfhandle(handle.fileno())),
+                buffer,
+                len(buffer),
+                0,
+            )
+        )
+        if length <= 0 or length >= len(buffer):
+            raise OSError("GetFinalPathNameByHandleW failed")
+        final = buffer.value
+    except (AttributeError, OSError, ValueError) as exc:
+        raise CapturedPaperHostCutoverError(
+            "FILE_UNREADABLE", f"cannot resolve the open handle path for {field}"
+        ) from exc
+    normalized_final = os.path.normcase(final.removeprefix("\\\\?\\"))
+    if normalized_final != os.path.normcase(str(path)):
+        raise CapturedPaperHostCutoverError(
+            "REPARSE_REDIRECTION",
+            f"{field} resolved to a different final path while being read",
+        )
+
+
 def _stable_read(
     value: str | Path,
     *,
@@ -441,8 +484,9 @@ def _stable_read(
                 "ARTIFACT_TOO_LARGE", f"{field} exceeds its bounded size"
             )
         with path.open("rb") as handle:
+            _assert_handle_final_path(handle, path, field=field)
             raw = handle.read(max_bytes + 1)
-        after = path.stat()
+            after = os.stat(handle.fileno())
     except OSError as exc:
         raise CapturedPaperHostCutoverError(
             "FILE_UNREADABLE", f"cannot read {field}"
@@ -489,6 +533,7 @@ def _stable_local_file_unrooted(
     digest = hashlib.sha256()
     total = 0
     with path.open("rb") as handle:
+        _assert_handle_final_path(handle, path, field=field)
         while True:
             chunk = handle.read(1024 * 1024)
             if not chunk:
@@ -499,7 +544,7 @@ def _stable_local_file_unrooted(
                     "ARTIFACT_TOO_LARGE", f"{field} exceeds its bounded size"
                 )
             digest.update(chunk)
-    after = path.stat()
+        after = os.stat(handle.fileno())
     if (
         (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
         != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
@@ -596,6 +641,9 @@ class LegacyTaskLaunchContract:
     expected_bridge_script_sha256: str
     expected_cmdline: tuple[str, ...]
     expected_cmdline_sha256: str
+    scheduler_principal_sha256: str
+    scheduler_settings_sha256: str
+    trigger_profile: str
     role_semantic_sha256: str
     contract_sha256: str
 
@@ -1238,6 +1286,37 @@ def _task_enabled_from_xml(raw: bytes) -> bool:
     return (enabled.text or "").strip().lower() == "true"
 
 
+def _normalize_schtasks_xml_output(raw: bytes) -> bytes:
+    """Repair only the observed schtasks pipe encoding/declaration mismatch.
+
+    On Windows, ``schtasks /Query /XML`` can write single-byte ASCII XML to a
+    pipe while retaining ``encoding="UTF-16"`` in the XML declaration.  Those
+    bytes are not parseable or safely restorable as declared.  When (and only
+    when) the entire payload is strict ASCII and declares UTF-16, re-encode it
+    as BOM-bearing UTF-16.  Non-ASCII ambiguous output fails closed instead of
+    guessing a console code page.  Shared by the read-only collector and the
+    cutover backend so both authorities observe identical task bytes.
+    """
+
+    if not isinstance(raw, bytes) or not raw:
+        raise CapturedPaperHostCutoverError(
+            "TASK_XML_INVALID", "task XML output is empty"
+        )
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in raw[:128]:
+        return raw
+    declaration = raw[:256]
+    if re.search(br"encoding\s*=\s*['\"]UTF-16['\"]", declaration, re.I):
+        try:
+            text = raw.decode("ascii", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise CapturedPaperHostCutoverError(
+                "TASK_XML_ENCODING_UNINSPECTABLE",
+                "schtasks XML encoding differs from its UTF-16 declaration",
+            ) from exc
+        return text.encode("utf-16")
+    return raw
+
+
 def _task_exec_from_xml(raw: bytes) -> tuple[str, str]:
     if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
         raise CapturedPaperHostCutoverError(
@@ -1293,6 +1372,123 @@ def _task_exec_projection_from_xml(raw: bytes) -> Mapping[str, str]:
 
 def _task_action_sha256(raw: bytes) -> str:
     return sha256_json(dict(_task_exec_projection_from_xml(raw)))
+
+
+_LEGACY_TASK_TRIGGER_KIND = MappingProxyType(
+    {"-Daily": "CalendarTrigger", "-Logon": "LogonTrigger"}
+)
+
+
+def _task_scheduler_projection_from_xml(
+    raw: bytes, *, task_name: str
+) -> Mapping[str, str]:
+    """Project the scheduler execution semantics behind one legacy task.
+
+    Name/action identity alone is not execution semantics: the Principal
+    defines the security context and privilege level, ``Actions@Context``
+    selects it, Settings gate execution policy, and Triggers decide when the
+    scheduler runs the action on its own.  ``Settings/Enabled`` is lifecycle
+    state and is deliberately excluded so enable/disable cycles do not change
+    launch identity.
+    """
+
+    if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+        raise CapturedPaperHostCutoverError(
+            "TASK_XML_UNSAFE", "task XML cannot contain DTD/entity declarations"
+        )
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise CapturedPaperHostCutoverError(
+            "TASK_XML_INVALID", "task XML is malformed"
+        ) from exc
+    trigger_kind = next(
+        (
+            kind
+            for suffix, kind in _LEGACY_TASK_TRIGGER_KIND.items()
+            if task_name.endswith(suffix)
+        ),
+        None,
+    )
+    if trigger_kind is None:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            f"task {task_name} has no approved trigger classification",
+        )
+
+    def _child_text(parent: ET.Element, tag: str) -> str:
+        node = parent.find(f"{{{_TASK_NS}}}{tag}")
+        return (node.text or "").strip() if node is not None else ""
+
+    principals = root.findall(f"{{{_TASK_NS}}}Principals")
+    if (
+        len(principals) != 1
+        or len(list(principals[0])) != 1
+        or list(principals[0])[0].tag != f"{{{_TASK_NS}}}Principal"
+    ):
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            f"task {task_name} must declare exactly one principal",
+        )
+    principal = list(principals[0])[0]
+    actions = root.find(f"{{{_TASK_NS}}}Actions")
+    context = (
+        str(actions.attrib.get("Context", "")).strip() if actions is not None else ""
+    )
+    principal_id = str(principal.attrib.get("id", "")).strip()
+    if context != principal_id:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            f"task {task_name} action context does not select its declared principal",
+        )
+    principal_projection = {
+        "principal_id": principal_id,
+        "user_id": _child_text(principal, "UserId"),
+        "group_id": _child_text(principal, "GroupId"),
+        "logon_type": _child_text(principal, "LogonType"),
+        "run_level": _child_text(principal, "RunLevel") or "LeastPrivilege",
+        "actions_context": context,
+    }
+    if not principal_projection["user_id"] and not principal_projection["group_id"]:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            f"task {task_name} principal identity is empty",
+        )
+    settings_nodes = root.findall(f"{{{_TASK_NS}}}Settings")
+    if len(settings_nodes) > 1:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            f"task {task_name} declares more than one Settings element",
+        )
+    settings_c14n = ""
+    if settings_nodes:
+        settings_copy = copy.deepcopy(settings_nodes[0])
+        for enabled in settings_copy.findall(f"{{{_TASK_NS}}}Enabled"):
+            settings_copy.remove(enabled)
+        settings_c14n = ET.canonicalize(
+            ET.tostring(settings_copy, encoding="unicode")
+        )
+    triggers_nodes = root.findall(f"{{{_TASK_NS}}}Triggers")
+    trigger_children = list(triggers_nodes[0]) if len(triggers_nodes) == 1 else []
+    if (
+        len(triggers_nodes) != 1
+        or len(trigger_children) != 1
+        or trigger_children[0].tag != f"{{{_TASK_NS}}}{trigger_kind}"
+        or (_child_text(trigger_children[0], "Enabled") or "true").casefold()
+        != "true"
+    ):
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            f"task {task_name} must declare exactly one enabled {trigger_kind}"
+            " and no other trigger",
+        )
+    return MappingProxyType(
+        {
+            "principal_sha256": sha256_json(principal_projection),
+            "settings_sha256": sha256_json({"settings_c14n": settings_c14n}),
+            "trigger_profile": trigger_kind,
+        }
+    )
 
 
 def _quote_windows_arguments(arguments: Sequence[str]) -> str:
@@ -1589,6 +1785,9 @@ def _launch_contract_payload(
         "expected_bridge_script_sha256": contract.expected_bridge_script_sha256,
         "expected_cmdline": list(contract.expected_cmdline),
         "expected_cmdline_sha256": contract.expected_cmdline_sha256,
+        "scheduler_principal_sha256": contract.scheduler_principal_sha256,
+        "scheduler_settings_sha256": contract.scheduler_settings_sha256,
+        "trigger_profile": contract.trigger_profile,
         "role_semantic_sha256": contract.role_semantic_sha256,
     }
     if include_contract_sha256:
@@ -1618,6 +1817,10 @@ def _role_semantic_material(contract: LegacyTaskLaunchContract) -> Mapping[str, 
         "expected_bridge_script_sha256": contract.expected_bridge_script_sha256,
         "expected_cmdline": [os.path.normcase(value) for value in contract.expected_cmdline],
         "expected_cmdline_sha256": contract.expected_cmdline_sha256,
+        # Trigger profiles are typed per task (Daily vs Logon differ by
+        # design); principal/context/settings must match across the pair.
+        "scheduler_principal_sha256": contract.scheduler_principal_sha256,
+        "scheduler_settings_sha256": contract.scheduler_settings_sha256,
     }
 
 
@@ -1636,6 +1839,7 @@ def _contract_for_direct_task(
     *, task: TaskObservation, binding: LegacyProcessBinding
 ) -> LegacyTaskLaunchContract:
     projection = _task_exec_projection_from_xml(task.xml)
+    scheduler = _task_scheduler_projection_from_xml(task.xml, task_name=task.name)
     if not (
         os.path.normcase(projection["command"])
         == os.path.normcase(binding.executable_path)
@@ -1673,6 +1877,9 @@ def _contract_for_direct_task(
             expected_executable_sha256=binding.executable_sha256,
             expected_bridge_script_path=binding.bridge_script_path,
             expected_bridge_script_sha256=binding.bridge_script_sha256,
+            scheduler_principal_sha256=scheduler["principal_sha256"],
+            scheduler_settings_sha256=scheduler["settings_sha256"],
+            trigger_profile=scheduler["trigger_profile"],
             expected_cmdline=binding.expected_cmdline,
             expected_cmdline_sha256=binding.expected_cmdline_sha256,
             role_semantic_sha256="0" * 64,
@@ -1729,6 +1936,7 @@ def build_legacy_wrapper_launch_contracts(
         process = process_by_role[role]
         task = tasks[name]
         projection = _task_exec_projection_from_xml(task.xml)
+        scheduler = _task_scheduler_projection_from_xml(task.xml, task_name=name)
         if task.name != name or projection["working_directory"] != "":
             raise CapturedPaperHostCutoverError(
                 "LEGACY_LAUNCH_CONTRACT_INVALID",
@@ -1813,6 +2021,9 @@ def build_legacy_wrapper_launch_contracts(
                 expected_bridge_script_sha256=bridge_sha,
                 expected_cmdline=process.cmdline,
                 expected_cmdline_sha256=process.cmdline_sha256,
+                scheduler_principal_sha256=scheduler["principal_sha256"],
+                scheduler_settings_sha256=scheduler["settings_sha256"],
+                trigger_profile=scheduler["trigger_profile"],
                 role_semantic_sha256="0" * 64,
                 contract_sha256="0" * 64,
             )
@@ -1832,6 +2043,12 @@ def _assert_launch_contract_roster(
             and contract.role == _LEGACY_TASK_ROLE[name]
             and contract.launch_kind
             in {LEGACY_DIRECT_LAUNCH_KIND, LEGACY_WRAPPER_LAUNCH_KIND}
+            and contract.trigger_profile
+            == next(
+                kind
+                for suffix, kind in _LEGACY_TASK_TRIGGER_KIND.items()
+                if name.endswith(suffix)
+            )
             and contract.role_semantic_sha256
             == sha256_json(_role_semantic_material(contract))
             and contract.contract_sha256
@@ -2207,6 +2424,15 @@ def _parse_launch_contract(
         expected_cmdline_sha256=_sha(
             value.get("expected_cmdline_sha256"), f"{field_name}.argv"
         ),
+        scheduler_principal_sha256=_sha(
+            value.get("scheduler_principal_sha256"),
+            f"{field_name}.scheduler principal",
+        ),
+        scheduler_settings_sha256=_sha(
+            value.get("scheduler_settings_sha256"),
+            f"{field_name}.scheduler settings",
+        ),
+        trigger_profile=str(value.get("trigger_profile") or ""),
         role_semantic_sha256=_sha(
             value.get("role_semantic_sha256"), f"{field_name}.role semantics"
         ),
@@ -6628,9 +6854,9 @@ class WindowsHostCutoverBackend:
         )
         if result is None:
             return None
-        raw = bytes(result.stdout)
-        # schtasks can prepend a UTF BOM; ElementTree handles it.  It must not
-        # contain command status text because the bytes are hash-authoritative.
+        # The same normalization the collector applies, so backend and
+        # collector observe identical hash-authoritative task bytes.
+        raw = _normalize_schtasks_xml_output(bytes(result.stdout))
         enabled = _task_enabled_from_xml(raw)
         return TaskObservation(name=name, xml=raw, enabled=enabled)
 
