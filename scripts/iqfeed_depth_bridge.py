@@ -1272,7 +1272,10 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
     global running, _max_watch, _limit_hit
     last_refresh = 0.0
     last_fast_sub = 0.0
-    last_prune = 0.0
+    # Defer the first retention sweep (same starvation as the L1 bridge): a
+    # first-iteration DELETE scan on iqfeed_depth_snapshots blocked the first
+    # depth watch ~68s past connect, far beyond the capture-smoke window.
+    last_prune = time.monotonic()
     ins = sa.text(
         "INSERT INTO iqfeed_depth_snapshots (symbol, observed_at, bid_top, ask_top, "
         "bid_top_size, ask_top_size, bid5_size, ask5_size, imbalance5, venues, "

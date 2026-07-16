@@ -1669,7 +1669,12 @@ def writer(
 ) -> None:
     global _max_watch, _limit_hit
     last_refresh = 0.0
-    last_prune = 0.0
+    # Defer the first hourly retention sweep to one hour after connect: with
+    # last_prune=0.0 it ran on the FIRST loop iteration, and its observed_at-only
+    # DELETE full-scans iqfeed_trade_ticks (~128M rows, 139s live-measured
+    # 2026-07-16) BEFORE the first reconcile() can send any watch -- every
+    # watch (and the 30s capture-certification smoke window) starved behind it.
+    last_prune = time.monotonic()
     last_fast_sub = 0.0
     # Explicit CLI symbols are capture-hot for the lifetime of this writer.
     # Dynamic hot membership is refreshed from live/paper sessions + fresh alerts.
