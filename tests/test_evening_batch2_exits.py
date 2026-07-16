@@ -1,7 +1,9 @@
 """Evening batch 2 (2026-06-12): exit ladder + 5m-EMA runner trail + repeg."""
 
+import inspect
 import math
 
+from app.services.trading.momentum_neural import live_runner
 from app.services.trading.momentum_neural.paper_execution import cushion_adaptive_trail_stop
 
 
@@ -39,14 +41,13 @@ def test_ema5m_ignored_before_one_r():
 
 
 def test_exit_ladder_structure():
-    src = open("app/services/trading/momentum_neural/live_runner.py", encoding="utf-8").read()
-    i = src.index("EXIT LADDER (2026-06-12")
-    # Window widened 2500→5000 (2026-06-16): the hours-aware equity-exit fix added the
-    # ext-hours/force-limit logic between the ladder comment and the place calls, so the
-    # market-order floor now sits ~4.3k chars in. (Behavioural parity is now pinned by
-    # tests/test_premarket_exit_hours_aware.py — this stays as a structure smoke check.)
-    block = src[i:i + 5000]
-    assert 'str(reason or "") in ("kill_switch_flatten", "operator_flatten")' in block
-    assert "place_limit_order_gtc" in block
-    assert "place_market_order" in block  # the floor remains
-    assert "live_exit_limit_repegged" in src
+    src = inspect.getsource(live_runner._submit_live_market_exit)
+    # Durable outbox/deadman checks made this function much larger; inspect the whole
+    # function so this smoke test follows structure rather than a brittle char window.
+    assert "EXIT LADDER (2026-06-12" in src
+    assert '_urgent = str(reason or "") in {' in src
+    assert '"kill_switch_flatten"' in src
+    assert '"operator_flatten"' in src
+    assert "place_limit_order_gtc" in src
+    assert "place_market_order" in src  # the floor remains
+    assert "live_exit_limit_repegged" in inspect.getsource(live_runner)

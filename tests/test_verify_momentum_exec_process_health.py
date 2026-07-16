@@ -15,12 +15,16 @@ def _good_env() -> dict[str, str]:
         "CHILI_SCHEDULER_ROLE": "momentum_exec_only",
         "CHILI_MOMENTUM_LIVE_RUNNER_ENABLED": "true",
         "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_ENABLED": "true",
+        "CHILI_AUTOPILOT_PRICE_BUS_ENABLED": "true",
         "CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED": "true",
         "CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED": "true",
         "CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED": "false",
         "CHILI_MOMENTUM_LIVE_RUNNER_BATCH_FALLBACK_ENABLED": "false",
         "CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_ENABLED": "false",
         "CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_FALLBACK_ENABLED": "false",
+        "CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD": (
+            "iqfeed-l1-quote-provenance-v2+sha256:dc0185e65439364c"
+        ),
     }
 
 
@@ -34,6 +38,23 @@ def test_environment_requires_momentum_exec_ross_runtime_flags() -> None:
     ok, errors = evaluate_environment(bad)
     assert ok is False
     assert any("required_env_disabled:ross_universe" in err for err in errors)
+
+    missing_bus = _good_env()
+    missing_bus["CHILI_AUTOPILOT_PRICE_BUS_ENABLED"] = "false"
+    ok, errors = evaluate_environment(missing_bus)
+    assert ok is False
+    assert any("required_env_disabled:event_loop_price_bus" in err for err in errors)
+
+    wrong_build = _good_env()
+    wrong_build["CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD"] = (
+        "iqfeed-l1-quote-provenance-v2+sha256:0000000000000000"
+    )
+    ok, errors = evaluate_environment(wrong_build)
+    assert ok is False
+    assert any(
+        "required_env_mismatch:iqfeed_authoritative_bridge_build" in err
+        for err in errors
+    )
 
 
 def test_process_command_rejects_placeholder_worker() -> None:

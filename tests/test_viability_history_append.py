@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import engine
 from app.migrations import _migration_311_momentum_viability_history
-from app.models.trading import MomentumViabilityHistory
+from app.models.trading import MomentumSymbolViability, MomentumViabilityHistory
 from app.services.trading.momentum_neural.context import build_momentum_regime_context
 from app.services.trading.momentum_neural.features import ExecutionReadinessFeatures
 from app.services.trading.momentum_neural.persistence import (
@@ -92,6 +92,7 @@ def test_viability_update_appends_history_row(db: Session) -> None:
         meta={"ross_signals": {"UPC": {"rvol": 6.3, "daily_change_pct": 18.4}}},
     )
     row = _row_for("UPC", feats)
+    observed_at = datetime(2026, 7, 13, 13, 5, tzinfo=timezone.utc)
 
     n = persist_neural_momentum_tick(
         db,
@@ -100,6 +101,7 @@ def test_viability_update_appends_history_row(db: Session) -> None:
         features=feats,
         correlation_id="r1-corr",
         source_node_id="nm_test",
+        observed_at=observed_at,
     )
     assert n == 1
     db.commit()
@@ -114,7 +116,16 @@ def test_viability_update_appends_history_row(db: Session) -> None:
     assert h.live_eligible == bool(row.get("live_eligible", False))
     assert h.viability_score == float(row.get("viability") or 0.0)
     assert h.correlation_id == "r1-corr"
-    assert h.observed_at is not None
+    expected_observed_at = observed_at.replace(tzinfo=None)
+    assert h.observed_at == expected_observed_at
+    assert h.freshness_ts == expected_observed_at
+    viability = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "UPC")
+        .one()
+    )
+    assert viability.freshness_ts == expected_observed_at
+    assert viability.updated_at == expected_observed_at
     # the scorer inputs are captured from features.meta['ross_signals'] + features.spread_bps.
     assert h.rvol == 6.3
     assert h.change_pct == 18.4

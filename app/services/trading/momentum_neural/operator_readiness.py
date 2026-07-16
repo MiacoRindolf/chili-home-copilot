@@ -8,12 +8,18 @@ from ....config import settings
 from app.services.broker_manager import get_all_broker_statuses
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import (
+    EXECUTION_FAMILY_ALPACA_SHORT,
     EXECUTION_FAMILY_ALPACA_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     is_momentum_automation_implemented,
     normalize_execution_family,
 )
 from ..governance import get_kill_switch_status
+from .alpaca_orphan_claims import (
+    alpaca_asset_class_is_crypto,
+    alpaca_symbol_is_crypto_like,
+)
+from .lane_health import live_runner_driver_configuration
 
 
 def _scheduler_includes_web_light() -> bool:
@@ -23,10 +29,29 @@ def _scheduler_includes_web_light() -> bool:
     return role in ("all", "web")
 
 
+def _scheduler_includes_momentum_exec() -> bool:
+    if getattr(settings, "chili_scheduler_runs_externally", False):
+        return True
+    role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
+    return role in ("all", "web", "worker", "cron_only", "momentum_exec_only")
+
+
+def _local_process_includes_momentum_exec() -> bool:
+    """Whether this process role can provide runtime owner evidence.
+
+    ``chili_scheduler_runs_externally`` describes the deployment, not proof that
+    the separate process is alive.  Do not let that flag turn an absent heartbeat
+    into a green local/runtime signal.
+    """
+    role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
+    return role in ("all", "web", "worker", "cron_only", "momentum_exec_only")
+
+
 def build_momentum_operator_readiness(
     *,
     execution_family: str = "coinbase_spot",
     symbol: Optional[str] = None,
+    asset_class: Optional[str] = None,
 ) -> dict[str, Any]:
     """Structured readiness for paper/live momentum automation (no DB)."""
     ef = normalize_execution_family(execution_family)
@@ -38,16 +63,84 @@ def build_momentum_operator_readiness(
     robinhood_adapter = bool(getattr(settings, "chili_robinhood_spot_adapter_enabled", False))
     alpaca_adapter = bool(getattr(settings, "chili_alpaca_enabled", False))
     is_robinhood = ef == EXECUTION_FAMILY_ROBINHOOD_SPOT
-    is_alpaca = ef == EXECUTION_FAMILY_ALPACA_SPOT
+    is_alpaca = ef in {
+        EXECUTION_FAMILY_ALPACA_SPOT,
+        EXECUTION_FAMILY_ALPACA_SHORT,
+    }
+    alpaca_quarantine_reason: str | None = None
+    if is_alpaca:
+        if not bool(getattr(settings, "chili_alpaca_paper", True)):
+            alpaca_quarantine_reason = "alpaca_live_posture_not_certified"
+        elif (
+            alpaca_symbol_is_crypto_like(symbol)
+            or alpaca_asset_class_is_crypto(asset_class)
+        ):
+            alpaca_quarantine_reason = "alpaca_crypto_execution_not_certified"
+        elif ef == EXECUTION_FAMILY_ALPACA_SHORT:
+            alpaca_quarantine_reason = "alpaca_short_execution_not_certified"
 
     paper_runner = bool(settings.chili_momentum_paper_runner_enabled)
     live_runner = bool(settings.chili_momentum_live_runner_enabled)
     paper_sched_on = bool(settings.chili_momentum_paper_runner_scheduler_enabled)
     live_sched_on = bool(settings.chili_momentum_live_runner_scheduler_enabled)
+    live_loop_on = bool(
+        getattr(settings, "chili_momentum_live_runner_loop_enabled", False)
+    )
+    price_bus_on = bool(getattr(settings, "chili_autopilot_price_bus_enabled", False))
     web_light = _scheduler_includes_web_light()
+    momentum_exec = _scheduler_includes_momentum_exec()
 
     paper_scheduler_would_run = web_light and paper_runner and paper_sched_on
-    live_scheduler_would_run = web_light and live_runner and live_sched_on
+    posture_mode, posture_error = live_runner_driver_configuration()
+    live_driver_mode = (
+        "scheduled_batch"
+        if posture_mode == "scheduled_auto_arm"
+        else posture_mode
+    )
+    live_driver_config_valid = bool(
+        posture_error is None and live_driver_mode is not None
+    )
+    external_scheduler = bool(
+        getattr(settings, "chili_scheduler_runs_externally", False)
+    )
+    local_momentum_exec = _local_process_includes_momentum_exec()
+    local_loop_signal_available = bool(
+        live_driver_mode == "event_loop"
+        and local_momentum_exec
+    )
+    local_loop_running: bool | None = None
+    if local_loop_signal_available:
+        try:
+            from .live_runner_loop import is_live_runner_loop_running
+
+            local_loop_running = bool(is_live_runner_loop_running())
+        except Exception:
+            local_loop_running = False
+    if live_driver_mode == "event_loop":
+        if local_loop_signal_available:
+            live_driver_runtime_state = (
+                "running" if local_loop_running is True else "not_running"
+            )
+        else:
+            # The DB-aware runner-health surface can later replace this unknown
+            # with durable heartbeat truth. This no-DB helper must not invent it.
+            live_driver_runtime_state = "unknown_external"
+    else:
+        live_driver_runtime_state = (
+            "configured" if live_driver_config_valid else "not_configured"
+        )
+    live_driver_would_run = bool(
+        live_runner
+        and momentum_exec
+        and live_driver_config_valid
+        and (
+            live_driver_mode != "event_loop"
+            or live_driver_runtime_state == "running"
+        )
+    )
+    # Backward-compatible response key.  In canonical event-loop mode this now
+    # means "the one live driver would run", not "enable the forbidden batch".
+    live_scheduler_would_run = live_driver_would_run
 
     brokers = get_all_broker_statuses()
     coinbase_connected = bool(brokers.get("coinbase", {}).get("connected"))
@@ -68,13 +161,11 @@ def build_momentum_operator_readiness(
     robinhood_connected = bool(brokers.get("robinhood", {}).get("connected"))
     robinhood_can_trade = robinhood_connected
 
-    # Alpaca (equities via the DMA-style limit rail): is_enabled() = adapter on + keys
-    # present + SDK importable (cheap, no network). Paper + live place via the same API,
-    # so an enabled+keyed adapter is the can-trade signal. Critically, Alpaca readiness
-    # must NOT fall through to the Coinbase branch below (that gated alpaca_spot on an
-    # unrelated Coinbase status). docs/DESIGN/ALPACA_LANE.md
+    # Alpaca is certified only for the paper/equity/long lane.  Compute quarantine
+    # before constructing the adapter so live posture, crypto, and unfinished short
+    # shapes cannot even perform an adapter readiness probe.
     alpaca_ready = False
-    if is_alpaca and alpaca_adapter:
+    if is_alpaca and alpaca_quarantine_reason is None and alpaca_adapter:
         try:
             from ..venue.alpaca_spot import AlpacaSpotAdapter
 
@@ -93,8 +184,12 @@ def build_momentum_operator_readiness(
         broker_ready_for_live = robinhood_connected and robinhood_adapter and robinhood_can_trade
         execution_ready = exec_impl and robinhood_adapter
     elif is_alpaca:
-        broker_ready_for_live = alpaca_adapter and alpaca_ready
-        execution_ready = exec_impl and alpaca_adapter
+        broker_ready_for_live = bool(
+            alpaca_quarantine_reason is None and alpaca_adapter and alpaca_ready
+        )
+        execution_ready = bool(
+            alpaca_quarantine_reason is None and exec_impl and alpaca_adapter
+        )
     else:
         broker_ready_for_live = coinbase_connected and coinbase_adapter and coinbase_can_trade
         execution_ready = exec_impl and coinbase_adapter
@@ -111,6 +206,7 @@ def build_momentum_operator_readiness(
         exec_impl
         and neural_on
         and live_runner
+        and live_driver_would_run
         and broker_ready_for_live
         and execution_ready
         and not governance_blocks_live
@@ -129,11 +225,24 @@ def build_momentum_operator_readiness(
         "broker_robinhood_can_trade": robinhood_can_trade,
         "alpaca_spot_adapter_enabled": alpaca_adapter,
         "broker_alpaca_ready": alpaca_ready,
+        "execution_quarantine_reason": alpaca_quarantine_reason,
         "broker_ready_for_live": broker_ready_for_live,
         "paper_runner_enabled": paper_runner,
         "live_runner_enabled": live_runner,
         "paper_runner_scheduler_enabled": paper_sched_on,
         "live_runner_scheduler_enabled": live_sched_on,
+        "live_runner_loop_enabled": live_loop_on,
+        "live_runner_price_bus_enabled": price_bus_on,
+        "live_driver_mode": live_driver_mode,
+        "live_driver_config_valid": live_driver_config_valid,
+        "live_driver_config_error": posture_error,
+        "scheduler_includes_momentum_exec_jobs": momentum_exec,
+        "local_process_includes_momentum_exec_jobs": local_momentum_exec,
+        "live_event_loop_process_signal_available": local_loop_signal_available,
+        "live_event_loop_running": local_loop_running,
+        "live_driver_runtime_state": live_driver_runtime_state,
+        "external_scheduler_configured": external_scheduler,
+        "live_driver_would_run": live_driver_would_run,
         "scheduler_role": (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower(),
         "scheduler_includes_web_light_jobs": web_light,
         "paper_scheduler_would_run": paper_scheduler_would_run,
@@ -155,11 +264,13 @@ def blocked_reason_for_session(
     canonical_state: str,
 ) -> Optional[str]:
     """Why automation cannot progress (None if no blanket block)."""
+    m = (mode or "").lower()
+    if m == "live" and readiness.get("execution_quarantine_reason"):
+        return str(readiness["execution_quarantine_reason"])
     if not readiness.get("execution_family_implemented"):
         return "execution_family_not_implemented"
     if not readiness.get("momentum_neural_enabled"):
         return "momentum_neural_disabled"
-    m = (mode or "").lower()
     if m == "paper":
         if readiness.get("governance_blocks_paper"):
             return "governance_kill_switch"
@@ -180,10 +291,24 @@ def blocked_reason_for_session(
             return "governance_kill_switch"
         if canonical_state in ("armed_pending_runner", "queued_live") and not readiness.get("live_runner_enabled"):
             return "live_runner_disabled"
-        if canonical_state == "queued_live" and not readiness.get("live_scheduler_would_run"):
+        if canonical_state == "queued_live" and not readiness.get("live_driver_would_run"):
             if not readiness.get("live_runner_enabled"):
                 return "live_runner_disabled"
-            return "live_scheduler_not_running"
+            if not readiness.get("live_driver_config_valid"):
+                return "live_driver_misconfigured"
+            if (
+                readiness.get("live_driver_mode") == "event_loop"
+                and readiness.get("live_driver_runtime_state")
+                == "unknown_external"
+            ):
+                return "live_event_loop_health_unverified"
+            if (
+                readiness.get("live_driver_mode") == "event_loop"
+                and readiness.get("live_event_loop_process_signal_available")
+                and readiness.get("live_event_loop_running") is not True
+            ):
+                return "live_event_loop_not_running"
+            return "live_driver_not_running"
         if not readiness.get("broker_ready_for_live"):
             return "broker_not_ready"
     return None
@@ -203,16 +328,35 @@ def next_action_required(
         if _ef_r == EXECUTION_FAMILY_ROBINHOOD_SPOT:
             return "Connect Robinhood + enable CHILI_ROBINHOOD_SPOT_ADAPTER_ENABLED for live equity execution."
         if _ef_r == EXECUTION_FAMILY_ALPACA_SPOT:
-            return "Enable CHILI_ALPACA_ENABLED + set valid Alpaca API keys for live equity execution."
+            return "Enable the Alpaca adapter with paper keys for the certified paper equity-long lane."
         return "Connect Coinbase Advanced (or fix credentials) for live execution."
+    if blocked in {
+        "alpaca_live_posture_not_certified",
+        "alpaca_crypto_execution_not_certified",
+        "alpaca_short_execution_not_certified",
+        "alpaca_account_scope_unfrozen_or_mismatched",
+    }:
+        return "This Alpaca execution shape is quarantined; only paper equity long execution is certified."
     if blocked == "paper_runner_disabled" and (mode or "").lower() == "paper":
         return "Enable CHILI_MOMENTUM_PAPER_RUNNER_ENABLED (and optional scheduler) or use dev tick."
     if blocked == "live_runner_disabled" and (mode or "").lower() == "live":
         return "Enable CHILI_MOMENTUM_LIVE_RUNNER_ENABLED after confirming venue readiness."
     if blocked == "paper_scheduler_not_running":
         return "Scheduler must run web-light jobs (CHILI_SCHEDULER_ROLE=all|web) with paper runner scheduler enabled."
-    if blocked == "live_scheduler_not_running":
-        return "Scheduler must run web-light jobs with live runner scheduler enabled."
+    if blocked == "live_driver_misconfigured":
+        if readiness.get("live_runner_loop_enabled") and not readiness.get(
+            "live_runner_price_bus_enabled"
+        ):
+            return "Event-loop mode requires the price bus; keep the legacy live batch disabled."
+        return "Enable exactly one live owner: the event loop or the legacy batch, never both."
+    if blocked == "live_event_loop_not_running":
+        return "Start or repair the dedicated event-loop owner; keep the legacy live batch disabled."
+    if blocked == "live_event_loop_health_unverified":
+        return "Verify the dedicated event-loop heartbeat/owner fence; keep the legacy live batch disabled."
+    if blocked in {"live_driver_not_running", "live_scheduler_not_running"}:
+        if readiness.get("live_driver_mode") == "event_loop":
+            return "Start or repair the dedicated event-loop owner; do not enable the legacy live batch."
+        return "Start the configured live-runner owner in the momentum execution scheduler."
     if blocked == "governance_kill_switch":
         return "Governance kill-switch active — resolve before automation."
     if blocked == "execution_family_not_implemented":

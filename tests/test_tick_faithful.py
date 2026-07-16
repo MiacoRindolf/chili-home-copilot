@@ -137,6 +137,22 @@ def test_resample_micro_bars_ohlc_bucketing():
     assert df["Volume"].isna().all()
 
 
+def test_resample_micro_bars_duplicate_timestamp_keeps_input_open_close_order():
+    """Repeated IQFeed containment timestamps must have stable OHLC ties."""
+
+    t0 = datetime(2026, 7, 14, 15, 0, 1, tzinfo=timezone.utc)
+    rows = [
+        (t0, 4.99, 5.01),
+        (t0, 5.99, 6.01),
+        (t0 + timedelta(seconds=15), 6.99, 7.01),
+    ]
+
+    df = _resample_micro_bars(rows, bar_seconds=15)
+
+    assert float(df.iloc[0]["Open"]) == pytest.approx(5.0)
+    assert float(df.iloc[0]["Close"]) == pytest.approx(6.0)
+
+
 def test_resample_micro_bars_real_trade_volume_join():
     """F1: trade prints supply REAL per-bucket volume; a quiet bucket INSIDE the trade-tape
     span is a genuine 0.0; buckets OUTSIDE the span stay NaN (unknown)."""

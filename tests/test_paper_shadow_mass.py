@@ -109,6 +109,13 @@ def test_paper_equities_route_to_alpaca_when_configured(monkeypatch) -> None:
     monkeypatch.setattr(settings, "chili_alpaca_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
     monkeypatch.setattr(settings, "chili_alpaca_api_key", "pk_test", raising=False)
+    monkeypatch.setattr(settings, "chili_alpaca_api_secret", "ps_test", raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        "00000000-0000-0000-0000-000000000001",
+        raising=False,
+    )
     assert resolve_execution_family_for_symbol("AAPL", mode="paper") == "alpaca_spot"
     assert resolve_execution_family_for_symbol("AAPL", mode="live") == "robinhood_spot"
     assert resolve_execution_family_for_symbol("KAIO-USD", mode="paper") == "coinbase_spot"

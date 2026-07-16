@@ -14,7 +14,9 @@ def _patch(monkeypatch, peak, current, cap=200.0):
     # activation = 0.5 * cap = 100.0 with the default cap
     monkeypatch.setattr(risk_evaluator, "equity_relative_daily_loss_cap", lambda *a, **k: cap)
     monkeypatch.setattr(
-        risk_evaluator, "_daily_realized_pnl_peak_and_current", lambda db, uid: (peak, current)
+        risk_evaluator,
+        "_daily_realized_pnl_peak_and_current",
+        lambda db, uid, **kwargs: (peak, current),
     )
 
 

@@ -7,8 +7,14 @@ from types import SimpleNamespace
 from app.services.trading.momentum_neural.tape_ws_recorder import TapeWsRecorder
 
 
-def _quote(bid, ask):
-    return SimpleNamespace(bid=bid, ask=ask, price=(bid + ask) / 2, timestamp=time.time())
+def _quote(bid, ask, **extra):
+    return SimpleNamespace(
+        bid=bid,
+        ask=ask,
+        price=(bid + ask) / 2,
+        timestamp=time.time(),
+        **extra,
+    )
 
 
 def _trade(size):
@@ -75,3 +81,25 @@ def test_not_running_ignores():
     r._running = False
     r._on_tick("DSY", _quote(2.40, 2.43))
     assert r._buffer == []
+
+
+def test_massive_quote_row_preserves_three_clocks_and_connection_identity():
+    r = _rec()
+    snap = _quote(
+        2.40,
+        2.43,
+        provider_event_at=1_700_000_000.123,
+        received_at=1_700_000_000.200,
+        available_at=1_700_000_000.250,
+        bridge_run_id="10000000-0000-0000-0000-000000000001",
+        connection_generation=7,
+    )
+    r._on_tick("DSY", snap)
+    row = r._buffer[0]
+    assert row["provider_event_at"].timestamp() == snap.provider_event_at
+    assert row["received_at"].timestamp() == snap.received_at
+    assert row["available_at"].timestamp() == snap.available_at
+    assert row["timestamp_basis"] == "massive_sip_unix_ms"
+    assert row["message_type"] == "Q"
+    assert row["bridge_run_id"] == snap.bridge_run_id
+    assert row["connection_generation"] == 7

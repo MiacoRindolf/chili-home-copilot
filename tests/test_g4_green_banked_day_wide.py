@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,6 +19,7 @@ from app.models.trading import (
     TradingAutomationSession,
 )
 from app.services.trading.momentum_neural.risk_policy import (
+    replay_risk_clock,
     symbol_day_banked_pnl_other_sessions,
 )
 
@@ -99,6 +101,24 @@ def test_prior_days_do_not_count(db) -> None:
     _seed(db, symbol="G4M6", pnl=10.0)
     _seed(db, symbol="G4M6", pnl=400.0, terminal_at=datetime.utcnow() - timedelta(days=3))
     total = symbol_day_banked_pnl_other_sessions(db, symbol="G4M6")
+    assert total == pytest.approx(10.0)
+
+
+def test_replay_frontier_excludes_future_same_day_sessions(db) -> None:
+    et = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    frontier = (
+        datetime.now(et)
+        .replace(hour=12, minute=0, second=0, microsecond=0)
+        .astimezone(utc)
+        .replace(tzinfo=None)
+    )
+    _seed(db, symbol="G4FUT", pnl=10.0, terminal_at=frontier - timedelta(minutes=1))
+    _seed(db, symbol="G4FUT", pnl=999.0, terminal_at=frontier + timedelta(minutes=1))
+
+    with replay_risk_clock(frontier):
+        total = symbol_day_banked_pnl_other_sessions(db, symbol="G4FUT")
+
     assert total == pytest.approx(10.0)
 
 

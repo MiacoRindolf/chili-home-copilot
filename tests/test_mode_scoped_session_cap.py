@@ -70,5 +70,9 @@ def test_alpaca_twins_do_not_consume_slots(db):
             user_id=uid, symbol=f"EQ{i}", mode="live", state="queued_live",
             execution_family="alpaca_spot", variant_id=vid, risk_snapshot_json={},
         ))
+        db.add(TradingAutomationSession(
+            user_id=uid, symbol=f"SH{i}", mode="live", state="queued_live",
+            execution_family="alpaca_short", variant_id=vid, risk_snapshot_json={},
+        ))
     db.flush()
     assert count_concurrent_automation_sessions(db, user_id=uid, mode="live") == 3

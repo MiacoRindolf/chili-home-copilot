@@ -8,7 +8,13 @@ import pytest
 import app.services.trading.momentum_neural.auto_arm as aa
 from app.services import coinbase_service
 from app.services.trading import governance, portfolio_risk
-from app.services.trading.momentum_neural import automation_query, market_profile, operator_actions
+from app.services.trading.momentum_neural import (
+    automation_query,
+    market_profile,
+    operator_actions,
+    risk_policy,
+)
+from app.services.trading.venue import account_identity
 
 
 class _FakeDB:
@@ -16,6 +22,9 @@ class _FakeDB:
         pass
 
     def commit(self) -> None:
+        pass
+
+    def flush(self) -> None:
         pass
 
     def rollback(self) -> None:
@@ -51,6 +60,18 @@ def happy(monkeypatch):
     monkeypatch.setattr(aa.settings, "chili_momentum_crypto_live_arm_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_momentum_crypto_pause_during_us_session", False, raising=False)
     monkeypatch.setattr(aa.settings, "chili_crypto_schedule_enabled", False, raising=False)
+    monkeypatch.setattr(
+        aa.settings,
+        "chili_momentum_equity_execution_via_alpaca_paper",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        aa.settings,
+        "chili_momentum_crypto_execution_via_alpaca_paper",
+        False,
+        raising=False,
+    )
     monkeypatch.setattr(aa.settings, "chili_momentum_ross_equity_universe_required", False, raising=False)
     # Post-reap cooldown (#701) writes reaped crypto names into a module-global dict;
     # disable it here so a happy-path arm is deterministic and never order-dependent on
@@ -81,6 +102,43 @@ def happy(monkeypatch):
     # Default freshness UNKNOWN (None) — keeps existing tests network-free and on the
     # arm-on-active-break contract; freshness-specific tests override this seam.
     monkeypatch.setattr(aa, "_candidate_freshness", lambda sym: None)
+    monkeypatch.setattr(
+        account_identity,
+        "read_current_non_alpaca_account_identity",
+        lambda _family: {
+            "ok": True,
+            "identity": "auto-arm-test-account-v1",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(aa, "_symbol_loss_guards", lambda db, **kwargs: (set(), {}))
+    monkeypatch.setattr(
+        risk_policy,
+        "load_current_live_loss_history",
+        lambda db, **kwargs: (
+            (),
+            {
+                "history_available": True,
+                "coverage_grade": "CURRENT_LIVE_COMPLETE",
+                "history_authority": "broker_reconciled_current_live_db_only",
+                "replay_certifiable": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        risk_policy,
+        "consecutive_loss_halt_decision",
+        lambda db, **kwargs: (
+            False,
+            {
+                "halted": False,
+                "consecutive_losses": 0,
+                "halt_count": 4,
+                "history_available": True,
+                "config_provenance": {},
+            },
+        ),
+    )
     monkeypatch.setattr(coinbase_service, "connect", lambda: {"ok": True})
     monkeypatch.setattr(
         operator_actions, "begin_live_arm",
@@ -99,6 +157,217 @@ def test_happy_path_arms(happy):
     assert out["symbol"] == "RSC-USD"
     assert out["session_id"] == 99
     assert out["state"] == "queued_live"
+
+
+def test_crypto_candidate_never_creates_alpaca_twin(happy):
+    """A Coinbase crypto primary must never spawn the equity-only Alpaca twin."""
+    calls: list[tuple[str, str]] = []
+
+    happy.setattr(
+        aa.settings,
+        "chili_momentum_crypto_execution_via_alpaca_paper",
+        False,
+        raising=False,
+    )
+    happy.setattr(aa.settings, "chili_momentum_alpaca_twin_arm_enabled", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_enabled", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_paper", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_api_key", "paper-test-key", raising=False)
+    happy.setattr(
+        aa,
+        "_alpaca_lists_symbol",
+        lambda _symbol: (_ for _ in ()).throw(AssertionError("crypto twin probe must not run")),
+    )
+
+    def _begin(_db, **kwargs):
+        calls.append((kwargs["symbol"], kwargs["execution_family"]))
+        return {"ok": True, "arm_token": "tok", "session_id": len(calls)}
+
+    happy.setattr(operator_actions, "begin_live_arm", _begin)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 1
+    assert calls == [("RSC-USD", "coinbase_spot")]
+    assert "alpaca_twin_session_id" not in out
+
+
+def test_alpaca_twin_loss_denial_does_not_undo_primary_arm(happy):
+    calls: list[tuple[str, str]] = []
+    happy.setattr(
+        aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False
+    )
+    happy.setattr(
+        aa.settings, "chili_momentum_auto_arm_equity_only", False, raising=False
+    )
+    happy.setattr(
+        aa.settings,
+        "chili_momentum_equity_execution_via_alpaca_paper",
+        False,
+        raising=False,
+    )
+    happy.setattr(
+        aa.settings, "chili_momentum_alpaca_twin_arm_enabled", True, raising=False
+    )
+    happy.setattr(aa.settings, "chili_alpaca_enabled", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_paper", True, raising=False)
+    happy.setattr(aa.settings, "chili_alpaca_api_key", "paper-key", raising=False)
+    happy.setattr(
+        aa,
+        "_fresh_live_eligible_candidates",
+        lambda db, *, limit: [_cand("PRIMARY", 8, 0.75)],
+    )
+    happy.setattr(
+        aa,
+        "_alpaca_twin_loss_guard_decision",
+        lambda db, **kwargs: (
+            False,
+            {
+                "allowed": False,
+                "reason": "alpaca_twin_consecutive_loss_halt",
+                "coverage_grade": "CURRENT_LIVE_COMPLETE",
+            },
+            {
+                "account_scope": "alpaca:paper",
+                "account_identity": "paper-account",
+            },
+        ),
+    )
+    happy.setattr(
+        aa,
+        "_alpaca_lists_symbol",
+        lambda _symbol: (_ for _ in ()).throw(
+            AssertionError("denied twin must not probe provider/listing")
+        ),
+    )
+
+    def _begin(_db, **kwargs):
+        calls.append((kwargs["symbol"], kwargs["execution_family"]))
+        return {"ok": True, "arm_token": "tok", "session_id": len(calls)}
+
+    happy.setattr(operator_actions, "begin_live_arm", _begin)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 1
+    assert calls == [("PRIMARY", "robinhood_spot")]
+    assert out["alpaca_twin_skipped"] == "alpaca_twin_consecutive_loss_halt"
+    assert "alpaca_twin_session_id" not in out
+
+
+def test_crypto_resolution_defaults_away_from_alpaca_paper(monkeypatch):
+    from app.services.trading import execution_family_registry as registry
+    from app.services.trading.venue import alpaca_spot
+
+    monkeypatch.setattr(aa.settings, "chili_alpaca_enabled", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_alpaca_api_key", "paper-test-key", raising=False)
+    monkeypatch.setattr(
+        aa.settings,
+        "chili_momentum_crypto_execution_via_alpaca_paper",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        alpaca_spot,
+        "alpaca_lists_symbol",
+        lambda _symbol: (_ for _ in ()).throw(AssertionError("flag-off must not probe Alpaca")),
+    )
+
+    assert registry.resolve_execution_family_for_symbol("BTC-USD") == "coinbase_spot"
+
+
+def test_lane_execution_family_uses_authoritative_direct_alpaca_route(monkeypatch):
+    from app.services.trading import execution_family_registry as registry
+
+    monkeypatch.setattr(
+        aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False
+    )
+    monkeypatch.setattr(
+        aa.settings,
+        "chili_momentum_equity_execution_via_alpaca_paper",
+        True,
+        raising=False,
+    )
+    calls: list[tuple[str, str]] = []
+
+    def _resolve(symbol: str, *, mode: str = "live") -> str:
+        calls.append((symbol, mode))
+        return "alpaca_spot"
+
+    monkeypatch.setattr(registry, "resolve_execution_family_for_symbol", _resolve)
+
+    assert aa._lane_execution_family() == "alpaca_spot"
+    assert calls == [("SPY", "live")]
+
+
+def test_alpaca_arm_budget_uses_current_watcher_and_rail_headroom(monkeypatch):
+    import app.services.trading.momentum_neural.risk_evaluator as risk_evaluator
+
+    monkeypatch.setattr(
+        aa.settings,
+        "chili_momentum_auto_arm_max_arms_per_pass",
+        1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        risk_evaluator,
+        "alpaca_paper_arm_resource_capacity",
+        lambda *_args, **_kwargs: {
+            "available": True,
+            "risk_usd": 0.0,
+            "field_size": 12,
+            "watching": 4,
+            "capacity": 10,
+            "headroom": 6,
+            "provenance": {
+                "authority": "resource_only_watch_fanout",
+                "financial_authority": "final_adaptive_reservation",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        aa,
+        "_current_rail_dispatch_capacity",
+        lambda **_kwargs: {
+            "available": True,
+            "enabled": True,
+            "call_headroom": 4,
+            "provenance": {"authority": "current_adaptive_rail_bucket"},
+        },
+    )
+
+    budget, provenance = aa._resolved_auto_arm_capacity_budget(
+        _FakeDB(),
+        user_id=1,
+        execution_family="alpaca_spot",
+        candidate_count=9,
+    )
+
+    assert budget == 4
+    assert provenance["resolved_budget"] == 4
+    assert provenance["legacy_max_arms_per_pass_used"] is False
+    assert provenance["financial_authority"] == "final_adaptive_reservation"
+
+
+def test_non_alpaca_arm_budget_retains_configured_behavior(monkeypatch):
+    monkeypatch.setattr(
+        aa.settings,
+        "chili_momentum_auto_arm_max_arms_per_pass",
+        2,
+        raising=False,
+    )
+
+    budget, provenance = aa._resolved_auto_arm_capacity_budget(
+        _FakeDB(),
+        user_id=1,
+        execution_family="coinbase_spot",
+        candidate_count=9,
+    )
+
+    assert budget == 2
+    assert provenance["policy"] == "legacy_configured_non_alpaca"
+    assert provenance["configured_max_arms_per_pass"] == 2
 
 
 def test_flag_off_skips(happy):
@@ -242,7 +511,9 @@ def test_daily_loss_cap_skips_scan(happy, monkeypatch):
     # tests/test_per_broker_daily_loss.py). Exercise the legacy branch explicitly.
     monkeypatch.setattr(aa.settings, "chili_per_broker_daily_loss_enabled", False)
     monkeypatch.setattr(risk_policy, "equity_relative_daily_loss_cap", lambda *a, **k: 130.0)
-    monkeypatch.setattr(risk_evaluator, "_daily_realized_pnl", lambda db, uid: -131.0)
+    monkeypatch.setattr(
+        risk_evaluator, "_daily_realized_pnl", lambda db, uid, **kwargs: -131.0
+    )
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["skipped"] == "daily_loss_cap"
     assert out.get("armed", 0) == 0
@@ -255,7 +526,9 @@ def test_within_daily_loss_cap_does_not_skip(happy, monkeypatch):
 
     monkeypatch.setattr(aa.settings, "chili_per_broker_daily_loss_enabled", False)
     monkeypatch.setattr(risk_policy, "equity_relative_daily_loss_cap", lambda *a, **k: 130.0)
-    monkeypatch.setattr(risk_evaluator, "_daily_realized_pnl", lambda db, uid: -10.0)
+    monkeypatch.setattr(
+        risk_evaluator, "_daily_realized_pnl", lambda db, uid, **kwargs: -10.0
+    )
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out.get("skipped") != "daily_loss_cap"
 

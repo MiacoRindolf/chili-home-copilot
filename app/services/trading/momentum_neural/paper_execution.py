@@ -162,6 +162,33 @@ def roundtrip_fee_usd(
     return abs(notional) * 0.0025 * 2.0
 
 
+def modeled_fill_leg_fee_usd(
+    notional: float,
+    fee_to_target_ratio: float,
+    *,
+    entry: float = 0.0,
+    target: float = 0.0,
+    venue_rt_bps: float | None = None,
+) -> float:
+    """Allocate a symmetric round-trip fee model to one executed leg.
+
+    ``roundtrip_fee_usd`` is intentionally a complete entry+exit estimate.
+    A fill ledger records each leg separately, so charging that full amount on
+    both the buy and sell doubles modeled costs.  Until a sealed venue receipt
+    supplies asymmetric per-leg fees, allocate exactly half of the prospectively
+    bound round-trip model to each executed notional.  Partial fills remain
+    proportional because ``notional`` is the delta fill notional.
+    """
+
+    return roundtrip_fee_usd(
+        notional,
+        fee_to_target_ratio,
+        entry=entry,
+        target=target,
+        venue_rt_bps=venue_rt_bps,
+    ) / 2.0
+
+
 def crypto_paper_roundtrip_bps() -> float:
     """Round-trip commission (bps) a crypto PAPER trade should be charged.
 
@@ -2791,7 +2818,10 @@ def classify_stop_breach(
 
     # ---- data-validity floor: never hold on bad data → BREAKDOWN ----
     if (age is None or age > float(max_age_s) or n < int(min_snaps)
-            or ofi is None or micro is None or pctile is None):
+            or ofi is None or micro is None or pctile is None
+            or spread is None or spread < 0.0):
+        if spread is not None and spread < 0.0:
+            out["reason"] = "crossed_l2_book"
         return out
 
     # ---- BREAKDOWN veto (evaluated FIRST; any one fires ⇒ sell now) ----

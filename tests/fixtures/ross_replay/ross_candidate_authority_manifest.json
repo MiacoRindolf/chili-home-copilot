@@ -1,0 +1,230 @@
+{
+  "schema_version": "chili.ross-evidence-authority.v1",
+  "authority_id": "ross-merged-baseline-2026-07-15-v1",
+  "baseline_grade_counts": {
+    "CERTIFIABLE": 0,
+    "DIAGNOSTIC_ONLY": 4,
+    "UNAVAILABLE": 2,
+    "UNRESOLVED": 6
+  },
+  "labels": [
+    {
+      "canonical_id": "P5qdiBNct1c::ZDAI::second_pullback",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "PARTIAL",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "DIAGNOSTIC_ONLY",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/10/phase_labels/0", "target_sha256": "9b8df2c6d230594059081ecbbdff50cdb93565468eeacf27b009f2baa9a80e61"}
+      ]
+    },
+    {
+      "canonical_id": "P5qdiBNct1c::SDOT::vwap_reclaim",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNRESOLVED",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNRESOLVED",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/10/phase_labels/1", "target_sha256": "0870615bfbf9dbb57b05cd502be59b1fb348ddbd926fcb2d1de0a8f2d5ec885b"}
+      ]
+    },
+    {
+      "canonical_id": "P5qdiBNct1c::SDOT::opening_rejection",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNRESOLVED",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNRESOLVED",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/10/phase_labels/2", "target_sha256": "1d10bdd847b7ef4e99d9aec1b6a802eb77f0527f8c33f8a6404428290403462f"}
+      ]
+    },
+    {
+      "canonical_id": "550XNdh4y5k::SILO::dip_break",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNAVAILABLE",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNAVAILABLE",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/15/phase_labels/0", "target_sha256": "6f104c6b5a27fc2b2017ae28f2f787f7de9b3aa814692683ab2266571fc114f5"}
+      ]
+    },
+    {
+      "canonical_id": "550XNdh4y5k::SILO::vwap_rejection",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNRESOLVED",
+      "executable_pricing": {"status": "NOT_APPLICABLE_NO_EXECUTION", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNRESOLVED",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/15/phase_labels/1", "target_sha256": "a62bcaa6cc9d7e7317b9d0afc62eb287749cc5a25b133809fd0eceda48c6ced3"}
+      ]
+    },
+    {
+      "canonical_id": "550XNdh4y5k::CLRO::double_top_flush",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "PARTIAL",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "DIAGNOSTIC_ONLY",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/15/phase_labels/2", "target_sha256": "9923eed292290ec07630a5a6bd88dbaabcb68c0607a6032744a5e3907663417e"}
+      ]
+    },
+    {
+      "canonical_id": "S2sOq-stPgA::QTTB::veto",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "PARTIAL",
+      "executable_pricing": {"status": "NOT_APPLICABLE_NO_EXECUTION", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "DIAGNOSTIC_ONLY",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/17/phase_labels/0", "target_sha256": "11935924b8063165c95d1a7c6b568feee08a194c80c559884d01fca228ac7dab"}
+      ]
+    },
+    {
+      "canonical_id": "S2sOq-stPgA::PLSM::first_dip",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNAVAILABLE",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNAVAILABLE",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/17/phase_labels/1", "target_sha256": "fbca1c4e7c7d309f1c5f41aa4122fc2e899c66b35a1e9b7798c3a9d08568cc83"}
+      ]
+    },
+    {
+      "canonical_id": "S2sOq-stPgA::PLSM::backside",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "PARTIAL",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "DIAGNOSTIC_ONLY",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/17/phase_labels/2", "target_sha256": "c2883895b63237564e19a2139a371c4af00383ccdbcc6b6e80326e5e9c48141a"}
+      ]
+    },
+    {
+      "canonical_id": "S2sOq-stPgA::VEEE::pullback",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNRESOLVED",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNRESOLVED",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/17/phase_labels/3", "target_sha256": "fe34cc57f8f3d6eced2fda0cd957ff3c7ca84af9d69aaf831a780b346c8513ca"}
+      ]
+    },
+    {
+      "canonical_id": "ChLgwLS9eJY::NXTC::breakout",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNRESOLVED",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNRESOLVED",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/18/phase_labels/0", "target_sha256": "22dd9e38686cd35f3a63f21eb1c9627877360528ee5319312a397e7756dbfe94"}
+      ]
+    },
+    {
+      "canonical_id": "ChLgwLS9eJY::UBXG::vwap_bounce",
+      "semantic_support": "VIDEO_SUPPORTED",
+      "recorded_data_coverage": "UNRESOLVED",
+      "executable_pricing": {"status": "UNAVAILABLE", "ask_entry": null, "bid_exit": null},
+      "implementation_grade": "UNRESOLVED",
+      "event_window": null,
+      "phase_window": null,
+      "warmup_window": null,
+      "coverage_windows": [],
+      "citation_targets": [
+        {"path": "small_account_challenge_manifest.json", "target": "json:/entries/18/phase_labels/1", "target_sha256": "ce4915365d1907db9f1c3a8e9d0a1039cc9d0e9a2ecc910df66366a52f07e677"}
+      ]
+    }
+  ],
+  "evidence_files": [
+    {
+      "path": "small_account_challenge_manifest.json",
+      "size_bytes": 18130,
+      "sha256": "ad532a7aa02b78a3b1fb521bf5d7d341b27410617ccd0fade867871bce21bfbf",
+      "json_targets": {
+        "/entries/10/phase_labels/0": "9b8df2c6d230594059081ecbbdff50cdb93565468eeacf27b009f2baa9a80e61",
+        "/entries/10/phase_labels/1": "0870615bfbf9dbb57b05cd502be59b1fb348ddbd926fcb2d1de0a8f2d5ec885b",
+        "/entries/10/phase_labels/2": "1d10bdd847b7ef4e99d9aec1b6a802eb77f0527f8c33f8a6404428290403462f",
+        "/entries/15/phase_labels/0": "6f104c6b5a27fc2b2017ae28f2f787f7de9b3aa814692683ab2266571fc114f5",
+        "/entries/15/phase_labels/1": "a62bcaa6cc9d7e7317b9d0afc62eb287749cc5a25b133809fd0eceda48c6ced3",
+        "/entries/15/phase_labels/2": "9923eed292290ec07630a5a6bd88dbaabcb68c0607a6032744a5e3907663417e",
+        "/entries/17/phase_labels/0": "11935924b8063165c95d1a7c6b568feee08a194c80c559884d01fca228ac7dab",
+        "/entries/17/phase_labels/1": "fbca1c4e7c7d309f1c5f41aa4122fc2e899c66b35a1e9b7798c3a9d08568cc83",
+        "/entries/17/phase_labels/2": "c2883895b63237564e19a2139a371c4af00383ccdbcc6b6e80326e5e9c48141a",
+        "/entries/17/phase_labels/3": "fe34cc57f8f3d6eced2fda0cd957ff3c7ca84af9d69aaf831a780b346c8513ca",
+        "/entries/18/phase_labels/0": "22dd9e38686cd35f3a63f21eb1c9627877360528ee5319312a397e7756dbfe94",
+        "/entries/18/phase_labels/1": "ce4915365d1907db9f1c3a8e9d0a1039cc9d0e9a2ecc910df66366a52f07e677"
+      },
+      "line_targets": {}
+    }
+  ],
+  "protected_facts": [
+    {
+      "fact_id": "VEEE_main_account_approx_0850_not_small_account_execution",
+      "label_contains": "::VEEE::",
+      "kind": "time_hhmm",
+      "value": "08:50",
+      "allowed_candidate_paths": []
+    },
+    {
+      "fact_id": "PLSM_narrated_6_52_not_executable_ask",
+      "label_contains": "::PLSM::",
+      "kind": "number",
+      "value": "6.52",
+      "allowed_candidate_paths": []
+    },
+    {
+      "fact_id": "SILO_move_high_9_50_not_executable_bid",
+      "label_contains": "::SILO::",
+      "kind": "number",
+      "value": "9.50",
+      "allowed_candidate_paths": []
+    }
+  ],
+  "trusted_grader": {
+    "grader_id": "chili-sealed-replay-v3-grader-v1",
+    "ed25519_public_key_base64": "SstkOjdvCoutAOlP8oYZT1rwBHVLmB3XL8eoxv5Y3MU="
+  },
+  "disclaimer": "Policy validation only. This does not establish profitability, Ross parity, executable pricing, or broker readiness. The embedded grader public key is deny-by-default: no private key was retained; enabling signed transitions requires separate recertification and a reviewed authority-digest update."
+}

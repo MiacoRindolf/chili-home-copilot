@@ -409,7 +409,7 @@ def test_atomic_helper_fails_closed_on_unknown_equity():
 def test_atomic_helper_fails_closed_on_uncomputable_candidate_risk():
     """A missing/uncomputable shape-aware candidate risk -> admit=False (fail-closed
     so a notional-fallback sizing never slips past the dollar budget unmeasured)."""
-    for cand in (float("nan"), -1.0, float("inf")):
+    for cand in (0.0, float("nan"), -1.0, float("inf")):
         admit, meta = admit_by_aggregate_risk(
             open_risk_usd=0.0, candidate_risk_usd=cand,
             equity_usd=10_000.0, budget_fraction=0.03)

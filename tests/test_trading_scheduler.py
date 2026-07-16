@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from app.config import settings
 
 ROLE_ALL = "all"
@@ -574,6 +576,287 @@ def test_scheduler_market_snapshot_only_role_is_dedicated_lane(monkeypatch):
     finally:
         stop_scheduler()
         monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+
+def test_momentum_exec_event_loop_is_the_only_live_driver(monkeypatch):
+    from app.services.trading.momentum_neural import live_runner_loop, tape_ws_recorder
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    started: list[str] = []
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", True)
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_alpaca_orphan_reconcile_enabled", False)
+    monkeypatch.setattr(live_runner_loop, "start_live_runner_loop", lambda: started.append("loop"))
+    monkeypatch.setattr(tape_ws_recorder, "start_tape_ws_recorder", lambda: None)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert started == ["loop"]
+        assert "momentum_live_runner_batch" not in job_ids
+        assert "momentum_auto_arm_live" not in job_ids
+        assert "lane_health_check" in job_ids
+    finally:
+        stop_scheduler()
+
+
+def test_momentum_exec_dual_live_driver_config_fails_closed(monkeypatch):
+    from app.services.trading.momentum_neural import live_runner_loop
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    started: list[str] = []
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", True)
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_alpaca_orphan_reconcile_enabled", False)
+    monkeypatch.setattr(live_runner_loop, "start_live_runner_loop", lambda: started.append("loop"))
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert started == []
+        assert "momentum_live_runner_batch" not in job_ids
+        assert "momentum_auto_arm_live" not in job_ids
+        # Invalid master-on ownership must stay visible instead of suppressing the
+        # one job that reports the misconfiguration.
+        assert "lane_health_check" in job_ids
+    finally:
+        stop_scheduler()
+
+
+@pytest.mark.parametrize(
+    ("batch_on", "loop_on", "bus_on"),
+    (
+        (False, False, True),
+        (False, True, False),
+    ),
+)
+def test_master_on_invalid_live_driver_still_registers_lane_health(
+    monkeypatch,
+    batch_on,
+    loop_on,
+    bus_on,
+):
+    from app.services.trading.momentum_neural import live_runner_loop
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    started = []
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_momentum_live_runner_scheduler_enabled", batch_on
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_live_runner_loop_enabled", loop_on
+    )
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", bus_on)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_live_scheduler_enabled", True
+    )
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_alpaca_orphan_reconcile_enabled", False
+    )
+    monkeypatch.setattr(
+        live_runner_loop,
+        "start_live_runner_loop",
+        lambda: started.append("loop") or True,
+    )
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert started == []
+        assert "momentum_live_runner_batch" not in job_ids
+        assert "momentum_auto_arm_live" not in job_ids
+        assert "lane_health_check" in job_ids
+    finally:
+        stop_scheduler()
+
+
+def test_event_loop_start_refusal_blocks_auto_arm_but_keeps_health_loud(
+    monkeypatch,
+    caplog,
+):
+    import logging
+
+    from app.services import trading_scheduler as scheduler_module
+    from app.services.trading.momentum_neural import live_runner_loop
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", True)
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_live_scheduler_enabled", True
+    )
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_alpaca_orphan_reconcile_enabled", False
+    )
+    # Keep this ownership-registration test hermetic.  The isolated scheduler
+    # role normally launches market-data prewarm immediately; letting that job
+    # reach Yahoo/IQFeed makes stop_scheduler wait on unrelated network work.
+    monkeypatch.setattr(
+        scheduler_module,
+        "_momentum_event_startup_delay_seconds",
+        lambda _settings: 3600.0,
+    )
+    monkeypatch.setattr(live_runner_loop, "start_live_runner_loop", lambda: False)
+    monkeypatch.setattr(live_runner_loop, "is_live_runner_loop_running", lambda: False)
+    try:
+        with caplog.at_level(logging.CRITICAL):
+            start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "momentum_auto_arm_live" not in job_ids
+        assert "lane_health_check" in job_ids
+        assert any("refused startup" in rec.message for rec in caplog.records)
+    finally:
+        stop_scheduler()
+
+
+def test_already_running_event_loop_allows_same_process_auto_arm(monkeypatch):
+    from app.services import trading_scheduler as scheduler_module
+    from app.services.trading.momentum_neural import live_runner_loop
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", True)
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_live_scheduler_enabled", True
+    )
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_alpaca_orphan_reconcile_enabled", False
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_momentum_event_startup_delay_seconds",
+        lambda _settings: 3600.0,
+    )
+    monkeypatch.setattr(live_runner_loop, "start_live_runner_loop", lambda: False)
+    monkeypatch.setattr(live_runner_loop, "is_live_runner_loop_running", lambda: True)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "momentum_auto_arm_live" in job_ids
+        assert "lane_health_check" in job_ids
+    finally:
+        stop_scheduler()
+
+
+def test_each_auto_arm_pass_blocks_after_event_loop_owner_or_heartbeat_loss(
+    monkeypatch,
+):
+    import app.db as app_db
+    from app.services import trading_scheduler
+    from app.services.trading.momentum_neural import (
+        auto_arm,
+        lane_health,
+        live_runner_loop,
+    )
+
+    state = {"owner_ready": True, "control_ok": True}
+    sessions = []
+    arm_calls = []
+    scheduler_heartbeats = []
+
+    def _session_local():
+        session = _FakeBatchSession(f"auto-arm-{len(sessions) + 1}")
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_momentum_auto_arm_live_enabled", True
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_auto_arm_live_scheduler_enabled",
+        True,
+    )
+    monkeypatch.setattr(app_db, "SessionLocal", _session_local)
+    monkeypatch.setattr(
+        trading_scheduler,
+        "run_scheduler_job_guarded",
+        lambda _job_id, work: work(),
+    )
+    monkeypatch.setattr(
+        lane_health,
+        "live_runner_driver_configuration",
+        lambda: ("event_loop", None),
+    )
+    monkeypatch.setattr(
+        live_runner_loop,
+        "is_live_runner_loop_admission_ready",
+        lambda: state["owner_ready"],
+    )
+    monkeypatch.setattr(
+        lane_health,
+        "live_runner_loop_control_health",
+        lambda _db: {
+            "ok": state["control_ok"],
+            "reason": (
+                None
+                if state["control_ok"]
+                else "live_runner_loop_heartbeat_stale"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        lane_health,
+        "record_auto_arm_run",
+        lambda: scheduler_heartbeats.append("ran"),
+    )
+    monkeypatch.setattr(
+        auto_arm,
+        "run_auto_arm_pass",
+        lambda _db: arm_calls.append("armed")
+        or {"armed": False, "skipped": "no_candidate"},
+    )
+
+    trading_scheduler._run_momentum_auto_arm_live_job()
+    assert arm_calls == ["armed"]
+    assert scheduler_heartbeats == ["ran"]
+
+    state["control_ok"] = False
+    trading_scheduler._run_momentum_auto_arm_live_job()
+    assert arm_calls == ["armed"]
+    assert scheduler_heartbeats == ["ran"]
+
+    state["control_ok"] = True
+    state["owner_ready"] = False
+    trading_scheduler._run_momentum_auto_arm_live_job()
+    assert arm_calls == ["armed"]
+    assert scheduler_heartbeats == ["ran"]
+    assert len(sessions) == 3
+    assert all(session.closed for session in sessions)
 
 
 def test_market_snapshots_defer_for_fresh_learning_status():

@@ -1,7 +1,8 @@
-"""Alpaca crypto paper rail (operator 2026-06-12: 'magpaper trade din ang crypto
-sa alpaca'): symbol mapping, GTC-only crypto TIF, multi-class family gate, and
-the twin-arm listing probe — the soak that measures whether crypto can go live
-on Alpaca (fees 0.15/0.25% vs Coinbase retail ~0.6%)."""
+"""Archived Alpaca-crypto helpers remain readable, but execution is quarantined.
+
+The active recertification lane is paper/equity/long-only. Broker listing support
+must never be interpreted as CHILI order authority.
+"""
 
 from __future__ import annotations
 
@@ -24,39 +25,43 @@ def test_symbol_mapping_round_trips() -> None:
 
 
 # ── multi-class family gate ──────────────────────────────────────────────────
-def test_alpaca_supports_both_asset_classes() -> None:
+def test_alpaca_recertification_supports_equity_only() -> None:
     from app.services.trading.execution_family_registry import (
         execution_family_supports_asset_class,
     )
 
-    assert execution_family_supports_asset_class("alpaca_spot", "crypto")
+    assert not execution_family_supports_asset_class("alpaca_spot", "crypto")
     assert execution_family_supports_asset_class("alpaca_spot", "equity")
     assert not execution_family_supports_asset_class("robinhood_spot", "crypto")
     assert not execution_family_supports_asset_class("coinbase_spot", "equity")
     assert not execution_family_supports_asset_class("unknown_venue", "equity")
 
 
-# ── crypto orders use GTC (Alpaca rejects DAY for crypto) ────────────────────
-def test_crypto_submit_uses_gtc(monkeypatch) -> None:
+# ── crypto orders are rejected before transport ─────────────────────────────
+def test_crypto_submit_is_quarantined_before_transport(monkeypatch) -> None:
     import app.services.trading.venue.alpaca_spot as ap
 
-    captured = {}
+    calls = []
 
-    class _FakeTC:
-        def submit_order(self, order_data):
-            captured["symbol"] = order_data.symbol
-            captured["tif"] = str(order_data.time_in_force)
-            return SimpleNamespace(id="o1", client_order_id="c1", status="accepted")
+    def _forbidden_client():
+        calls.append("transport")
+        raise AssertionError("crypto instruction reached Alpaca transport")
 
-    monkeypatch.setattr(ap, "_trading_client", lambda: _FakeTC())
+    monkeypatch.setattr(ap, "_trading_client", _forbidden_client)
     a = ap.AlpacaSpotAdapter()
-    out = a.place_limit_order_gtc(
-        product_id="BTC-USD", side="buy", base_size="0.001", limit_price="50000",
-        client_order_id="c1",
-    )
-    assert out["ok"], out
-    assert captured["symbol"] == "BTC/USD"
-    assert "GTC" in captured["tif"].upper()
+    for index, product_id in enumerate(("BTC-USD", "BTC/USD")):
+        out = a.place_limit_order_gtc(
+            product_id=product_id,
+            side="buy",
+            base_size="0.001",
+            limit_price="50000",
+            client_order_id=f"c{index}",
+            position_intent="buy_to_open",
+            time_in_force="day",
+        )
+        assert out["ok"] is False
+        assert out["pre_submit_blocked"] is True
+    assert calls == []
 
 
 def test_twin_listing_probe_caches_and_fails_closed(monkeypatch) -> None:

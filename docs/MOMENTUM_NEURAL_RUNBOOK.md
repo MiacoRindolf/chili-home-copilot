@@ -43,16 +43,46 @@ $env:CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_INTERVAL_MINUTES = "3"
 $env:CHILI_MOMENTUM_PAPER_RUNNER_DEV_TICK_ENABLED = "1"
 ```
 
-## Live runner (**real orders** — dangerous)
+## Live runner (**broker orders** — dangerous)
+
+The current Alpaca adapter is constrained to paper-account, US-equity, long-only. The
+automation mode is still named `live` because it drives a real broker order lifecycle;
+paper-account fills are not simulated. Keep the runner off during recertification.
+
+Production ownership is exclusive: the event loop is the canonical driver and the
+legacy APScheduler batch must stay off. The event loop cannot run without the price bus.
+Never enable both drivers to try to clear a readiness warning; that configuration is
+rejected and leaves no session owner.
 
 ```powershell
+# Do not apply this block until the recertification rollout gate authorizes it.
+$env:CHILI_SCHEDULER_ROLE = "momentum_exec_only"
 $env:CHILI_MOMENTUM_LIVE_RUNNER_ENABLED = "1"
-$env:CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED = "1"
-$env:CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_MINUTES = "2"
-$env:CHILI_MOMENTUM_LIVE_RUNNER_DEV_TICK_ENABLED = "1"
+$env:CHILI_MOMENTUM_LIVE_RUNNER_LOOP_ENABLED = "1"
+$env:CHILI_AUTOPILOT_PRICE_BUS_ENABLED = "1"
+$env:CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED = "1"
+$env:CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED = "1"
+$env:CHILI_IQFEED_L1_AUTHORITATIVE_BRIDGE_BUILD = "iqfeed-l1-quote-provenance-v2+sha256:dc0185e65439364c"
+
+# Required exclusivity: legacy/batch driver and dev HTTP tick remain off.
+$env:CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED = "0"
+$env:CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_ENABLED = "0"
+$env:CHILI_MOMENTUM_LIVE_RUNNER_DEV_TICK_ENABLED = "0"
 ```
 
-**Production**: keep `CHILI_MOMENTUM_LIVE_RUNNER_ENABLED` and scheduler flags **off** unless you explicitly accept real trading. Use governance / kill switch as documented in risk policy.
+The loop writes a durable cross-process heartbeat. The cockpit must show
+`driver_mode=event_loop` with a fresh `live_loop_heartbeat_utc`; a missing, malformed,
+overlapping-owner, future, or stale heartbeat is a blocker. The process-health check also
+requires `CHILI_SCHEDULER_ROLE=momentum_exec_only`, the price bus, the loop flag, and the
+legacy scheduler flag off. It also rejects an empty or different IQFeed authority pin;
+the configured value must match the exact reviewed bridge source build:
+
+```powershell
+python scripts/verify_momentum_exec_process_health.py
+```
+
+**Production**: keep all live-runner flags off unless the broker-truth recertification and
+paper soak authorize a rollout. Use governance / kill switch as documented in risk policy.
 
 ## Feedback / evolution ingest
 
@@ -66,7 +96,10 @@ $env:CHILI_MOMENTUM_NEURAL_FEEDBACK_ENABLED = "1"
 
 ## Execution family registry
 
-- Only **`coinbase_spot`** is implemented. Others return safe errors or `execution_family_not_implemented` from runners/APIs.
+- Implemented venue families include Coinbase and Robinhood spot paths plus the recertified
+  subset of `alpaca_spot`. Alpaca is currently paper-only, equity-only, and long-only;
+  `alpaca_short`, Alpaca crypto, and live-money Alpaca posture are quarantined before broker
+  transport.
 - Read-only list: `GET /api/trading/momentum/execution-families`
 
 ## pytest (from repo root, conda env `chili-env`)
@@ -92,4 +125,5 @@ See [MOMENTUM_NEURAL_TEST_MATRIX.md](MOMENTUM_NEURAL_TEST_MATRIX.md) for phase m
 |-----------|------|
 | Paper runner on | Prefer off unless you understand simulation limits |
 | Live runner dev tick | **Avoid** on shared/prod hosts |
-| Live scheduler | **Off** by default; treat as trading bot |
+| Live event loop | **Off** by default; treat as a broker-order bot |
+| Legacy live scheduler | **Off** in event-loop mode; enabling both drivers is invalid |

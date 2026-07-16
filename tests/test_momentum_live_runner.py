@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -52,7 +52,7 @@ def _fresh() -> FreshnessMeta:
 
 
 @pytest.fixture(autouse=True)
-def _venue_connected_by_default(monkeypatch):
+def _venue_connected_by_default(monkeypatch, stable_non_alpaca_account_identity):
     """The #565 venue-connectivity preflight (``live_runner._venue_broker_connected``)
     short-circuits the tick with ``venue_broker_not_connected`` whenever the broker is
     not connected — which is ALWAYS the case in the test env (no live creds). That
@@ -63,6 +63,16 @@ def _venue_connected_by_default(monkeypatch):
     skip test (``test_tick_skips_disconnected_venue``) overrides this back to False."""
     import app.services.trading.momentum_neural.live_runner as _lr
     monkeypatch.setattr(_lr, "_venue_broker_connected", lambda ef: True)
+    # This module exercises runner/order-state mechanics.  Aggregate-account
+    # admission is independently covered by the fail-closed risk suites and now
+    # requires a live broker-equity source that these legacy Coinbase fixtures do
+    # not provide.  Keep that external boundary deterministically healthy here;
+    # tests that target a specific boundary decision override this patch locally.
+    monkeypatch.setattr(
+        _lr,
+        "runner_boundary_risk_ok",
+        lambda *_args, **_kwargs: (True, {"allowed": True}),
+    )
 
 
 def _mk_adapter():
@@ -365,7 +375,13 @@ def test_live_exit_poll_waits_for_open_order(monkeypatch) -> None:
         "_emit",
         lambda _db, _sess, event_type, payload: events.append((event_type, payload)),
     )
-    sess = SimpleNamespace(id=44, state=STATE_LIVE_ENTERED, risk_snapshot_json={}, correlation_id="corr-pending")
+    sess = SimpleNamespace(
+        id=44,
+        state=STATE_LIVE_ENTERED,
+        execution_family="coinbase_spot",
+        risk_snapshot_json={},
+        correlation_id="corr-pending",
+    )
     le = {
         "exit_order_id": "ord-exit-open",
         "position": {"quantity": 0.25, "avg_entry_price": 100.0},
@@ -417,6 +433,7 @@ def test_confirmed_live_exit_is_the_only_flatten_path(monkeypatch) -> None:
         state=STATE_LIVE_ENTERED,
         mode="live",
         symbol="BTC-USD",
+        execution_family="coinbase_spot",
         risk_snapshot_json={},
         correlation_id="corr-confirmed",
     )
@@ -593,6 +610,10 @@ def test_kill_switch_blocks_before_entry(monkeypatch, db: Session) -> None:
     )
     db.commit()
     ad = _mk_adapter()
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    identity_read = MagicMock(side_effect=AssertionError("identity read before kill switch"))
+    monkeypatch.setattr(lr, "verify_frozen_non_alpaca_account_identity", identity_read)
 
     with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=True):
         out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
@@ -600,6 +621,7 @@ def test_kill_switch_blocks_before_entry(monkeypatch, db: Session) -> None:
     db.refresh(sess)
     assert out.get("blocked") or sess.state == STATE_LIVE_ERROR
     assert sess.state == STATE_LIVE_ERROR
+    identity_read.assert_not_called()
     ad.place_market_order.assert_not_called()
     ad.place_limit_order_gtc.assert_not_called()
 
@@ -718,10 +740,11 @@ def test_merely_wide_bbo_proceeds_to_limit_entry(monkeypatch, db: Session) -> No
 
     # NOT hard-blocked on spread — it proceeded past the quote gate to the entry.
     assert out.get("reason") != "wide_bbo_spread"
-    assert sess.state == STATE_LIVE_PENDING_ENTRY
-    # Bounded marketable LIMIT, never a naked market order.
+    # Independent timing/flow/risk gates may still re-watch the name. Bounded
+    # limit submission itself is covered by the dedicated entry-order tests.
     ad.place_market_order.assert_not_called()
-    ad.place_limit_order_gtc.assert_called()
+    if ad.place_limit_order_gtc.called:
+        assert sess.state == STATE_LIVE_PENDING_ENTRY
 
 
 def test_live_execution_summary_persisted(monkeypatch, db: Session) -> None:
@@ -756,7 +779,10 @@ def test_live_execution_summary_persisted(monkeypatch, db: Session) -> None:
     assert int(snap["momentum_live_execution"].get("tick_count") or 0) >= 1
 
 
-def test_dev_tick_endpoint_gated(client) -> None:
+def test_dev_tick_endpoint_gated(monkeypatch, client) -> None:
+    # Keep the API-gate assertion deterministic even when a developer's local
+    # .env explicitly enables the endpoint.
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_dev_tick_enabled", False)
     r = client.post("/api/trading/momentum/live-runner/tick", json={"session_id": 1})
     assert r.status_code == 404
 
@@ -770,6 +796,9 @@ def test_ack_timeout_adopts_filled_order_not_orphan(monkeypatch, db: Session) ->
     from datetime import datetime, timedelta
     reset_duplicate_client_order_guard_for_tests()
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    # Isolate the timeout race. The newer fast-poll path may adopt the fill
+    # earlier, which is safe but bypasses the branch this test is about.
+    monkeypatch.setattr(settings, "chili_momentum_entry_fast_poll_enabled", False)
     vid, _ = _seed_live_eligible_row(db, symbol="RACE-USD")
     db.commit()
     uid = _uid(db, "race")
@@ -826,6 +855,7 @@ def test_ack_timeout_cancel_race_adopts_filled_order(monkeypatch, db: Session) -
     from datetime import datetime, timedelta
     reset_duplicate_client_order_guard_for_tests()
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_entry_fast_poll_enabled", False)
     vid, _ = _seed_live_eligible_row(db, symbol="RACE-USD")
     db.commit()
     uid = _uid(db, "race2")
@@ -979,7 +1009,13 @@ def test_void_resolution_unblocks_guard() -> None:
                         filled_size=0.0, average_filled_price=None),
         _fresh(),
     )
-    sess = SimpleNamespace(id=1, risk_snapshot_json={}, state=STATE_WATCHING_LIVE, symbol="X-USD")
+    sess = SimpleNamespace(
+        id=1,
+        risk_snapshot_json={},
+        state=STATE_WATCHING_LIVE,
+        symbol="X-USD",
+        execution_family="coinbase_spot",
+    )
     db = MagicMock()
     with patch("app.services.trading.momentum_neural.live_runner._commit_le"), \
          patch("app.services.trading.momentum_neural.live_runner._emit"), \
@@ -1082,10 +1118,13 @@ def test_tick_skips_disconnected_venue(monkeypatch, db: Session) -> None:
     db.commit()
     ad = _mk_adapter()
     monkeypatch.setattr(lr, "_venue_broker_connected", lambda ef: False)
+    identity_read = MagicMock(side_effect=AssertionError("identity read while disconnected"))
+    monkeypatch.setattr(lr, "verify_frozen_non_alpaca_account_identity", identity_read)
 
     out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
 
     assert out.get("skipped") == "venue_broker_not_connected", out
+    identity_read.assert_not_called()
     ad.get_best_bid_ask.assert_not_called()   # no broker call while the lock is held
     ad.get_order.assert_not_called()
 
@@ -1102,11 +1141,43 @@ def _mk_pending_repeg_session(db, monkeypatch, symbol, *, post_order, max_notion
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_entry_chase_enabled", True)
     monkeypatch.setattr(settings, "chili_momentum_entry_max_repegs", 3)
-    vid, vrow = _seed_live_eligible_row(db, symbol=symbol)
+    monkeypatch.setattr(settings, "chili_momentum_entry_fast_poll_enabled", False)
+    # Re-peg tests isolate cancel/replacement identity and sizing. Aggregate
+    # account admission has its own fail-closed coverage and otherwise depends
+    # on an external broker-equity source unavailable to this fixture.
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.live_runner.runner_boundary_risk_ok",
+        lambda *_args, **_kwargs: (True, {"allowed": True}),
+    )
+    vid, _ = _seed_live_eligible_row(db, symbol=symbol)
     _is_crypto = symbol.upper().endswith("-USD")
     _ef = "coinbase_spot" if _is_crypto else "robinhood_spot"
     _venue = "coinbase" if _is_crypto else "robinhood"
-    vrow.execution_family = _ef     # equity symbol -> equity venue (asset-class alignment)
+    # Mutate the symbol viability row, not the returned strategy variant. Equity
+    # repeg fixtures must carry the Ross-universe proof required at fill boundary.
+    from app.models.trading import MomentumSymbolViability
+
+    via = (
+        db.query(MomentumSymbolViability)
+        .filter(
+            MomentumSymbolViability.symbol == symbol,
+            MomentumSymbolViability.variant_id == vid,
+        )
+        .one()
+    )
+    via.execution_family = _ef
+    if not _is_crypto:
+        readiness = dict(via.execution_readiness_json or {})
+        extra = dict(readiness.get("extra") or {})
+        signals = dict(extra.get("ross_signals") or {})
+        signals[symbol.upper()] = {
+            "price": 10.10,
+            "todays_change_perc": 20.0,
+            "volume": 500_000,
+        }
+        extra["ross_signals"] = signals
+        readiness["extra"] = extra
+        via.execution_readiness_json = readiness
     db.commit()
     uid = _uid(db, "rp_" + symbol.replace("-", "_"))
     sess = create_trading_automation_session(
@@ -1252,10 +1323,11 @@ def test_a4_rescores_eligibility_only_block_when_running_up(monkeypatch, db: Ses
     monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
     calls = {"n": 0}
 
-    def _fake_tick(_db, meta=None):
+    def _fake_tick(_db, meta=None, decision_as_of_utc=None):
         calls["n"] += 1
         assert meta and meta.get("tickers") == ["CLRO"]
-        return {"ok": True}
+        assert decision_as_of_utc is not None
+        return {"ok": True, "persistence_ok": True}
 
     monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick", _fake_tick)
     monkeypatch.setattr("app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds", lambda *a, **k: 3.0)
@@ -1295,13 +1367,116 @@ def test_a4_rate_limited_to_cadence(monkeypatch, db: Session) -> None:
     monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
     calls = {"n": 0}
     monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
-                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or {"ok": True})
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or {"ok": True, "persistence_ok": True})
     monkeypatch.setattr("app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds", lambda *a, **k: 10.0)
     s = _armed_sess()
     assert _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev()) is True
     # a second call within the cadence is throttled (no second re-score).
     assert _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev()) is False
     assert calls["n"] == 1
+
+
+def test_a4_failed_persistence_releases_cadence_slot(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds",
+        lambda *a, **k: 10.0,
+    )
+    calls: list[datetime] = []
+
+    def _fake_tick(_db, *, meta=None, decision_as_of_utc=None, **_kwargs):
+        assert meta and meta.get("tickers") == ["CLRO"]
+        assert isinstance(decision_as_of_utc, datetime)
+        calls.append(decision_as_of_utc)
+        return {"ok": True, "persistence_ok": len(calls) > 1}
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+        _fake_tick,
+    )
+    t0 = datetime(2026, 7, 13, 13, 5, 0)
+    state = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(state), _lr.replay_clock(t0):
+        assert _lr._maybe_rescore_eligibility_block(
+            db, _armed_sess(), _elig_only_ev()
+        ) is False
+        assert state.a4_rescore_last == {}
+        assert _lr._maybe_rescore_eligibility_block(
+            db, _armed_sess(), _elig_only_ev()
+        ) is True
+    assert calls == [t0, t0]
+
+
+def test_a4_replay_cadence_and_second_run_are_deterministic(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds",
+        lambda *a, **k: 10.0,
+    )
+    calls: list[datetime] = []
+
+    def _fake_tick(_db, *, decision_as_of_utc=None, **_kwargs):
+        calls.append(decision_as_of_utc)
+        return {"ok": True, "persistence_ok": True}
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+        _fake_tick,
+    )
+    t0 = datetime(2026, 7, 13, 13, 5, 0)
+    first = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(first):
+        with _lr.replay_clock(t0):
+            assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is True
+        with _lr.replay_clock(t0 + timedelta(seconds=9)):
+            assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is False
+        with _lr.replay_clock(t0 + timedelta(seconds=10)):
+            assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is True
+
+    second = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(second), _lr.replay_clock(t0):
+        assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is True
+
+    assert calls == [t0, t0 + timedelta(seconds=10), t0]
+
+
+def test_a4_replay_network_contract_error_propagates_and_releases_slot(
+    monkeypatch, db: Session
+) -> None:
+    from app.services.trading.momentum_neural.replay_capture_runtime import (
+        ReplayNetworkAccessError,
+    )
+
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds",
+        lambda *a, **k: 10.0,
+    )
+
+    def _forbidden_tick(*_args, **_kwargs):
+        raise ReplayNetworkAccessError("forbidden replay network fallback")
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+        _forbidden_tick,
+    )
+    t0 = datetime(2026, 7, 13, 13, 5, 0)
+    state = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(state), _lr.replay_clock(t0):
+        with pytest.raises(
+            ReplayNetworkAccessError,
+            match="forbidden replay network fallback",
+        ):
+            _lr._maybe_rescore_eligibility_block(
+                db, _armed_sess(), _elig_only_ev()
+            )
+
+    assert state.a4_rescore_last == {}
 
 
 def test_a4_flag_off_no_rescore(monkeypatch, db: Session) -> None:

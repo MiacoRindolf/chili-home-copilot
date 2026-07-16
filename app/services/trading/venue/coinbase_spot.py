@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import re
 import threading
 import time
@@ -354,6 +356,28 @@ def _normalize_order(od: dict[str, Any]) -> NormalizedOrder:
     )
 
 
+def _normalize_order_truth(od: dict[str, Any]) -> Optional[NormalizedOrder]:
+    """Strict order normalization without missing-fill-to-zero coercion."""
+    raw_filled = (
+        od.get("filled_size")
+        if "filled_size" in od
+        else od.get("filledSize")
+    )
+    filled = _sf(raw_filled)
+    order = _normalize_order(od)
+    if not (
+        str(order.order_id or "").strip()
+        and str(order.product_id or "").strip()
+        and str(order.side or "").strip()
+        and str(order.status or "").strip()
+        and filled is not None
+        and math.isfinite(filled)
+        and filled >= 0.0
+    ):
+        return None
+    return order
+
+
 def _normalize_fill(fd: dict[str, Any]) -> NormalizedFill:
     return NormalizedFill(
         fill_id=str(fd.get("entry_id") or fd.get("trade_id") or fd.get("fill_id") or "") or None,
@@ -656,6 +680,227 @@ class CoinbaseSpotAdapter(VenueAdapter):
         except Exception as e:
             _log.debug("[coinbase_spot] get_order failed: %s", e)
             return None, fresh
+
+    def list_open_orders_truth(
+        self,
+        *,
+        product_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Fail-closed, fully paginated working-order absence proof.
+
+        One unfiltered product query avoids a cross-query transition race (for
+        example PENDING -> OPEN between two status-specific scans).  Every status
+        not explicitly terminal remains working, including
+        ``UNKNOWN_ORDER_STATUS``.
+        """
+        if not self.is_enabled():
+            return {"readable": False, "orders": None}
+        try:
+            client = self._require_client()
+            page_limit = max(1, min(int(limit or 50), 250))
+            orders: list[NormalizedOrder] = []
+            seen_order_ids: set[str] = set()
+            cursor: str | None = None
+            seen_cursors: set[str] = set()
+            for _page in range(100):
+                kwargs: dict[str, Any] = {"limit": page_limit}
+                if product_id:
+                    kwargs["product_ids"] = [_to_product_id(product_id)]
+                if cursor:
+                    kwargs["cursor"] = cursor
+                payload = _as_dict(client.list_orders(**kwargs))
+                raw_orders = payload.get("orders")
+                has_next = payload.get("has_next")
+                if not isinstance(raw_orders, list) or not isinstance(has_next, bool):
+                    return {"readable": False, "orders": None}
+                for raw_order in raw_orders:
+                    row = (
+                        raw_order
+                        if isinstance(raw_order, dict)
+                        else _as_dict(raw_order)
+                    )
+                    if not row:
+                        return {"readable": False, "orders": None}
+                    order = _normalize_order_truth(row)
+                    if order is None:
+                        return {"readable": False, "orders": None}
+                    oid = str(order.order_id or "").strip()
+                    if oid in seen_order_ids:
+                        return {"readable": False, "orders": None}
+                    seen_order_ids.add(oid)
+                    orders.append(order)
+                if not has_next:
+                    break
+                next_cursor = str(payload.get("cursor") or "").strip()
+                if not next_cursor or next_cursor in seen_cursors:
+                    return {"readable": False, "orders": None}
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+            else:
+                return {"readable": False, "orders": None}
+
+            terminal = {"filled", "cancelled", "canceled", "expired", "failed"}
+            working = [
+                order
+                for order in orders
+                if str(order.status or "").strip().lower() not in terminal
+            ]
+            if product_id:
+                expected_product = _to_product_id(product_id)
+                working = [
+                    order
+                    for order in working
+                    if str(order.product_id or "").strip().upper() == expected_product
+                ]
+            return {"readable": True, "orders": working}
+        except Exception as exc:
+            _log.warning("[coinbase_spot] strict open-order read failed: %s", exc)
+            return {"readable": False, "orders": None}
+
+    def get_order_truth(self, order_id: str) -> dict[str, Any]:
+        """Fail-closed order identity read; errors are never broker absence."""
+        if not self.is_enabled() or not str(order_id or "").strip():
+            return {"readable": False, "found": False, "order": None}
+        try:
+            payload = _as_dict(
+                self._require_client().get_order(order_id=str(order_id))
+            )
+            inner = (
+                payload.get("order")
+                if isinstance(payload.get("order"), dict)
+                else payload
+            )
+            if not isinstance(inner, dict) or not inner:
+                return {"readable": False, "found": False, "order": None}
+            order = _normalize_order_truth(inner)
+            if order is None:
+                return {"readable": False, "found": False, "order": None}
+            if str(order.order_id or "").strip() != str(order_id).strip():
+                return {"readable": False, "found": False, "order": None}
+            return {"readable": True, "found": True, "order": order}
+        except Exception as exc:
+            _log.debug("[coinbase_spot] strict get_order failed: %s", exc)
+            return {"readable": False, "found": False, "order": None}
+
+    def _strict_account_snapshot(self) -> Optional[dict[str, Any]]:
+        """Return complete, identity-bearing Coinbase account rows or ``None``."""
+        if not self.is_enabled():
+            return None
+        try:
+            client = self._require_client()
+            cursor: str | None = None
+            seen_cursors: set[str] = set()
+            rows: list[dict[str, Any]] = []
+            seen_account_ids: set[str] = set()
+            portfolio_ids: set[str] = set()
+            for _page in range(100):
+                kwargs: dict[str, Any] = {"limit": 250}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                payload = _as_dict(client.get_accounts(**kwargs))
+                raw_accounts = payload.get("accounts")
+                has_next = payload.get("has_next")
+                if not isinstance(raw_accounts, list) or not isinstance(has_next, bool):
+                    return None
+                for raw_account in raw_accounts:
+                    account = (
+                        raw_account
+                        if isinstance(raw_account, dict)
+                        else _as_dict(raw_account)
+                    )
+                    if not account:
+                        return None
+                    available = _as_dict(account.get("available_balance"))
+                    hold = _as_dict(account.get("hold"))
+                    account_id = str(account.get("uuid") or "").strip()
+                    portfolio_id = str(
+                        account.get("retail_portfolio_id") or ""
+                    ).strip()
+                    currencies = [
+                        str(account.get("currency") or "").strip().upper(),
+                        str(available.get("currency") or "").strip().upper(),
+                        str(hold.get("currency") or "").strip().upper(),
+                    ]
+                    available_value = _sf(available.get("value"))
+                    hold_value = _sf(hold.get("value"))
+                    if not (
+                        account_id
+                        and account_id not in seen_account_ids
+                        and portfolio_id
+                        and all(currencies)
+                        and len(set(currencies)) == 1
+                        and available_value is not None
+                        and hold_value is not None
+                        and math.isfinite(available_value)
+                        and math.isfinite(hold_value)
+                        and available_value >= 0.0
+                        and hold_value >= 0.0
+                    ):
+                        return None
+                    seen_account_ids.add(account_id)
+                    portfolio_ids.add(portfolio_id)
+                    rows.append(
+                        {
+                            "account_id": account_id,
+                            "portfolio_id": portfolio_id,
+                            "currency": currencies[0],
+                            "available": available_value,
+                            "hold": hold_value,
+                        }
+                    )
+                if not has_next:
+                    break
+                next_cursor = str(payload.get("cursor") or "").strip()
+                if not next_cursor or next_cursor in seen_cursors:
+                    return None
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+            else:
+                return None
+            if not rows or len(portfolio_ids) != 1:
+                return None
+            portfolio_id = next(iter(portfolio_ids))
+            canonical = "\n".join(
+                [f"portfolio:{portfolio_id}"]
+                + sorted(
+                    f"account:{row['account_id']}:{row['currency']}"
+                    for row in rows
+                )
+            )
+            digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            return {
+                "rows": rows,
+                "identity": f"coinbase_spot:v1:{digest}",
+            }
+        except Exception as exc:
+            _log.warning("[coinbase_spot] strict account read failed: %s", exc)
+            return None
+
+    def get_account_identity_truth(self) -> dict[str, Any]:
+        snapshot = self._strict_account_snapshot()
+        if snapshot is None:
+            return {"readable": False, "identity": None}
+        return {"readable": True, "identity": snapshot["identity"]}
+
+    def get_position_quantity_truth(self, product_id: str) -> dict[str, Any]:
+        """Direct, complete Coinbase wallet read; errors never mean flat."""
+        base = _to_product_id(product_id).split("-", 1)[0]
+        if not base:
+            return {"readable": False, "quantity": None}
+        snapshot = self._strict_account_snapshot()
+        if snapshot is None:
+            return {"readable": False, "quantity": None}
+        quantity = sum(
+            float(row["available"]) + float(row["hold"])
+            for row in snapshot["rows"]
+            if row["currency"] == base
+        )
+        return {
+            "readable": True,
+            "quantity": quantity,
+            "account_identity": snapshot["identity"],
+        }
 
     # f-coinbase-post-place-verify-routing-fix (2026-05-10): single-shot
     # broker-side state read for the bracket writer's post-place verify

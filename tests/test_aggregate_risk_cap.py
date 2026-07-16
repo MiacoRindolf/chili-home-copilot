@@ -8,9 +8,20 @@ from app.models.trading import MomentumStrategyVariant, TradingAutomationSession
 from app.services.trading.momentum_neural.risk_evaluator import aggregate_open_risk_usd
 
 
-def _held_session(db, user_id, variant_id, symbol, qty, entry, stop, state="live_entered"):
+def _held_session(
+    db,
+    user_id,
+    variant_id,
+    symbol,
+    qty,
+    entry,
+    stop,
+    state="live_entered",
+    execution_family=None,
+):
     sess = TradingAutomationSession(
         user_id=user_id, symbol=symbol, mode="live", variant_id=variant_id, state=state,
+        execution_family=execution_family,
         risk_snapshot_json={"momentum_live_execution": {"position": {
             "quantity": qty, "avg_entry_price": entry, "stop_price": stop,
         }}},
@@ -44,3 +55,43 @@ def test_aggregate_zero_when_flat(db) -> None:
     db.flush()
     total, rows = aggregate_open_risk_usd(db, user_id=u.id)
     assert total == 0.0 and rows == []
+
+
+def test_aggregate_risk_is_scoped_to_the_candidate_capital_account(db) -> None:
+    u = models.User(name="agg-family")
+    db.add(u)
+    db.flush()
+    v = MomentumStrategyVariant(family="agg-family", variant_key="agg_family_v", label="agg", params_json={})
+    db.add(v)
+    db.flush()
+    _held_session(
+        db, u.id, v.id, "REAL", 100, 10.0, 9.0,
+        execution_family="robinhood_spot",
+    )
+    _held_session(
+        db, u.id, v.id, "PAPR", 200, 5.0, 4.5,
+        execution_family="alpaca_spot",
+    )
+    short = _held_session(
+        db, u.id, v.id, "SHRT", 50, 8.0, 9.0,
+        execution_family="alpaca_short",
+    )
+    short.risk_snapshot_json = {
+        "momentum_live_execution": {
+            "side_long": False,
+            "position": {"quantity": 50, "avg_entry_price": 8.0, "stop_price": 9.0},
+        }
+    }
+    db.commit()
+
+    real_total, real_rows = aggregate_open_risk_usd(
+        db, user_id=u.id, execution_family="robinhood_spot"
+    )
+    paper_total, paper_rows = aggregate_open_risk_usd(
+        db, user_id=u.id, execution_family="alpaca_spot"
+    )
+
+    assert real_total == 100.0
+    assert [r["symbol"] for r in real_rows] == ["REAL"]
+    assert paper_total == 150.0
+    assert sorted(r["symbol"] for r in paper_rows) == ["PAPR", "SHRT"]

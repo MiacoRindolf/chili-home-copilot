@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "evidence_role": "after_fact_enrichment_only_never_canonical_label_or_event_time_input",
+  "trade_date": "2026-07-13",
+  "video": {
+    "id": "RZbM0qXOFbc",
+    "title": "Biggest Loss of The Month...",
+    "url": "https://www.youtube.com/watch?v=RZbM0qXOFbc",
+    "published_at_utc": "2026-07-13T23:00:24Z"
+  },
+  "canonical_source_video_id": "S2sOq-stPgA",
+  "creates_canonical_labels": false,
+  "verified_aggregate_day_pnl_usd": {
+    "main_account": 8430.49,
+    "small_account": 205.18
+  },
+  "after_fact_pnl_context": {
+    "main_account": {
+      "PLSM_symbol_pnl_usd_approx": -26000,
+      "VE_symbol_pnl_usd_approx": 34000,
+      "warning": "VE is a separate main-account campaign; exact symbol P/L is not retained without sealed local source evidence"
+    },
+    "small_account": {
+      "PLSM_cumulative_day_pnl_after_backside_exit_usd": -560.56,
+      "PLSM_first_trade_pnl_usd": 2363.44,
+      "VEEE_trade_pnl_usd": 765.74,
+      "warning": "cumulative day P/L is not a trade-specific P/L and must not be differenced to derive the backside loss"
+    }
+  },
+  "local_capture_audit": {
+    "audited_at": "2026-07-14",
+    "database_clock": "UTC",
+    "PLSM_front_side_first_dip": {
+      "coverage_status": "coverage_unavailable",
+      "reason": "retained quote_trade_l2_prefix_begins_after_reported_first_dip_entry_zone",
+      "benchmark_entry_price": 6.52,
+      "first_massive_quote": {
+        "observed_at": "2026-07-13T12:01:38.120481Z",
+        "bid": 8.79,
+        "ask": 8.82
+      },
+      "first_viability_observation_at": "2026-07-13T12:02:22.218768Z",
+      "first_iqfeed_l2_snapshot_at": "2026-07-13T12:02:33.214220Z",
+      "first_iqfeed_trade": {
+        "observed_at": "2026-07-13T12:02:34.218184Z",
+        "price": 8.86,
+        "bid": 8.85,
+        "ask": 8.93
+      },
+      "live_runner_started": {
+        "session_id": 13103,
+        "observed_at": "2026-07-13T12:04:39.873962Z",
+        "mid": 10.455
+      },
+      "missing_proofs": [
+        "pretrigger_quote_trade_l2_prefix",
+        "exact_quote_provider_event_clock",
+        "exact_quote_receive_release_clock",
+        "provider_watermark_and_bounded_lateness",
+        "provider_sequenced_l2_deltas",
+        "complete_scanner_to_decision_continuity"
+      ]
+    }
+  },
+  "phase_labels": [],
+  "enrichment_context": [
+    {
+      "canonical_label_id": "S2sOq-stPgA::QTTB::veto",
+      "symbol": "QTTB",
+      "context_role": "headline_context_never_phase_boundary",
+      "headline_context_time_et": "06:59:00",
+      "expected_action_context": "reject",
+      "facts": [
+        "fresh clinical-results headline",
+        "higher price",
+        "wide spread",
+        "easy to borrow"
+      ]
+    },
+    {
+      "canonical_label_id": "S2sOq-stPgA::PLSM::first_dip",
+      "symbol": "PLSM",
+      "context_role": "reported_trade_context_never_phase_boundary_or_executable_pricing",
+      "scanner_observations_et": ["07:58:33", "07:59:22"],
+      "reported_entry_price": 6.52,
+      "reported_exit_price": 7.7,
+      "small_account_trade_pnl_usd": 2363.44
+    },
+    {
+      "canonical_label_id": "S2sOq-stPgA::PLSM::backside",
+      "symbol": "PLSM",
+      "context_role": "approximate_recap_context_never_phase_boundary_or_fill",
+      "approx_window_et": {
+        "start": "08:22:30",
+        "end": "08:30:40"
+      },
+      "reported_entry_zone": [9.3, 9.57],
+      "reported_failed_break_level": 9.59,
+      "trade_specific_small_account_pnl_usd": null,
+      "exact_fill_time": null
+    },
+    {
+      "canonical_label_id": "S2sOq-stPgA::VEEE::pullback",
+      "symbol": "VEEE",
+      "context_role": "small_account_context_never_phase_boundary_or_fill",
+      "scanner_observations_et": [
+        {"time": "08:58:59", "price": 8.89, "volume": 2750000},
+        {"time": "08:59:08", "price": 9.72, "volume": 3010000}
+      ],
+      "approx_execution_window_et": {
+        "start": "09:17:30",
+        "end": "09:21:10",
+        "certainty": "approximate"
+      },
+      "exact_order_time": null,
+      "small_account_symbol_pnl_usd": 765.74
+    },
+    {
+      "canonical_label_id": null,
+      "symbol": "VE",
+      "account": "main",
+      "context_role": "different_symbol_cross_account_campaign_never_canonical_label",
+      "campaign_start_approx_et": "08:50:00",
+      "campaign_pnl_usd_approx": 34000,
+      "exact_trade_count_and_fills": null
+    }
+  ],
+  "certification_limits": [
+    "edited recap cannot supply event-time signals",
+    "not every VEEE execution is disclosed",
+    "RZbM0qXOFbc adds context to S2sOq-stPgA and creates no canonical label",
+    "the approximately 08:50 campaign is main-account VE, not small-account VEEE",
+    "borrow and collateral observations are broker-specific",
+    "recorded CHILI data must independently prove every decision-time input"
+  ]
+}

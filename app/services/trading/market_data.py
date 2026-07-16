@@ -508,12 +508,17 @@ def fetch_ohlcv_df(
     with _ohlcv_df_lock:
         _hit = _ohlcv_df_cache.get(_cache_key)
         if _hit and _now - _hit[0] < _OHLCV_DF_TTL:
-            return _hit[1].copy()
+            cached = _hit[1].copy()
+            cached.attrs["cache_hit"] = True
+            cached.attrs["cache_age_seconds"] = max(0.0, _now - _hit[0])
+            return cached
 
     _start_str = str(start)[:10] if start else None
     _end_str = str(end)[:10] if end else None
 
     def _store_and_return(result: pd.DataFrame) -> pd.DataFrame:
+        result.attrs["cache_hit"] = False
+        result.attrs["cache_age_seconds"] = 0.0
         if not result.empty or _is_quality_rejected_df(result):
             with _ohlcv_df_lock:
                 if len(_ohlcv_df_cache) >= _OHLCV_DF_MAX:

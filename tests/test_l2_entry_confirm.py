@@ -99,11 +99,35 @@ def test_tape_helper_rising_buy_tape_positive_accel():
         _tick(10.02, 500, 10.01, 10.02, 12.0),  # px>=ask -> buy
         _tick(10.03, 600, 10.02, 10.03, 15.0),  # px>=ask -> buy
     ]
-    out = _signed_tape_features(rows, window_s=15.0)
+    out = _signed_tape_features(
+        rows,
+        window_s=15.0,
+        tick_rate_floor_pctile=0.0,
+    )
     assert out is not None
     assert out["signed_tape_accel"] > 0.0
     assert out["n_ticks"] == 6
     assert out["tick_rate"] >= 0.0
+
+
+def test_tape_helper_epoch_midpoint_is_stable_across_microsecond_offsets():
+    """An exactly centered millisecond print always belongs to the back half."""
+
+    epoch = 1_784_100_000.0
+    for microsecond_offset in range(1_000):
+        decision = epoch + microsecond_offset / 1_000_000.0
+        rows = [
+            _tick(10.00, 100, 9.99, 10.00, decision - 0.030),
+            _tick(10.01, 200, 10.00, 10.01, decision - 0.020),
+            _tick(10.02, 300, 10.01, 10.02, decision - 0.010),
+        ]
+        out = _signed_tape_features(
+            rows,
+            window_s=0.05,
+            tick_rate_floor_pctile=0.0,
+        )
+        assert out is not None
+        assert out["signed_tape_accel"] == 400.0
 
 
 def test_tape_helper_dead_negative_tape_nonpositive_accel():
@@ -115,14 +139,32 @@ def test_tape_helper_dead_negative_tape_nonpositive_accel():
         _tick(9.99, 400, 9.99, 10.00, 12.0),    # back: sell
         _tick(9.98, 500, 9.98, 9.99, 15.0),     # back: sell
     ]
-    out = _signed_tape_features(rows, window_s=15.0)
+    out = _signed_tape_features(
+        rows,
+        window_s=15.0,
+        tick_rate_floor_pctile=0.0,
+    )
     assert out is not None
     assert out["signed_tape_accel"] <= 0.0
 
 
 def test_tape_helper_too_few_ticks_returns_none():
-    assert _signed_tape_features([], window_s=15.0) is None
-    assert _signed_tape_features([_tick(10.0, 100, 9.99, 10.0, 1.0)], window_s=15.0) is None
+    assert (
+        _signed_tape_features(
+            [],
+            window_s=15.0,
+            tick_rate_floor_pctile=0.0,
+        )
+        is None
+    )
+    assert (
+        _signed_tape_features(
+            [_tick(10.0, 100, 9.99, 10.0, 1.0)],
+            window_s=15.0,
+            tick_rate_floor_pctile=0.0,
+        )
+        is None
+    )
 
 
 # ── (4) DISABLED = confirm before any I/O ────────────────────────────────────────

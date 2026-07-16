@@ -170,12 +170,21 @@ class _FakeSession:
         self.closed = True
 
 
-def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurrent: int):
+def _wire_batch(
+    monkeypatch,
+    *,
+    n_sessions: int,
+    batch_workers: int,
+    max_concurrent: int,
+    tick_result=None,
+    post_commit_handler=None,
+):
     """Drive _run_momentum_live_runner_batch_job with fakes; return captured state."""
     import app.db as app_db
     from app.config import settings
     from app.services import trading_scheduler
     from app.services.trading.momentum_neural import live_runner
+    from app.services.trading.momentum_neural import captured_paper_dispatcher
 
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True, raising=False)
     monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", True, raising=False)
@@ -202,9 +211,29 @@ def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurr
     def _fake_tick(db, sid, **_):
         with ticks_lock:
             ticks.append((db.name, int(sid)))
-        return {"ok": True}
+        return {"ok": True} if tick_result is None else tick_result
 
-    monkeypatch.setattr(live_runner, "tick_live_session", _fake_tick)
+    monkeypatch.setattr(captured_paper_dispatcher, "dispatch_live_runner_tick", _fake_tick)
+    post_commit_calls = []
+    post_commit_commit_counts = []
+
+    def _fake_post_commit(request):
+        post_commit_calls.append(request)
+        post_commit_commit_counts.append(tuple(s.commits for s in created))
+        if post_commit_handler is not None:
+            return post_commit_handler(request)
+        return None
+
+    monkeypatch.setattr(
+        captured_paper_dispatcher,
+        "dispatch_captured_paper_post_commit",
+        _fake_post_commit,
+    )
+
+    def _bare_tick_is_forbidden(*_args, **_kwargs):
+        raise AssertionError("scheduler bypassed captured-paper dispatcher")
+
+    monkeypatch.setattr(live_runner, "tick_live_session", _bare_tick_is_forbidden)
 
     captured: dict[str, object] = {}
     real_dispatch = trading_scheduler._dispatch_live_runner_ticks
@@ -212,7 +241,9 @@ def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurr
     def _spy_dispatch(session_ids, *, workers, tick_one):
         captured["workers"] = workers
         captured["ids"] = list(session_ids)
-        return real_dispatch(session_ids, workers=workers, tick_one=tick_one)
+        result = real_dispatch(session_ids, workers=workers, tick_one=tick_one)
+        captured["dispatch_result"] = result
+        return result
 
     monkeypatch.setattr(trading_scheduler, "_dispatch_live_runner_ticks", _spy_dispatch)
     monkeypatch.setattr(app_db, "SessionLocal", _session_factory)
@@ -220,6 +251,8 @@ def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurr
 
     trading_scheduler._run_momentum_live_runner_batch_job()
 
+    captured["post_commit_calls"] = post_commit_calls
+    captured["post_commit_commit_counts"] = post_commit_commit_counts
     return created, ticks, captured
 
 
@@ -269,3 +302,94 @@ def test_batch_single_session_uses_one_worker(monkeypatch):
     )
     assert captured["workers"] == 1
     assert [sid for _, sid in ticks] == [100]
+
+
+def _captured_completion_request():
+    from datetime import datetime, timezone
+
+    from app.services.trading.momentum_neural import (
+        captured_paper_entry_intent as contract,
+    )
+
+    route = contract.CapturedPaperRouteToken(
+        session_id=100,
+        symbol="ACTU",
+        execution_family="alpaca_spot",
+        account_scope="alpaca:paper",
+        expected_account_id="d7cc580c-2b8f-432f-b771-1cecfb3fe87a",
+        code_build_sha256="a" * 64,
+        config_sha256="b" * 64,
+        capture_receipt_sha256="c" * 64,
+        runtime_generation="f6ef5ba0-5b91-49bf-a2f5-e71e8e270eb3",
+        first_dip_policy_mode="candidate",
+    )
+    intent = contract.CapturedPaperEntryIntent(
+        route_token=route,
+        intent_generation="39f55a65-e6f2-4ccc-bd02-f50dc9c27c69",
+        decision_id="captured-paper-decision-100",
+        client_order_id="chili_ml_ACTU_100_1",
+        setup_family="first_dip_reclaim",
+        decision_at=datetime(2026, 7, 15, 16, 30, tzinfo=timezone.utc),
+        structural_stop_price="2.50",
+        entry_limit_ceiling_price="3.00",
+        account_receipt_sha256="d" * 64,
+        bbo_receipt_sha256="e" * 64,
+        setup_evidence_sha256="f" * 64,
+        policy_sha256="1" * 64,
+        feature_flags_sha256="2" * 64,
+    )
+    return contract.CapturedPaperPostCommitRequest(
+        intent=intent,
+        completion_generation="73dbcf92-94ea-436e-978c-b0e31ce7252d",
+    )
+
+
+def test_batch_commits_phase_one_before_exact_post_commit_completion(monkeypatch):
+    completion = _captured_completion_request()
+    state = {}
+
+    def complete(request):
+        state["request"] = request
+
+    created, _ticks, captured = _wire_batch(
+        monkeypatch,
+        n_sessions=1,
+        batch_workers=1,
+        max_concurrent=1,
+        tick_result=completion,
+        post_commit_handler=complete,
+    )
+
+    assert captured["post_commit_calls"] == [completion]
+    # The listing session is first and the tick-owned session is second.  The
+    # completion dispatcher observed the latter only after its commit.
+    assert captured["post_commit_commit_counts"] == [(0, 1)]
+    assert state["request"] is completion
+    per_tick = created[-1]
+    assert per_tick.commits == 1
+    assert per_tick.rollbacks == 0
+    assert captured["dispatch_result"][0] == 1
+
+
+def test_batch_completion_failure_marks_tick_failed_without_phase_one_rollback(
+    monkeypatch,
+):
+    completion = _captured_completion_request()
+
+    def fail_completion(_request):
+        raise RuntimeError("retry completion")
+
+    created, _ticks, captured = _wire_batch(
+        monkeypatch,
+        n_sessions=1,
+        batch_workers=1,
+        max_concurrent=1,
+        tick_result=completion,
+        post_commit_handler=fail_completion,
+    )
+
+    assert captured["post_commit_calls"] == [completion]
+    per_tick = created[-1]
+    assert per_tick.commits == 1
+    assert per_tick.rollbacks == 0
+    assert captured["dispatch_result"][0] == 0

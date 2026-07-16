@@ -1816,7 +1816,12 @@ def _l2_big_buyer_bid_starter(
         return None  # any error -> fail-CLOSED (only arm on a proven big-buyer book)
 
 
-def _signed_tape_features(rows: Any, *, window_s: float) -> dict[str, Any] | None:
+def _signed_tape_features(
+    rows: Any,
+    *,
+    window_s: float,
+    tick_rate_floor_pctile: float,
+) -> dict[str, Any] | None:
     """PURE (no I/O): from oldest-first ``(price, size, bid, ask, ts_seconds)`` trade ticks
     over a recent window, compute the TAPE-PRIMARY confirmer features. Lookahead-free —
     the caller supplies only COMPLETED ticks up to ``now`` / ``as_of``; this just splits the
@@ -1844,7 +1849,7 @@ def _signed_tape_features(rows: Any, *, window_s: float) -> dict[str, Any] | Non
         return None
     # Parse + aggressor-sign every tick in arrival order (prev_px / last_sign carry across
     # the whole window so the tick-rule fallback is continuous, exactly like _aggressor_imbalance).
-    parsed: list[tuple[float, float, int]] = []  # (ts_seconds, signed_vol, abs_vol)
+    parsed: list[tuple[float | None, float, float]] = []
     prev_px = None
     last_sign = 0
     t_min = None
@@ -1900,11 +1905,35 @@ def _signed_tape_features(rows: Any, *, window_s: float) -> dict[str, Any] | Non
     # Split the WINDOW (not the count) in half by timestamp midpoint so accel measures a
     # true rate of change in time; fall back to an index split when timestamps are absent.
     if t_min is not None and t_max is not None and t_max > t_min:
-        midpoint = (t_min + t_max) / 2.0
-        front = [p for p in parsed if p[0] is not None and p[0] < midpoint]
-        back = [p for p in parsed if p[0] is None or p[0] >= midpoint]
-        front_secs = max(1e-6, midpoint - t_min)
-        back_secs = max(1e-6, t_max - midpoint)
+        # Epoch-second floats are ~1e9 today.  ``(min + max) / 2`` loses enough
+        # low bits that an exactly centered millisecond print can randomly land
+        # on either side as the surrounding microsecond changes.  Work in
+        # relative time and treat values within the representable epoch-float
+        # resolution as the midpoint (therefore the newer/back half).
+        span = t_max - t_min
+        midpoint_offset = span / 2.0
+        timestamp_tolerance = max(
+            1e-9,
+            2.0 * math.ulp(t_min),
+            2.0 * math.ulp(t_max),
+        )
+
+        def _is_front_half(point: tuple[float | None, float, float]) -> bool:
+            ts = point[0]
+            if ts is None:
+                return False
+            offset = ts - t_min
+            return offset < midpoint_offset and not math.isclose(
+                offset,
+                midpoint_offset,
+                rel_tol=0.0,
+                abs_tol=timestamp_tolerance,
+            )
+
+        front = [p for p in parsed if _is_front_half(p)]
+        back = [p for p in parsed if not _is_front_half(p)]
+        front_secs = max(1e-6, midpoint_offset)
+        back_secs = max(1e-6, span - midpoint_offset)
     else:
         half = n // 2
         front = parsed[:half]
@@ -1923,9 +1952,11 @@ def _signed_tape_features(rows: Any, *, window_s: float) -> dict[str, Any] | Non
          len(back) / back_secs if back_secs > 0 else 0.0]
     )
     try:
-        fp = float(getattr(settings, "chili_momentum_l2_confirm_tick_rate_floor_pctile", 0.0) or 0.0)
+        fp = float(tick_rate_floor_pctile)
     except (TypeError, ValueError):
-        fp = 0.0
+        return None
+    if not math.isfinite(fp):
+        return None
     fp = max(0.0, min(1.0, fp))
     # percentile of the small per-half-rate sample (nearest-rank, lower bound)
     idx = min(len(half_rates) - 1, int(fp * (len(half_rates) - 1)))
@@ -1939,7 +1970,12 @@ def _signed_tape_features(rows: Any, *, window_s: float) -> dict[str, Any] | Non
 
 
 def signed_tape_accel_features(
-    symbol: str | None, *, db: Any = None, window_s: float | None = None, as_of: Any = None
+    symbol: str | None,
+    *,
+    db: Any = None,
+    window_s: float | None = None,
+    as_of: Any = None,
+    settings_obj: Any = settings,
 ) -> dict[str, Any] | None:
     """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
     (equity tape; lookahead-free trailing ``now()`` / ``(as_of-w, as_of]``) and compute the
@@ -1952,7 +1988,7 @@ def signed_tape_accel_features(
         return None
     try:
         w = float(window_s) if window_s is not None else float(
-            getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0
+            getattr(settings_obj, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0
         )
     except (TypeError, ValueError):
         w = 15.0
@@ -1973,11 +2009,25 @@ def signed_tape_accel_features(
             "AND observed_at <= :as_of ORDER BY observed_at ASC"
         )
         p = {"s": s, "w": w, "as_of": _ao}
-        rows = db.execute(_sql(q), p).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(q), p)
     except Exception:
         return None
     try:
-        return _signed_tape_features(rows, window_s=w)
+        floor_pctile = float(
+            getattr(
+                settings_obj,
+                "chili_momentum_l2_confirm_tick_rate_floor_pctile",
+                0.0,
+            )
+            or 0.0
+        )
+        return _signed_tape_features(
+            rows,
+            window_s=w,
+            tick_rate_floor_pctile=floor_pctile,
+        )
     except Exception:
         return None
 
@@ -2031,7 +2081,13 @@ def _l2_entry_confirm(
             w = float(getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0)
         except (TypeError, ValueError):
             w = 15.0
-        tape = signed_tape_accel_features(symbol, db=db, window_s=w, as_of=l2_as_of)
+        tape = signed_tape_accel_features(
+            symbol,
+            db=db,
+            window_s=w,
+            as_of=l2_as_of,
+            settings_obj=settings,
+        )
         if tape is None:
             dbg["reason"] = "l2_confirm_no_data"  # empty/thin tape -> fail-open
             return "confirm", dbg
@@ -3235,13 +3291,26 @@ def evaluate_sticky_backside_bench(
         # ── MANDATORY UN-BENCH: a genuine NEW HIGH above the benched-at HOD clears it ───
         if benched_at_hod is not None:
             try:
-                if cur_hod is not None and float(cur_hod) > float(benched_at_hod):
+                # A historical post-bench wick is not enough to establish a
+                # fresh leg.  The price must still be above the anchor at this
+                # decision instant: live tick when available, otherwise the
+                # latest completed close.
+                _current_px = None
+                if live_price is not None:
+                    _lp = float(live_price)
+                    if math.isfinite(_lp) and _lp > 0:
+                        _current_px = _lp
+                if _current_px is None:
+                    _current_px = float(_sess["Close"].astype(float).iloc[-1])
+                debug["current_px"] = _current_px
+                if _current_px > float(benched_at_hod):
                     debug["unbenched_new_high"] = {
                         "benched_at_hod": round(float(benched_at_hod), 6),
-                        "cur_hod": round(float(cur_hod), 6),
+                        "cur_hod": round(float(cur_hod), 6) if cur_hod is not None else None,
+                        "current_px": round(float(_current_px), 6),
                     }
                     return False, "unbenched_fresh_hod", None, debug
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, KeyError, IndexError):
                 pass
             # ── WAVE-4 ITEM-5: VWAP-RECLAIM CROSS UN-BENCH (all latch reasons) ───────────
             # A benched name that makes a genuine fresh CROSS-from-below of session VWAP has
@@ -3440,7 +3509,13 @@ def tape_confirms_hold(
             w = float(getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0)
         except (TypeError, ValueError):
             w = 15.0
-        tape = signed_tape_accel_features(symbol, db=db, window_s=w, as_of=l2_as_of)
+        tape = signed_tape_accel_features(
+            symbol,
+            db=db,
+            window_s=w,
+            as_of=l2_as_of,
+            settings_obj=settings,
+        )
         if tape is None:
             return False, dbg  # empty / thin / crypto / error -> fail-CLOSED (no early fire)
         accel = float(tape.get("signed_tape_accel", 0.0))
@@ -3881,6 +3956,190 @@ def _ohlc_local(o: float, h: float, l: float, c: float) -> tuple[float, float, f
     return rng, body, upper, lower
 
 
+_FIRST_DIP_FRONT_SIDE_VIA = "first_dip_day_leg"
+_FIRST_DIP_SETUP_FAMILY = "first_dip_reclaim"
+
+
+def _first_dip_policy_mode(settings_obj: Any) -> tuple[str, str, bool]:
+    """Resolve the explicit lifecycle without a second activation authority.
+
+    The deprecated boolean used to be OR-ed with the lifecycle mode, which let
+    it silently bypass the candidate/OOS workflow.  It is now provenance only:
+    candidate/promoted behavior depends exclusively on the explicit lifecycle
+    mode and its typed evidence gates.
+    """
+
+    configured_mode = str(
+        getattr(
+            settings_obj,
+            "chili_momentum_first_dip_reclaim_policy_mode",
+            "baseline",
+        )
+        or "baseline"
+    ).strip().lower()
+    if configured_mode not in {"baseline", "candidate", "promoted"}:
+        configured_mode = "baseline"
+    legacy_enabled = bool(
+        getattr(settings_obj, "chili_momentum_first_dip_reclaim_enabled", False)
+    )
+    return configured_mode, configured_mode, legacy_enabled
+
+
+def _first_dip_et_date(clock: Any) -> str | None:
+    """Return the decision clock's DST-correct New York trading date.
+
+    Momentum clocks are naive UTC when timezone information is absent.  Keeping
+    that convention here makes live and replay produce the same opportunity key
+    across the UTC-date boundary.  This helper is pure and fail-closed.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        ts = pd.Timestamp(clock)
+        if pd.isna(ts):
+            return None
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+        return ts.tz_convert(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return None
+
+
+def _first_dip_day_leg_certificate(
+    df: pd.DataFrame,
+    *,
+    flush_idx: int,
+    cur: int,
+    atr_pct: float | None,
+    symbol: str | None,
+    decision_clock: Any,
+    settings_obj: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Pure geometry certificate for a vertical, still-intact ET-day leg.
+
+    This intentionally does not read or write an ``already used`` marker.  It
+    emits the stable opportunity key that the final pre-submit reservation must
+    claim, and that claim may become consumed only on a broker-confirmed non-zero
+    fill.  A detector veto/reject/cancel therefore cannot burn the opportunity.
+    """
+    debug: dict[str, Any] = {
+        "certificate": _FIRST_DIP_FRONT_SIDE_VIA,
+        "eligible": False,
+        "reason": "first_dip_certificate_invalid",
+    }
+    try:
+        symbol_key = str(symbol or "").strip().upper()
+        trading_date_et = _first_dip_et_date(decision_clock)
+        debug.update({
+            "symbol": symbol_key or None,
+            "trading_date_et": trading_date_et,
+            "setup_family": _FIRST_DIP_SETUP_FAMILY,
+        })
+        if not symbol_key:
+            debug["reason"] = "first_dip_symbol_missing"
+            return False, debug
+        if trading_date_et is None:
+            debug["reason"] = "first_dip_et_date_unavailable"
+            return False, debug
+
+        # Restrict both the ignition base and HOD to the exact ET trading day.
+        # ``utc=True`` follows the lane's established naive-is-UTC convention.
+        idx_utc = pd.to_datetime(df.index, utc=True, errors="coerce")
+        from zoneinfo import ZoneInfo
+
+        idx_et = idx_utc.tz_convert(ZoneInfo("America/New_York"))
+        day_positions = [
+            pos
+            for pos in range(0, min(int(flush_idx), len(df) - 1) + 1)
+            if not pd.isna(idx_et[pos]) and idx_et[pos].date().isoformat() == trading_date_et
+        ]
+        debug["et_day_bar_count_through_flush"] = len(day_positions)
+        if not day_positions:
+            debug["reason"] = "first_dip_no_same_et_day_bars"
+            return False, debug
+
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+        day_highs = high.iloc[day_positions]
+        hod_offset = int(day_highs.to_numpy().argmax())
+        hod_idx = int(day_positions[hod_offset])
+        base_positions = [pos for pos in day_positions if pos <= hod_idx]
+        hod = float(high.iloc[hod_idx])
+        base = float(low.iloc[base_positions].min())
+        flush_close = float(close.iloc[flush_idx])
+        leg_abs = hod - base
+        leg_pct = leg_abs / base if base > 0.0 else float("nan")
+        retrace_fraction = (hod - flush_close) / leg_abs if leg_abs > 0.0 else float("nan")
+        atr_fraction = float(atr_pct) if atr_pct is not None else float("nan")
+        min_leg_atr_multiple = float(
+            getattr(settings_obj, "chili_momentum_first_dip_min_leg_atr_multiple", 3.0)
+        )
+        max_retrace_fraction = float(
+            getattr(settings_obj, "chili_momentum_first_dip_max_retrace_fraction", 0.618)
+        )
+        required_leg_pct = min_leg_atr_multiple * atr_fraction
+        dip_follows_hod = int(flush_idx) > hod_idx
+        debug.update({
+            "day_leg_hod": hod,
+            "day_leg_base": base,
+            "day_leg_absolute": leg_abs,
+            "day_leg_pct": leg_pct,
+            "atr_pct": atr_fraction,
+            "min_leg_atr_multiple": min_leg_atr_multiple,
+            "required_day_leg_pct": required_leg_pct,
+            "flush_close": flush_close,
+            "retrace_fraction": retrace_fraction,
+            "max_retrace_fraction": max_retrace_fraction,
+            "hod_bar_position": hod_idx,
+            "flush_bar_position": int(flush_idx),
+            "current_bar_position": int(cur),
+            "dip_follows_hod": dip_follows_hod,
+        })
+        finite_values = (
+            hod,
+            base,
+            leg_abs,
+            leg_pct,
+            atr_fraction,
+            min_leg_atr_multiple,
+            required_leg_pct,
+            flush_close,
+            retrace_fraction,
+            max_retrace_fraction,
+        )
+        if not all(math.isfinite(value) for value in finite_values):
+            debug["reason"] = "first_dip_nonfinite_structure"
+            return False, debug
+        if base <= 0.0 or leg_abs <= 0.0 or atr_fraction <= 0.0:
+            debug["reason"] = "first_dip_invalid_structure"
+            return False, debug
+        if min_leg_atr_multiple <= 0.0 or not (0.0 < max_retrace_fraction < 1.0):
+            debug["reason"] = "first_dip_invalid_thresholds"
+            return False, debug
+        if leg_pct < required_leg_pct:
+            debug["reason"] = "first_dip_day_leg_not_vertical"
+            return False, debug
+        if not dip_follows_hod:
+            debug["reason"] = "first_dip_does_not_follow_hod"
+            return False, debug
+        if retrace_fraction < 0.0 or retrace_fraction > max_retrace_fraction:
+            debug["reason"] = "first_dip_day_leg_broken"
+            return False, debug
+
+        debug["eligible"] = True
+        debug["reason"] = "first_dip_day_leg_certified"
+        debug["opportunity_key"] = {
+            "symbol": symbol_key,
+            "trading_date": trading_date_et,
+            "setup_family": _FIRST_DIP_SETUP_FAMILY,
+        }
+        return True, debug
+    except Exception as exc:
+        debug["reason"] = "first_dip_certificate_error"
+        debug["error_type"] = type(exc).__name__
+        return False, debug
+
+
 def flush_dip_buy_confirmation(
     df: pd.DataFrame,
     *,
@@ -3888,6 +4147,9 @@ def flush_dip_buy_confirmation(
     live_price: float | None = None,
     symbol: str | None = None,
     now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+    first_dip_execution_surface: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """AS101 algo-flush V-bounce dip-buy (flag ``chili_momentum_flush_dip_buy_enabled``).
 
@@ -3984,6 +4246,10 @@ def flush_dip_buy_confirmation(
             atr_pct = None
 
         debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "flush_dip"}
+        _first_dip_candidate = False
+        _first_dip_decision_clock: Any = None
+        _first_dip_opportunity: dict[str, Any] | None = None
+        _first_dip_mode = "baseline"
 
         # The flush bar = the bar BEFORE the current (curl) bar; the current bar is the
         # reclaim. Need both present.
@@ -4004,15 +4270,52 @@ def flush_dip_buy_confirmation(
             # proof: VWAP RISING at the flush bar. The other guards still gate the
             # shape (pre-flush close above VWAP, ATR-scaled bottoming-tail flush INTO
             # support, green curl reclaim) — this only widens WHICH trend yardstick
-            # may certify "front side". Default-ON per the operator's overfit rule
-            # (small-sample-positive -> ship + live-test; the replay window for this
-            # shape is unadjudicable — its profitable segment predates the recorded
-            # tape — so live IS the test, with per-sha rollback as the net).
+            # may certify "front side". The first-dip fallback remains
+            # experimental/default-OFF: the profitable PLSM prefix is missing from
+            # the retained tape, so neither live nor paper execution may substitute
+            # for an out-of-sample replay proof.
             v_f = vwap[flush_idx] if flush_idx < len(vwap) and vwap[flush_idx] is not None else None
             v_p = vwap[flush_idx - 1] if (flush_idx - 1) < len(vwap) and vwap[flush_idx - 1] is not None else None
             if not (v_f is not None and v_p is not None and float(v_f) > float(v_p)):
-                return False, "flush_dip_not_front_side", debug  # 9-EMA not rising, VWAP not rising
-            debug["front_side_via"] = "rising_vwap"
+                (
+                    _fd_configured_mode,
+                    _fd_mode,
+                    _fd_legacy_migrated,
+                ) = _first_dip_policy_mode(settings)
+                if _fd_mode not in {"candidate", "promoted"}:
+                    return False, "flush_dip_not_front_side", debug  # 9-EMA not rising, VWAP not rising
+                debug["first_dip_policy"] = {
+                    "configured_mode": _fd_configured_mode,
+                    "effective_mode": _fd_mode,
+                    "legacy_input_true_ignored": _fd_legacy_migrated,
+                    "legacy_true_migrated_to_candidate": False,
+                    "independent_legacy_override": False,
+                    "promotion_authority_verified": False,
+                }
+                # Use the tape as-of clock when present so the opportunity's ET
+                # date and the confirmation read share one causal decision time.
+                _first_dip_decision_clock = (
+                    l2_as_of if l2_as_of is not None else now
+                )
+                if _first_dip_decision_clock is None:
+                    _first_dip_decision_clock = df.index[cur]
+                _fd_ok, _fd_debug = _first_dip_day_leg_certificate(
+                    df,
+                    flush_idx=flush_idx,
+                    cur=cur,
+                    atr_pct=atr_pct,
+                    symbol=symbol,
+                    decision_clock=_first_dip_decision_clock,
+                    settings_obj=settings,
+                )
+                debug["first_dip_certificate"] = _fd_debug
+                if not _fd_ok:
+                    return False, "flush_dip_not_front_side", debug
+                _first_dip_candidate = True
+                _first_dip_mode = _fd_mode
+                _first_dip_opportunity = dict(_fd_debug["opportunity_key"])
+            else:
+                debug["front_side_via"] = "rising_vwap"
         vwap_flush = vwap[flush_idx] if flush_idx < len(vwap) and vwap[flush_idx] is not None else None
         # Pre-flush strength: the bar BEFORE the flush closed above VWAP (was front-side).
         pre = flush_idx - 1
@@ -4077,8 +4380,149 @@ def flush_dip_buy_confirmation(
             "flush_spike_pct": round(spike_pct * 100.0, 2),
             "flush_support": (round(support, 6) if support is not None else None),
         })
+        if _first_dip_candidate:
+            # Ownership begins only after every structural first-dip guard has
+            # passed.  A merely vertical day leg that fails the tail/reclaim
+            # geometry remains eligible for the ordinary generic ladder.
+            debug["front_side_via"] = _FIRST_DIP_FRONT_SIDE_VIA
+            debug["opportunity_key"] = dict(_first_dip_opportunity or {})
+            if _first_dip_mode == "promoted":
+                # The paired OOS scoreboard intentionally cannot mint a
+                # promotion receipt yet. A config string must never
+                # self-attest that evidence, so the classified decision stops
+                # without reading tape, reserving risk, or consuming its key.
+                debug["first_dip_promotion_receipt_status"] = "unavailable"
+                return (
+                    False,
+                    "flush_dip_first_dip_promotion_unavailable",
+                    debug,
+                )
+            # The structural certificate alone never opens a first-dip path.
+            # Require one exact, typed evaluation from the scoped decision seam.
+            # This detector never falls back to the mutable diagnostic DB tape
+            # reader, and the evidence explicitly carries no reservation/order
+            # authority.  Alpaca's final hard block remains a separate boundary.
+            try:
+                from .first_dip_tape_decision import (
+                    _retain_captured_first_dip_detector_for_opportunity,
+                    first_dip_tape_decision_debug,
+                    resolve_first_dip_tape_decision,
+                )
+                from .first_dip_tape_policy import FirstDipTapePolicy
+
+                _decision_ts = pd.Timestamp(_first_dip_decision_clock)
+                if pd.isna(_decision_ts):
+                    raise ValueError("first-dip decision clock is unavailable")
+                if _decision_ts.tzinfo is None:
+                    _decision_ts = _decision_ts.tz_localize("UTC")
+                else:
+                    _decision_ts = _decision_ts.tz_convert("UTC")
+                _tape_policy = FirstDipTapePolicy.from_settings(settings)
+                _tape_evaluation = resolve_first_dip_tape_decision(
+                    symbol=str(symbol or ""),
+                    decision_at=_decision_ts.to_pydatetime(),
+                    policy=_tape_policy,
+                )
+                _tape_debug = first_dip_tape_decision_debug(_tape_evaluation)
+            except (TypeError, ValueError) as exc:
+                debug["first_dip_tape"] = {
+                    "status": "coverage_unavailable",
+                    "reason": "first_dip_tape_decision_input_invalid",
+                    "error_type": type(exc).__name__,
+                    "authority_scope": "detector_diagnostic_only",
+                    "reservation_authority": False,
+                    "order_authority": False,
+                }
+                return False, "flush_dip_first_dip_tape_unavailable", debug
+            debug["first_dip_tape"] = _tape_debug
+            debug["first_dip_tape_policy"] = _tape_policy.to_dict()
+            debug["first_dip_tape_policy_sha256"] = _tape_policy.policy_sha256
+            debug["first_dip_tape_evaluation"] = _tape_evaluation.to_dict()
+            debug["first_dip_tape_evaluation_sha256"] = (
+                _tape_evaluation.evaluation_sha256
+            )
+            debug["first_dip_tape_read_id"] = _tape_evaluation.read_id
+            debug["first_dip_tape_run_bound"] = _tape_evaluation.run_bound
+            if _tape_evaluation.receipt is not None:
+                debug["first_dip_tape_decision_receipt"] = (
+                    _tape_evaluation.receipt.to_audit_dict()
+                )
+                debug["first_dip_tape_decision_receipt_binding_sha256"] = (
+                    _tape_evaluation.receipt.binding_sha256
+                )
+            if _tape_evaluation.status != "valid_positive":
+                debug["first_dip_tape_reject_reason"] = _tape_evaluation.reason
+                if _tape_evaluation.status == "valid_negative":
+                    _reject_reason = "flush_dip_first_dip_tape_not_confirmed"
+                elif _tape_evaluation.status == "invalid":
+                    _reject_reason = "flush_dip_first_dip_tape_invalid"
+                else:
+                    _reject_reason = "flush_dip_first_dip_tape_unavailable"
+                return False, _reject_reason, debug
+            if not _tape_evaluation.run_bound:
+                debug["first_dip_tape_reject_reason"] = (
+                    "first_dip_tape_decision_receipt_unbound"
+                )
+                return False, "flush_dip_first_dip_tape_invalid", debug
+            _expected_surface = str(first_dip_execution_surface or "").strip()
+            _actual_surface = (
+                _tape_evaluation.receipt.authority_source
+                if _tape_evaluation.receipt is not None
+                else None
+            )
+            debug["first_dip_expected_execution_surface"] = (
+                _expected_surface or None
+            )
+            if not _expected_surface:
+                debug["first_dip_tape_reject_reason"] = (
+                    "first_dip_tape_execution_surface_missing"
+                )
+                return False, "flush_dip_first_dip_tape_invalid", debug
+            if (
+                _expected_surface
+                not in {"sealed_replay", "captured_db_paper"}
+                or _actual_surface != _expected_surface
+            ):
+                debug["first_dip_tape_reject_reason"] = (
+                    "first_dip_tape_execution_surface_mismatch"
+                )
+                return False, "flush_dip_first_dip_tape_invalid", debug
+            if _actual_surface == "captured_db_paper":
+                # The accepted receipt must reach the same active capture
+                # runtime while it is still a private object.  Persisted debug
+                # cannot reconstruct this lineage later.  A missing/mismatched
+                # sink vetoes only this decision and leaves the daily
+                # opportunity, risk ledger, and broker untouched.
+                debug["first_dip_prior_detector_reference_sha256"] = (
+                    _retain_captured_first_dip_detector_for_opportunity(
+                        _tape_evaluation,
+                        opportunity_key=dict(_first_dip_opportunity or {}),
+                    )
+                )
+            debug["first_dip_tape_confirmed"] = True
         return True, "flush_dip_buy", debug
-    except Exception:
+    except Exception as exc:
+        if (
+            isinstance(locals().get("debug"), dict)
+            and debug.get("front_side_via") == _FIRST_DIP_FRONT_SIDE_VIA
+        ):
+            # Once the full structural setup owns this decision, an unexpected
+            # receipt/provider error must not erase the marker and fall through
+            # to a generic order path.  Preserve reusable opportunity identity;
+            # this detector still reserves and consumes nothing.
+            debug["first_dip_tape"] = {
+                "status": "coverage_unavailable",
+                "reason": "first_dip_tape_decision_provider_error",
+                "error_type": type(exc).__name__,
+                "authority_scope": "detector_diagnostic_only",
+                "reservation_authority": False,
+                "order_authority": False,
+            }
+            debug["first_dip_tape_reject_reason"] = (
+                "first_dip_tape_decision_provider_error"
+            )
+            debug.pop("first_dip_tape_confirmed", None)
+            return False, "flush_dip_first_dip_tape_unavailable", debug
         return False, "flush_dip_error", {"entry_interval": entry_interval}
 
 
@@ -9952,7 +10396,7 @@ def halt_resume_dip_trigger(
     *,
     entry_interval: str = "1m",
     halt_resumed_at_utc: Any,
-    now: Any = None,
+    now: Any,
     halt_level: float | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross's halt-resume DIP BUY (2026-06-10 DSY +$20k leg: "it drops and on the
@@ -10002,7 +10446,9 @@ def halt_resume_dip_trigger(
             resumed = resumed.tz_convert("UTC")
     except Exception:
         return False, "resume_dip_bad_resume_ts", debug
-    now_ts = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+    if now is None:
+        return False, "resume_dip_now_missing", debug
+    now_ts = pd.Timestamp(now)
     if now_ts.tzinfo is None:
         now_ts = now_ts.tz_localize("UTC")
     window_s = float(getattr(settings, "chili_momentum_halt_resume_dip_window_seconds", 600.0) or 600.0)
@@ -10150,6 +10596,8 @@ def run_paper_entry_gates(
     variant: MomentumStrategyVariant | None,
     regime_snapshot: dict[str, Any],
     family_id: str | None,
+    live_price: float | None = None,
+    decision_at: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Returns (allowed, reason_code, debug_dict)."""
     if not bool(getattr(settings, "chili_momentum_entry_gates_enabled", True)):
@@ -10202,9 +10650,54 @@ def run_paper_entry_gates(
         df_entry = None
     if df_entry is None or getattr(df_entry, "empty", True):
         return False, "no_entry_data", {"interval": _interval}
-    ok_t, reason_t, pb = momentum_pullback_trigger(df_entry, entry_interval=_interval, symbol=sym, db=db)
-    if not ok_t:
-        return False, reason_t, {"trigger": True, "interval": _interval}
+    # Classify the candidate before generic-trigger priority.  Otherwise the
+    # same first-dip shape can pass ``momentum_pullback_trigger`` and skip the
+    # typed receipt entirely.  A non-first-dip flush remains merely the fallback
+    # below, preserving the existing generic-first order for every other setup.
+    fd_ok, fd_reason, fd_debug = flush_dip_buy_confirmation(
+        df_entry,
+        entry_interval=_interval,
+        live_price=live_price,
+        symbol=sym,
+        now=decision_at,
+        db=db,
+        l2_as_of=decision_at,
+        first_dip_execution_surface="captured_db_paper",
+    )
+    fd_is_first_dip = (
+        isinstance(fd_debug, dict)
+        and fd_debug.get("front_side_via") == _FIRST_DIP_FRONT_SIDE_VIA
+    )
+    if fd_is_first_dip:
+        if not fd_ok:
+            return False, fd_reason, {
+                "trigger": True,
+                "interval": _interval,
+                "first_dip_reject": fd_debug,
+            }
+        ok_t, reason_t, pb = fd_ok, fd_reason, fd_debug
+    else:
+        ok_t, reason_t, pb = momentum_pullback_trigger(
+            df_entry,
+            entry_interval=_interval,
+            live_price=live_price,
+            symbol=sym,
+            now=decision_at,
+            db=db,
+            l2_as_of=decision_at,
+        )
+        if not ok_t:
+            # A regular flush remains additive after a generic reject.  Nothing
+            # below this gate creates a reservation, consumes the keyed
+            # opportunity, or emits an order.
+            primary_reason = reason_t
+            if fd_ok:
+                ok_t, reason_t, pb = fd_ok, fd_reason, fd_debug
+            else:
+                return False, primary_reason, {
+                    "trigger": True,
+                    "interval": _interval,
+                }
 
     debug = {
         "bars": len(df_entry),
@@ -10214,6 +10707,29 @@ def run_paper_entry_gates(
         "pullback_low": pb.get("pullback_low"),
         "pullback_high": pb.get("pullback_high"),
     }
+    # Preserve the final fail-closed tape receipt and once-per-day identity.
+    # PENDING_ENTRY re-runs this helper with an exact decision clock; dropping
+    # these keys here would make the detector's earlier mutable debug the only
+    # evidence available to the fill boundary.
+    for key in (
+        "opportunity_key",
+        "first_dip_tape_confirmed",
+        "first_dip_tape",
+        "first_dip_tape_policy",
+        "first_dip_tape_policy_sha256",
+        "first_dip_tape_evaluation",
+        "first_dip_tape_evaluation_sha256",
+        "first_dip_tape_read_id",
+        "first_dip_tape_run_bound",
+        "first_dip_tape_decision_receipt",
+        "first_dip_tape_decision_receipt_binding_sha256",
+        "first_dip_certificate",
+        "first_dip_policy",
+        "front_side_via",
+        "tape_reason",
+    ):
+        if key in pb:
+            debug[key] = pb[key]
     return True, "all_gates_pass", debug
 
 

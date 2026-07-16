@@ -865,10 +865,16 @@ def _run_momentum_live_runner_batch_job():
     def _work() -> None:
         from ..config import settings as _settings
         from ..db import SessionLocal
+        from .trading.momentum_neural.captured_paper_entry_intent import (
+            CapturedPaperPostCommitRequest,
+        )
+        from .trading.momentum_neural.captured_paper_dispatcher import (
+            dispatch_captured_paper_post_commit,
+            dispatch_live_runner_tick,
+        )
         from .trading.momentum_neural.live_runner import (
             cleanup_leaked_lane_locks,
             list_runnable_live_sessions,
-            tick_live_session,
         )
 
         if not _settings.chili_momentum_live_runner_enabled:
@@ -942,19 +948,40 @@ def _run_momentum_live_runner_batch_job():
             _t0 = time.monotonic()
             db_s = SessionLocal()
             ok = False
+            phase_one_committed = False
+            completion_request = None
             try:
-                tick_live_session(db_s, sid)
+                result = dispatch_live_runner_tick(db_s, sid)
+                if type(result) is CapturedPaperPostCommitRequest:
+                    completion_request = result
                 db_s.commit()
+                phase_one_committed = True
                 ok = True
             except Exception:
                 db_s.rollback()
                 logger.warning("[scheduler] live runner tick failed session=%s", sid, exc_info=True)
+            else:
+                if completion_request is not None:
+                    try:
+                        dispatch_captured_paper_post_commit(completion_request)
+                    except Exception:
+                        ok = False
+                        # The phase-one transaction is already durable.  Report
+                        # a retry-required completion failure without pretending
+                        # a rollback can undo it.
+                        logger.exception(
+                            "[scheduler] captured PAPER post-commit completion "
+                            "failed session=%s phase_one_committed=true "
+                            "retry_required=true",
+                            sid,
+                        )
             finally:
                 # FIX 46 pattern (rollback before close).
-                try:
-                    db_s.rollback()
-                except Exception:
-                    pass
+                if not phase_one_committed or completion_request is None:
+                    try:
+                        db_s.rollback()
+                    except Exception:
+                        pass
                 db_s.close()
             return ok, int((time.monotonic() - _t0) * 1000)
 
@@ -1059,6 +1086,43 @@ def _run_rh_agentic_keepwarm_job():
 _auto_arm_last_skip_sig: "str | None" = None
 
 
+def _live_auto_arm_owner_health(db) -> tuple[bool, str | None]:
+    """Revalidate the sole live owner before every pass that may add risk."""
+    try:
+        from .trading.momentum_neural.lane_health import (
+            live_runner_driver_configuration,
+            live_runner_loop_control_health,
+        )
+
+        driver_mode, driver_error = live_runner_driver_configuration()
+        if driver_error is not None:
+            return False, driver_error
+        if driver_mode is None:
+            return False, "live_runner_no_driver_enabled"
+        if driver_mode != "event_loop":
+            return True, None
+
+        from .trading.momentum_neural.live_runner_loop import (
+            is_live_runner_loop_admission_ready,
+        )
+
+        if not is_live_runner_loop_admission_ready():
+            return False, "live_runner_loop_owner_or_fence_lost"
+        control = live_runner_loop_control_health(db)
+        if control.get("ok") is not True:
+            return False, str(
+                control.get("reason")
+                or "live_runner_loop_heartbeat_unreadable"
+            )
+        return True, None
+    except Exception:
+        logger.critical(
+            "[scheduler] auto-arm live-owner health probe failed",
+            exc_info=True,
+        )
+        return False, "live_runner_owner_health_probe_failed"
+
+
 def _run_alpaca_orphan_reconcile_job():
     """Flatten Alpaca PAPER positions / cancel resting orders that no session manages
     (the exit-reject storm's stranded orphans). PAPER-only + flatten-only + fail-open
@@ -1108,6 +1172,13 @@ def _run_momentum_auto_arm_live_job():
             from .trading.momentum_neural.auto_arm import run_auto_arm_pass
             from .trading.momentum_neural.lane_health import record_auto_arm_run
 
+            owner_ready, owner_reason = _live_auto_arm_owner_health(db)
+            if not owner_ready:
+                logger.critical(
+                    "[scheduler] auto_arm blocked: live owner unhealthy reason=%s",
+                    owner_reason,
+                )
+                return
             # Heartbeat: prove the pass actually executed so lane-health can tell a
             # wedged/dead auto-arm job from a legitimately quiet market.
             record_auto_arm_run()
@@ -6773,6 +6844,44 @@ def start_scheduler():
         # False, hits UnboundLocalError at `if _bus_on:` the moment
         # chili_momentum_live_runner_scheduler_enabled is turned on).
         _bus_on = bool(settings.chili_autopilot_price_bus_enabled)
+        _live_batch_on = bool(settings.chili_momentum_live_runner_scheduler_enabled)
+        _live_loop_on = bool(
+            getattr(settings, "chili_momentum_live_runner_loop_enabled", False)
+        )
+        # Entry/exit ownership is exclusive. Starting both used to let the
+        # scheduled batch and the event loop advance the same session. Row locks
+        # reduce overlap but cannot make two detector paths semantically equal.
+        _live_driver_ready = bool(
+            settings.chili_momentum_live_runner_enabled
+            and (
+                (_live_batch_on and not _live_loop_on)
+                or (_live_loop_on and not _live_batch_on and _bus_on)
+            )
+        )
+        # Configuration readiness is not runtime ownership.  In event-loop mode,
+        # auto-arm admission stays gated until this process either starts the owner
+        # generation or proves that its singleton already owns one.
+        _event_loop_owner_ready = False
+        if (
+            include_momentum_exec
+            and settings.chili_momentum_live_runner_enabled
+            and _live_batch_on
+            and _live_loop_on
+        ):
+            logger.critical(
+                "[scheduler] LIVE runner misconfigured: batch and event-loop drivers "
+                "are both enabled; fail-closed with neither driver started"
+            )
+        elif (
+            include_momentum_exec
+            and settings.chili_momentum_live_runner_enabled
+            and _live_loop_on
+            and not _bus_on
+        ):
+            logger.critical(
+                "[scheduler] LIVE event loop requested without price bus; "
+                "fail-closed with no live driver started"
+            )
         if (
             include_web_light
             and settings.chili_momentum_paper_runner_enabled
@@ -6799,7 +6908,8 @@ def start_scheduler():
         if (
             include_momentum_exec
             and settings.chili_momentum_live_runner_enabled
-            and settings.chili_momentum_live_runner_scheduler_enabled
+            and _live_batch_on
+            and not _live_loop_on
         ):
             # Ross-style fast cadence: prefer the SECONDS knob (>0) so a fleeting
             # momentum break is caught within ~30s instead of up to 2min. coalesce
@@ -6824,16 +6934,9 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=20),
             )
             if _bus_on:
-                # Stage 2 websocket rail: event-driven EXITS — a price-bus tick that
-                # breaches a tracked stop/target ticks the session IMMEDIATELY (the
-                # batch above stays as the heartbeat; FOR-UPDATE-nowait makes the
-                # overlap a no-op).
-                try:
-                    from .trading.momentum_neural.live_runner_loop import start_live_runner_loop
-                    start_live_runner_loop()
-                    logger.info("[scheduler] Event-driven LIVE runner loop started (exit-speed ticks)")
-                except Exception as e:
-                    logger.warning("[scheduler] Event-driven LIVE runner loop failed to start: %s", e)
+                # Market-data support may run beside the legacy batch driver. The
+                # live event loop itself stays off so only this batch advances
+                # entry/exit state.
                 try:
                     from .trading.momentum_neural.tape_ws_recorder import start_tape_ws_recorder
                     start_tape_ws_recorder()
@@ -6852,17 +6955,85 @@ def start_scheduler():
                     except Exception as e:
                         logger.warning("[scheduler] WS ignition scorer failed to start: %s", e)
 
-        # Auto-arm-live: autonomously arm the surging Ross candidate (one live
-        # session at a time). Only runs when the live runner is also on (no point
-        # arming a session nothing will process). Guards live in the arm flow.
+        # Canonical event-only path. The loop used to start only inside the legacy
+        # scheduler-enabled branch above, so the health-required configuration
+        # (loop=true, scheduler=false) silently registered no entry/exit driver.
         if (
             include_momentum_exec
             and settings.chili_momentum_live_runner_enabled
-            and settings.chili_momentum_live_runner_scheduler_enabled
+            and _live_loop_on
+            and not _live_batch_on
+            and _bus_on
+        ):
+            try:
+                from .trading.momentum_neural.live_runner_loop import (
+                    is_live_runner_loop_running,
+                    start_live_runner_loop,
+                )
+
+                _loop_started = bool(start_live_runner_loop())
+                _event_loop_owner_ready = bool(
+                    _loop_started or is_live_runner_loop_running()
+                )
+                if _loop_started:
+                    logger.info(
+                        "[scheduler] Event-driven LIVE runner loop started "
+                        "(sole entry/exit driver)"
+                    )
+                elif _event_loop_owner_ready:
+                    logger.info(
+                        "[scheduler] Event-driven LIVE runner loop already owns "
+                        "the active generation"
+                    )
+                else:
+                    logger.critical(
+                        "[scheduler] Event-driven LIVE runner loop refused startup; "
+                        "entry admission remains disabled and lane health stays loud"
+                    )
+            except Exception as e:
+                _event_loop_owner_ready = False
+                logger.critical(
+                    "[scheduler] Event-driven LIVE runner loop failed to start; "
+                    "entry admission remains disabled: %s",
+                    e,
+                    exc_info=True,
+                )
+            try:
+                from .trading.momentum_neural.tape_ws_recorder import start_tape_ws_recorder
+
+                start_tape_ws_recorder()
+                logger.info("[scheduler] WS tape recorder started (second-scale NBBO for traded names)")
+            except Exception as e:
+                logger.warning("[scheduler] WS tape recorder failed to start: %s", e)
+            if settings.chili_momentum_ws_ignition_enabled:
+                try:
+                    from .trading.momentum_neural.ignition_loop import start_ignition_loop
+
+                    start_ignition_loop()
+                    logger.info("[scheduler] WS ignition scorer started")
+                except Exception as e:
+                    logger.warning("[scheduler] WS ignition scorer failed to start: %s", e)
+
+        # Auto-arm-live: autonomously arm the surging Ross candidate (one live
+        # session at a time). Only runs when the live runner is also on (no point
+        # arming a session nothing will process). Guards live in the arm flow.
+        _aa_secs = max(
+            10,
+            int(
+                getattr(
+                    settings,
+                    "chili_momentum_auto_arm_live_scheduler_interval_seconds",
+                    30,
+                )
+            ),
+        )
+        if (
+            include_momentum_exec
+            and _live_driver_ready
+            and (not _live_loop_on or _event_loop_owner_ready)
             and getattr(settings, "chili_momentum_auto_arm_live_enabled", True)
             and getattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True)
         ):
-            _aa_secs = max(10, int(getattr(settings, "chili_momentum_auto_arm_live_scheduler_interval_seconds", 30)))
             _scheduler.add_job(
                 _run_momentum_auto_arm_live_job,
                 trigger=IntervalTrigger(seconds=_aa_secs),
@@ -6874,22 +7045,24 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=40),
             )
 
-            # Lane-health FROZEN watch: a tripped safety breaker silently empties the
-            # lane (the 06-15 ~8h frozen-lane incident). Runs at the lane's own cadence
-            # (the auto-arm interval — no new magic number); evaluates against the
-            # adaptive grace window and emits critical+banner+audit row when frozen.
-            # Gated on the same lane-on condition as auto-arm + its own kill-switch flag.
-            if getattr(settings, "chili_lane_health_alert_enabled", True):
-                _scheduler.add_job(
-                    _run_lane_health_check_job,
-                    trigger=IntervalTrigger(seconds=_aa_secs),
-                    id="lane_health_check",
-                    name=f"Lane-health FROZEN watch (every {_aa_secs}s; alerts on a stuck safety breaker)",
-                    replace_existing=True,
-                    max_instances=1,
-                    coalesce=True,
-                    next_run_time=datetime.now() + timedelta(seconds=55),
-                )
+        # Monitor whichever single driver owns the lane. Event-only production has
+        # no auto-arm scheduler heartbeat, so lane health now reads the loop's own
+        # heartbeat instead of silently disappearing with that legacy job.
+        if (
+            include_momentum_exec
+            and settings.chili_momentum_live_runner_enabled
+            and getattr(settings, "chili_lane_health_alert_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_lane_health_check_job,
+                trigger=IntervalTrigger(seconds=_aa_secs),
+                id="lane_health_check",
+                name=f"Lane-health FROZEN watch (every {_aa_secs}s; alerts on a stuck live driver)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=55),
+            )
 
         # Alpaca ORPHAN reconciler (2026-07-09): flatten paper-account positions /
         # cancel resting orders that NO session manages (the sub-penny reject storm
@@ -6897,9 +7070,17 @@ def start_scheduler():
         # by construction; flatten-only; fail-open; grace-windowed. (alpaca_reconcile.py)
         if (
             include_momentum_exec
-            and settings.chili_momentum_live_runner_enabled
-            and settings.chili_momentum_live_runner_scheduler_enabled
             and getattr(settings, "chili_momentum_alpaca_orphan_reconcile_enabled", True)
+            and (
+                bool(settings.chili_momentum_live_runner_enabled)
+                or bool(
+                    getattr(
+                        settings,
+                        "chili_momentum_alpaca_orphan_reconcile_standalone_enabled",
+                        False,
+                    )
+                )
+            )
             and bool(getattr(settings, "chili_alpaca_enabled", False))
             and bool(getattr(settings, "chili_alpaca_paper", True))
         ):
@@ -7950,6 +8131,15 @@ def start_scheduler():
 def stop_scheduler():
     """Gracefully stop the scheduler and signal background tasks to abort."""
     global _scheduler
+    # The event-driven live runner owns daemon threads and price-bus callbacks
+    # outside APScheduler. Stop that owner first so an in-process scheduler restart
+    # cannot leave the old generation advancing sessions beside the new one.
+    try:
+        from .trading.momentum_neural.live_runner_loop import stop_live_runner_loop
+
+        stop_live_runner_loop()
+    except Exception:
+        logger.warning("[scheduler] live runner loop shutdown failed", exc_info=True)
     from . import trading_service as ts
     ts.signal_shutdown()
     with _lock:

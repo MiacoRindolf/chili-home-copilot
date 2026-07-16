@@ -106,7 +106,8 @@ def _patch_completion_deps(monkeypatch, cap):
 
 def _sess():
     return SimpleNamespace(id=1, symbol="ORCA-USD", user_id=1, venue="coinbase",
-                           mode="live", state="live_trailing", variant_id=1)
+                           mode="live", state="live_trailing", variant_id=1,
+                           execution_family="coinbase_spot")
 
 
 def test_full_exit_nets_exit_and_entry_fees(monkeypatch):

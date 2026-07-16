@@ -20,6 +20,15 @@ Log "TCP connections=$count lagpas sa threshold=$THRESHOLD"
 
 # May hawak bang posisyon? (Alpaca paper API; keys mula sa deploy .env)
 $envFile = 'D:\dev\chili-home-copilot\.env'
+$paperMatch = Select-String -Path $envFile -Pattern '^CHILI_ALPACA_PAPER=(.+)$' | Select-Object -First 1
+$paperRaw = if ($paperMatch) { $paperMatch.Matches[0].Groups[1].Value.Trim().Trim('"').Trim("'").ToLowerInvariant() } else { '' }
+if ($paperRaw -notin @('1', 'true', 'yes', 'on')) {
+    # Never query even the hard-coded paper endpoint when process posture is live
+    # or ambiguous. A legacy live holding cannot be disproved by paper-flat truth,
+    # so restarting Docker here would be unsafe.
+    Log "Alpaca paper posture not explicitly certified -- no broker call; treating as NOT flat"
+    exit 0
+}
 $key = (Select-String -Path $envFile -Pattern '^CHILI_ALPACA_API_KEY=(.+)$').Matches[0].Groups[1].Value.Trim()
 $sec = (Select-String -Path $envFile -Pattern '^CHILI_ALPACA_API_SECRET=(.+)$').Matches[0].Groups[1].Value.Trim()
 $flat = $true
@@ -27,12 +36,12 @@ try {
     $resp = Invoke-RestMethod -Uri 'https://paper-api.alpaca.markets/v2/positions' -Headers @{ 'APCA-API-KEY-ID' = $key; 'APCA-API-SECRET-KEY' = $sec } -TimeoutSec 20
     if ($resp -and @($resp).Count -gt 0) { $flat = $false }
 } catch {
-    Log "positions check failed ($_) — treating as NOT flat (conservative)"
+    Log "positions check failed ($_) -- treating as NOT flat (conservative)"
     $flat = $false
 }
 
 if (-not $flat) {
-    Log "ALERT: socket pressure habang MAY posisyon — hindi magre-restart; umaasa sa dead-man stop"
+    Log "ALERT: socket pressure habang MAY posisyon -- hindi magre-restart; umaasa sa dead-man stop"
     exit 0
 }
 

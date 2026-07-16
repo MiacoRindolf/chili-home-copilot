@@ -485,6 +485,7 @@ def admit_ross_event(
     now: datetime | None = None,
     ignore_cooldown: bool = False,
     dry_run: bool = False,
+    defer_live_ticks_until_commit: bool = False,
 ) -> dict[str, Any]:
     """Admit one Ross-qualified symbol into the live watcher path.
 
@@ -502,6 +503,17 @@ def admit_ross_event(
         "ticked": 0,
         "skipped": None,
     }
+    # The IQFeed loop owns a generation-fenced DB commit before any runner tick.
+    # Other callers retain the existing immediate-tick behavior even if they pass
+    # this option accidentally.
+    defer_iqfeed_ticks = bool(
+        defer_live_ticks_until_commit
+        and "iqfeed" in str(source or "").strip().lower()
+    )
+    admission_tick_count = 0 if defer_iqfeed_ticks else _tick_count()
+    if defer_iqfeed_ticks:
+        out["ticks_deferred_until_commit"] = True
+        out["admission_tick_count"] = 0
     if not sym:
         out["skipped"] = "invalid_symbol"
         return out
@@ -621,7 +633,7 @@ def admit_ross_event(
             db,
             session_id,
             tick_live_session_fn=tick_live_session_fn,
-            count=_tick_count(),
+            count=admission_tick_count,
         )
         out.update(
             {
@@ -727,7 +739,7 @@ def admit_ross_event(
             db,
             session_id,
             tick_live_session_fn=tick_live_session_fn,
-            count=_tick_count(),
+            count=admission_tick_count,
         )
         out.update(
             {
@@ -757,7 +769,7 @@ def admit_ross_event(
         db,
         session_id,
         tick_live_session_fn=tick_live_session_fn,
-        count=_tick_count(),
+        count=admission_tick_count,
     )
     out.update(
         {

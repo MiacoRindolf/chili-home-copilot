@@ -1,0 +1,499 @@
+{
+  "schema_version": 1,
+  "manifest_id": "ross_small_account_challenge_2026",
+  "playlist": {
+    "id": "PL1xI23WKVWie6vdrBAiRZhcUx2u5KhEZ4",
+    "title": "Small Account Challenge",
+    "url": "https://www.youtube.com/playlist?list=PL1xI23WKVWie6vdrBAiRZhcUx2u5KhEZ4",
+    "cataloged_as_of": "2026-07-14",
+    "entry_count": 19
+  },
+  "evidence_role": "after_fact_only",
+  "usage_constraints": [
+    "recap evidence may label replay outcomes but must never supply event-time strategy inputs",
+    "an empty phase_labels array means the episode has not yet been phase-labeled, not that it contained no trades",
+    "phase descriptions are sequence-only because no exact market event timestamps were independently verified",
+    "role-qualified after-fact timing context is not a phase boundary and is never executable-price evidence",
+    "independently verified day P/L need not equal the sum of phase P/L when a trade-specific outcome is unavailable",
+    "reported dollar outcomes are comparison labels, not a sizing target or a profitability promise"
+  ],
+  "entries": [
+    {
+      "playlist_index": 1,
+      "date": "2026-05-30",
+      "entry_kind": "challenge_introduction",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "2IMvfIR1TPA",
+        "title": "I Reset My Account to $2,000 (AGAIN) Charles Schwab ThinkorSwim Challenge Ep 1",
+        "url": "https://www.youtube.com/watch?v=2IMvfIR1TPA"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 2,
+      "date": "2026-06-08",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "RMxnG64WuLc",
+        "title": "We Just Had A Stock Go Up 5,000% Today!",
+        "url": "https://www.youtube.com/watch?v=RMxnG64WuLc"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 3,
+      "date": "2026-06-09",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "znf0QIW8KRE",
+        "title": "This Is Crazy! We Just Had ANOTHER 2,000% Short Squeeze!",
+        "url": "https://www.youtube.com/watch?v=znf0QIW8KRE"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 4,
+      "date": "2026-06-10",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "ltdLO7sAzow",
+        "title": "We Just Had A Stock Go Up 950% in 2hrs",
+        "url": "https://www.youtube.com/watch?v=ltdLO7sAzow"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 5,
+      "date": "2026-06-11",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "5UBYoh6J2e0",
+        "title": "Trading a Chinese Short Squeeze! ThinkorSwim Small Account Challenge Day 4",
+        "url": "https://www.youtube.com/watch?v=5UBYoh6J2e0"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 6,
+      "date": "2026-06-16",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "c814DtTOGDg",
+        "title": "I Grew My Account +50% in 10 Minutes",
+        "url": "https://www.youtube.com/watch?v=c814DtTOGDg"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 7,
+      "date": "2026-06-18",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "Zf2p9c1qHjg",
+        "title": "RED DAY on Day 6 of my Small Account Challenge",
+        "url": "https://www.youtube.com/watch?v=Zf2p9c1qHjg"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 8,
+      "date": "2026-06-23",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "10ogBWqgprI",
+        "title": "Account Is Up +330% in 8 Days...",
+        "url": "https://www.youtube.com/watch?v=10ogBWqgprI"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 9,
+      "date": "2026-06-24",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "D8Guwf84eAA",
+        "title": "The \"Blue Sky\" Day Trading Pattern",
+        "url": "https://www.youtube.com/watch?v=D8Guwf84eAA"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 10,
+      "date": "2026-06-25",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "P5Sn_mWJdy0",
+        "title": "Day Trading the Break of VWAP Setup",
+        "url": "https://www.youtube.com/watch?v=P5Sn_mWJdy0"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 11,
+      "date": "2026-06-26",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "P5qdiBNct1c",
+        "title": "Day 11 of Growing a $2,000 Account with Charles Schwab",
+        "url": "https://www.youtube.com/watch?v=P5qdiBNct1c"
+      },
+      "verified_small_account_day_pnl_usd": 1349.10,
+      "phase_labels": [
+        {
+          "label_id": "2026-06-26_ZDAI_front_side_second_pullback",
+          "symbol": "ZDAI",
+          "phase": "front_side_second_pullback",
+          "benchmark_target": "trade",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "second pullback after the initial momentum-scanner impulse",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": 1095.08,
+            "scope": "symbol_aggregate"
+          },
+          "evidence": [
+            "Ross identified the small-account entry as the second pullback",
+            "broker P/L frame shows ZDAI +$1,095.08"
+          ]
+        },
+        {
+          "label_id": "2026-06-26_SDOT_vwap_reclaim_micro_pullbacks",
+          "symbol": "SDOT",
+          "phase": "front_side_vwap_reclaim_micro_pullbacks",
+          "benchmark_target": "trade",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "early sequence after the VWAP reclaim and before the opening-bell rejection",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": 254.02,
+            "scope": "symbol_aggregate_including_later_giveback",
+            "early_trade_detail": "first two trades were described as approximately $300 winners each"
+          },
+          "evidence": [
+            "first entry was a micro pullback after the VWAP reclaim",
+            "broker P/L frame shows SDOT +$254.02 after the later giveback"
+          ]
+        },
+        {
+          "label_id": "2026-06-26_SDOT_opening_bell_rejection",
+          "symbol": "SDOT",
+          "phase": "opening_bell_failed_continuation",
+          "benchmark_target": "contain_loss",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "last SDOT attempt after the earlier winning sequence",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": null,
+            "scope": "losing_subtrade_amount_not_disclosed"
+          },
+          "evidence": [
+            "the attempted opening-bell squeeze rejected and dropped instead of halting up",
+            "Ross reported that this final attempt gave back part of the earlier profit"
+          ]
+        }
+      ]
+    },
+    {
+      "playlist_index": 12,
+      "date": "2026-06-29",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "tQ7cYcI2tNk",
+        "title": "+500% Short Squeeze on Biotech Acquisition News",
+        "url": "https://www.youtube.com/watch?v=tQ7cYcI2tNk"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 13,
+      "date": "2026-06-30",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "b1pOO_bkbdA",
+        "title": "Breaking News Sends A Stock Up 222% in 15min",
+        "url": "https://www.youtube.com/watch?v=b1pOO_bkbdA"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 14,
+      "date": "2026-07-01",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "HTgOZI8GOV0",
+        "title": "Narrowly Avoided a Big Loss!",
+        "url": "https://www.youtube.com/watch?v=HTgOZI8GOV0"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 15,
+      "date": "2026-07-02",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "zxzE4I3Iig8",
+        "title": "I ALMOST Had The Biggest Green Day So Far...",
+        "url": "https://www.youtube.com/watch?v=zxzE4I3Iig8"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 16,
+      "date": "2026-07-07",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "550XNdh4y5k",
+        "title": "It's All About Your Profit/Loss Ratio!!",
+        "url": "https://www.youtube.com/watch?v=550XNdh4y5k"
+      },
+      "verified_small_account_day_pnl_usd": 216.80,
+      "phase_labels": [
+        {
+          "label_id": "2026-07-07_SILO_front_side_dip_break_nine",
+          "symbol": "SILO",
+          "phase": "front_side_dip_then_breakout",
+          "benchmark_target": "trade",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "initial scanner impulse, pullback, and break through $9",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": 476.77,
+            "scope": "trade"
+          },
+          "evidence": [
+            "low-float leader had high relative volume and a fresh news catalyst",
+            "entry was $8.81 for the break through $9 and profit was taken after the move reached $9.50"
+          ]
+        },
+        {
+          "label_id": "2026-07-07_SILO_vwap_rejection_end_phase",
+          "symbol": "SILO",
+          "phase": "post_impulse_vwap_rejection",
+          "benchmark_target": "reject",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "after the profitable front-side move and selloff",
+          "evidence": [
+            "the attempted VWAP break rejected",
+            "Ross described that rejection as the end of the move for the day"
+          ]
+        },
+        {
+          "label_id": "2026-07-07_CLRO_double_top_flush",
+          "symbol": "CLRO",
+          "phase": "failed_break_double_top_flush",
+          "benchmark_target": "contain_loss",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "starter and add followed by a double top and flush",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": -259.97,
+            "scope": "trade"
+          },
+          "evidence": [
+            "partial fill was followed by a dip, an add, a double top, and a flush",
+            "Ross stopped out rather than relying on the stock's later recovery"
+          ]
+        }
+      ]
+    },
+    {
+      "playlist_index": 17,
+      "date": "2026-07-09",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "miyJZq-5uIg",
+        "title": "My Account Is Up Over 1,000% in 17 Days...",
+        "url": "https://www.youtube.com/watch?v=miyJZq-5uIg"
+      },
+      "phase_labels": []
+    },
+    {
+      "playlist_index": 18,
+      "date": "2026-07-13",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "S2sOq-stPgA",
+        "title": "Big Winner THEN An Even Bigger Loser!!",
+        "url": "https://www.youtube.com/watch?v=S2sOq-stPgA"
+      },
+      "verified_small_account_day_pnl_usd": 205.18,
+      "phase_labels": [
+        {
+          "label_id": "2026-07-13_QTTB_explicit_no_trade",
+          "symbol": "QTTB",
+          "phase": "news_spike_with_poor_tradability",
+          "benchmark_target": "reject",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "morning scan before PLSM appeared",
+          "after_fact_headline_context": {
+            "role": "enrichment_headline_context_never_phase_boundary",
+            "enrichment_video_id": "RZbM0qXOFbc",
+            "headline_context_time_et": "06:59:00",
+            "creates_canonical_label": false
+          },
+          "evidence": [
+            "fresh clinical-results news alone did not make the setup tradable",
+            "higher price, wider spread, and easy-to-borrow status were explicit veto factors"
+          ]
+        },
+        {
+          "label_id": "2026-07-13_PLSM_front_side_first_dip",
+          "symbol": "PLSM",
+          "phase": "front_side_first_dip",
+          "benchmark_target": "trade",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "first dip after the initial fast scanner impulse",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": 2363.44,
+            "scope": "trade"
+          },
+          "evidence": [
+            "2,000 shares were bought on the first dip after increasing volume",
+            "profit was realized into strength rather than requiring the later absolute high"
+          ]
+        },
+        {
+          "label_id": "2026-07-13_PLSM_backside_fomo_curl",
+          "symbol": "PLSM",
+          "phase": "backside_failed_break_fomo_curl",
+          "benchmark_target": "reject",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "after the front-side extension, VWAP loss, and stair-step decline",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": null,
+            "scope": "trade_specific_loss_unavailable_not_derived_from_day_swing",
+            "cumulative_day_pnl_after_exit_usd": -560.56
+          },
+          "after_fact_timing_context": {
+            "role": "approximate_recap_context_never_phase_boundary_or_fill",
+            "approx_window_et": {
+              "start": "08:22:30",
+              "end": "08:30:40"
+            },
+            "exact_fill_time": null
+          },
+          "evidence": [
+            "the late curl was taken after a VWAP break and a stair-step decline",
+            "Ross explicitly connected the trade to FOMO after missing the extension in the main account",
+            "the -$560.56 observation is cumulative day P/L after exit, not the trade-specific loss"
+          ]
+        },
+        {
+          "label_id": "2026-07-13_VEEE_fresh_front_side_pullback",
+          "symbol": "VEEE",
+          "phase": "fresh_catalyst_front_side_pullback",
+          "benchmark_target": "trade",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "new scanner leader after the failed PLSM backside phase",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": 765.74,
+            "scope": "trade"
+          },
+          "after_fact_timing_context": {
+            "role": "small_account_context_never_phase_boundary_or_fill",
+            "scanner_observations_et": [
+              {
+                "time": "08:58:59",
+                "price": 8.89,
+                "volume": 2750000
+              },
+              {
+                "time": "08:59:08",
+                "price": 9.72,
+                "volume": 3010000
+              }
+            ],
+            "approx_execution_window_et": {
+              "start": "09:17:30",
+              "end": "09:21:10",
+              "certainty": "approximate"
+            },
+            "exact_order_time": null
+          },
+          "cross_account_enrichment": {
+            "role": "different_symbol_account_context_never_canonical_phase",
+            "enrichment_video_id": "RZbM0qXOFbc",
+            "symbol": "VE",
+            "account": "main",
+            "campaign_start_approx_et": "08:50:00",
+            "campaign_pnl_usd_approx": 34000,
+            "creates_canonical_label": false
+          },
+          "evidence": [
+            "new merger/divestiture headline and increasing relative volume formed an independent setup",
+            "small-account entry was the pullback near $11 followed by a squeeze toward $12"
+          ]
+        }
+      ]
+    },
+    {
+      "playlist_index": 19,
+      "date": "2026-07-14",
+      "entry_kind": "trade_recap",
+      "evidence_role": "after_fact_only",
+      "video": {
+        "id": "ChLgwLS9eJY",
+        "title": "A 350% Short Squeeze!",
+        "url": "https://www.youtube.com/watch?v=ChLgwLS9eJY"
+      },
+      "verified_small_account_day_pnl_usd": 2164.33,
+      "phase_labels": [
+        {
+          "label_id": "2026-07-14_NXTC_rejection_reclaim_breakout",
+          "symbol": "NXTC",
+          "phase": "front_side_rejection_reclaim_breakout",
+          "benchmark_target": "trade",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "break over the prior rejection after the earlier premarket move",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": 1423.34,
+            "scope": "trade"
+          },
+          "evidence": [
+            "leading gainer had a reverse-merger catalyst, low float, and extreme relative volume",
+            "entry was the volume-backed break over the marked rejection level"
+          ]
+        },
+        {
+          "label_id": "2026-07-14_UBXG_micro_pullback_vwap_bounce",
+          "symbol": "UBXG",
+          "phase": "scanner_curl_micro_pullback_vwap_bounce",
+          "benchmark_target": "trade",
+          "timing_basis": "sequence_only_no_event_timestamp",
+          "sequence_position": "scanner curl after an initial pop, pullback, and consolidation",
+          "ross_outcome": {
+            "account": "small",
+            "pnl_usd": 740.99,
+            "scope": "trade"
+          },
+          "evidence": [
+            "Ross explicitly said he did not see a headline, so catalyst presence must not be inferred",
+            "the micro-pullback entry held VWAP, bounced, and was sold into strength"
+          ]
+        }
+      ]
+    }
+  ]
+}

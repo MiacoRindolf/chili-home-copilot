@@ -16,8 +16,10 @@ from app.services.trading.momentum_neural import risk_policy
 from app.services.trading.momentum_neural.live_runner import cleanup_leaked_lane_locks
 from app.services.trading.momentum_neural.risk_evaluator import (
     aggregate_open_crypto_risk_usd,
+    aggregate_open_risk_usd,
     count_inflight_entry_orders,
     count_open_positions,
+    sum_inflight_entry_risk_usd,
 )
 from app.services.trading.momentum_neural.risk_policy import effective_position_cap
 
@@ -75,6 +77,7 @@ def test_count_open_positions_excludes_alpaca_twin(db) -> None:
     u = _mk_user(db, "cop-twin")
     _sess(db, user_id=u.id, symbol="AAA", state="live_entered")
     _sess(db, user_id=u.id, symbol="AAA", state="live_entered", execution_family="alpaca_spot")
+    _sess(db, user_id=u.id, symbol="BBB", state="live_entered", execution_family="alpaca_short")
     db.commit()
     assert count_open_positions(db, user_id=u.id, mode="live") == 1
 
@@ -114,9 +117,90 @@ def test_count_inflight_excludes_self_and_twin(db) -> None:
     _sess(db, user_id=u.id, symbol="BBB", state="live_pending_entry", entry_submitted=True)
     _sess(db, user_id=u.id, symbol="CCC", state="live_pending_entry",
           entry_submitted=True, execution_family="alpaca_spot")
+    _sess(db, user_id=u.id, symbol="DDD", state="live_pending_entry",
+          entry_submitted=True, execution_family="alpaca_short")
     db.commit()
-    # self excluded -> only BBB; twin (CCC) excluded regardless.
+    # self excluded -> only BBB; both paper families are excluded regardless.
     assert count_inflight_entry_orders(db, user_id=u.id, exclude_session_id=s_self.id) == 1
+
+
+def test_alpaca_account_scope_counts_long_short_held_and_inflight(db) -> None:
+    """Paper exposure is isolated from real capital but cannot disappear from
+    Alpaca's own fill-boundary count or dollar-risk budget."""
+    u = _mk_user(db, "alpaca-account-risk")
+    _sess(
+        db,
+        user_id=u.id,
+        symbol="LONG",
+        state="live_entered",
+        execution_family="alpaca_spot",
+        position={"quantity": 10, "avg_entry_price": 5.0, "stop_price": 4.5},
+    )
+    _sess(
+        db,
+        user_id=u.id,
+        symbol="SHORT",
+        state="live_entered",
+        execution_family="alpaca_short",
+        position={"quantity": 20, "avg_entry_price": 4.0, "stop_price": 4.25},
+    )
+    wait_long = _sess(
+        db,
+        user_id=u.id,
+        symbol="WAITL",
+        state="live_pending_entry",
+        execution_family="alpaca_spot",
+        entry_submitted=True,
+    )
+    wait_long.risk_snapshot_json = {
+        "momentum_live_execution": {
+            "entry_submitted": True,
+            "entry_inflight_risk_usd": 7.0,
+        }
+    }
+    _sess(
+        db,
+        user_id=u.id,
+        symbol="WAITS",
+        state="live_pending_entry",
+        execution_family="alpaca_short",
+        entry_submitted=True,
+    )
+    _sess(
+        db,
+        user_id=u.id,
+        symbol="REAL",
+        state="live_pending_entry",
+        execution_family="robinhood_spot",
+        entry_submitted=True,
+    )
+    db.commit()
+
+    # Historical/no-family view remains the real-capital ledger.
+    assert count_open_positions(db, user_id=u.id) == 0
+    assert count_inflight_entry_orders(db, user_id=u.id) == 1
+
+    # Either Alpaca family selects their one shared paper account.
+    assert count_open_positions(
+        db, user_id=u.id, execution_family="alpaca_spot"
+    ) == 2
+    assert count_inflight_entry_orders(
+        db, user_id=u.id, execution_family="alpaca_short"
+    ) == 2
+    assert sum_inflight_entry_risk_usd(
+        db,
+        user_id=u.id,
+        per_trade_fallback_usd=5.0,
+        execution_family="alpaca_spot",
+    ) == 12.0
+    open_risk, rows = aggregate_open_risk_usd(
+        db, user_id=u.id, execution_family="alpaca_short"
+    )
+    assert open_risk == 10.0
+    assert {row["execution_family"] for row in rows} == {
+        "alpaca_spot",
+        "alpaca_short",
+    }
 
 
 def test_count_inflight_crypto_filter(db) -> None:

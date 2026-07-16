@@ -56,3 +56,37 @@ def test_buying_power_margin_multiple(monkeypatch):
     # multiple 1.0 -> just the API buying power (no extra leverage)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_buying_power_margin_multiple", 1.0, raising=False)
     assert abs(rp._account_equity_usd("robinhood_spot") - 11275.69) < 0.5
+
+
+def test_alpaca_defaults_to_equity_even_when_global_buying_power_is_on(monkeypatch):
+    monkeypatch.setattr(rp, "_alpaca_account_cached", lambda: (75_000.0, 300_000.0))
+    monkeypatch.setattr(
+        rp, "_alpaca_cached_account_generation", lambda: "acct-sizing-test"
+    )
+    monkeypatch.setattr(
+        rp.settings, "chili_momentum_risk_size_use_buying_power", True, raising=False
+    )
+    monkeypatch.setattr(
+        rp.settings, "chili_momentum_alpaca_size_use_buying_power", False, raising=False
+    )
+    assert rp._account_equity_usd("alpaca_spot") == 75_000.0
+    assert rp._account_equity_usd("alpaca_spot", prefer_equity=True) == 75_000.0
+    # Paper recertification remains at the explicit per-trade $ ceiling until
+    # expectancy is proven; a simulated large balance cannot inflate one loss.
+    assert rp.equity_relative_loss_cap(50.0, "alpaca_spot") == 50.0
+
+
+def test_alpaca_leveraged_sizing_requires_explicit_venue_opt_in(monkeypatch):
+    monkeypatch.setattr(rp, "_alpaca_account_cached", lambda: (75_000.0, 300_000.0))
+    monkeypatch.setattr(
+        rp, "_alpaca_cached_account_generation", lambda: "acct-sizing-test"
+    )
+    monkeypatch.setattr(
+        rp.settings, "chili_momentum_risk_size_use_buying_power", True, raising=False
+    )
+    monkeypatch.setattr(
+        rp.settings, "chili_momentum_alpaca_size_use_buying_power", True, raising=False
+    )
+    assert rp._account_equity_usd("alpaca_spot") == 300_000.0
+    # Safety caps that explicitly request equity never inherit paper margin.
+    assert rp._account_equity_usd("alpaca_spot", prefer_equity=True) == 75_000.0

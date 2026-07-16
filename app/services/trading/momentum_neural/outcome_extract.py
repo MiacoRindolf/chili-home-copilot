@@ -554,6 +554,11 @@ def _classify_real_exit(
     if governance_context.get("kill_switch_exit"):
         return OUTCOME_GOVERNANCE_EXIT
     er = (_strip_reconcile_suffix(exit_reason) or "").lower()
+    if er == "alpaca_orphan_reconcile":
+        # A dead-session orphan flatten is a broker-safety/governance exit, not a
+        # strategy stop or success.  It still carries its real PnL into risk/day
+        # accounting, but it must not train entry/exit expectancy.
+        return OUTCOME_GOVERNANCE_EXIT
     if "stop" in er or er == "stop":
         return OUTCOME_STOP_LOSS
     if "bailout" in er or er == "bailout":

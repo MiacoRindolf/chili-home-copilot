@@ -25,11 +25,11 @@ from app.models.trading import MomentumAutomationOutcome, Trade
 from app.services.trading import governance
 
 
-def _today_et_utc_noon() -> datetime:
-    """A naive UTC datetime that lands inside today's ET session."""
+def _today_et_recent_utc() -> datetime:
+    """A naive UTC instant safely behind wall-now in today's ET session."""
     et = ZoneInfo("America/New_York")
-    now_et = datetime.now(et).replace(hour=12, minute=0, second=0, microsecond=0)
-    return now_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    recent_et = datetime.now(et) - timedelta(minutes=1)
+    return recent_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +40,15 @@ def _reset_governance_state():
     governance.deactivate_kill_switch()
 
 
-def _add_closed_trade(db, *, user_id: int | None, pnl: float, version: str | None = "v1") -> None:
+def _add_closed_trade(
+    db,
+    *,
+    user_id: int | None,
+    pnl: float,
+    version: str | None = "v1",
+    exit_at: datetime | None = None,
+) -> None:
+    closed_at = exit_at or _today_et_recent_utc()
     t = Trade(
         user_id=user_id,
         ticker="AAPL",
@@ -48,8 +56,8 @@ def _add_closed_trade(db, *, user_id: int | None, pnl: float, version: str | Non
         entry_price=100.0,
         exit_price=100.0,  # placeholder; pnl column is what the helper reads
         quantity=1.0,
-        entry_date=_today_et_utc_noon() - timedelta(hours=2),
-        exit_date=_today_et_utc_noon(),
+        entry_date=closed_at - timedelta(hours=2),
+        exit_date=closed_at,
         status="closed",
         pnl=pnl,
         auto_trader_version=version,
@@ -58,7 +66,13 @@ def _add_closed_trade(db, *, user_id: int | None, pnl: float, version: str | Non
     db.commit()
 
 
-def _add_momentum_outcome(db, *, user_id: int | None, pnl: float) -> None:
+def _add_momentum_outcome(
+    db,
+    *,
+    user_id: int | None,
+    pnl: float,
+    terminal_at: datetime | None = None,
+) -> None:
     from app.models.trading import MomentumStrategyVariant, TradingAutomationSession
 
     # Minimal supporting rows (FKs: variant, session).
@@ -87,7 +101,7 @@ def _add_momentum_outcome(db, *, user_id: int | None, pnl: float) -> None:
         mode="paper",
         execution_family="coinbase_spot",
         terminal_state="finished",
-        terminal_at=_today_et_utc_noon(),
+        terminal_at=terminal_at or _today_et_recent_utc(),
         outcome_class="loss",
         realized_pnl_usd=pnl,
     )
@@ -174,6 +188,44 @@ def test_global_pnl_helper_aggregates_trades_and_momentum(db):
     assert result["autotrader_usd"] == pytest.approx(-150.0)
     assert result["momentum_usd"] == pytest.approx(-75.0)
     assert result["total_usd"] == pytest.approx(-225.0)
+
+
+def test_global_pnl_historical_frontier_excludes_future_same_day_rows(db):
+    frontier = _today_et_recent_utc()
+    _add_closed_trade(
+        db,
+        user_id=None,
+        pnl=-10.0,
+        exit_at=frontier - timedelta(minutes=1),
+    )
+    _add_closed_trade(
+        db,
+        user_id=None,
+        pnl=-20.0,
+        exit_at=frontier + timedelta(minutes=1),
+    )
+    _add_momentum_outcome(
+        db,
+        user_id=None,
+        pnl=-30.0,
+        terminal_at=frontier - timedelta(seconds=1),
+    )
+    _add_momentum_outcome(
+        db,
+        user_id=None,
+        pnl=-40.0,
+        terminal_at=frontier + timedelta(seconds=1),
+    )
+
+    result = governance.global_realized_pnl_today_et(
+        db,
+        user_id=None,
+        as_of_utc=frontier.replace(tzinfo=timezone.utc),
+    )
+
+    assert result["autotrader_usd"] == pytest.approx(-10.0)
+    assert result["momentum_usd"] == pytest.approx(-30.0)
+    assert result["total_usd"] == pytest.approx(-40.0)
 
 
 def test_cross_version_summation_catches_mixed_drawdown(db, monkeypatch):

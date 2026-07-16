@@ -788,38 +788,86 @@ def test_maybe_wrap_chunking_on_inserts_wrapper():
     assert adapter.is_enabled() is True
 
 
+def test_live_runner_hard_bypasses_chunking_for_alpaca_entry_and_close():
+    """Flag-on still sends one exact claimed parent CID for both directions."""
+    from app.config import settings as _rs
+
+    base = FakeVenueAdapter(base_increment=1.0)
+
+    def factory():
+        return base
+
+    with patch.object(_rs, "chili_momentum_order_chunking_enabled", True), patch.object(
+        _rs, "chili_momentum_order_chunking_blocks", 4
+    ):
+        selected = lr._live_runner_order_factory(factory, "alpaca_spot")
+        adapter = selected()
+        entry = adapter.place_limit_order_gtc(
+            product_id="ACTU",
+            side="buy",
+            base_size="8",
+            limit_price="1.25",
+            client_order_id="claimed-entry-parent",
+        )
+        close = adapter.place_limit_order_gtc(
+            product_id="ACTU",
+            side="sell",
+            base_size="8",
+            limit_price="1.20",
+            client_order_id="claimed-close-parent",
+        )
+
+    assert selected is factory
+    assert entry["ok"] is True and close["ok"] is True
+    assert [row[4] for row in base.placed_orders] == [
+        "claimed-entry-parent",
+        "claimed-close-parent",
+    ]
+    assert [row[1] for row in base.placed_orders] == ["buy", "sell"]
+    assert all(CHUNK_RESULT_KEY not in result for result in (entry, close))
+
+
 def test_maybe_wrap_chunking_on_but_blocks_one_returns_base():
     # FLAG PARITY: flag ON but blocks<=1 ⇒ still byte-identical (base factory returned).
+    # maybe_wrap_chunking reads settings via a LOCAL `from ...config import settings`,
+    # so the real shared singleton must be patched — a module-level ca.settings stub is
+    # ignored by the function and this test would pass for the wrong reason (flag OFF).
     sentinel = FakeVenueAdapter()
-
-    class _S:
-        chili_momentum_order_chunking_enabled = True
-        chili_momentum_order_chunking_blocks = 1
 
     def factory():
         return sentinel
 
-    with patch.object(ca, "settings", _S(), create=True):
+    from app.config import settings as _rs
+
+    with patch.object(_rs, "chili_momentum_order_chunking_enabled", True), patch.object(
+        _rs, "chili_momentum_order_chunking_blocks", 1
+    ):
         wf = maybe_wrap_chunking(factory)
     assert wf is factory, "blocks<=1 must return the untouched factory"
 
 
-def test_maybe_wrap_chunking_settings_import_error_returns_base():
+def test_maybe_wrap_chunking_settings_import_error_returns_base(monkeypatch):
     # FAILURE MODE: any error reading settings ⇒ fail-safe to the base factory (never
-    # wrap on an indeterminate config). Force the local `from ...config import settings`
-    # to raise by removing the attribute the wrapper reads after a broken settings obj.
+    # wrap on an indeterminate config). The function's local import re-reads the real
+    # config module, so force the failure on the attribute that import resolves —
+    # a raising property installed on the settings singleton's class.
     sentinel = FakeVenueAdapter()
-
-    class _Boom:
-        @property
-        def chili_momentum_order_chunking_enabled(self):
-            raise RuntimeError("config blew up")
 
     def factory():
         return sentinel
 
-    with patch.object(ca, "settings", _Boom(), create=True):
-        wf = maybe_wrap_chunking(factory)
+    from app.config import settings as _rs
+
+    def _boom(self):  # pragma: no cover - executed via the property below
+        raise RuntimeError("config blew up")
+
+    monkeypatch.setattr(
+        type(_rs),
+        "chili_momentum_order_chunking_enabled",
+        property(_boom),
+        raising=False,
+    )
+    wf = maybe_wrap_chunking(factory)
     # ADVERSARIAL: a config read that raises must NOT crash the lane and must NOT
     # silently wrap — it returns the exact base factory.
     assert wf is factory

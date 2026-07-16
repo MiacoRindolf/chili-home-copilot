@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.config import settings
+from app.models.trading import TradingAutomationSession
 from app.services.trading.momentum_neural import live_runner as lr
 from app.services.trading.momentum_neural import market_profile as _mp
 from app.services.trading.momentum_neural import replay_v3 as rv3
@@ -38,7 +39,15 @@ from app.services.trading.momentum_neural.live_fsm import (
     STATE_QUEUED_LIVE,
     STATE_WATCHING_LIVE,
 )
-from app.services.trading.momentum_neural.replay_mock_broker import MockBrokerAdapter, RecordedQuote
+from app.services.trading.momentum_neural.replay_mock_broker import (
+    REPLAY_MOCK_ACCOUNT_IDENTITY,
+    MockBrokerAdapter,
+    RecordedQuote,
+)
+from app.services.trading.momentum_neural.replay_errors import (
+    ReplayOhlcvInputUnavailableError,
+)
+from app.services.trading.venue.account_identity import NON_ALPACA_ACCOUNT_IDENTITY_KEY
 
 _BASE = datetime(2026, 6, 29, 14, 30, 0)  # 10:30 ET, RTH (naive-UTC, the _utcnow shape)
 
@@ -89,10 +98,16 @@ def _install_network_guard(monkeypatch) -> _NetworkGuard:
     import app.services.trading.momentum_neural.universe as _uni
 
     monkeypatch.setattr(_uni, "snapshot_dollar_volumes", lambda syms: {})
-    # entry_features.macro_regime_features reads SPY/^VIX OHLCV (the MACRO benchmark, a
-    # separate module the live_runner OHLCV seam does not reach) on the post-fill feature
-    # capture. Stub it (fail-open shape) so the replay is hermetic — it is feature logging,
-    # not an FSM decision. A future phase can serve recorded macro bars through the same seam.
+    # risk_evaluator has a separate direct Massive snapshot fallback for missing
+    # Ross-universe fields.  Replay must consume recorded eligibility instead of
+    # refreshing that live snapshot, including account-quarantine/terminal paths.
+    import app.services.trading.momentum_neural.risk_evaluator as _risk_eval
+
+    monkeypatch.setattr(_risk_eval, "_ross_risk_snapshot_rows", lambda: {})
+    # This legacy P1 fixture predates multi-read decision receipts.  Macro now routes through
+    # the same recorded-OHLCV seam; stub the derived feature call here so this older one-frame
+    # diagnostic fixture keeps testing its original transition scope.  Sealed ReplayV3 tests
+    # separately require and consume the exact ordered receipt plan.
     import app.services.trading.momentum_neural.entry_features as _ef
 
     monkeypatch.setattr(_ef, "macro_regime_features", lambda *a, **k: {})
@@ -105,7 +120,8 @@ def _install_network_guard(monkeypatch) -> _NetworkGuard:
 
 def _grid_with_entry_then_stop(symbol: str) -> list[rv3.RecordedNbboTick]:
     """A recorded NBBO walk: a few rising ticks (the entry fires + fills near 10.04), then a
-    sharp drop BELOW the stop so the held position's stop fires and it exits."""
+    sharp drop BELOW the stop, followed by an executable bid through the circuit's frozen
+    sell limit. The final rebound is required because a sell limit above the bid cannot fill."""
     ticks: list[rv3.RecordedNbboTick] = []
     t = _BASE
     # 1) a couple of rising, tight-spread ticks (watch → candidate → pending → entered)
@@ -113,7 +129,7 @@ def _grid_with_entry_then_stop(symbol: str) -> list[rv3.RecordedNbboTick]:
         ticks.append(rv3.RecordedNbboTick(ts=t, bid=px - 0.01, ask=px + 0.01, last=px))
         t = t + timedelta(seconds=5)
     # 2) a deep drop — bid well under the (~0.65*ATR) stop ⇒ stop/bailout exit
-    for px in (9.30, 9.10, 9.00):
+    for px in (9.30, 9.10, 9.00, 9.85):
         ticks.append(rv3.RecordedNbboTick(ts=t, bid=px - 0.01, ask=px + 0.01, last=px))
         t = t + timedelta(seconds=5)
     return ticks
@@ -165,6 +181,19 @@ def test_replay_v3_p1_drives_one_session_end_to_end(db, monkeypatch, _enable_run
         db, seed, mock=mock, ohlcv_provider=provider, grid=grid, risk_gate_allows=True
     )
     result = driver.run()
+    assert driver.python_network_attempt_count == 0
+
+    assert result.economic_seed_mode == "legacy_config_diagnostic"
+    assert result.certification_eligible is False
+    assert result.certification_failures == [
+        "legacy_or_missing_recorded_adaptive_risk_economics",
+        "mutable_database_dependencies_not_sealed",
+        "sealed_dual_clock_capture_driver_not_migrated",
+        "os_level_external_network_denial_not_proven",
+        "recorded_broker_lifecycle_not_replayed",
+        "entry_risk_gate_bypassed",
+        "recorded_eligibility_stream_missing",
+    ]
 
     # (1) FSM advanced through the expected states (queued → watching → entered → exit).
     visited = result.states_visited
@@ -189,7 +218,8 @@ def test_replay_v3_p1_drives_one_session_end_to_end(db, monkeypatch, _enable_run
     assert result.entry_fill_price is not None
     assert 10.0 <= result.entry_fill_price <= 10.2, result.entry_fill_price
     assert result.exit_fill_prices, "expected at least one exit fill"
-    # the exit filled on the DROP (well below the entry) — the stop did its job
+    # The loss-floor limit fills only once a later executable bid reaches it; the mock does
+    # not fabricate a sell while the bid remains below the frozen limit.
     assert min(result.exit_fill_prices) < result.entry_fill_price, result.exit_fill_prices
 
     # (3) ZERO network calls — the guard never fired.
@@ -233,6 +263,88 @@ def test_replay_v3_p1_sim_clock_governs_utcnow_each_step(db, monkeypatch, _enabl
     assert observed == [tk.ts for tk in grid], (observed[:3], [t.ts for t in grid][:3])
 
 
+def test_replay_seed_and_mock_share_deterministic_non_alpaca_identity(db):
+    arm = rv3.RecordedArm(
+        symbol="IDOK",
+        live_eligible_at_utc=(_BASE - timedelta(seconds=30)).isoformat() + "+00:00",
+    )
+
+    seed = rv3.seed_replay_session(db, arm, execution_family="robinhood_spot")
+    session = db.get(TradingAutomationSession, seed.session_id)
+    mock = MockBrokerAdapter()
+
+    assert session is not None
+    assert session.risk_snapshot_json[NON_ALPACA_ACCOUNT_IDENTITY_KEY] == (
+        REPLAY_MOCK_ACCOUNT_IDENTITY
+    )
+    assert mock.get_account_identity_truth() == {
+        "readable": True,
+        "identity": REPLAY_MOCK_ACCOUNT_IDENTITY,
+        "reason": None,
+    }
+
+
+def test_replay_account_identity_rotation_quarantines_before_any_order(
+    db, monkeypatch, _enable_runner
+):
+    symbol = "IDSW"
+    guard = _install_network_guard(monkeypatch)
+    arm = rv3.RecordedArm(
+        symbol=symbol,
+        live_eligible_at_utc=(_BASE - timedelta(seconds=30)).isoformat() + "+00:00",
+    )
+    seed = rv3.seed_replay_session(db, arm, execution_family="robinhood_spot")
+    db.flush()
+    grid = rv3.build_event_grid(_grid_with_entry_then_stop(symbol))
+    provider = rv3.RecordedOhlcvProvider(
+        {
+            "15m": rv3.synthetic_uptrend_ohlcv(),
+            "5m": rv3.synthetic_uptrend_ohlcv(),
+            "1m": rv3.synthetic_uptrend_ohlcv(),
+        }
+    )
+    mock = MockBrokerAdapter(freshness_mode="wall")
+
+    def recorded_scanner(ticker, **_query):
+        return {
+            "ticker": str(ticker).upper(),
+            "todaysChangePerc": 25.0,
+            "lastTrade": {"p": 10.0},
+            "day": {"c": 10.0, "vw": 9.8, "v": 2_000_000.0},
+            "min": {"c": 10.0, "av": 2_000_000.0},
+        }
+
+    driver = rv3.ReplayV3Driver(
+        db,
+        seed,
+        mock=mock,
+        ohlcv_provider=provider,
+        grid=grid,
+        risk_gate_allows=True,
+        scanner_snapshot_provider=recorded_scanner,
+    )
+
+    # First matching-identity step is allowed to establish/watch the session.
+    driver.step(grid[0].ts, grid[0].as_quote())
+    # Model the operator/broker account changing before the next decision.
+    mock.set_account_identity("replay-mock-rotated-account")
+    remaining = rv3.ReplayV3Driver(
+        db,
+        seed,
+        mock=mock,
+        ohlcv_provider=provider,
+        grid=grid[1:],
+        risk_gate_allows=True,
+        scanner_snapshot_provider=recorded_scanner,
+    ).run()
+
+    fills, _ = mock.get_fills(limit=1000)
+    assert fills == []
+    assert remaining.entry_fill_price is None
+    assert "non_alpaca_account_identity_quarantined" in remaining.events
+    assert guard.violations == []
+
+
 def test_replay_v3_p1_no_provider_means_prod_byte_identical_fetch(monkeypatch):
     """With NO provider installed (PROD always), the in-tick OHLCV wrapper calls the REAL
     ``fetch_ohlcv_df`` with the EXACT same args — byte-identical. With a provider it bypasses
@@ -264,6 +376,79 @@ def test_replay_v3_p1_no_provider_means_prod_byte_identical_fetch(monkeypatch):
 
 
 # ── P1 MOCK FIDELITY: resting limit / ack-delay / partial (pure, no DB) ───────────
+def test_live_ohlcv_capture_sink_observes_result_and_rejection_fails_closed(
+    monkeypatch,
+):
+    import app.services.trading.market_data as _md
+
+    frame = object()
+    monkeypatch.setattr(_md, "fetch_ohlcv_df", lambda *_a, **_k: frame)
+
+    class Sink:
+        def __init__(self, accepted: bool):
+            self.accepted = accepted
+            self.results = []
+            self.failures = []
+
+        def on_ohlcv_result(self, **kwargs):
+            self.results.append(kwargs)
+            return self.accepted
+
+        def on_ohlcv_failure(self, **kwargs):
+            self.failures.append(kwargs)
+            return True
+
+    accepted = Sink(True)
+    with lr.live_ohlcv_capture_sink(accepted):
+        assert lr._replay_aware_fetch_ohlcv_df(
+            "VEEE", interval="15m", period="5d"
+        ) is frame
+    assert len(accepted.results) == 1
+    assert accepted.results[0]["ticker"] == "VEEE"
+    assert accepted.results[0]["frame"] is frame
+    assert accepted.failures == []
+
+    rejected = Sink(False)
+    with lr.live_ohlcv_capture_sink(rejected), pytest.raises(
+        ReplayOhlcvInputUnavailableError,
+        match="captured_ohlcv_result_receipt_unavailable",
+    ):
+        lr._replay_aware_fetch_ohlcv_df("VEEE", interval="15m", period="5d")
+    assert len(rejected.results) == 1
+    assert lr._LIVE_OHLCV_CAPTURE_SINK.get() is None
+
+
+def test_live_ohlcv_capture_sink_records_provider_failure_before_reraise(
+    monkeypatch,
+):
+    import app.services.trading.market_data as _md
+
+    class ProviderFailure(RuntimeError):
+        pass
+
+    def fail(*_args, **_kwargs):
+        raise ProviderFailure("fixture provider down")
+
+    monkeypatch.setattr(_md, "fetch_ohlcv_df", fail)
+    failures = []
+
+    class Sink:
+        def on_ohlcv_result(self, **_kwargs):
+            raise AssertionError("failure path emitted a result")
+
+        def on_ohlcv_failure(self, **kwargs):
+            failures.append(kwargs)
+            return True
+
+    with lr.live_ohlcv_capture_sink(Sink()), pytest.raises(
+        ProviderFailure,
+        match="fixture provider down",
+    ):
+        lr._replay_aware_fetch_ohlcv_df("VEEE", interval="15m", period="5d")
+    assert len(failures) == 1
+    assert failures[0]["ticker"] == "VEEE"
+
+
 def test_mock_resting_limit_does_not_fill_until_quote_crosses():
     """A resting BUY limit rests ``open`` while the ask is ABOVE the limit, then fills the
     instant a later recorded NBBO has the ask at/below it — not on placement."""

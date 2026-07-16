@@ -16,9 +16,11 @@ docs/STRATEGY (auto-arm-live); see [[project_momentum_lane]].
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import or_
@@ -135,13 +137,51 @@ def _lane_execution_family() -> str:
     legacy basis. The ACTIVE path (flag OFF) is already correct via THIS function +
     equity_relative_daily_loss_cap."""
     from ..execution_family_registry import (
+        EXECUTION_FAMILY_ALPACA_SPOT,
         EXECUTION_FAMILY_COINBASE_SPOT,
         EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
         EXECUTION_FAMILY_ROBINHOOD_SPOT,
+        normalize_execution_family,
+        resolve_execution_family_for_symbol,
     )
 
     if _auto_arm_crypto_only():
+        if bool(
+            getattr(
+                settings,
+                "chili_momentum_crypto_execution_via_alpaca_paper",
+                False,
+            )
+        ):
+            # Before candidate selection the exact crypto symbol is unknown.  The
+            # paper posture admits only Alpaca-listed pairs later in the pass, so
+            # resolve a canonical listed major and require the selected topology
+            # to stay on Alpaca.  Never degrade this explicit fake-money posture
+            # to a live Coinbase account.
+            resolved = normalize_execution_family(
+                resolve_execution_family_for_symbol("BTC-USD", mode="live")
+            )
+            if resolved != EXECUTION_FAMILY_ALPACA_SPOT:
+                raise RuntimeError("alpaca_paper_crypto_lane_not_resolved")
+            return resolved
         return EXECUTION_FAMILY_COINBASE_SPOT
+    if bool(
+        getattr(
+            settings,
+            "chili_momentum_equity_execution_via_alpaca_paper",
+            False,
+        )
+    ):
+        # The primary equity route flag is an explicit paper-only topology.
+        # Ask the same authoritative per-symbol registry used by begin/confirm;
+        # its typed readiness failure propagates closed instead of falling back
+        # to Robinhood.  SPY is only an asset-class route probe—no order/data read.
+        resolved = normalize_execution_family(
+            resolve_execution_family_for_symbol("SPY", mode="live")
+        )
+        if resolved != EXECUTION_FAMILY_ALPACA_SPOT:
+            raise RuntimeError("alpaca_paper_equity_lane_not_resolved")
+        return resolved
     rail = str(getattr(settings, "chili_equity_execution_rail", "") or "").strip().lower()
     if rail == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
         return EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
@@ -212,7 +252,7 @@ def _venue_broker_ready_for(symbol: str, cache: dict[str, bool]) -> bool:
     if (
         str(symbol or "").strip().upper().endswith("-USD")
         and ef == "coinbase_spot"
-        and bool(getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", True))
+        and bool(getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", False))
     ):
         return False
     if ef in cache:
@@ -1784,7 +1824,11 @@ def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     return int(q.count())
 
 
-def _count_live_eligible_field(db: Session) -> int:
+def _count_live_eligible_field(
+    db: Session,
+    *,
+    as_of_utc: datetime | None = None,
+) -> int:
     """Distinct live-eligible names in the field RIGHT NOW (the adaptive watch-fanout
     basis, CHUNK 2). Same eligibility + lane filter the arm queue ranks from
     (``_fresh_live_eligible_candidates``): scope=symbol, live_eligible, fresh within
@@ -1795,7 +1839,9 @@ def _count_live_eligible_field(db: Session) -> int:
         max_age = float(
             getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
         )
-        cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+        cutoff = _decision_as_of_naive_utc(as_of_utc) - timedelta(
+            seconds=max_age
+        )
         q = db.query(MomentumSymbolViability.symbol).filter(
             MomentumSymbolViability.scope == "symbol",
             MomentumSymbolViability.live_eligible.is_(True),
@@ -1822,6 +1868,165 @@ def _count_watching_prefill(db: Session, *, user_id: int | None) -> int:
     if user_id is not None:
         q = q.filter(TradingAutomationSession.user_id == int(user_id))
     return int(q.count())
+
+
+def _is_alpaca_paper_execution_family(execution_family: str | None) -> bool:
+    try:
+        from ..execution_family_registry import normalize_execution_family
+
+        return normalize_execution_family(execution_family) in {
+            "alpaca_spot",
+            "alpaca_short",
+        }
+    except Exception:
+        return False
+
+
+def _current_rail_dispatch_capacity(*, user_id: int | None) -> dict[str, Any]:
+    """Read current adaptive rail throughput without consuming a token.
+
+    The headroom horizon is the already-configured auto-arm scheduler cadence:
+    tokens available now plus the bucket's currently learned refill rate over one
+    pass.  It is an operational throughput observation only; the final place path
+    still acquires the real token and may defer.  No financial or symbol cap is
+    inferred here.
+    """
+
+    enabled = bool(
+        getattr(settings, "chili_momentum_entry_placement_governor_enabled", True)
+    )
+    lane_key = (
+        f"momentum:{int(user_id or 0)}" if user_id is not None else "momentum"
+    )
+    if not enabled:
+        return {
+            "available": True,
+            "enabled": False,
+            "lane_key": lane_key,
+            "call_headroom": None,
+            "provenance": {
+                "authority": "rail_governor_disabled",
+                "financial_authority": "final_adaptive_reservation",
+            },
+        }
+    try:
+        from .rail_governor import _config_from_settings, get_bucket
+
+        snapshot = get_bucket(
+            lane_key,
+            _config_from_settings(settings),
+        ).snapshot()
+        cadence_seconds = max(
+            0.0,
+            float(
+                getattr(
+                    settings,
+                    "chili_momentum_auto_arm_live_scheduler_interval_seconds",
+                    30.0,
+                )
+                or 0.0
+            ),
+        )
+        tokens = max(0.0, float(snapshot.get("tokens") or 0.0))
+        refill_rps = max(0.0, float(snapshot.get("refill_rps") or 0.0))
+        call_headroom = max(
+            0,
+            int(math.floor(tokens + refill_rps * cadence_seconds)),
+        )
+        return {
+            "available": True,
+            "enabled": True,
+            "lane_key": lane_key,
+            "tokens": tokens,
+            "refill_rps": refill_rps,
+            "cadence_seconds": cadence_seconds,
+            "call_headroom": call_headroom,
+            "rate_limit_events": int(snapshot.get("rate_limit_events") or 0),
+            "defers": int(snapshot.get("defers") or 0),
+            "provenance": {
+                "authority": "current_adaptive_rail_bucket",
+                "formula": "floor(tokens + refill_rps * scheduler_cadence_seconds)",
+                "financial_authority": "final_adaptive_reservation",
+            },
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "enabled": True,
+            "lane_key": lane_key,
+            "call_headroom": 0,
+            "error_type": type(exc).__name__,
+            "provenance": {
+                "authority": "current_adaptive_rail_bucket",
+                "financial_authority": "final_adaptive_reservation",
+            },
+        }
+
+
+def _resolved_auto_arm_capacity_budget(
+    db: Session,
+    *,
+    user_id: int | None,
+    execution_family: str,
+    candidate_count: int,
+) -> tuple[int, dict[str, Any]]:
+    """Resolve per-pass arm breadth from current capacity.
+
+    Non-Alpaca families intentionally retain their configured legacy behaviour.
+    Direct Alpaca paper uses no arbitrary ``max_arms_per_pass`` constant: its
+    budget is the minimum of actual candidate count, current zero-risk watcher
+    headroom, and current rail throughput over one scheduler cadence.
+    """
+
+    candidates = max(0, int(candidate_count))
+    if not _is_alpaca_paper_execution_family(execution_family):
+        configured = max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "chili_momentum_auto_arm_max_arms_per_pass",
+                    3,
+                )
+                or 1
+            ),
+        )
+        return min(candidates, configured), {
+            "schema_version": "chili.auto-arm-capacity.v1",
+            "execution_family": execution_family,
+            "policy": "legacy_configured_non_alpaca",
+            "candidate_count": candidates,
+            "configured_max_arms_per_pass": configured,
+            "resolved_budget": min(candidates, configured),
+        }
+
+    from .risk_evaluator import alpaca_paper_arm_resource_capacity
+
+    watcher = alpaca_paper_arm_resource_capacity(
+        db,
+        user_id=user_id,
+    )
+    rail = _current_rail_dispatch_capacity(user_id=user_id)
+    watcher_headroom = max(0, int(watcher.get("headroom") or 0))
+    rail_headroom = (
+        max(0, int(rail.get("call_headroom") or 0))
+        if rail.get("enabled")
+        else candidates
+    )
+    resolved = min(candidates, watcher_headroom, rail_headroom)
+    provenance = {
+        "schema_version": "chili.auto-arm-capacity.v1",
+        "execution_family": execution_family,
+        "policy": "alpaca_current_resource_headroom",
+        "candidate_count": candidates,
+        "watcher": watcher,
+        "rail": rail,
+        "resolved_budget": resolved,
+        "formula": "min(candidate_count, watcher_headroom, rail_call_headroom)",
+        "financial_authority": "final_adaptive_reservation",
+        "legacy_max_arms_per_pass_used": False,
+    }
+    return resolved, provenance
 
 
 def _paper_shadow_arm(
@@ -2075,6 +2280,7 @@ def _fresh_live_eligible_candidates(
     *,
     limit: int,
     ross_universe_symbols: set[str] | None = None,
+    as_of_utc: datetime | None = None,
 ) -> list[MomentumSymbolViability]:
     """Top live-eligible candidates (distinct symbols) fresh within the LIVE risk
     gate (600s).
@@ -2093,7 +2299,7 @@ def _fresh_live_eligible_candidates(
     stale rows here.
     """
     max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
-    cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+    cutoff = _decision_as_of_naive_utc(as_of_utc) - timedelta(seconds=max_age)
     q = db.query(MomentumSymbolViability).filter(
         MomentumSymbolViability.scope == "symbol",
         MomentumSymbolViability.live_eligible.is_(True),
@@ -2433,8 +2639,144 @@ def _crypto_liquidity_rerank(
 _EPOCH = datetime(1970, 1, 1)
 
 
+class _LossGuardScopeUnavailable(RuntimeError):
+    """The current arming account cannot be bound to one loss-history scope."""
+
+
+class _LossGuardHistoryUnavailable(RuntimeError):
+    """Required current-live loss history could not be read causally."""
+
+
+def _resolve_loss_guard_scope(
+    *,
+    user_id: int | None,
+    execution_family: str | None,
+    account_scope: str | None = None,
+    account_identity: str | None = None,
+) -> dict[str, Any]:
+    """Resolve the exact history scope used by every auto-arm loss guard.
+
+    Alpaca sessions persist the non-secret paper account UUID in
+    ``risk_snapshot_json``.  The configured expected UUID is therefore an exact
+    account-generation key, not an inferred broker identity.  A supplied live
+    identity is only a consistency assertion: it can never override the configured
+    Alpaca pin or the adapter-produced current non-Alpaca identity.
+
+    This is a LIVE resolver and may perform one read-only non-Alpaca identity read.
+    Replay/historical decisions must stop before calling it unless a future real,
+    content-addressed capture receipt is implemented.  A raw string is not such a
+    receipt and never acquires replay authority here.
+    """
+
+    from ..execution_family_registry import normalize_execution_family
+
+    try:
+        uid = int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        uid = None
+    raw_family = str(execution_family or "").strip()
+    if uid is None:
+        raise _LossGuardScopeUnavailable("loss_guard_user_unavailable")
+    if not raw_family:
+        raise _LossGuardScopeUnavailable("loss_guard_execution_family_unavailable")
+    family = normalize_execution_family(raw_family)
+    supplied_identity = str(account_identity or "").strip()
+    supplied_scope = str(account_scope or "").strip().lower()
+
+    if family in {"alpaca_spot", "alpaca_short"}:
+        if not bool(getattr(settings, "chili_alpaca_paper", True)):
+            raise _LossGuardScopeUnavailable("alpaca_paper_scope_unavailable")
+        expected = str(
+            getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+        ).strip()
+        scope = supplied_scope or "alpaca:paper"
+        if scope != "alpaca:paper":
+            raise _LossGuardScopeUnavailable("alpaca_loss_guard_scope_mismatch")
+        if not expected:
+            raise _LossGuardScopeUnavailable("alpaca_loss_guard_identity_unavailable")
+        if supplied_identity and supplied_identity != expected:
+            raise _LossGuardScopeUnavailable("alpaca_loss_guard_identity_mismatch")
+        return {
+            "user_id": uid,
+            "execution_family": family,
+            "account_scope": scope,
+            "account_identity": expected,
+            "account_identity_bound": True,
+            "account_identity_source": "settings.chili_alpaca_expected_account_id",
+        }
+
+    from ..venue.account_identity import read_current_non_alpaca_account_identity
+
+    truth = read_current_non_alpaca_account_identity(family)
+    current_identity = str(truth.get("identity") or "").strip()
+    if truth.get("ok") is not True or not current_identity:
+        raise _LossGuardScopeUnavailable(
+            str(
+                truth.get("reason")
+                or "non_alpaca_loss_guard_identity_unavailable"
+            )
+        )
+    if supplied_identity and supplied_identity != current_identity:
+        raise _LossGuardScopeUnavailable(
+            "non_alpaca_loss_guard_identity_mismatch"
+        )
+    return {
+        "user_id": uid,
+        "execution_family": family,
+        "account_scope": supplied_scope or None,
+        "account_identity": current_identity,
+        "account_identity_bound": True,
+        "account_identity_source": "adapter_current_account_identity",
+    }
+
+
 def _utcnow() -> datetime:
+    # Use the live-FSM replay clock when one is bound.  The lazy import avoids
+    # the module cycle (live_runner imports auto_arm helpers inside functions).
+    try:
+        from .live_runner import _SIM_NOW
+
+        replay_now = _SIM_NOW.get()
+        if replay_now is not None:
+            if replay_now.tzinfo is not None:
+                return replay_now.astimezone(timezone.utc).replace(tzinfo=None)
+            return replay_now
+    except Exception:
+        pass
     return datetime.utcnow()
+
+
+def _decision_as_of_naive_utc(value: datetime | None = None) -> datetime:
+    """Normalize one production/replay decision frontier to naive UTC."""
+
+    resolved = value if value is not None else _utcnow()
+    if resolved.tzinfo is not None:
+        return resolved.astimezone(timezone.utc).replace(tzinfo=None)
+    return resolved
+
+
+def _loss_guard_replay_or_historical_decision(
+    decision_at: datetime | None,
+) -> bool:
+    """True when current adapter/DB history is forbidden as a fallback.
+
+    A caller-supplied decision instant is an explicit historical decision.  The
+    bound live-FSM replay clock is the other replay authority signal.  Until a
+    genuine content-addressed loss-history receipt exists, either condition must
+    grade coverage unavailable before an adapter or mutable current-DB read.
+    """
+
+    if decision_at is not None:
+        return True
+    try:
+        from .live_runner import _SIM_NOW
+
+        return _SIM_NOW.get() is not None
+    except Exception:
+        # Losing the authority seam cannot prove this is an ordinary wall-clock
+        # live pass.  Treat it as replay/historical coverage-unavailable rather
+        # than falling through to current adapter/DB history and mutation.
+        return True
 
 
 def _adaptive_loss_cooldown_minutes(return_bps: float | None) -> float:
@@ -2458,8 +2800,18 @@ def _adaptive_loss_cooldown_minutes(return_bps: float | None) -> float:
     return min(adaptive, cap)
 
 
-def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
-    """Churn guards from TODAY's closed live outcomes (UTC day):
+def _symbol_loss_guards(
+    db: Session,
+    *,
+    user_id: int | None,
+    execution_family: str | None,
+    account_scope: str | None = None,
+    account_identity: str | None = None,
+    as_of_utc: datetime | None = None,
+    _resolved_scope: dict[str, Any] | None = None,
+    _current_live_history: Any | None = None,
+) -> tuple[set[str], dict[str, datetime]]:
+    """Churn guards from this account's closed outcomes in the current ET day:
 
     - 2-STRIKE: symbols with >= ``chili_momentum_symbol_max_daily_stopouts``
       (default 2) losing live trades today are BLOCKED for the rest of the day —
@@ -2468,69 +2820,220 @@ def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
       for ``chili_momentum_symbol_loss_cooldown_min`` (default 5) minutes — a
       tick-speed re-trigger into the same chop is how 1R losses machine-gun.
 
-    Fail-open: any error returns no blocks (the daily-loss cap and drawdown
-    breaker still bound the account)."""
-    try:
-        from ....models.trading import MomentumAutomationOutcome
+    Both this guard and the account-wide streak consume the same shared,
+    broker-authoritative current-live history receipt. Missing scope, terminal
+    coverage, reconciliation, or finite broker P&L raises before a new arm.
 
-        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        rows = (
-            db.query(
-                MomentumAutomationOutcome.symbol,
-                MomentumAutomationOutcome.terminal_at,
-                MomentumAutomationOutcome.realized_pnl_usd,
-                MomentumAutomationOutcome.return_bps,
-                MomentumAutomationOutcome.execution_family,
-            )
-            .filter(
-                MomentumAutomationOutcome.mode == "live",
-                MomentumAutomationOutcome.terminal_at >= day_start,
-                MomentumAutomationOutcome.realized_pnl_usd < 0,
-            )
-            .all()
+    ``_resolved_scope`` is an internal once-per-pass live result.  It prevents a
+    second adapter identity read when both account-wide and per-symbol guards use
+    the same scope; it is never exposed as a replay receipt.
+    """
+    scope = _resolved_scope or _resolve_loss_guard_scope(
+        user_id=user_id,
+        execution_family=execution_family,
+        account_scope=account_scope,
+        account_identity=account_identity,
+    )
+    try:
+        from .risk_policy import load_current_live_loss_history
+
+        history = _current_live_history or load_current_live_loss_history(
+            db,
+            user_id=scope["user_id"],
+            execution_family=scope["execution_family"],
+            account_scope=scope["account_scope"],
+            account_identity=scope["account_identity"],
+            decision_as_of=_decision_as_of_naive_utc(as_of_utc),
         )
+        entries, history_meta = history
+        if (
+            history_meta.get("required_scope_unavailable") is True
+            or history_meta.get("history_unavailable") is True
+        ):
+            raise _LossGuardHistoryUnavailable(
+                str(history_meta.get("reason") or "symbol_loss_guard_history_unavailable")
+            )
         max_stops = int(getattr(settings, "chili_momentum_symbol_max_daily_stopouts", 2) or 2)
         cd_min = float(getattr(settings, "chili_momentum_symbol_loss_cooldown_min", 5) or 5)
         counts: dict[str, int] = {}
         cooldown_until: dict[str, datetime] = {}
-        for sym, t_at, _pnl, _bps, _ef in rows:
-            s = str(sym).upper()
+        for entry in entries:
+            if entry.realized_pnl_usd >= 0:
+                continue
+            s = str(entry.symbol).upper()
             counts[s] = counts.get(s, 0) + 1
             # EQUITY: the post-loss cooldown SCALES with the loss magnitude — a hard
             # bailout sits the name out far longer than a scratch (the CCTG re-entry).
             # CRYPTO: fixed base, BYTE-IDENTICAL — it re-arms fast by design and is
             # bounded by reap_cooldown below. The 2-strike day-block is unchanged for all.
-            if str(_ef or "") in ("robinhood_spot", "alpaca_spot"):
-                _mins = _adaptive_loss_cooldown_minutes(_bps)
+            if scope["execution_family"] in ("robinhood_spot", "alpaca_spot"):
+                _mins = _adaptive_loss_cooldown_minutes(entry.return_bps)
             else:
                 _mins = cd_min
-            cd = (t_at if isinstance(t_at, datetime) else _utcnow()) + timedelta(minutes=_mins)
+            cd = entry.terminal_at + timedelta(minutes=_mins)
             if cd > cooldown_until.get(s, _EPOCH):
                 cooldown_until[s] = cd
         blocked = {s for s, n in counts.items() if n >= max_stops}
         return blocked, cooldown_until
-    except Exception:
-        logger.debug("[auto_arm] loss-guard query failed (fail-open)", exc_info=True)
-        return set(), {}
+    except _LossGuardHistoryUnavailable:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[auto_arm] loss-guard history unavailable; failing closed for new arms",
+            exc_info=True,
+        )
+        raise _LossGuardHistoryUnavailable(
+            "symbol_loss_guard_history_unavailable"
+        ) from exc
 
 
-def _win_cycle_clean_win_count(db: Session, *, execution_family: str | None = None) -> int:
+def _alpaca_twin_loss_guard_decision(
+    db: Session,
+    *,
+    user_id: int,
+    symbol: str,
+    as_of_utc: datetime,
+) -> tuple[bool, dict[str, Any], dict[str, Any] | None]:
+    """Independently guard one external Alpaca-paper twin arm.
+
+    The primary broker's history never authorizes a secondary account.  Resolve
+    Alpaca's configured paper generation, load one shared broker-authoritative
+    history receipt, and run both account-wide and per-symbol policies before
+    ``begin_live_arm`` can perform its own fresh identity fence.
+    """
+
+    meta: dict[str, Any] = {
+        "schema_version": "chili.alpaca-twin-loss-guard.v1",
+        "allowed": False,
+        "execution_family": "alpaca_spot",
+        "account_scope": "alpaca:paper",
+        "symbol": str(symbol or "").strip().upper(),
+        "decision_as_of_utc": _decision_as_of_naive_utc(as_of_utc).isoformat(),
+        "history_authority": "broker_reconciled_current_live_db_only",
+        "replay_certifiable": False,
+    }
+    try:
+        scope = _resolve_loss_guard_scope(
+            user_id=int(user_id),
+            execution_family="alpaca_spot",
+            account_scope="alpaca:paper",
+        )
+    except _LossGuardScopeUnavailable as exc:
+        return False, {**meta, "reason": str(exc), "coverage_grade": "COVERAGE_UNAVAILABLE"}, None
+
+    meta["account_identity_sha256"] = hashlib.sha256(
+        str(scope["account_identity"]).encode("utf-8")
+    ).hexdigest()
+    try:
+        from .risk_policy import (
+            consecutive_loss_halt_decision,
+            load_current_live_loss_history,
+        )
+
+        history = load_current_live_loss_history(
+            db,
+            user_id=int(user_id),
+            execution_family=scope["execution_family"],
+            account_scope=scope["account_scope"],
+            account_identity=scope["account_identity"],
+            decision_as_of=as_of_utc,
+        )
+        _entries, history_meta = history
+        meta["history"] = dict(history_meta)
+        if (
+            history_meta.get("required_scope_unavailable") is True
+            or history_meta.get("history_unavailable") is True
+        ):
+            return False, {
+                **meta,
+                "reason": str(
+                    history_meta.get("reason")
+                    or "alpaca_twin_loss_history_unavailable"
+                ),
+                "coverage_grade": "COVERAGE_UNAVAILABLE",
+            }, scope
+
+        halted, halt_meta = consecutive_loss_halt_decision(
+            db,
+            user_id=int(user_id),
+            execution_family=scope["execution_family"],
+            account_scope=scope["account_scope"],
+            account_identity=scope["account_identity"],
+            decision_as_of=as_of_utc,
+            _current_live_history=history,
+        )
+        meta["consecutive_loss_state"] = {
+            key: value
+            for key, value in halt_meta.items()
+            if key != "config_provenance"
+        }
+        if halted:
+            return False, {**meta, "reason": "alpaca_twin_consecutive_loss_halt"}, scope
+
+        blocked, cooldowns = _symbol_loss_guards(
+            db,
+            user_id=int(user_id),
+            execution_family=scope["execution_family"],
+            account_scope=scope["account_scope"],
+            account_identity=scope["account_identity"],
+            as_of_utc=as_of_utc,
+            _resolved_scope=scope,
+            _current_live_history=history,
+        )
+        upper_symbol = str(symbol or "").strip().upper()
+        if upper_symbol in blocked:
+            return False, {**meta, "reason": "alpaca_twin_symbol_daily_stopout"}, scope
+        cooldown_until = cooldowns.get(upper_symbol)
+        if isinstance(cooldown_until, datetime) and cooldown_until > _decision_as_of_naive_utc(
+            as_of_utc
+        ):
+            return False, {
+                **meta,
+                "reason": "alpaca_twin_symbol_loss_cooldown",
+                "cooldown_until_utc": cooldown_until.isoformat(),
+            }, scope
+    except Exception as exc:
+        logger.warning(
+            "[auto_arm] Alpaca twin loss guard unavailable; twin denied",
+            exc_info=True,
+        )
+        return False, {
+            **meta,
+            "reason": "alpaca_twin_loss_guard_unavailable",
+            "error_type": type(exc).__name__,
+            "coverage_grade": "COVERAGE_UNAVAILABLE",
+        }, scope
+
+    return True, {**meta, "allowed": True, "reason": "ok"}, scope
+
+
+def _win_cycle_clean_win_count(
+    db: Session,
+    *,
+    execution_family: str | None = None,
+    as_of_utc: datetime | None = None,
+) -> int:
     """Count TODAY's CLEAN WINS (live, this execution family) for win-cycle fatigue (E2).
 
     A clean win = a closed live momentum outcome with realized_pnl_usd > 0 in the current
-    UTC day. Mirrors ``_symbol_loss_guards``'s query shape (no new table, no new path).
+    ET decision day. Mirrors ``_symbol_loss_guards``'s query shape (no new table/path).
     Fail-open: any error returns 0 (fatigue never triggers on a query glitch — it can only
     REDUCE/HALT new entries, so failing open just preserves current behavior). ENTRIES-ONLY:
     the caller uses this for the YELLOW down-size + RED halt; it never touches an exit."""
     try:
         from ....models.trading import MomentumAutomationOutcome
+        from .risk_policy import _et_day_bounds_utc
 
-        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        decision_as_of = _decision_as_of_naive_utc(as_of_utc)
+        day_start, day_end = _et_day_bounds_utc(as_of_utc=decision_as_of)
         q = (
             db.query(MomentumAutomationOutcome.id)
             .filter(
                 MomentumAutomationOutcome.mode == "live",
                 MomentumAutomationOutcome.terminal_at >= day_start,
+                MomentumAutomationOutcome.terminal_at < day_end,
+                MomentumAutomationOutcome.terminal_at <= decision_as_of,
+                MomentumAutomationOutcome.created_at <= decision_as_of,
                 MomentumAutomationOutcome.realized_pnl_usd > 0,
             )
         )
@@ -2564,7 +3067,12 @@ def _win_cycle_fatigue_level(win_count: int) -> str:
     return "green"
 
 
-def win_cycle_yellow_size_multiplier(db: Session, *, execution_family: str | None = None) -> tuple[float, dict[str, Any]]:
+def win_cycle_yellow_size_multiplier(
+    db: Session,
+    *,
+    execution_family: str | None = None,
+    as_of_utc: datetime | None = None,
+) -> tuple[float, dict[str, Any]]:
     """ENTRY-side size multiplier for win-cycle fatigue (E2) — read by the live runner at
     entry-fill sizing. Returns ``(mult, meta)`` where mult is in (0, 1]:
 
@@ -2578,7 +3086,11 @@ def win_cycle_yellow_size_multiplier(db: Session, *, execution_family: str | Non
     try:
         if not bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
             return 1.0, {}
-        n = _win_cycle_clean_win_count(db, execution_family=execution_family)
+        n = _win_cycle_clean_win_count(
+            db,
+            execution_family=execution_family,
+            as_of_utc=as_of_utc,
+        )
         level = _win_cycle_fatigue_level(n)
         if level == "yellow":
             frac = float(getattr(settings, "chili_momentum_win_cycle_yellow_size_fraction", 0.5) or 0.5)
@@ -2608,23 +3120,35 @@ def win_cycle_yellow_size_multiplier(db: Session, *, execution_family: str | Non
 # OPEN position's own session is already counted and cannot be re-blocked out of its exit.
 
 
-def _per_symbol_attempt_count(db: Session, symbol: str, *, execution_family: str | None = None) -> int:
+def _per_symbol_attempt_count(
+    db: Session,
+    symbol: str,
+    *,
+    execution_family: str | None = None,
+    as_of_utc: datetime | None = None,
+) -> int:
     """Count TODAY's LIVE ENTRY ATTEMPTS on ``symbol`` (this execution family) for per-symbol
     fatigue (P2). An attempt = a live TradingAutomationSession begun for the symbol in the
-    current UTC day (the lane arms one live session per entry attempt). Mirrors the win-cycle
+    current ET decision day (the lane arms one live session per entry attempt). Mirrors the win-cycle
     count's query shape (no new table/path). Fail-open: any error returns 0 (fatigue never
     triggers on a query glitch — it can only REDUCE/VETO a NEW entry, never an exit)."""
     try:
         su = str(symbol or "").strip().upper()
         if not su:
             return 0
-        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        decision_as_of = _decision_as_of_naive_utc(as_of_utc)
+        from .risk_policy import _et_day_bounds_utc
+
+        day_start, day_end = _et_day_bounds_utc(as_of_utc=decision_as_of)
         q = (
             db.query(TradingAutomationSession.id)
             .filter(
                 TradingAutomationSession.mode == "live",
                 TradingAutomationSession.symbol == su,
                 TradingAutomationSession.started_at >= day_start,
+                TradingAutomationSession.started_at < day_end,
+                TradingAutomationSession.started_at <= decision_as_of,
+                TradingAutomationSession.created_at <= decision_as_of,
             )
         )
         if execution_family:
@@ -2657,7 +3181,13 @@ def _per_symbol_fatigue_level(attempt_count: int) -> str:
     return "green"
 
 
-def per_symbol_fatigue_blocks_entry(db: Session, symbol: str, *, execution_family: str | None = None) -> tuple[bool, dict[str, Any]]:
+def per_symbol_fatigue_blocks_entry(
+    db: Session,
+    symbol: str,
+    *,
+    execution_family: str | None = None,
+    as_of_utc: datetime | None = None,
+) -> tuple[bool, dict[str, Any]]:
     """ENTRIES-ONLY veto for per-symbol attempt fatigue (P2). Returns ``(blocked, meta)``.
 
     ``blocked`` is True when ``symbol`` has already reached the per-symbol attempt cap TODAY
@@ -2667,7 +3197,12 @@ def per_symbol_fatigue_blocks_entry(db: Session, symbol: str, *, execution_famil
     try:
         if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
             return False, {}
-        n = _per_symbol_attempt_count(db, symbol, execution_family=execution_family)
+        n = _per_symbol_attempt_count(
+            db,
+            symbol,
+            execution_family=execution_family,
+            as_of_utc=as_of_utc,
+        )
         level = _per_symbol_fatigue_level(n)
         if level == "red":
             return True, {
@@ -2680,7 +3215,13 @@ def per_symbol_fatigue_blocks_entry(db: Session, symbol: str, *, execution_famil
         return False, {}
 
 
-def per_symbol_fatigue_size_multiplier(db: Session, symbol: str, *, execution_family: str | None = None) -> tuple[float, dict[str, Any]]:
+def per_symbol_fatigue_size_multiplier(
+    db: Session,
+    symbol: str,
+    *,
+    execution_family: str | None = None,
+    as_of_utc: datetime | None = None,
+) -> tuple[float, dict[str, Any]]:
     """ENTRY-side size multiplier for per-symbol fatigue (P2) — read by the live runner at
     entry-fill sizing. Returns ``(mult, meta)`` in (0, 1]:
 
@@ -2695,7 +3236,12 @@ def per_symbol_fatigue_size_multiplier(db: Session, symbol: str, *, execution_fa
     try:
         if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
             return 1.0, {}
-        n = _per_symbol_attempt_count(db, symbol, execution_family=execution_family)
+        n = _per_symbol_attempt_count(
+            db,
+            symbol,
+            execution_family=execution_family,
+            as_of_utc=as_of_utc,
+        )
         level = _per_symbol_fatigue_level(n)
         if level == "yellow":
             frac = float(getattr(settings, "chili_momentum_per_symbol_yellow_size_fraction", 0.5) or 0.5)
@@ -3416,7 +3962,12 @@ def _maybe_rank_displace(
     return False, {"reason": "no_displaceable"}
 
 
-def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[str, Any]) -> bool:
+def _try_displacement_for_full_slots(
+    db: Session,
+    *,
+    uid: int | None,
+    out: dict[str, Any],
+) -> bool:
     """Slot-full hook: if rank-displacement is ON and no per-pass cancel has fired yet,
     pick the best fresh non-busy eligible NEWCOMER and try to displace the worst inert
     watcher to free a slot. Returns True iff a slot was freed. PARITY: flag OFF -> returns
@@ -3476,7 +4027,13 @@ def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[
     return False
 
 
-def run_auto_arm_pass(db: Session) -> dict[str, Any]:
+def run_auto_arm_pass(
+    db: Session,
+    *,
+    decision_at: datetime | None = None,
+    loss_guard_account_scope: str | None = None,
+    loss_guard_account_identity: str | None = None,
+) -> dict[str, Any]:
     """Single auto-arm pass. Returns a summary dict (armed 0/1)."""
     out: dict[str, Any] = {"checked": 0, "scanned": 0, "armed": 0, "skipped": None}
 
@@ -3491,6 +4048,25 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     uid = _auto_arm_user_id()
     if uid is None:
         out["skipped"] = "no_user"
+        return out
+    pass_as_of = _decision_as_of_naive_utc(decision_at)
+
+    # ReplayV3/historical auto-arm cannot use today's adapter identity or mutable
+    # operational DB as a surrogate for recorded decision-time inputs.  There is
+    # not yet a real typed/content-addressed loss-history receipt, so grade this
+    # exact workstream unavailable before any identity/history read or mutation.
+    # A raw caller string is deliberately insufficient.
+    if _loss_guard_replay_or_historical_decision(decision_at):
+        out["skipped"] = "loss_guard_history_coverage_unavailable"
+        out["loss_guard_history"] = {
+            "schema_version": "chili.loss-guard-history-coverage.v1",
+            "coverage_grade": "COVERAGE_UNAVAILABLE",
+            "reason": "recorded_loss_guard_history_receipt_unavailable",
+            "decision_as_of_utc": pass_as_of.isoformat(),
+            "adapter_fallback_attempted": False,
+            "current_db_fallback_attempted": False,
+            "replay_certifiable": False,
+        }
         return out
 
     # Guard 1: kill switch.
@@ -3524,9 +4100,9 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
 
     # Reap stale pre-entry sessions FIRST so a faded leftover (e.g. a name armed
     # long ago whose intraday move never triggered) does not pin the only slot.
-    reaped = _reap_stale_watching_sessions(db, user_id=uid, now=datetime.utcnow())
+    reaped = _reap_stale_watching_sessions(db, user_id=uid, now=pass_as_of)
     try:
-        _finalized = _finalize_stale_exited_sessions(db, user_id=uid, now=datetime.utcnow())
+        _finalized = _finalize_stale_exited_sessions(db, user_id=uid, now=pass_as_of)
         if _finalized:
             out["finalized_exited"] = _finalized
     except Exception:
@@ -3535,8 +4111,146 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["reaped"] = reaped
         db.commit()
 
-    # Guard 2: concurrency. Two regimes, selected by the master flag.
-    if getattr(settings, "chili_momentum_decouple_watching_enabled", False):
+    # Finish every session/outcome mutation before freezing the shared loss
+    # history. Finalization or stale-live reaping can book the Nth loss; flush
+    # those writes, then advance the frontier beyond their generated clocks so
+    # this same pass cannot ignore the new loss and re-arm.
+    try:
+        from .automation_query import (
+            expire_stale_live_arm_sessions,
+            reap_stale_live_sessions,
+        )
+
+        expire_stale_live_arm_sessions(db, user_id=int(uid))
+        _stale_reaped = reap_stale_live_sessions(db, user_id=int(uid))
+        if _stale_reaped.get("reaped"):
+            out["stale_sessions_reaped"] = _stale_reaped.get("reaped")
+            logger.info("[auto_arm] stale-session reaper: %s", _stale_reaped)
+    except Exception:
+        logger.debug("[auto_arm] pre-history session sweep failed", exc_info=True)
+    try:
+        db.flush()
+    except Exception as exc:
+        out["skipped"] = "loss_guard_history_unavailable"
+        out["loss_guard_history"] = {
+            "coverage_grade": "COVERAGE_UNAVAILABLE",
+            "reason": "loss_guard_pre_history_flush_unavailable",
+            "error_type": type(exc).__name__,
+            "replay_certifiable": False,
+        }
+        return out
+    pass_as_of = _decision_as_of_naive_utc()
+
+    # Guard 2: concurrency. Direct Alpaca paper watchers are $0 risk and use
+    # only the measured/current watcher resource budget. Financial position,
+    # gross-notional, and buying-power concurrency is decided later by the
+    # exact account-wide adaptive reservation. A selected paper topology that
+    # cannot resolve never falls through to a real-money family.
+    try:
+        _pass_execution_family = _lane_execution_family()
+    except Exception as exc:
+        out["skipped"] = "execution_family_resolution_unavailable"
+        out["execution_family_error_type"] = type(exc).__name__
+        return out
+
+    # One immutable scope is reused by both the per-symbol churn guard and the
+    # consecutive-loss halt.  This prevents a paper or replay decision from
+    # counting another user, execution family, or Alpaca paper account.  Resolve
+    # before any loss-history query; missing required Alpaca identity is a
+    # fail-closed arming stop, never an unscoped fallback.
+    try:
+        _loss_guard_scope = _resolve_loss_guard_scope(
+            user_id=uid,
+            execution_family=_pass_execution_family,
+            account_scope=loss_guard_account_scope,
+            account_identity=loss_guard_account_identity,
+        )
+    except _LossGuardScopeUnavailable as exc:
+        out["skipped"] = "loss_guard_scope_unavailable"
+        out["loss_guard_scope_reason"] = str(exc)
+        return out
+    out["loss_guard_policy"] = {
+        "schema_version": "chili.loss-guard-scope.v1",
+        "user_id": int(uid),
+        "execution_family": _loss_guard_scope["execution_family"],
+        "account_scope": _loss_guard_scope["account_scope"],
+        "account_identity_bound": _loss_guard_scope["account_identity_bound"],
+        "account_identity_source": _loss_guard_scope["account_identity_source"],
+        "account_identity_sha256": hashlib.sha256(
+            str(_loss_guard_scope["account_identity"]).encode("utf-8")
+        ).hexdigest(),
+        "decision_as_of_utc": pass_as_of.isoformat(),
+        "history_authority": "broker_reconciled_current_live_db_only",
+        "replay_certifiable": False,
+        "symbol_max_daily_stopouts": {
+            "value": int(
+                getattr(settings, "chili_momentum_symbol_max_daily_stopouts", 2)
+                or 2
+            ),
+            "source": "settings.chili_momentum_symbol_max_daily_stopouts",
+        },
+        "symbol_loss_cooldown_minutes": {
+            "value": float(
+                getattr(settings, "chili_momentum_symbol_loss_cooldown_min", 5.0)
+                or 5.0
+            ),
+            "source": "settings.chili_momentum_symbol_loss_cooldown_min",
+        },
+        "validation_status": "offline_oos_required",
+    }
+
+    # Load once and share byte-for-byte between the streak and per-symbol guards.
+    # This prevents two read-committed snapshots (or two label policies) from
+    # disagreeing inside one arm pass.
+    try:
+        from .risk_policy import load_current_live_loss_history
+
+        _current_live_loss_history = load_current_live_loss_history(
+            db,
+            user_id=int(uid),
+            execution_family=_loss_guard_scope["execution_family"],
+            account_scope=_loss_guard_scope["account_scope"],
+            account_identity=_loss_guard_scope["account_identity"],
+            decision_as_of=pass_as_of,
+        )
+    except Exception as exc:
+        out["skipped"] = "loss_guard_history_unavailable"
+        out["loss_guard_history"] = {
+            "coverage_grade": "COVERAGE_UNAVAILABLE",
+            "reason": "loss_guard_history_unavailable",
+            "error_type": type(exc).__name__,
+            "decision_as_of_utc": pass_as_of.isoformat(),
+            "replay_certifiable": False,
+        }
+        return out
+    _loss_history_entries, _loss_history_meta = _current_live_loss_history
+    out["loss_guard_history"] = dict(_loss_history_meta)
+    if (
+        _loss_history_meta.get("required_scope_unavailable") is True
+        or _loss_history_meta.get("history_unavailable") is True
+    ):
+        out["skipped"] = "loss_guard_history_unavailable"
+        return out
+
+    if _is_alpaca_paper_execution_family(_pass_execution_family):
+        try:
+            from .risk_evaluator import alpaca_paper_arm_resource_capacity
+
+            _arm_resource = alpaca_paper_arm_resource_capacity(
+                db,
+                user_id=uid,
+            )
+        except Exception as exc:
+            out["skipped"] = "watch_resource_capacity_unavailable"
+            out["watch_resource_error_type"] = type(exc).__name__
+            return out
+        out["arm_resource_capacity"] = _arm_resource
+        if not bool(_arm_resource.get("available")):
+            out["skipped"] = "watch_fanout_full"
+            out["watching"] = int(_arm_resource.get("watching") or 0)
+            out["watch_capacity"] = int(_arm_resource.get("capacity") or 0)
+            return out
+    elif getattr(settings, "chili_momentum_decouple_watching_enabled", False):
         # DECOUPLED: watchers fan out to the top-N funnel cap (a $0-risk watcher no
         # longer eats a real slot); only HELD positions charge the risk-budget cap.
         # Both checks here are SOFT pre-checks (don't bother arming an 11th watcher
@@ -3629,7 +4343,11 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                 float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
                 _lane_execution_family(),
             )
-            _daily_pnl = _daily_realized_pnl(db, int(uid))
+            _daily_pnl = _daily_realized_pnl(
+                db,
+                int(uid),
+                execution_family=_lane_execution_family(),
+            )
             if _daily_pnl <= -_max_dl:
                 out["skipped"] = "daily_loss_cap"
                 out["daily_pnl_usd"] = round(float(_daily_pnl), 2)
@@ -3683,17 +4401,47 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # row = walk away'). The streak dial only de-SIZES (never halts), the COUNT day-blocks are
     # PER-SYMBOL, and the other account-wide halts are DOLLAR-based — so N small losses across N
     # different tickers trip no halt (death by a thousand papercuts). This is the missing
-    # account-wide, COUNT-based tilt halt: after N consecutive realized losses across ALL
-    # symbols/families today (resets on a win or a new ET day), STOP arming NEW entries for the
+    # account-wide, COUNT-based tilt halt: after N consecutive realized losses across all
+    # symbols in this exact user/family/account generation today (resets on a win or a new
+    # ET day), STOP arming NEW entries for the
     # session. It composes WITH the dollar caps (an ADDITIONAL count halt, not a replacement).
     # ⚠️ HALTS ARMING ONLY — every exit/stop/trail/bailout/scale-out runs in the live runner,
     # which this guard does not gate, so OPEN positions still manage + exit normally. Same
     # early-out shape as Guards 4/5; observable (out["skipped"]=consecutive_loss_halt + a log).
-    # OFF (handled in the helper) => not halted => byte-identical. Fail-open. MOMENTUM_LANE.md
+    # OFF (handled in the helper) => no-op. Missing scope/history fails closed for NEW arms.
     try:
         from .risk_policy import consecutive_loss_halt_decision
 
-        _cl_halt, _cl_meta = consecutive_loss_halt_decision(db)
+        _cl_halt, _cl_meta = consecutive_loss_halt_decision(
+            db,
+            user_id=int(uid),
+            execution_family=_loss_guard_scope["execution_family"],
+            account_scope=_loss_guard_scope["account_scope"],
+            account_identity=_loss_guard_scope["account_identity"],
+            decision_as_of=pass_as_of,
+            _current_live_history=_current_live_loss_history,
+        )
+        out["consecutive_loss_policy"] = _cl_meta.get("config_provenance")
+        out["consecutive_loss_state"] = {
+            key: value
+            for key, value in _cl_meta.items()
+            if key != "config_provenance"
+        }
+        if (
+            _cl_meta.get("history_unavailable") is True
+            or _cl_meta.get("required_scope_unavailable") is True
+        ):
+            out["skipped"] = "loss_guard_history_unavailable"
+            out["loss_guard_history"] = {
+                "coverage_grade": "COVERAGE_UNAVAILABLE",
+                "reason": str(
+                    _cl_meta.get("reason")
+                    or "loss_guard_history_unavailable"
+                ),
+                "decision_as_of_utc": pass_as_of.isoformat(),
+                "replay_certifiable": False,
+            }
+            return out
         if _cl_halt:
             out["skipped"] = "consecutive_loss_halt"
             out["consecutive_losses"] = _cl_meta.get("consecutive_losses")
@@ -3705,8 +4453,16 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                 _cl_meta.get("consecutive_losses"), _cl_meta.get("halt_count"), _cl_meta,
             )
             return out
-    except Exception:
-        pass
+    except Exception as exc:
+        out["skipped"] = "loss_guard_history_unavailable"
+        out["loss_guard_history"] = {
+            "coverage_grade": "COVERAGE_UNAVAILABLE",
+            "reason": "consecutive_loss_guard_exception",
+            "error_type": type(exc).__name__,
+            "decision_as_of_utc": pass_as_of.isoformat(),
+            "replay_certifiable": False,
+        }
+        return out
 
     # Guard 5c: WIN-CYCLE FATIGUE — RED hard-stop (Batch E(2), ENTRIES ONLY). Once today's
     # CLEAN-WIN count (this execution family) reaches the RED threshold, STOP arming NEW
@@ -3718,7 +4474,11 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # OFF => 'green' => no-op (byte-identical). Fail-open. docs/DESIGN/MOMENTUM_LANE.md
     try:
         if bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
-            _wc_n = _win_cycle_clean_win_count(db, execution_family=_lane_execution_family())
+            _wc_n = _win_cycle_clean_win_count(
+                db,
+                execution_family=_lane_execution_family(),
+                as_of_utc=pass_as_of,
+            )
             if _win_cycle_fatigue_level(_wc_n) == "red":
                 out["skipped"] = "win_cycle_fatigue_red"
                 out["clean_wins_today"] = _wc_n
@@ -3746,30 +4506,6 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                 return out
     except Exception:
         pass
-
-    # Clear expired pending arms so they do not pin a concurrency slot.
-    try:
-        from .automation_query import expire_stale_live_arm_sessions
-
-        expire_stale_live_arm_sessions(db, user_id=int(uid))
-    except Exception:
-        pass
-
-    # AREA C — SAFE BOUNDED STALE-SESSION REAPER (2026-06-25). Runs INSIDE this
-    # auto-arm pass (NOT a parallel loop) right after the arm-pending TTL sweep:
-    # terminalize dead-but-lingering live_error / broker-flat live_bailout sessions so
-    # they stop pinning the busy-set + accumulating in the table. Broker-truth-gated +
-    # in-flight-order-gated + row-locked + fail-safe (any unknown read leaves the
-    # session alone). Kill-switch chili_momentum_stale_session_reaper_enabled.
-    try:
-        from .automation_query import reap_stale_live_sessions
-
-        _reaped = reap_stale_live_sessions(db, user_id=int(uid))
-        if _reaped.get("reaped"):
-            out["stale_sessions_reaped"] = _reaped.get("reaped")
-            logger.info("[auto_arm] stale-session reaper: %s", _reaped)
-    except Exception:
-        logger.debug("[auto_arm] stale-session reaper failed", exc_info=True)
 
     # Coinbase connect at PASS START (2026-06-12): the venue-readiness filter
     # at selection ran BEFORE the lazy _cb_connect() at the arm phase, so a
@@ -3856,7 +4592,10 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # runner, ungated). Fail-open on every axis. docs/DESIGN/MOMENTUM_LANE.md
     if _timeofday_schedule_enabled():
         try:
-            _tod, _tod_dbg = _should_suppress_late_day(candidates)
+            _tod, _tod_dbg = _should_suppress_late_day(
+                candidates,
+                now=pass_as_of,
+            )
             if _tod:
                 out["skipped"] = "momentum_timeofday_schedule"
                 out["timeofday_schedule"] = _tod_dbg
@@ -3881,8 +4620,36 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # stop-out): (a) 2-strike rule — a symbol that stopped us out twice TODAY is
     # done for the day (Ross's own discipline); (b) post-loss cooldown — after any
     # loss on a symbol, sit out a few minutes before re-arming it so a chop doesn't
-    # machine-gun 1R losses on one name. Both fail-open on query errors.
-    loss_blocked, loss_cooldown_until = _symbol_loss_guards(db)
+    # machine-gun 1R losses on one name. Missing/unreadable history fails closed for
+    # NEW arms, while existing positions remain entirely outside this path.
+    try:
+        loss_blocked, loss_cooldown_until = _symbol_loss_guards(
+            db,
+            user_id=int(uid),
+            execution_family=_loss_guard_scope["execution_family"],
+            account_scope=_loss_guard_scope["account_scope"],
+            account_identity=_loss_guard_scope["account_identity"],
+            as_of_utc=pass_as_of,
+            _resolved_scope=_loss_guard_scope,
+            _current_live_history=_current_live_loss_history,
+        )
+    except _LossGuardHistoryUnavailable as exc:
+        out["skipped"] = "loss_guard_history_unavailable"
+        out["loss_guard_history"] = {
+            "coverage_grade": "COVERAGE_UNAVAILABLE",
+            "reason": str(exc),
+            "decision_as_of_utc": pass_as_of.isoformat(),
+            "replay_certifiable": False,
+        }
+        return out
+    out["symbol_loss_guard_state"] = {
+        "blocked_symbols": sorted(loss_blocked),
+        "cooldown_until_utc": {
+            symbol: value.isoformat()
+            for symbol, value in sorted(loss_cooldown_until.items())
+        },
+        "history_available": True,
+    }
     out["busy_skipped"] = 0
     out["broker_not_ready_skipped"] = 0
     out["loss_guard_skipped"] = 0
@@ -3946,13 +4713,13 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup
         _sym_u = c.symbol.upper()
-        if _sym_u in loss_blocked or _utcnow() < loss_cooldown_until.get(_sym_u, _EPOCH):
+        if _sym_u in loss_blocked or pass_as_of < loss_cooldown_until.get(_sym_u, _EPOCH):
             out["loss_guard_skipped"] += 1
             continue  # 2-strike / post-loss cooldown — walk away like Ross does
-        if _reap_cooldown_active(_sym_u, _utcnow()):
+        if _reap_cooldown_active(_sym_u, pass_as_of):
             out["reap_cooldown_skipped"] += 1
             continue  # just churned/displaced the slot without firing — let a different mover watch
-        if _entry_reject_cooldown_active(_sym_u, _utcnow()):
+        if _entry_reject_cooldown_active(_sym_u, pass_as_of):
             out["entry_reject_cooldown_skipped"] += 1
             continue  # broker REFUSED this name's entry recently (suitability/untradable) — don't loop on it
         # AGENTIC-TRADABILITY PRE-FILTER (learn-from-401): a name the agentic MCP rail 401'd
@@ -3960,7 +4727,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         # this rail until RH re-enables it — SKIP it here so it never becomes a watcher/entry
         # again and the single slot goes to a FILLABLE mover. Scoped to the agentic family
         # (no penalty to crypto/alpaca/robinhood_spot); self-healing via the TTL; FAIL-OPEN.
-        if _agentic_tradability_blocks_arm(c.symbol, _utcnow()):
+        if _agentic_tradability_blocks_arm(c.symbol, pass_as_of):
             out["agentic_tradability_skipped"] = out.get("agentic_tradability_skipped", 0) + 1
             logger.info("[momentum_neural] tradability skip sym=%s (non-agentic-tradeable; learn-from-401)", _sym_u)
             continue
@@ -4209,12 +4976,40 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     from ..execution_family_registry import resolve_execution_family_for_symbol
     from .operator_actions import begin_live_arm, confirm_live_arm
 
-    # A6: spend up to max_arms_per_pass on distinct fresh candidates — the
-    # open burst offers far more simultaneous setups than one arm per 30s pass
-    # can take (74 fresh vs 6 armed in the 13:30-13:50Z window). Every pick
-    # still passes begin/confirm risk gates individually.
-    _max_arms = max(1, int(getattr(settings, "chili_momentum_auto_arm_max_arms_per_pass", 3) or 1))
     _picks = [(chosen, chosen_reason)] + list(_more_picks)
+    # A6: Direct Alpaca paper spends CURRENT operational headroom instead of an
+    # arbitrary three-arms-per-pass constant. The transparent budget composes
+    # fresh pick count, account-wide watcher fanout headroom, and the rail
+    # governor's learned throughput over one scheduler cadence. This creates
+    # only $0-risk watchers; every eventual exposure increase still needs its
+    # exact adaptive reservation and a real rail token. Non-Alpaca families
+    # retain the configured legacy behaviour unchanged.
+    _capacity_family = resolve_execution_family_for_symbol(chosen.symbol)
+    try:
+        _max_arms, _arm_capacity = _resolved_auto_arm_capacity_budget(
+            db,
+            user_id=uid,
+            execution_family=_capacity_family,
+            candidate_count=len(_picks),
+        )
+    except Exception as exc:
+        out["skipped"] = "arm_capacity_unavailable"
+        out["arm_capacity_error_type"] = type(exc).__name__
+        return out
+    out["arm_capacity"] = _arm_capacity
+    logger.info(
+        "[auto_arm] resolved arm capacity family=%s budget=%s policy=%s "
+        "candidate_count=%s watcher_headroom=%s rail_headroom=%s",
+        _capacity_family,
+        _max_arms,
+        _arm_capacity.get("policy"),
+        len(_picks),
+        ((_arm_capacity.get("watcher") or {}).get("headroom")),
+        ((_arm_capacity.get("rail") or {}).get("call_headroom")),
+    )
+    if _max_arms <= 0:
+        out["skipped"] = "arm_capacity_exhausted"
+        return out
     out["armed"] = 0
     _armed_syms: list[str] = []
     for chosen, chosen_reason in _picks:
@@ -4225,6 +5020,12 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["execution_family"] = _exec_family
         out["viability_score"] = round(float(chosen.viability_score or 0.0), 4)
         out["trigger"] = chosen_reason
+        if _exec_family != _loss_guard_scope["execution_family"]:
+            out["skipped"] = "loss_guard_execution_family_mismatch"
+            out["loss_guard_expected_execution_family"] = _loss_guard_scope[
+                "execution_family"
+            ]
+            continue
 
         # P2 PER-SYMBOL ATTEMPT FATIGUE (ENTRIES ONLY): veto a NEW live entry attempt once this
         # ticker has already reached the per-symbol attempt cap TODAY (Ross: stop trading a name
@@ -4235,7 +5036,10 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         # live runner (per_symbol_fatigue_size_multiplier). docs/DESIGN/MOMENTUM_LANE.md
         try:
             _psf_blocked, _psf_meta = per_symbol_fatigue_blocks_entry(
-                db, chosen.symbol, execution_family=_exec_family
+                db,
+                chosen.symbol,
+                execution_family=_exec_family,
+                as_of_utc=pass_as_of,
             )
             if _psf_blocked:
                 out["skipped"] = "per_symbol_fatigue"
@@ -4254,6 +5058,15 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             symbol=chosen.symbol,
             variant_id=int(chosen.variant_id),
             execution_family=_exec_family,
+            expected_guarded_account_scope=(
+                _loss_guard_scope["account_scope"]
+                if _loss_guard_scope["execution_family"]
+                in {"alpaca_spot", "alpaca_short"}
+                else None
+            ),
+            expected_guarded_account_identity=_loss_guard_scope[
+                "account_identity"
+            ],
         )
         if not begin.get("ok"):
             out["skipped"] = "begin_blocked"
@@ -4305,18 +5118,41 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                 if (
                     bool(getattr(settings, "chili_momentum_alpaca_twin_arm_enabled", True))
                     and _exec_family in ("robinhood_spot", "coinbase_spot")
+                    and not str(chosen.symbol or "").strip().upper().endswith("-USD")
                     and bool(getattr(settings, "chili_alpaca_enabled", False))
                     and bool(getattr(settings, "chili_alpaca_paper", True))
                     and str(getattr(settings, "chili_alpaca_api_key", "") or "")
                     # crypto twin only for pairs Alpaca actually lists (majors —
                     # the lane's exotic low-cap alts mostly aren't there); equities
                     # are probed too (cheap, cached) so delisted names skip cleanly
-                    and _alpaca_lists_symbol(chosen.symbol)
                 ):
+                    _twin_allowed, _twin_guard, _twin_scope = (
+                        _alpaca_twin_loss_guard_decision(
+                            db,
+                            user_id=int(uid),
+                            symbol=chosen.symbol,
+                            as_of_utc=pass_as_of,
+                        )
+                    )
+                    out["alpaca_twin_loss_guard"] = _twin_guard
+                    if not _twin_allowed or _twin_scope is None:
+                        out["alpaca_twin_skipped"] = _twin_guard.get("reason")
+                        continue
+                    # Listing/provider work occurs only after this secondary
+                    # account's own history has authorized the twin.
+                    if not _alpaca_lists_symbol(chosen.symbol):
+                        out["alpaca_twin_skipped"] = "alpaca_symbol_unavailable"
+                        continue
                     _tb = begin_live_arm(
                         db, user_id=int(uid), symbol=chosen.symbol,
                         variant_id=int(chosen.variant_id), execution_family="alpaca_spot",
+                        expected_guarded_account_scope=_twin_scope["account_scope"],
+                        expected_guarded_account_identity=_twin_scope["account_identity"],
                     )
+                    if not _tb.get("ok"):
+                        out["alpaca_twin_skipped"] = str(
+                            _tb.get("error") or "alpaca_twin_begin_blocked"
+                        )
                     if _tb.get("ok") and not _tb.get("deduped"):
                         _tc = confirm_live_arm(
                             db, user_id=int(uid), arm_token=_tb.get("arm_token"), confirm=True

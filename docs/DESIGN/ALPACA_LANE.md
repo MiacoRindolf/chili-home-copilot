@@ -1,112 +1,160 @@
-# Alpaca execution lane — design + phased plan
+# Alpaca execution lane — current recertification boundary
 
-**Status:** PLAN (2026-06-09). Greenfield — no Alpaca code yet, `alpaca-py` not a dependency.
+**Status (2026-07-13): IMPLEMENTED, UNDER RECERTIFICATION.** The current repair branch is
+not merged or deployed, and the live runner is disabled. The certified scope is Alpaca
+paper, US equities, long positions only. Live Alpaca, crypto, and short execution are not
+certified and cannot be enabled by changing a strategy flag.
 
-## Why (the problem this solves)
+This document describes the enforced safety boundary in the current code. Earlier
+greenfield, passive-posting, and live-ramp plans are historical context, not current
+capability or authorization.
 
-The equity momentum lane has **0 clean fills ever** (168 sessions) — see
-`project_momentum_zero_fills_root_cause`. Root cause: **Robinhood routes via PFOF with
-NO direct market access**, so CHILI is forced to **cross** the spread (market / marketable-
-limit), and the real spreads on Ross low-float names are 3.6%+ median (validated by the
-NBBO tape: 06-09 median 359bps; only 5/48 fires fillable at real spreads, and force-trading
-all = −$5,120 — the gate is protective). Ross's actual edge is **posting INSIDE the spread**
-(passive limits that rest on the book / add liquidity), which RH cannot do.
+## What is actually certified
 
-**Alpaca** is the pragmatic first upgrade: API-first (built for bots, vs RH's unofficial
-`robin_stocks`), commission-free, free **paper-trading sandbox**, and **limit orders that
-route to the market and can rest on the book** (the post-inside-the-spread capability RH
-lacks). It is NOT full venue-selection DMA like IBKR — that stays the later execution-max
-option — but it unlocks limit-posting + a free paper proving ground NOW.
+- The only certified account scope is `alpaca:paper`.
+- A risk-increasing order must be an equity long entry with the exact pair
+  `BUY + BUY_TO_OPEN` and `DAY` time in force.
+- A new entry is regular-hours-only. Immediately before admission and again before
+  transport, a fresh Alpaca clock must report the market open and provide a valid future
+  `next_close`; the order is rejected at or beyond the derived close cutoff. A local clock,
+  calendar assumption, or extended-hours quote cannot authorize an entry.
+- Entry quantity is whole-share only and is submitted as one complete approved request.
+  Scale-ins, partial-size tactics, pyramids, and generic chunked child entries are outside
+  the certified lane. A broker partial fill is treated as real exposure; it is never a
+  reason to resubmit the unfilled remainder under a new identity.
+- A certified close is `SELL + SELL_TO_CLOSE` against exact long-position provenance.
+- The adapter, readiness checks, runner, reconciler, and operator paths quarantine a
+  non-paper posture before creating an Alpaca client or making an Alpaca broker call.
+- Alpaca crypto, `alpaca_short`, ambiguous side/intent pairs, missing account scope, and
+  contradictory direction evidence are rejected before transport.
 
-## What Alpaca gives us (researched 2026-06-09)
+The current primary entry is a marketable limit derived from the final ask. It is not a
+demonstrated passive-maker order, does not prove posting inside the spread, and is not
+venue-selection DMA. Any future passive-posting experiment is a separate hypothesis that
+must be replayed and soaked after recertification.
 
-- **Order types:** market, limit, stop, stop_limit, **trailing_stop**, plus **bracket**
-  (entry + take-profit limit + stop-loss) and **OCO** order classes. Extended hours (limit).
-- **Paper trading:** free, separate endpoint `https://paper-api.alpaca.markets` — identical
-  API to live (`https://api.alpaca.markets`). Prove the full FSM with zero risk.
-- **Market data:** real-time quotes (NBBO bid/ask/size/exchange) + trades + bars over REST +
-  WebSocket. **Free tier = IEX feed** (limited small-cap coverage, 1 conn, 30 channels);
-  **paid = SIP** (full NBBO, all exchanges).
-- **SDK:** official `alpaca-py` (OOP: build a `LimitOrderRequest` → `trade_client.submit_order`).
-  Commission-free US equities, fractional shares.
+## Final execution-price truth
 
-## Data strategy (important)
+Discovery and setup scoring may consume Massive/Polygon, IQFeed, and other contextual
+feeds. Provider availability does not make a provider causal or authoritative for the
+final order.
 
-Keep **Massive** as the selection + spread-gate data source (we pay for it; full-market
-snapshot + the NBBO tape already built on it). Use **Alpaca for EXECUTION only** at first.
-Alpaca's free IEX quotes have thin small-cap coverage, so do NOT rely on them for the spread
-gate — Massive stays authoritative for selection. (Optionally add Alpaca SIP later for a
-unified data+exec feed, which would make the spread we see exactly the spread we trade.)
+Immediately before an Alpaca entry, the runner calls the strict execution-BBO boundary:
 
-## The build — a drop-in venue adapter
+1. accept only a provenance-valid IQFeed `Q` row whose bridge receive time and conservative
+   provider trade-reference time independently satisfy the two-second, future-safe bound;
+2. otherwise request a direct Alpaca quote and require a valid provider timestamp;
+3. require exact symbol identity, a named source, positive bid/mid, and an uncrossed ask;
+4. recheck the same freshness object immediately before transport; and
+5. refuse to raise the previously approved price ceiling merely because the market moved.
 
-The momentum FSM is **venue-agnostic**: `live_runner` drives everything through the
-`VenueAdapter` Protocol (`venue/protocol.py:134`). So the work is ONE new adapter that
-implements the Protocol; the limit-entry (#553), software stop/target, liquidity-bias, and
-auto-arm all work unchanged.
+A recent bridge-receive timestamp is preserved as receive-time evidence; it is not
+relabeled as provider-event time. A fresh BBO proves only the execution-price observation,
+not the strategy's tape-confirmation or expected profitability.
 
-**`app/services/trading/venue/alpaca_spot.py`** implements the 15 Protocol methods, mapping
-`alpaca-py` ↔ the normalized types:
+## Ownership, idempotency, and shared-account posture
 
-| Protocol method | alpaca-py mapping |
-|---|---|
-| `is_enabled` | settings flag + keys present |
-| `get_product` / `get_products` | `GetAssetRequest` → `NormalizedProduct` (tradable, fractionable, min size, increment) |
-| `get_best_bid_ask` / `get_ticker` | `StockLatestQuoteRequest` → `NormalizedTicker` (bid/ask/mid/spread_bps + FreshnessMeta from quote ts) |
-| `get_recent_trades` | `StockLatestTradeRequest` / trades |
-| `place_market_order` | `MarketOrderRequest(time_in_force=DAY)` → `submit_order` |
-| `place_limit_order_gtc` | `LimitOrderRequest(limit_price, tif=GTC/DAY, extended_hours)` → `submit_order` |
-| `get_order` / `list_open_orders` | `get_order_by_id` / `get_orders` → `NormalizedOrder` (status, filled_size, avg_fill_price) |
-| `get_fills` | order activities / fills |
-| `cancel_order` | `cancel_order_by_id` |
-| `preview_market_order` | local estimate (Alpaca has no preview) |
-| `get_account_snapshot` | `get_account` (equity, buying_power, cash) |
+Every risk-increasing order in the governed Alpaca momentum path requires:
 
-Status mapping is the one fiddly bit: normalize Alpaca's `new/accepted/partially_filled/
-filled/canceled/expired/rejected` to the terminal/open sets `_order_done_for_entry` /
-`_order_open` already use (#550/#551). Idempotency via Alpaca's `client_order_id`.
+- a deterministic client order id;
+- an exact immutable order request;
+- a durable `alpaca:paper` account/symbol ownership claim committed before broker HTTP;
+- a durable owner-transport outbox, committed before the first broker `POST`, containing
+  the same immutable client id, exact normalized request, and frozen order-type verb that
+  every retry must reuse;
+- a committed planned-risk reservation; and
+- a strict broker preflight showing no positions and no open orders anywhere in the shared
+  paper account.
 
-## Execution-family wiring
+The recertification posture permits one shared-account exposure across all users and
+symbols. Any persisted position, unresolved execution claim, broker position, or broker
+open order blocks a new entry. Adds and pyramids therefore cannot reserve risk while a
+position exists. Unknown or manual broker state may block admission, but it is never
+cancelled, adopted, or liquidated merely because its symbol resembles a CHILI session.
 
-Add `"alpaca_spot"` to the execution-family registry alongside `coinbase_spot`,
-`robinhood_spot`, `robinhood_mcp` (the same place `normalize_execution_family` + the adapter
-factory resolve). The auto-arm + live runner then route an equity session to Alpaca when
-its `execution_family="alpaca_spot"`.
+A timeout, disconnect, duplicate client id, or malformed submit response is not proof that
+the order was rejected. The same client id is reconciled through exact broker truth; an
+ambiguous result never authorizes a replacement order.
 
-## Config (no dark flags — live + paper-gated)
+## Order lifecycle and replacement containment
 
-- `CHILI_ALPACA_ENABLED` (bool)
-- `CHILI_ALPACA_PAPER` (bool, default **True** — paper endpoint until proven)
-- `CHILI_ALPACA_API_KEY` / `CHILI_ALPACA_API_SECRET`
-- `CHILI_ALPACA_DATA_FEED` (`iex` | `sip`, default `iex`)
+An Alpaca `replaced` or `pending_replace` lifecycle is not permission to infer that the
+predecessor vanished or to create a locally invented child. The runner adopts only the
+broker-designated successor after a fresh read proves exact, bidirectional predecessor and
+successor ids plus the frozen symbol, side, intent, quantity, stop price, time in force, and
+extended-hours shape. The repair path never cancels an unresolved predecessor first merely
+to manufacture a clean replacement.
 
-## Phased rollout
+Status labels that do not prove both lifecycle and fill truth remain ambiguous. A missing
+successor, mismatched identity, uncertain terminal state, late or cumulative partial fill,
+or missing fill price is contained under the retained ownership claim and durable fill
+high-watermark. It is quarantined for exact reconciliation; it cannot be treated as absent,
+terminalized optimistically, or used to release account exposure.
 
-- **P0 — adapter + paper (this is the build):** implement `alpaca_spot.py` + wire the family
-  + config. Unit-test the normalization (status/quote/order mapping) like the other adapters.
-- **P1 — paper-prove:** arm ONE equity session with `execution_family="alpaca_spot"` against
-  the paper endpoint; drive the FSM end-to-end (queued → watching → marketable-limit entry →
-  fill → stop/target → exit). Verify the limit POSTS and fills, and the stop works. This is
-  the "prove DMA-style fills, free, before real" step the operator asked for.
-- **P2 — compare:** same setup vs the RH path on the same names — does the Alpaca limit fill
-  where RH's market was spread-gated? Quantify the fill-rate + cost delta.
-- **P3 — go-live (gated):** flip `CHILI_ALPACA_PAPER=False` with a small live size only after
-  P1/P2 are clean. Reuse the kill-switch + drawdown breaker (Hard Rules 1/2).
+## Risk and daily-loss boundary
 
-## Operator action item (unblocks P0 testing)
+- Planned risk for one paper position is at most the lower positive configured cap and
+  `$50`.
+- The Alpaca paper daily-loss admission limit is at most the lower broker/equity-derived
+  cap, lower positive configured cap, and `$250`.
+- The broker account day change (`equity - last_equity`) is the conservative paper
+  daily-loss authority because it includes broker activity omitted or mislabeled locally.
+- Alpaca paper P&L is excluded from real-capital aggregate halts.
 
-Create a **free Alpaca account** + generate **paper-trading API keys**
-(`https://app.alpaca.markets` → Paper Trading → API Keys). Paste the key + secret; I wire them
-into the env-file and run the first paper trade. (Account + paper keys are free; no funding
-needed to paper-trade.)
+These controls limit admission; they do not guarantee a `$50` realized maximum or a `$250`
+daily maximum. Gaps, halts, slippage, liquidity loss, delayed exits, and broker behavior can
+produce larger realized losses.
 
-## Dependencies / risks
+## Exit and recovery boundary
 
-- Add `alpaca-py` to `requirements.txt`.
-- Alpaca is NOT full DMA (no venue selection / dark pools) — IBKR remains the execution-max
-  upgrade if limit-posting on Alpaca proves insufficient for the thinnest names.
-- IEX free data is thin for small-caps → keep Massive authoritative for selection; consider
-  SIP only if we want a unified feed.
-- PDT no longer applies (FINRA removed it 2026-06-04) — no $25k constraint on day-trade count.
+Certified long exits use signed broker quantity and exact `SELL_TO_CLOSE` identity.
+Emergency close attempts retain deterministic order identity and apply only newly confirmed
+filled quantity.
 
-See `project_momentum_zero_fills_root_cause`, `project_momentum_lane`, `MOMENTUM_LANE.md`.
+If the ordinary exit retry cap is reached while an exact paper long remains open, the
+runner retains the entry ownership claim as the account/symbol exposure guard. It promotes
+a durable close-only emergency authority only after all of the following are exact:
+
+- explicit local long direction and matching symbol;
+- equal nonzero local and broker quantity;
+- zero competing broker open orders;
+- terminal filled entry identity; and
+- every earlier exit client id is absent or terminal with zero fill.
+
+Uncertain proof leaves the session held, entry-quarantined, and runner-serviceable. It does
+not terminalize exposure or let the generic orphan reconciler infer ownership. The retained
+entry claim is released only after exact broker-flat proof.
+
+Historical accounting repair is separate from execution authority. It may use narrowly
+scoped, read-only broker evidence to correct a local outcome, but it cannot place/cancel an
+order or create ownership of a legacy position.
+
+## Current rollout gate
+
+Before any new selection, entry, passive-posting, or exit experiment:
+
+1. finish the focused and relevant regression tests and record exact counts;
+2. verify the retry-cap close path and idempotent order lifecycle;
+3. commit the reviewed code and tests before touching production accounting state;
+4. while the runner remains off, perform the source-scoped ACTU accounting correction using
+   an exact allowlisted, GET-only broker adapter and the already committed repair code;
+5. require the exact one-row repair counts, then prove an independent second run is a no-op;
+6. re-verify the bound paper account has zero positions and zero open orders;
+7. record the resulting evidence in the audit and make a separate evidence commit; and
+8. keep the runner off with no merge or deployment.
+
+After that gate, Ross-aligned hypotheses may be tested through broker-fidelity replay and a
+forward paper soak under the `$50`/`$250` ceilings and single-exposure posture. Profitability
+and parity with another trader must be demonstrated; they are not promised by this lane.
+
+## Configuration and secrets
+
+Relevant posture controls include `CHILI_ALPACA_ENABLED`, `CHILI_ALPACA_PAPER`, the external
+paper credential settings, the IQFeed quote-source setting, and the execution-BBO age
+setting. Credentials must remain in external secret configuration; never paste them into
+this document or commit them to the repository.
+
+`alpaca-py>=0.30` is already an installed project dependency. No operator action is needed
+to enable more trading during recertification.
+
+See `2026-07-13_chili_broker_truth_recertification.md` and `MOMENTUM_LANE.md`.

@@ -72,6 +72,7 @@ def test_select_naive_and_aware_timestamps_parity():
 def test_select_skips_garbage_and_crypto():
     rows = [
         ("BTC-USD", NOW - timedelta(seconds=5)),  # crypto -> skipped (equity bridge)
+        ("EURC-USDC", NOW - timedelta(seconds=4)),  # alternate quote pair -> skipped
         ("", NOW - timedelta(seconds=5)),          # empty
         ("GOODNAME", None),                        # unreadable ts -> skipped
         ("REALMOVER", NOW - timedelta(seconds=5)),
@@ -150,6 +151,7 @@ def test_request_skips_crypto_and_empty(monkeypatch):
     monkeypatch.setattr(bs, "settings", _S(chili_momentum_bridge_subscribe_on_alert_enabled=True))
     db = _CaptureDB()
     assert request_bridge_subscription(db, "BTC-USD") is False
+    assert request_bridge_subscription(db, "EURC-USDC") is False
     assert request_bridge_subscription(db, "") is False
     assert db.calls == []
 

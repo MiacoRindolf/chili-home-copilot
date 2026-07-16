@@ -22,8 +22,10 @@ capability resolves to a real tool, the execution methods **fail loud** rather t
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -318,6 +320,55 @@ def _unwrap_payload(data: Any) -> Any:
     return data
 
 
+_STRICT_PAGINATION_KEYS = frozenset({
+    "has_next",
+    "next",
+    "next_cursor",
+    "nextCursor",
+    "cursor",
+    "next_page",
+})
+
+
+def _strict_mcp_collection(
+    payload: Any,
+    collection_key: str,
+    *,
+    known_identity_query: bool = False,
+) -> Optional[list[dict]]:
+    """Parse an MCP collection without silently treating truncation as absence.
+
+    The checked-in MCP contract does not promise that a bare list is complete.
+    Absence/flat proofs therefore require an explicit ``complete: true`` envelope
+    with no pagination fields.  A known-order-ID query may consume a bare/list
+    response because it is proving that exact identity, not collection absence.
+    """
+    data = _unwrap_payload(payload)
+    if isinstance(data, list) and known_identity_query:
+        rows = data
+    elif isinstance(data, dict) and collection_key in data:
+        if known_identity_query:
+            allowed_keys = {collection_key, "complete"} | _STRICT_PAGINATION_KEYS
+            if any(key not in allowed_keys for key in data):
+                return None
+            if data.get("has_next") is True or any(
+                data.get(key) not in (None, "", False)
+                for key in ("next", "next_cursor", "nextCursor", "cursor", "next_page")
+            ):
+                return None
+        else:
+            if set(data) != {collection_key, "complete"}:
+                return None
+            if data.get("complete") is not True:
+                return None
+        rows = data.get(collection_key)
+    else:
+        return None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return None
+    return list(rows)
+
+
 def _load_tool_overrides() -> dict[str, str]:
     raw = os.environ.get("CHILI_ROBINHOOD_AGENTIC_MCP_TOOL_MAP") or ""
     if not raw:
@@ -566,6 +617,21 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             raw=od,
         )
 
+    def _normalize_order_truth(self, row: dict[str, Any]) -> Optional[NormalizedOrder]:
+        filled = _sf(_pick(row, _RESP_KEYS["filled_size"]))
+        order = self._normalize_order(row)
+        if not (
+            str(order.order_id or "").strip()
+            and str(order.product_id or "").strip()
+            and str(order.side or "").strip()
+            and str(order.status or "").strip()
+            and filled is not None
+            and math.isfinite(filled)
+            and filled >= 0.0
+        ):
+            return None
+        return order
+
     @staticmethod
     def _as_order_dicts(data: Any) -> list[dict]:
         data = _unwrap_payload(data)
@@ -627,6 +693,151 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             if _is_rate_limit_exc(exc):
                 raise
             return None, fresh
+
+    def list_open_orders_truth(
+        self,
+        *,
+        product_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Strict MCP order-absence proof; any rail error stays unreadable."""
+        try:
+            response = self._call("list_orders", self._read_args())
+            rows = _strict_mcp_collection(response.data(), "orders")
+            if rows is None:
+                return {"readable": False, "orders": None}
+            orders: list[NormalizedOrder] = []
+            for row in rows:
+                order = self._normalize_order_truth(row)
+                if order is None:
+                    return {"readable": False, "orders": None}
+                orders.append(order)
+            terminal = {
+                "filled",
+                "cancelled",
+                "canceled",
+                "rejected",
+                "failed",
+                "expired",
+                "done",
+                "closed",
+            }
+            orders = [
+                order
+                for order in orders
+                if str(order.status or "").strip().lower() not in terminal
+            ]
+            if product_id:
+                ticker = _to_ticker(product_id)
+                orders = [
+                    order
+                    for order in orders
+                    if str(order.product_id or "").upper() == ticker
+                ]
+            return {"readable": True, "orders": orders[:limit]}
+        except Exception as exc:
+            logger.warning("[rh_mcp_adapter] strict open-order read failed: %s", exc)
+            return {"readable": False, "orders": None}
+
+    def get_order_truth(self, order_id: str) -> dict[str, Any]:
+        """Strict MCP identity read with explicit readable/found separation."""
+        oid = str(order_id or "").strip()
+        if not oid:
+            return {"readable": False, "found": False, "order": None}
+        try:
+            response = self._call(
+                "get_order",
+                self._read_args({"order_id": oid}),
+            )
+            payload = response.data()
+            if payload is None:
+                return {"readable": False, "found": False, "order": None}
+            unwrapped = _unwrap_payload(payload)
+            if isinstance(unwrapped, dict) and "orders" in unwrapped:
+                rows = _strict_mcp_collection(
+                    unwrapped,
+                    "orders",
+                    known_identity_query=True,
+                )
+            elif isinstance(unwrapped, list):
+                rows = _strict_mcp_collection(
+                    unwrapped,
+                    "orders",
+                    known_identity_query=True,
+                )
+            elif isinstance(unwrapped, dict) and _pick(
+                unwrapped, _RESP_KEYS["order_id"]
+            ) is not None:
+                rows = [unwrapped]
+            else:
+                rows = None
+            if rows is None:
+                return {"readable": False, "found": False, "order": None}
+            normalized: list[NormalizedOrder] = []
+            for row in rows:
+                order = self._normalize_order_truth(row)
+                if order is None:
+                    return {"readable": False, "found": False, "order": None}
+                normalized.append(order)
+            matches = [order for order in normalized if str(order.order_id) == oid]
+            if not matches:
+                return {"readable": True, "found": False, "order": None}
+            if len(matches) != 1:
+                return {"readable": False, "found": False, "order": None}
+            return {"readable": True, "found": True, "order": matches[0]}
+        except Exception as exc:
+            logger.warning("[rh_mcp_adapter] strict get_order(%s) failed: %s", oid, exc)
+            return {"readable": False, "found": False, "order": None}
+
+    def get_position_quantity_truth(self, product_id: str) -> dict[str, Any]:
+        """Direct account-pinned MCP position truth with strict collection parsing."""
+        symbol = _to_ticker(product_id)
+        if not symbol or not self._account_number:
+            return {"readable": False, "quantity": None}
+        try:
+            self._assert_account_is_agentic()
+            response = self._call(
+                "positions",
+                {_ARG_KEYS["account_number"]: self._account_number},
+            )
+            rows = _strict_mcp_collection(response.data(), "positions")
+            if rows is None:
+                return {"readable": False, "quantity": None}
+            quantity = 0.0
+            for row in rows:
+                row_symbol = str(
+                    _pick(row, ("symbol", "ticker", "instrument_symbol")) or ""
+                ).strip().upper()
+                qty = _sf(_pick(row, ("quantity", "shares", "position", "size")))
+                if not (
+                    row_symbol
+                    and qty is not None
+                    and math.isfinite(qty)
+                ):
+                    return {"readable": False, "quantity": None}
+                if row_symbol == symbol:
+                    quantity += qty
+            return {"readable": True, "quantity": quantity}
+        except Exception as exc:
+            logger.warning("[rh_mcp_adapter] strict position read failed: %s", exc)
+            return {"readable": False, "quantity": None}
+
+    def get_account_identity_truth(self) -> dict[str, Any]:
+        """Force-verify the current pin and return only a non-secret fingerprint."""
+        if not self._account_number:
+            return {"readable": False, "identity": None}
+        try:
+            self._assert_account_is_agentic(force=True)
+            digest = hashlib.sha256(
+                f"robinhood_agentic_mcp:v1:{self._account_number}".encode("utf-8")
+            ).hexdigest()
+            return {
+                "readable": True,
+                "identity": f"robinhood_agentic_mcp:v1:{digest}",
+            }
+        except Exception as exc:
+            logger.warning("[rh_mcp_adapter] strict account identity failed: %s", exc)
+            return {"readable": False, "identity": None}
 
     def get_fills(self, *, product_id: Optional[str] = None, limit: int = 50):
         fresh = _now_freshness()
@@ -806,7 +1017,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             args[_ARG_KEYS["ref_id"]] = client_order_id
         return args
 
-    def _assert_account_is_agentic(self) -> None:
+    def _assert_account_is_agentic(self, *, force: bool = False) -> None:
         """Verify the pinned account is agentic-allowed; latch ``_pin_invalid`` if not.
 
         Cached after the first success (avoids a get_accounts per order). A pinned
@@ -815,7 +1026,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         """
         if self._pin_invalid:
             raise VenueAdapterError("pinned account is not agentic-allowed", code="account_not_agentic")
-        if self._account_verified:
+        if self._account_verified and not force:
             return
         if not self._account_number:
             raise VenueAdapterError("no Robinhood Agentic account pinned", code="no_agentic_account")

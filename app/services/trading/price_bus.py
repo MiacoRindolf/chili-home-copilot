@@ -30,6 +30,15 @@ class BusQuote:
     last: float = 0.0
     timestamp: float = 0.0
     source: str = ""
+    provider_event_at: float | None = None
+    received_at: float | None = None
+    available_at: float | None = None
+    provider_sequence: int | None = None
+    provider_run_id: str | None = None
+    provider_connection_generation: int | None = None
+    # Empty preserves legacy provider behavior; Massive explicitly labels
+    # quote vs trade so NBBO mids cannot masquerade as prints in live candles.
+    event_kind: str = ""
 
 BUS_QUOTE_STALENESS = 5.0  # seconds
 
@@ -84,8 +93,13 @@ class PriceBus:
         with self._quotes_lock:
             self._quotes[sym] = quote
         self._fire_tick(sym, quote)
-        if quote.last > 0:
-            self._on_trade_tick(sym, quote.last, quote.timestamp)
+        if quote.last > 0 and quote.event_kind != "quote":
+            event_at = (
+                quote.provider_event_at
+                if quote.provider_event_at is not None
+                else quote.timestamp
+            )
+            self._on_trade_tick(sym, quote.last, event_at)
 
     def get_quote(self, symbol: str) -> BusQuote | None:
         """Return cached quote if fresh (within staleness window)."""
@@ -94,8 +108,18 @@ class PriceBus:
             q = self._quotes.get(sym)
         if q is None:
             return None
-        if time.time() - q.timestamp > BUS_QUOTE_STALENESS:
+        now = time.time()
+        received_at = q.received_at if q.received_at is not None else q.timestamp
+        if now - received_at > BUS_QUOTE_STALENESS or now - received_at < -1.0:
             return None
+        if q.provider_event_at is not None:
+            provider_age = now - q.provider_event_at
+            if provider_age > BUS_QUOTE_STALENESS or provider_age < -1.0:
+                return None
+        if q.available_at is not None:
+            available_age = now - q.available_at
+            if available_age > BUS_QUOTE_STALENESS or available_age < -1.0:
+                return None
         return q
 
     # ── tick listeners ───────────────────────────────────────────────
@@ -199,15 +223,46 @@ class PriceBus:
 
         def _on_massive_tick(sym: str, snap) -> None:
             now = time.time()
+            provider_event_at = getattr(snap, "provider_event_at", None)
+            received_at = getattr(snap, "received_at", None)
+            available_at = getattr(snap, "available_at", None)
+            # Massive stock Q/T messages provide an exact SIP clock.  A frame
+            # missing it, arriving delayed, or stamped in the future is raw
+            # capture evidence only and must not drive the operational bus.
+            if provider_event_at is None:
+                return
+            if now - provider_event_at > BUS_QUOTE_STALENESS or now - provider_event_at < -1.0:
+                return
             if hasattr(snap, "bid"):
                 q = BusQuote(
                     symbol=sym, bid=snap.bid, ask=snap.ask, mid=snap.price,
-                    last=snap.price, timestamp=now, source="massive_ws",
+                    last=snap.price,
+                    timestamp=received_at if received_at is not None else snap.timestamp,
+                    source="massive_ws",
+                    provider_event_at=provider_event_at,
+                    received_at=received_at,
+                    available_at=available_at,
+                    provider_sequence=getattr(snap, "sequence", None),
+                    provider_run_id=getattr(snap, "bridge_run_id", None),
+                    provider_connection_generation=getattr(
+                        snap, "connection_generation", None
+                    ),
+                    event_kind="quote",
                 )
             else:
                 q = BusQuote(
                     symbol=sym, mid=snap.price, last=snap.price,
-                    timestamp=now, source="massive_ws_trade",
+                    timestamp=received_at if received_at is not None else snap.timestamp,
+                    source="massive_ws_trade",
+                    provider_event_at=provider_event_at,
+                    received_at=received_at,
+                    available_at=available_at,
+                    provider_sequence=getattr(snap, "sequence", None),
+                    provider_run_id=getattr(snap, "bridge_run_id", None),
+                    provider_connection_generation=getattr(
+                        snap, "connection_generation", None
+                    ),
+                    event_kind="trade",
                 )
             self.update_quote(sym, q)
 
@@ -369,4 +424,11 @@ def get_live_quote(symbol: str) -> dict[str, Any] | None:
         "last": q.last,
         "source": q.source,
         "timestamp": q.timestamp,
+        "provider_event_at": q.provider_event_at,
+        "received_at": q.received_at,
+        "available_at": q.available_at,
+        "provider_sequence": q.provider_sequence,
+        "provider_run_id": q.provider_run_id,
+        "provider_connection_generation": q.provider_connection_generation,
+        "event_kind": q.event_kind,
     }

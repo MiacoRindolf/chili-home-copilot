@@ -1,27 +1,41 @@
-# Start IQConnect (if down) + the IQFeed L1 TRADE-tape bridge (if not already running).
-# Scheduled at logon + daily 03:56 PT (one min after the depth bridge, to avoid an IQConnect-start
-# race) via CHILI-IQFeed-Trade-Bridge* tasks, launched through scripts\run-hidden.vbs (no console
-# flash — see project_scheduled_tasks_hygiene). Safe to run repeatedly: both checks are idempotent.
-# Captures the equity trade tape -> iqfeed_trade_ticks -> the momentum lane's `trade_flow` feature.
-# Bridge logs: D:\CHILI-Docker\chili-data\iqfeed_trades\bridge.log
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$PythonExecutable,
 
-$ErrorActionPreference = 'SilentlyContinue'
+    [Parameter(Mandatory = $true)]
+    [string]$ManifestPath,
 
-# 1) IQConnect (binds 127.0.0.1; serves L1 :9100 + L2 :9200; auto-logs-in with saved credentials)
-if (-not (Get-Process iqconnect -ErrorAction SilentlyContinue)) {
-    Start-Process -FilePath 'E:\DTN\IQFeed\iqconnect.exe' -WorkingDirectory 'E:\DTN\IQFeed'
-    Start-Sleep -Seconds 20
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$ManifestSha256,
+
+    [Parameter(Mandatory = $true)]
+    [string[]]$AllowedReadRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string[]]$AllowedWriteRoot,
+
+    [Parameter(Mandatory = $true)]
+    [switch]$ValidateOnly
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+# Compatibility entry point only.  It no longer starts IQConnect, searches by
+# a Python basename, or launches a hard-coded legacy worktree.  The four
+# currently installed legacy tasks remain untouched until an approved cutover;
+# any future task targeting this candidate source must pass the exact immutable
+# validation inputs to the unified host launcher.
+$launcher = Join-Path $PSScriptRoot 'start-iqfeed-capture-host.ps1'
+& $launcher `
+    -PythonExecutable $PythonExecutable `
+    -ManifestPath $ManifestPath `
+    -ManifestSha256 $ManifestSha256 `
+    -AllowedReadRoot $AllowedReadRoot `
+    -AllowedWriteRoot $AllowedWriteRoot `
+    -ValidateOnly:$ValidateOnly
+if ($LASTEXITCODE -ne 0) {
+    throw "Unified IQFeed capture-host validation failed with exit code $LASTEXITCODE"
 }
-
-# 2) trade-bridge daemon — skip if one is already running
-$existing = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -like '*iqfeed_trade_bridge.py*' }
-if ($existing) { exit 0 }
-
-$dir = 'D:\CHILI-Docker\chili-data\iqfeed_trades'
-if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-$log = Join-Path $dir 'bridge.log'
-$err = Join-Path $dir 'bridge.err.log'
-Start-Process -FilePath 'C:\Users\rindo\miniconda3\envs\chili-env\python.exe' `
-    -ArgumentList 'D:\dev\chili-home-copilot\scripts\iqfeed_trade_bridge.py' `
-    -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err

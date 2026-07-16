@@ -55,7 +55,10 @@ def _bucket_trade_volume(trade_rows: Iterable[Any] | None, bar_seconds: int) -> 
         if not pts:
             return None
         idx = pd.to_datetime([p[0] for p in pts], utc=True)
-        s = pd.Series([p[1] for p in pts], index=idx).sort_index()
+        # Stable order is load-bearing when several IQFeed rows share the same
+        # containment/reference timestamp: OHLC open/close must retain their
+        # observable input order inside the tie.
+        s = pd.Series([p[1] for p in pts], index=idx).sort_index(kind="mergesort")
         # resample-sum yields the FULL span (a gap bucket inside the span sums to 0.0 — a
         # genuine quiet bucket); buckets outside the span simply don't exist here, so the
         # caller's reindex leaves them NaN (volume UNKNOWN there — honest).
@@ -143,7 +146,9 @@ def _resample_micro_bars(
         if len(pts) < 2:
             return pd.DataFrame(columns=cols)
         idx = pd.to_datetime([p[0] for p in pts], utc=True)
-        s = pd.Series([p[1] for p in pts], index=idx).sort_index()
+        # Stable for duplicate timestamps so resample().ohlc() has deterministic
+        # open/close semantics matching the caller's event order.
+        s = pd.Series([p[1] for p in pts], index=idx).sort_index(kind="mergesort")
         # OHLC bucketing of the mid series at the micro-bar cadence. resample yields the
         # FULL bucket range across the span; gap buckets are all-NaN rows (kept — F6).
         ohlc = s.resample(f"{bar_seconds}s").ohlc()
