@@ -59,6 +59,7 @@ from .alpaca_orphan_claims import (
     RESOLVED,
     SUBMIT_INDETERMINATE,
     SUBMITTED,
+    consume_orphan_handoff_close_post_permission_committed,
     list_unresolved_action_claims,
     persist_orphan_close_request_committed,
     read_action_claim,
@@ -2832,13 +2833,29 @@ def _submit_handoff_close(
             frozen_request = dict(request)
         return bool(persisted)
 
+    def _consume_post_permission(request: dict[str, Any]) -> bool:
+        # Livehead-audit gap G2: the byte-equal freeze alone lets two competing
+        # sweep workers both POST the same CID, delegating duplicate-close
+        # safety to broker-side dedup.  Consume the single client-side POST
+        # permission immediately before HTTP; a CAS loser performs zero POSTs
+        # and recovers only through the same-CID reconciliation path.
+        if frozen_request is None and not _persist_request(request):
+            return False
+        return consume_orphan_handoff_close_post_permission_committed(
+            symbol=claim["symbol"],
+            claim_token=claim["claim_token"],
+            client_order_id=cid,
+            close_request=request,
+            account_scope=claim["account_scope"],
+        )
+
     result = _place_alpaca_equity_close(
         adapter,
         symbol=claim["symbol"],
         close_side=close_side,
         quantity=qty,
         client_order_id=cid,
-        before_submit=(None if frozen_request is not None else _persist_request),
+        before_submit=_consume_post_permission,
         frozen_request=(dict(frozen_request) if isinstance(frozen_request, dict) else None),
     )
     if result.get("pre_place_blocked"):

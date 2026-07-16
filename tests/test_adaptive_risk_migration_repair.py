@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from sqlalchemy import text
+
 from app import migrations
+from app.db import Base, engine
 from app.models.trading import (
     AdaptiveRiskDecisionPacket,
     AdaptiveRiskReservation,
@@ -264,3 +267,71 @@ def test_migration_341_binds_aggregate_buying_power_reflection(
         ids.index("340_alpaca_fill_query_observation_ledger") + 1
     )
     assert conn.commits == 1
+
+
+def test_migration_341_reassert_executes_full_335_body_on_real_schema() -> None:
+    # Livehead-audit gap G1: every migration-repair suite above drives the
+    # migration with a recording fake, and the 341 test additionally stubbed
+    # _reassert_adaptive_late_fill_quarantine_if_present to a no-op — so the
+    # forward-call of the FULL migration-335 body (constraint re-validation
+    # against existing rows + %ROWTYPE guard-function CREATE) never executed
+    # any SQL anywhere in the tree. This test runs the real, unstubbed
+    # migration 341 against the dedicated *_test database in one rollback-only
+    # transaction, so inverted trigger comparisons, invalid DDL, or a
+    # constraint-vs-existing-rows abort can no longer stay green.
+    Base.metadata.create_all(bind=engine)
+    migrations.run_migrations(engine)
+
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            quarantine_columns = {
+                "lifecycle_contradiction_source_state",
+                "lifecycle_contradiction_at",
+                "lifecycle_contradiction_evidence_sha256",
+            }
+            assert quarantine_columns <= set(
+                migrations._columns(conn, "adaptive_risk_reservations")
+            )
+
+            # The reassert helper must take its real branch (columns present)
+            # and re-run the entire 335 body without error.
+            migrations._reassert_adaptive_late_fill_quarantine_if_present(conn)
+
+            state_constraint = conn.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = 'adaptive_risk_reservations'::regclass "
+                    "AND conname = 'ck_adaptive_risk_reservation_state'"
+                )
+            ).scalar_one()
+            assert "exposure_quarantined" in state_constraint
+            contradiction_constraint = conn.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = 'adaptive_risk_reservations'::regclass "
+                    "AND conname = "
+                    "'ck_adaptive_risk_reservation_contradiction'"
+                )
+            ).scalar_one()
+            assert contradiction_constraint
+
+            # And the full migration 341 must be idempotent + reassert-clean
+            # on the real current schema (it forward-calls the helper at its
+            # tail; under the fakes that call was doubly unreachable).
+            migrations._migration_341_alpaca_paper_buying_power_reflection(
+                conn
+            )
+
+            guard_function = conn.execute(
+                text(
+                    "SELECT pg_get_functiondef(oid) FROM pg_proc "
+                    "WHERE proname = "
+                    "'chili_guard_alpaca_reservation_settlement_state'"
+                )
+            ).scalar_one()
+            assert "quarantined Alpaca exposure is fail-closed" in (
+                guard_function
+            )
+        finally:
+            transaction.rollback()

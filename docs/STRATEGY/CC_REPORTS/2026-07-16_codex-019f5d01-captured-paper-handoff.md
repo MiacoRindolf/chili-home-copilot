@@ -119,18 +119,25 @@ All CLIs are stdlib-only, offline, fail-closed, hash-pin-chained, in `scripts/` 
 
 Source: `C:\chili-claude-audit\captured_paper_livehead_evidence_gate_fable5_20260716T080418Z` (aggregate NOT-PASS, DIAGNOSTIC_ONLY). ⚠️ The audit snapshot **predates** commits `8aa4df1..2d3ca10` — each gap must be re-verified against HEAD before being believed. Gating rule: a gap gates activation iff its failure mode is (i) unintended broker POST / C3 violation, (ii) wrong-account or wrong-credential binding, or (iii) silently-wrong schema in the paper order/capture path. Everything else → post-paper backlog.
 
-| Gap | Claim | Verdict vs HEAD `2d3ca10` |
-|---|---|---|
-| G1 (HIGH) | `test_migration_341` stubs `_reassert_adaptive_late_fill_quarantine_if_present` to no-op; 16 misleading-greens; forward-repair helpers couple `_328→_335`/`_338→_344` to future schema | *(to fill in Phase 3 — unstub + real-DB three-shape run; `database_schema` probe is the runtime backstop)* |
-| G2 (HIGH) | Close-lane same-CID resend relies on broker-side dedup | *(to fill — likely closed by `a4ef7a0` idempotent lifecycle; verify client-side CID ledger + reconcile)* |
-| G3 (MED) | No durable pagination frontier for fill reads | *(to fill — likely backlog)* |
-| G4 (MED) | Lease-expiry vs version-CAS fencing unpinned by tests | *(to fill — check recovery/promotion suites; post-fence worst case is zero-POST = safe direction)* |
-| G5 (MED) | Two DEAD_NEVER_EXECUTED invariants | *(to fill)* |
-| G6 (MED) | Managed-exit bracket lifecycle outside captured-paper file set | *(to fill — likely backlog boundary)* |
-| G7/G8 | Inferred-risk / bounded-partial crash windows | *(to fill — cross-check W1/W4 FAILS_CLOSED results)* |
-| G9 (INFO) | 291 UNRESOLVED_DYNAMIC edges; hermeticity unproven | Backlog (evidence-quality, not order-safety) |
+Triage completed 2026-07-16 (this session). Fixes referenced below are committed on this branch.
 
-Note: the audit's central **PT-C3-AUTH-AT-INVOCATION UNSAFE** quarantine is **already resolved at HEAD** — the corrected C3 semantics (post-fence invalidation ⇒ zero POST) were implemented and are green in both fake- and real-DB suites (session log 07-16 07:56–08:06 UTC, 76/76).
+| Gap | Claim | Verdict vs HEAD |
+|---|---|---|
+| G1 (HIGH) | `test_migration_341` stubs the reassert helper to no-op; 16 misleading-greens (recording-fake pattern executes no SQL); forward-repair helpers couple `_328→_335`/`_338→_344` | **FIXED pre-freeze.** New real-DB test `test_migration_341_reassert_executes_full_335_body_on_real_schema` runs the UNSTUBBED migration 341 + full 335 body (constraint re-validation vs existing rows + %ROWTYPE guard CREATE) in a rollback-only tx — PASSES; no hidden schema bug. Full three-shape (old/partial/current) chain test → backlog. |
+| G2 (HIGH) | Close-lane same-CID resend relies on broker-side dedup | **GATED → FIXED.** At HEAD the resend-after-indeterminate path was already fail-closed at the sweep (strict CID truth; neutered absent-rotation), but two racing workers could BOTH pass the byte-equal freeze and POST the same CID on FIRST submission. Fix: `consume_orphan_handoff_close_post_permission` (one-shot CAS) wired as the pre-POST gate in `_submit_handoff_close`; acceptance tests with a NON-deduping, NON-retaining fake broker prove exactly 1 POST across racing workers + frozen-request replays (`test_handoff_close_single_post_when_broker_never_dedupes`, `..._frozen_request_consumes_post_permission_once`). |
+| G3 (MED) | No durable pagination frontier for fill reads | BACKLOG — restart-mid-pagination real-DB test; restart safety currently rests on immutable fill identity + dedupe. |
+| G4 (MED) | Lease-expiry vs version-CAS fencing unpinned | BACKLOG — premise STALE at HEAD: every post-fence stage re-derives wall-clock `valid_until` (min of outbox/action/arm/invocation/breaker/pre-dispatch) under FOR UPDATE (`captured_paper_outbox.py:3452/3606/3786/4030`) + reaper `recover_expired_captured_paper_leases` each cycle. Debt = `test_two_actor_lease_expires_post_fence`. |
+| G5 (MED) | Two DEAD_NEVER_EXECUTED test invariants | BACKLOG — helper 1 just needs rename to `test_`; helper 2 is a builder needing a `def test_` wrapper (fill-settlement lock-walk; positive-adoption transport start). |
+| G6 (MED) | Managed-exit bracket outside captured-paper file set | BACKLOG — boundary documented; exit-owner coverage ends at the handoff boundary. |
+| G7a | ORM completion-marker stricter than migration-344 constraint | BACKLOG — divergence is inert wherever migrations run (migration replaces the ORM-created constraint); debt = ORM-vs-migration constraint-parity test, or relax the ORM branch. |
+| G7b | `lease_expires_at` never reaped in-segment | BACKLOG — premise STALE: read in-segment (outbox.py:2821) + two wired reapers (startup stranded-authority recovery `expired_released`; per-cycle outbox reaper). `submit_indeterminate` retention is BY DESIGN (same-CID reconciliation; escalates `reconciliation_health_escalated`). |
+| G7c | Fence-to-POST staleness after `authorize_transport_invocation` | BACKLOG — revalidate re-derives reservation/packet/claim/session/arm/opportunity/event-chain under lock pre-POST; host-revocation + operator-pause re-checked in-process immediately before POST. Residual = daily-loss flip INSIDE the breaker receipt validity window; debt = `test_pre_post_financial_breaker_window`. |
+| G8 | Bounded PARTIAL crash windows | BACKLOG — recorded in `transaction_and_crash_matrix.json`; recovery preconditions documented. |
+| G9 (INFO) | 291 UNRESOLVED_DYNAMIC edges; 2 chunking-stub misleading-greens | Chunking tests **FIXED** (now patch the real settings singleton the code reads; the import-error fail-safe is genuinely covered). Dynamic edges + hermeticity → backlog. |
+
+**NEW finding (this session): 14 stale tests** (8 in `test_adaptive_alpaca_lifecycle.py`, 5 in `test_alpaca_detached_claim_handoff.py::*adaptive*` failing with `adaptive_risk_reservation_unavailable`, +1 in `test_alpaca_deadman_close_handoff.py::test_rth_entry_rejects_stale_premarket_extended_hours_generation_before_place` failing with `builder_missing_capture_binding`). Root cause: they exercise the DEPRECATED `live_runner._ensure_adaptive_alpaca_reservation` entry, and `AdaptiveRiskReservationStore.reserve` now (correctly) requires the `LockedAlpacaPaperAdmissionBundle` for alpaca_paper — only the captured-paper admission path (`captured_paper_admission.py:1358`) constructs it. The old live_runner alpaca-paper reservation entry is intentionally fail-closed at HEAD. **Not an activation gate**: the probe battery's `focused_regressions` runs a PINNED 6-node list untouched by these; deployed prod runs main. Debt: update the 13 tests to the bundle contract or quarantine the deprecated entry + its tests explicitly.
+
+Note: the audit's central **PT-C3-AUTH-AT-INVOCATION UNSAFE** quarantine is **already resolved at HEAD** — corrected C3 semantics (post-fence invalidation ⇒ zero POST) green in fake- and real-DB suites; independently re-verified this session on this machine: `test_captured_paper_outbox.py` + `test_captured_paper_transport_coordinator.py` = **100/100 passed** vs real PostgreSQL.
 
 ---
 
