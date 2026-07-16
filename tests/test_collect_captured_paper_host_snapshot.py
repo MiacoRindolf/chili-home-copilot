@@ -156,12 +156,16 @@ def _direct_fixture(tmp_path: Path):
     return tasks, (depth, trade)
 
 
+NATIVE_WSCRIPT = str(cutover._native_system32_executable("wscript.exe"))
+NATIVE_POWERSHELL = str(cutover._native_system32_executable("powershell.exe"))
+
+
 def _wrapper_fixture(
     tmp_path: Path,
     *,
     wrapper_token: str | None = None,
-    powershell_token: str = "powershell.exe",
-    command: str = "wscript.exe",
+    powershell_token: str = NATIVE_POWERSHELL,
+    command: str = NATIVE_WSCRIPT,
     extra_argv: tuple[str, ...] = (),
     starter_suffix: str = "",
 ):
@@ -342,11 +346,6 @@ def test_wrapper_chain_becomes_typed_restore_authority_without_claiming_provenan
     ("fixture_kwargs", "reason"),
     [
         ({"extra_argv": ("--unexpected",)}, "extra or unsupported token"),
-        ({"command": r"C:\\Windows\\System32\\wscript.exe"}, "bare wscript.exe"),
-        (
-            {"powershell_token": r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"},
-            "extra or unsupported token",
-        ),
         ({"wrapper_token": r"relative\\run-hidden.vbs"}, "absolute local-drive"),
         ({"wrapper_token": r"\\server\share\run-hidden.vbs"}, "absolute local-drive"),
         ({"wrapper_token": r"D:\\dev\\run-hidden.vbs:authority"}, "absolute local-drive"),
@@ -369,6 +368,89 @@ def test_wrapper_authority_rejects_extra_argv_and_nonlocal_or_alternate_paths(
         )
 
 
+@pytest.mark.parametrize(
+    "fixture_kwargs",
+    [
+        {"command": "wscript.exe"},
+        {"powershell_token": "powershell.exe"},
+    ],
+)
+def test_wrapper_contract_requires_absolute_native_wscript_and_powershell(
+    tmp_path: Path, fixture_kwargs: Mapping[str, object]
+) -> None:
+    # A bare token is resolved through current-directory/PATH search at
+    # launch time, so the sealed native hash would not be runtime-bound.
+    tasks, processes, parsed, _wrapper, _starters = _wrapper_fixture(
+        tmp_path, **fixture_kwargs
+    )
+    with pytest.raises(
+        collector.CapturedPaperHostSnapshotError,
+        match="exact absolute native",
+    ):
+        collector.collect_host_snapshot(
+            probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
+            legacy_root=tmp_path,
+            captured_at=NOW,
+            argv_parser=lambda value: parsed[value],
+        )
+
+
+def test_wrapper_contract_rejects_shadow_system32_paths(tmp_path: Path) -> None:
+    # An existing copy of the binary at any other absolute path must be
+    # rejected by identity, not merely by nonexistence.
+    shadow_dir = tmp_path / "System32"
+    shadow_dir.mkdir()
+    shadow = shadow_dir / "wscript.exe"
+    shadow.write_bytes(b"shadow wscript")
+    tasks, processes, parsed, _wrapper, _starters = _wrapper_fixture(
+        tmp_path, command=str(shadow)
+    )
+    with pytest.raises(
+        collector.CapturedPaperHostSnapshotError,
+        match="exact absolute native",
+    ):
+        collector.collect_host_snapshot(
+            probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
+            legacy_root=tmp_path,
+            captured_at=NOW,
+            argv_parser=lambda value: parsed[value],
+        )
+
+
+def test_probe_ignores_forged_systemroot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forged = tmp_path / "ForgedRoot"
+    (forged / "System32").mkdir(parents=True)
+    (forged / "System32" / "schTasks.exe").write_bytes(b"forged schtasks")
+    monkeypatch.setenv("SystemRoot", str(forged))
+
+    probe = collector.WindowsReadOnlyHostProbe()
+
+    resolved = Path(probe._schtasks)
+    assert os.path.normcase(str(resolved)) == os.path.normcase(
+        str(cutover._native_system32_directory() / "schtasks.exe")
+    )
+    assert os.path.normcase(str(forged)) not in os.path.normcase(str(resolved))
+
+
+def test_backend_ignores_forged_systemroot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forged = tmp_path / "ForgedRoot"
+    (forged / "System32").mkdir(parents=True)
+    (forged / "System32" / "schTasks.exe").write_bytes(b"forged schtasks")
+    monkeypatch.setenv("SystemRoot", str(forged))
+
+    backend = cutover.WindowsHostCutoverBackend(bindings=())
+
+    resolved = Path(backend._schtasks)
+    assert os.path.normcase(str(resolved)) == os.path.normcase(
+        str(cutover._native_system32_directory() / "schtasks.exe")
+    )
+    assert os.path.normcase(str(forged)) not in os.path.normcase(str(resolved))
+
+
 def test_wrapper_authority_rejects_unapproved_starter_semantics(tmp_path: Path) -> None:
     tasks, processes, parsed, _wrapper, _starters = _wrapper_fixture(
         tmp_path,
@@ -377,6 +459,49 @@ def test_wrapper_authority_rejects_unapproved_starter_semantics(tmp_path: Path) 
     with pytest.raises(
         collector.CapturedPaperHostSnapshotError,
         match="LEGACY_STARTER_SEMANTICS_INVALID",
+    ):
+        collector.collect_host_snapshot(
+            probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
+            legacy_root=tmp_path,
+            captured_at=NOW,
+            argv_parser=lambda value: parsed[value],
+        )
+
+
+def test_wrapper_authority_rejects_single_quoted_executable_line(
+    tmp_path: Path,
+) -> None:
+    # A leading apostrophe is a string literal in PowerShell, not a comment;
+    # piped into Invoke-Expression it executes. It must never be stripped
+    # from the semantic profile.
+    tasks, processes, parsed, _wrapper, _starters = _wrapper_fixture(
+        tmp_path,
+        starter_suffix="'Start-Process -FilePath C:\\malicious.exe' | Invoke-Expression\n",
+    )
+    with pytest.raises(
+        collector.CapturedPaperHostSnapshotError,
+        match="LEGACY_STARTER_SEMANTICS_INVALID",
+    ):
+        collector.collect_host_snapshot(
+            probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
+            legacy_root=tmp_path,
+            captured_at=NOW,
+            argv_parser=lambda value: parsed[value],
+        )
+
+
+def test_wrapper_authority_rejects_requires_module_directive(
+    tmp_path: Path,
+) -> None:
+    # `#Requires` is an executable PowerShell engine directive (e.g. module
+    # auto-load), not a comment; ignoring it would admit unapproved code.
+    tasks, processes, parsed, _wrapper, _starters = _wrapper_fixture(
+        tmp_path,
+        starter_suffix="#Requires -Modules MaliciousModule\n",
+    )
+    with pytest.raises(
+        collector.CapturedPaperHostSnapshotError,
+        match="LEGACY_SOURCE_SEMANTICS_INVALID",
     ):
         collector.collect_host_snapshot(
             probe=FakeReadOnlyProbe(tasks=tasks, processes=processes),
@@ -395,7 +520,7 @@ def test_wrapper_authority_rejects_daily_logon_semantic_divergence(
     alternate.write_bytes(starters["iqfeed_trade_bridge"].read_bytes())
     argv = (
         str(wrapper),
-        "powershell.exe",
+        NATIVE_POWERSHELL,
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
@@ -406,7 +531,7 @@ def test_wrapper_authority_rejects_daily_logon_semantic_divergence(
     parsed[arguments] = argv
     tasks[name] = cutover.TaskObservation(
         name=name,
-        xml=_task_xml(command="wscript.exe", arguments=arguments),
+        xml=_task_xml(command=NATIVE_WSCRIPT, arguments=arguments),
         enabled=True,
     )
     with pytest.raises(

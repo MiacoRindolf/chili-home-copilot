@@ -219,9 +219,15 @@ class WindowsReadOnlyHostProbe:
             raise CapturedPaperHostSnapshotError(
                 "WINDOWS_REQUIRED", "Task Scheduler inventory requires Windows"
             )
-        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        # The immutable native resolver, never %SystemRoot%: a forged
+        # environment variable must not point the read-only probe at a
+        # staged schtasks.exe.
+        try:
+            system32 = host_cutover._native_system32_directory()
+        except host_cutover.CapturedPaperHostCutoverError as exc:
+            raise CapturedPaperHostSnapshotError(exc.code, exc.message) from exc
         self._schtasks, _digest = _stable_hash_unrooted(
-            system_root / "System32" / "schtasks.exe", field="schtasks.exe"
+            system32 / "schtasks.exe", field="schtasks.exe"
         )
         self._run = subprocess_run
         if psutil_module is None:
@@ -424,14 +430,20 @@ def _resolve_diagnostic_executable(value: str) -> tuple[str | None, str | None]:
     if host_cutover._is_local_absolute(raw):
         candidates.append(raw)
     else:
-        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        # Diagnostic evidence only, never authority; still resolve through
+        # the immutable native directory rather than mutable %SystemRoot%.
         lowered = raw.name.casefold()
-        if lowered == "wscript.exe":
-            candidates.append(system_root / "System32" / "wscript.exe")
-        elif lowered in {"powershell.exe", "powershell"}:
-            candidates.append(
-                system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-            )
+        try:
+            if lowered == "wscript.exe":
+                candidates.append(
+                    host_cutover._native_system32_executable("wscript.exe")
+                )
+            elif lowered in {"powershell.exe", "powershell"}:
+                candidates.append(
+                    host_cutover._native_system32_executable("powershell.exe")
+                )
+        except host_cutover.CapturedPaperHostCutoverError:
+            return None, None
     if len(candidates) != 1:
         return None, None
     try:

@@ -1336,40 +1336,83 @@ def _windows_command_line_to_argv(value: str) -> tuple[str, ...]:
         ) from exc
 
 
-def _strict_system32_profile(value: str, *, basename: str) -> tuple[str, str]:
-    """Resolve one approved bare system executable, never a PATH alternative."""
+def _native_system32_directory() -> Path:
+    """Resolve the immutable native System32 directory.
 
-    if not isinstance(value, str) or value.casefold() != basename.casefold():
-        raise CapturedPaperHostCutoverError(
-            "LEGACY_SYSTEM_EXECUTABLE_INVALID",
-            f"legacy launch requires bare {basename} under the System32 profile",
-        )
+    Never derived from ``%SystemRoot%``: environment variables are mutable
+    per-process state, so a forged ``SystemRoot`` could point the control
+    plane at an attacker-staged ``System32`` tree.  ``GetSystemDirectoryW``
+    is answered by the OS itself.  WOW64 processes are rejected because the
+    file-system redirector silently maps ``System32`` to ``SysWOW64`` and
+    the resolved identity would not be the binary the scheduler executes.
+    """
+
     if os.name != "nt":
         raise CapturedPaperHostCutoverError(
             "WINDOWS_REQUIRED", "System32 launch identity requires Windows"
         )
     try:
         import ctypes
+        from ctypes import wintypes
 
+        # A private WinDLL instance: prototype assignments below must not
+        # leak into the process-wide ctypes.windll cache.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.IsWow64Process.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.BOOL),
+        )
+        kernel32.IsWow64Process.restype = wintypes.BOOL
+        is_wow64 = wintypes.BOOL(0)
+        succeeded = kernel32.IsWow64Process(
+            kernel32.GetCurrentProcess(), ctypes.byref(is_wow64)
+        )
+        if not succeeded or is_wow64.value:
+            raise CapturedPaperHostCutoverError(
+                "LEGACY_SYSTEM_EXECUTABLE_INVALID",
+                "WOW64 redirection makes the System32 identity ambiguous",
+            )
         buffer = ctypes.create_unicode_buffer(32768)
-        length = int(ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer)))
+        length = int(kernel32.GetSystemDirectoryW(buffer, len(buffer)))
         if length <= 0 or length >= len(buffer):
             raise OSError("GetSystemDirectoryW failed")
-        system32 = Path(buffer.value)
+        return Path(buffer.value)
+    except CapturedPaperHostCutoverError:
+        raise
     except (AttributeError, OSError, ValueError) as exc:
         raise CapturedPaperHostCutoverError(
             "LEGACY_SYSTEM_EXECUTABLE_INVALID",
             "cannot resolve the native Windows System32 directory",
         ) from exc
+
+
+def _native_system32_executable(basename: str) -> Path:
+    """Return the exact native path for one approved system executable."""
+
+    system32 = _native_system32_directory()
     if basename.casefold() == "powershell.exe":
-        candidate = (
-            system32
-            / "WindowsPowerShell"
-            / "v1.0"
-            / "powershell.exe"
+        return system32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return system32 / basename
+
+
+def _strict_system32_profile(value: str, *, basename: str) -> tuple[str, str]:
+    """Bind one approved system executable by its exact absolute native path.
+
+    Bare tokens (``wscript.exe``/``powershell.exe``) are rejected: a command
+    name without a directory is resolved through current-directory/PATH
+    search at launch time, so a stored hash of the native binary would not
+    be bound to the binary the scheduler actually executes.
+    """
+
+    candidate = _native_system32_executable(basename)
+    if not isinstance(value, str) or os.path.normcase(value) != os.path.normcase(
+        str(candidate)
+    ):
+        raise CapturedPaperHostCutoverError(
+            "LEGACY_SYSTEM_EXECUTABLE_INVALID",
+            f"legacy launch requires the exact absolute native {basename} path",
         )
-    else:
-        candidate = system32 / basename
     path, digest = _stable_local_file_unrooted(
         candidate, field=f"legacy System32 {basename}"
     )
@@ -1384,12 +1427,36 @@ def _normalized_semantic_lines(raw: bytes, *, language: str) -> tuple[str, ...]:
             "LEGACY_SOURCE_SEMANTICS_INVALID",
             f"legacy {language} source is not strict UTF-8",
         ) from exc
+    if language not in ("PowerShell", "VBScript"):
+        raise CapturedPaperHostCutoverError(
+            "LEGACY_SOURCE_SEMANTICS_INVALID",
+            f"legacy source language {language} is unsupported",
+        )
     lines: list[str] = []
     pending = ""
     for source in text.splitlines():
         stripped = source.strip()
-        if not stripped or stripped.startswith("#") or stripped.startswith("'"):
+        if not stripped:
             continue
+        if language == "PowerShell":
+            # A leading single quote starts a string literal in PowerShell
+            # (e.g. piped into Invoke-Expression), never a comment, so it
+            # must stay in the semantic profile and mismatch the approved
+            # source.  `#Requires` is an executable engine directive.
+            if stripped.startswith("#"):
+                if re.match(r"#requires\b", stripped, re.IGNORECASE):
+                    raise CapturedPaperHostCutoverError(
+                        "LEGACY_SOURCE_SEMANTICS_INVALID",
+                        "legacy PowerShell source declares a #Requires directive",
+                    )
+                continue
+        else:
+            # VBScript comments are a leading apostrophe or Rem; `#` is not
+            # a VBScript comment and must stay in the semantic profile.
+            if stripped.startswith("'") or re.match(
+                r"rem(\s|$)", stripped, re.IGNORECASE
+            ):
+                continue
         normalized = re.sub(r"[ \t]+", " ", stripped)
         if language == "PowerShell" and normalized.endswith("`"):
             pending += normalized[:-1].rstrip() + " "
@@ -1675,7 +1742,6 @@ def build_legacy_wrapper_launch_contracts(
             len(argv) != 7
             or tuple(value.casefold() for value in argv[2:6])
             != ("-noprofile", "-executionpolicy", "bypass", "-file")
-            or argv[1].casefold() != "powershell.exe"
             or any(not value or any(c in value for c in "\x00\r\n") for value in argv)
         ):
             raise CapturedPaperHostCutoverError(
@@ -2212,7 +2278,7 @@ def _assert_launch_contract_sources_current(
         len(argv) != 7
         or tuple(value.casefold() for value in argv[2:6])
         != ("-noprofile", "-executionpolicy", "bypass", "-file")
-        or argv[1].casefold() != "powershell.exe"
+        or os.path.normcase(argv[1]) != os.path.normcase(contract.powershell_path)
         or os.path.normcase(argv[0]) != os.path.normcase(contract.wrapper_path)
         or os.path.normcase(argv[6]) != os.path.normcase(contract.starter_path)
     ):
@@ -5921,6 +5987,45 @@ class CapturedPaperHostCutoverExecutor:
                 f"refusing to start drifted {binding.role} restore authority",
             )
 
+    def _revalidate_restore_authority(self, prepared: PreparedCutover) -> None:
+        """Revalidate every sealed launch contract and both process bindings.
+
+        Runs unconditionally before any legacy task is registered or enabled.
+        A drifted wrapper/starter must never be installed where a Daily/Logon
+        trigger could execute it, and an already-running exact bridge process
+        must not skip wrapper-chain revalidation.
+        """
+
+        contracts: dict[str, LegacyTaskLaunchContract] = dict(
+            prepared.restore_plan.launch_contracts
+        )
+        derived: Mapping[str, LegacyTaskLaunchContract] | None = None
+        for binding in prepared.restore_plan.bindings:
+            contract = contracts.get(binding.restore_task)
+            if contract is None:
+                if derived is None:
+                    derived = _derive_direct_launch_contracts(
+                        tasks=prepared.task_snapshot.tasks,
+                        bindings=prepared.restore_plan.bindings,
+                    )
+                contract = derived[binding.restore_task]
+                contracts[binding.restore_task] = contract
+            self._assert_restore_binding_sources_current(
+                binding,
+                contract=contract,
+                roots=prepared.allowed_read_roots,
+            )
+        for task_name, contract in contracts.items():
+            try:
+                _assert_launch_contract_sources_current(
+                    contract, roots=prepared.allowed_read_roots
+                )
+            except CapturedPaperHostCutoverError as exc:
+                raise CapturedPaperHostCutoverError(
+                    "LEGACY_RESTORE_SOURCE_DRIFT",
+                    f"refusing to restore drifted launch contract for {task_name}",
+                ) from exc
+
     def _rollback_material(self, journal: CutoverJournal) -> PreparedCutover:
         started = [
             event for event in journal.events if event.get("event_type") == "apply_started"
@@ -6239,6 +6344,11 @@ class CapturedPaperHostCutoverExecutor:
         )
         if revocation is not None:
             record("activation_permit_revoked", dict(revocation))
+        # Fail closed before ANY host mutation when restore sources drifted.
+        # Registering a drifted wrapper/starter as an enabled Daily/Logon task
+        # would hand the scheduler unapproved code, so nothing below may run
+        # until every contract and binding revalidates against sealed hashes.
+        self._revalidate_restore_authority(prepared)
         mutations = 0
         foreign_candidate = False
         # Inventory, then disable/End the restart-capable task before
@@ -6454,9 +6564,11 @@ class WindowsHostCutoverBackend:
             raise CapturedPaperHostCutoverError(
                 "WINDOWS_REQUIRED", "Task Scheduler cutover requires Windows"
             )
-        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        # The immutable native resolver, never %SystemRoot%: a forged
+        # environment variable must not point task control at a staged
+        # schtasks.exe.
         self._schtasks, _ = _resolve_system_executable(
-            str(system_root / "System32" / "schtasks.exe"), "schtasks.exe"
+            str(_native_system32_directory() / "schtasks.exe"), "schtasks.exe"
         )
         self._bindings = {item.role: item for item in bindings}
         try:

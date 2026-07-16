@@ -565,6 +565,100 @@ def _validate_runtime_output(
     return receipt
 
 
+def _enforce_private_output_acl(path: Path) -> None:
+    """Apply and verify a protected operator-private DACL on the secret file.
+
+    ``0o600`` in :func:`os.open` has no effect on Windows DACLs, so without an
+    explicit descriptor the published credential file inherits the parent
+    directory's ACL (observed on this host: ``BUILTIN\\Users`` read plus
+    ``Authenticated Users`` modify).  The DACL is therefore replaced with a
+    protected, non-inherited grant to exactly the current operator, SYSTEM,
+    and Administrators, then read back and compared; any mismatch or missing
+    security API refuses publication.
+    """
+
+    if os.name != "nt":
+        raise CapturedPaperRuntimeEnvBuildError(
+            "private output ACL enforcement requires Windows",
+            code="ACL_ENFORCEMENT_FAILED",
+        )
+    try:
+        import ntsecuritycon
+        import win32api
+        import win32con
+        import win32security
+    except ImportError as exc:
+        raise CapturedPaperRuntimeEnvBuildError(
+            "the Windows security API is unavailable; refusing to publish",
+            code="ACL_ENFORCEMENT_FAILED",
+        ) from exc
+    try:
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+        )
+        operator_sid = win32security.GetTokenInformation(
+            token, win32security.TokenUser
+        )[0]
+        system_sid = win32security.CreateWellKnownSid(
+            win32security.WinLocalSystemSid, None
+        )
+        admins_sid = win32security.CreateWellKnownSid(
+            win32security.WinBuiltinAdministratorsSid, None
+        )
+        private_sids = (operator_sid, system_sid, admins_sid)
+        dacl = win32security.ACL()
+        for sid in private_sids:
+            dacl.AddAccessAllowedAce(
+                win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, sid
+            )
+        descriptor = win32security.SECURITY_DESCRIPTOR()
+        descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
+        win32security.SetFileSecurity(
+            str(path),
+            win32security.DACL_SECURITY_INFORMATION
+            | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+        observed = win32security.GetFileSecurity(
+            str(path), win32security.DACL_SECURITY_INFORMATION
+        ).GetSecurityDescriptorDacl()
+        if observed is None:
+            raise CapturedPaperRuntimeEnvBuildError(
+                "output ACL read-back returned a null DACL",
+                code="ACL_ENFORCEMENT_FAILED",
+            )
+        allowed = {
+            win32security.ConvertSidToStringSid(sid) for sid in private_sids
+        }
+        granted: set[str] = set()
+        for index in range(observed.GetAceCount()):
+            ace = observed.GetAce(index)
+            if ace[0][0] != win32security.ACCESS_ALLOWED_ACE_TYPE:
+                raise CapturedPaperRuntimeEnvBuildError(
+                    "output ACL read-back contains a non-allow ACE",
+                    code="ACL_ENFORCEMENT_FAILED",
+                )
+            sid_text = win32security.ConvertSidToStringSid(ace[2])
+            if sid_text not in allowed:
+                raise CapturedPaperRuntimeEnvBuildError(
+                    "output ACL read-back grants an unexpected identity",
+                    code="ACL_ENFORCEMENT_FAILED",
+                )
+            granted.add(sid_text)
+        if granted != allowed:
+            raise CapturedPaperRuntimeEnvBuildError(
+                "output ACL read-back is missing a required identity",
+                code="ACL_ENFORCEMENT_FAILED",
+            )
+    except CapturedPaperRuntimeEnvBuildError:
+        raise
+    except Exception as exc:
+        raise CapturedPaperRuntimeEnvBuildError(
+            "private output ACL could not be applied and verified",
+            code="ACL_ENFORCEMENT_FAILED",
+        ) from exc
+
+
 def _write_pending(path: Path, raw: bytes) -> Path:
     pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
     try:
@@ -574,6 +668,9 @@ def _write_pending(path: Path, raw: bytes) -> Path:
             0o600,
         )
         with os.fdopen(descriptor, "wb") as handle:
+            # Seal the DACL while the file is still empty so the secret bytes
+            # are never readable through the parent directory's inherited ACL.
+            _enforce_private_output_acl(pending)
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
@@ -585,6 +682,12 @@ def _write_pending(path: Path, raw: bytes) -> Path:
         raise CapturedPaperRuntimeEnvBuildError(
             "pending output could not be written", code="OUTPUT_WRITE_FAILED"
         ) from exc
+    except CapturedPaperRuntimeEnvBuildError:
+        try:
+            pending.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return pending
 
 
@@ -662,6 +765,10 @@ def build_captured_paper_runtime_env(
             "validated output was not published",
             code="OUTPUT_CONFLICT",
         )
+    # Reseal on every run: an already-published file may predate ACL
+    # enforcement or have been loosened out of band, and the hard-linked
+    # publish path must prove the shared descriptor survived publication.
+    _enforce_private_output_acl(output)
 
     return CapturedPaperRuntimeEnvBuildReceipt(
         source_sha256=source_sha256,

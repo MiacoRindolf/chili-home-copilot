@@ -1210,12 +1210,16 @@ def test_content_addressed_capsule_tamper_is_rejected(
         executor.rollback()
 
 
-def test_capsule_restores_tasks_but_never_starts_drifted_legacy_source(
+def test_capsule_never_registers_or_starts_drifted_legacy_source(
     prepared: cutover.PreparedCutover,
 ) -> None:
+    # A drifted restore source must fail rollback BEFORE any host mutation:
+    # registering the enabled Daily/Logon task XML would hand the scheduler
+    # a trigger that can execute the drifted wrapper chain on its own.
     backend = FakeHost(prepared)
     executor = _executor(prepared, backend)
     executor.apply()
+    baseline = list(backend.mutations)
     drifted = Path(prepared.restore_plan.bindings[0].bridge_script_path)
     drifted.unlink()
     with pytest.raises(
@@ -1223,16 +1227,73 @@ def test_capsule_restores_tasks_but_never_starts_drifted_legacy_source(
         match="LEGACY_RESTORE_SOURCE_DRIFT",
     ):
         executor.rollback()
-    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
-    assert backend.await_candidate_processes(
-        prepared.invocation, timeout_seconds=0
-    ) == ()
+    assert backend.mutations == baseline
     for name, expected in prepared.task_snapshot.tasks.items():
-        assert backend.tasks[name] == expected
+        observed = backend.tasks[name]
+        assert observed.enabled is False
+        assert observed != expected
     assert not any(
-        item == f"start:{prepared.restore_plan.bindings[0].restore_task}"
-        for item in backend.mutations
+        item.startswith(("register:", "start:")) or item.endswith(":enable")
+        for item in backend.mutations[len(baseline):]
     )
+
+
+def test_rollback_revalidates_all_wrapper_sources_before_any_task_restore(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    # Both bindings and every launch contract revalidate up front; the second
+    # role's drift must block rollback even though the first role's sources
+    # are intact and would otherwise restore first.
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    baseline = list(backend.mutations)
+    second = prepared.restore_plan.bindings[1]
+    Path(second.bridge_script_path).write_bytes(b"# drifted after apply")
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="LEGACY_RESTORE_SOURCE_DRIFT",
+    ):
+        executor.rollback()
+    assert backend.mutations == baseline
+    assert not any(
+        item.startswith("register:") for item in backend.mutations[len(baseline):]
+    )
+    for name in prepared.task_snapshot.tasks:
+        assert backend.tasks[name].enabled is False
+
+
+def test_existing_exact_role_does_not_skip_wrapper_chain_revalidation(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    # An already-running exact legacy process previously bypassed source
+    # revalidation for its role; drift behind a live process must still fail
+    # rollback closed before any restore mutation.
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    trade = next(
+        item
+        for item in prepared.process_snapshot.processes
+        if item.role == "iqfeed_trade_bridge"
+    )
+    backend.processes[7777] = replace(
+        trade, pid=7777, create_time_ns=trade.create_time_ns + 1
+    )
+    baseline = list(backend.mutations)
+    Path(
+        next(
+            item
+            for item in prepared.restore_plan.bindings
+            if item.role == "iqfeed_trade_bridge"
+        ).bridge_script_path
+    ).write_bytes(b"# drifted behind a live process")
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="LEGACY_RESTORE_SOURCE_DRIFT",
+    ):
+        executor.rollback()
+    assert backend.mutations == baseline
 
 
 def test_restore_plan_binds_task_action_and_full_process_argv(

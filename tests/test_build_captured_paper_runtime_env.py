@@ -487,6 +487,117 @@ def test_read_write_allowlists_fail_closed(tmp_path: Path) -> None:
         )
 
 
+def _read_output_acl(path: Path) -> tuple[set[str], set[str]]:
+    """Return (allow-ACE SID strings, non-allow ACE type names) for *path*."""
+
+    import win32security
+
+    dacl = win32security.GetFileSecurity(
+        str(path), win32security.DACL_SECURITY_INFORMATION
+    ).GetSecurityDescriptorDacl()
+    assert dacl is not None
+    allow_sids: set[str] = set()
+    other_types: set[str] = set()
+    for index in range(dacl.GetAceCount()):
+        ace = dacl.GetAce(index)
+        if ace[0][0] == win32security.ACCESS_ALLOWED_ACE_TYPE:
+            allow_sids.add(win32security.ConvertSidToStringSid(ace[2]))
+        else:
+            other_types.add(str(ace[0][0]))
+    return allow_sids, other_types
+
+
+def _private_sids() -> set[str]:
+    import win32api
+    import win32con
+    import win32security
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+    )
+    operator = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    return {
+        win32security.ConvertSidToStringSid(operator),
+        "S-1-5-18",  # SYSTEM
+        "S-1-5-32-544",  # Administrators
+    }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL enforcement")
+def test_published_output_acl_is_private_and_protected(tmp_path: Path) -> None:
+    _receipt, output = _build(tmp_path)
+
+    allow_sids, other_types = _read_output_acl(output)
+    assert other_types == set()
+    assert allow_sids == _private_sids()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL enforcement")
+def test_existing_output_with_loosened_acl_is_resealed(tmp_path: Path) -> None:
+    import ntsecuritycon
+    import win32security
+
+    source, digest = _write_source(tmp_path)
+    _first, output = _build(tmp_path, source=source, source_sha256=digest)
+
+    # Loosen out of band: grant Authenticated Users read, unprotected DACL.
+    authenticated = win32security.CreateWellKnownSid(
+        win32security.WinAuthenticatedUserSid, None
+    )
+    loose = win32security.ACL()
+    loose.AddAccessAllowedAce(
+        win32security.ACL_REVISION, ntsecuritycon.FILE_GENERIC_READ, authenticated
+    )
+    for sid_text in _private_sids():
+        loose.AddAccessAllowedAce(
+            win32security.ACL_REVISION,
+            ntsecuritycon.FILE_ALL_ACCESS,
+            win32security.ConvertStringSidToSid(sid_text),
+        )
+    descriptor = win32security.SECURITY_DESCRIPTOR()
+    descriptor.SetSecurityDescriptorDacl(1, loose, 0)
+    win32security.SetFileSecurity(
+        str(output), win32security.DACL_SECURITY_INFORMATION, descriptor
+    )
+    loosened, _ = _read_output_acl(output)
+    assert loosened != _private_sids()
+
+    _second, same_output = _build(
+        tmp_path, source=source, source_sha256=digest, output=output
+    )
+    assert same_output == output
+    allow_sids, other_types = _read_output_acl(output)
+    assert other_types == set()
+    assert allow_sids == _private_sids()
+
+
+def test_acl_enforcement_failure_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Path] = []
+
+    def rejecting_enforcement(path: Path) -> None:
+        calls.append(path)
+        raise builder.CapturedPaperRuntimeEnvBuildError(
+            "synthetic ACL rejection", code="ACL_ENFORCEMENT_FAILED"
+        )
+
+    monkeypatch.setattr(
+        builder, "_enforce_private_output_acl", rejecting_enforcement
+    )
+    output = tmp_path / "output" / "captured-paper.env"
+
+    with pytest.raises(
+        builder.CapturedPaperRuntimeEnvBuildError, match="synthetic ACL rejection"
+    ) as raised:
+        _build(tmp_path, output=output)
+
+    assert raised.value.code == "ACL_ENFORCEMENT_FAILED"
+    assert calls
+    assert not output.exists()
+    assert list(output.parent.glob(".*.pending")) == []
+
+
 def test_builder_import_surface_has_no_external_io_clients() -> None:
     tree = ast.parse(Path(builder.__file__).read_text(encoding="utf-8"))
     imports = {
