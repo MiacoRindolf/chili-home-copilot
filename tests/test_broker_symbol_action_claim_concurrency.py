@@ -28,6 +28,7 @@ from app.services.trading.momentum_neural.alpaca_orphan_claims import (
     SUBMIT_INDETERMINATE,
     SUBMITTED,
     acquire_action_claim,
+    mark_entry_transport_started,
     read_action_claim,
     resolve_action_claim,
     update_action_claim_phase,
@@ -58,6 +59,319 @@ def _claim_row(db, symbol: str) -> tuple[Any, ...] | None:
         ),
         {"symbol": symbol},
     ).fetchone()
+
+
+def _bound_entry_metadata(*, binder: str, generation: str = "v1") -> dict[str, Any]:
+    return {
+        "order_role": "primary",
+        "order_request": {
+            "product_id": "REBIND",
+            "side": "buy",
+            "base_size": "10",
+            "limit_price": "10.00",
+            "client_order_id": "cid-rebind",
+        },
+        "reserved_risk_usd": 5.0,
+        "alpaca_account_id": "paper-account-rebind",
+        "entry_post_bind_token": binder,
+        "adaptive_risk_decision_packet": {"generation": generation},
+        "adaptive_risk_reservation_claim": {"generation": generation},
+        "adaptive_risk_reservation_request": {"generation": generation},
+    }
+
+
+def test_expired_bound_claim_rotates_only_exact_pre_transport_generation(db) -> None:
+    symbol = "REBIND"
+    token = f"entry-{uuid.uuid4().hex}"
+    cid = "cid-rebind"
+    owner_id = 90701
+    old_binder = f"old-{uuid.uuid4().hex}"
+    new_binder = f"new-{uuid.uuid4().hex}"
+    old_metadata = _bound_entry_metadata(binder=old_binder)
+    new_metadata = _bound_entry_metadata(binder=new_binder)
+
+    seeded = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        metadata=old_metadata,
+        account_scope="alpaca:paper",
+    )
+    assert seeded.get("ok") is True, seeded
+    db.commit()
+
+    unexpired = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        metadata=new_metadata,
+        account_scope="alpaca:paper",
+    )
+    assert unexpired.get("ok") is False, unexpired
+    assert unexpired.get("reason") == "entry_claim_identity_mismatch"
+    db.rollback()
+
+    db.execute(
+        text(
+            "UPDATE broker_symbol_action_claims "
+            "SET lease_expires_at = NOW() - interval '1 second' "
+            "WHERE account_scope = 'alpaca:paper' AND symbol = :symbol"
+        ),
+        {"symbol": symbol},
+    )
+    db.commit()
+
+    changed_economics = _bound_entry_metadata(
+        binder=new_binder,
+        generation="different",
+    )
+    mismatched = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        metadata=changed_economics,
+        account_scope="alpaca:paper",
+    )
+    assert mismatched.get("ok") is False, mismatched
+    assert mismatched.get("reason") == "entry_claim_identity_mismatch"
+    db.rollback()
+
+    rebound = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        metadata=new_metadata,
+        account_scope="alpaca:paper",
+    )
+    assert rebound.get("ok") is True, rebound
+    assert rebound.get("pre_transport_generation_rebound") is True
+    assert rebound["claim"]["metadata"]["entry_post_bind_token"] == new_binder
+    proof = rebound["claim"]["metadata"]["pre_transport_generation_rebound"]
+    assert proof["client_order_id"] == cid
+    assert proof["reason"] == "expired_claim_only_pre_transport_recovery"
+    db.commit()
+
+    assert mark_entry_transport_started(
+        db,
+        symbol=symbol,
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        post_bind_token=old_binder,
+        account_scope="alpaca:paper",
+        alpaca_account_id="paper-account-rebind",
+    ) is False
+    assert mark_entry_transport_started(
+        db,
+        symbol=symbol,
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        post_bind_token=new_binder,
+        account_scope="alpaca:paper",
+        alpaca_account_id="paper-account-rebind",
+    ) is True
+    db.commit()
+    readable, claim = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope="alpaca:paper",
+    )
+    assert readable is True and claim is not None
+    assert claim["phase"] == SUBMIT_INDETERMINATE
+    assert claim["metadata"]["entry_transport_started"]["post_bind_token"] == new_binder
+
+
+def test_stale_lookup_cannot_resolve_a_rebound_claim_generation(db) -> None:
+    """A broker observation tied to binder A cannot CAS-resolve binder B."""
+
+    symbol = "REBSTAL"
+    token = f"entry-{uuid.uuid4().hex}"
+    cid = "cid-rebind"
+    owner_id = 90703
+    old_binder = f"old-{uuid.uuid4().hex}"
+    new_binder = f"new-{uuid.uuid4().hex}"
+    seeded = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        metadata=_bound_entry_metadata(binder=old_binder),
+        account_scope="alpaca:paper",
+    )
+    assert seeded.get("ok") is True, seeded
+    db.commit()
+    readable, stale = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope="alpaca:paper",
+    )
+    assert readable and stale is not None
+
+    db.execute(
+        text(
+            "UPDATE broker_symbol_action_claims "
+            "SET lease_expires_at = NOW() - interval '1 second' "
+            "WHERE account_scope = 'alpaca:paper' AND symbol = :symbol"
+        ),
+        {"symbol": symbol},
+    )
+    db.commit()
+    rebound = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        metadata=_bound_entry_metadata(binder=new_binder),
+        account_scope="alpaca:paper",
+    )
+    assert rebound.get("ok") is True, rebound
+    assert rebound.get("pre_transport_generation_rebound") is True
+    db.commit()
+
+    stale_resolution = resolve_action_claim(
+        db,
+        symbol=symbol,
+        claim_token=token,
+        client_order_id=cid,
+        broker_order_id="stale-broker-order",
+        broker_order_status="canceled",
+        zero_fill_terminal=True,
+        expected_claim_updated_at=stale["updated_at"],
+        account_scope="alpaca:paper",
+    )
+    assert stale_resolution is False
+    db.rollback()
+    readable, current = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope="alpaca:paper",
+    )
+    assert readable and current is not None
+    assert current["phase"] == "claimed"
+    assert current["metadata"]["entry_post_bind_token"] == new_binder
+
+
+def test_expired_rebind_racing_old_transport_has_one_generation_winner(db) -> None:
+    symbol = "REBRACE"
+    token = f"entry-{uuid.uuid4().hex}"
+    cid = "cid-rebind"
+    owner_id = 90702
+    old_binder = f"old-{uuid.uuid4().hex}"
+    new_binder = f"new-{uuid.uuid4().hex}"
+    old_metadata = _bound_entry_metadata(binder=old_binder)
+    new_metadata = _bound_entry_metadata(binder=new_binder)
+    seeded = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=owner_id,
+        client_order_id=cid,
+        metadata=old_metadata,
+        account_scope="alpaca:paper",
+    )
+    assert seeded.get("ok") is True, seeded
+    db.execute(
+        text(
+            "UPDATE broker_symbol_action_claims "
+            "SET lease_expires_at = NOW() - interval '1 second' "
+            "WHERE account_scope = 'alpaca:paper' AND symbol = :symbol"
+        ),
+        {"symbol": symbol},
+    )
+    db.commit()
+
+    engine, Session = _independent_sessions()
+    start = threading.Barrier(2, timeout=5)
+
+    def old_transport() -> bool:
+        session = Session()
+        try:
+            _bound_transaction_timeouts(session)
+            start.wait()
+            won = mark_entry_transport_started(
+                session,
+                symbol=symbol,
+                claim_token=token,
+                owner_session_id=owner_id,
+                client_order_id=cid,
+                post_bind_token=old_binder,
+                account_scope="alpaca:paper",
+                alpaca_account_id="paper-account-rebind",
+            )
+            session.commit()
+            return bool(won)
+        finally:
+            session.rollback()
+            session.close()
+
+    def new_generation() -> bool:
+        session = Session()
+        try:
+            _bound_transaction_timeouts(session)
+            start.wait()
+            result = acquire_action_claim(
+                session,
+                symbol=symbol,
+                action="entry",
+                claim_token=token,
+                owner_session_id=owner_id,
+                client_order_id=cid,
+                metadata=new_metadata,
+                account_scope="alpaca:paper",
+            )
+            session.commit()
+            return bool(
+                result.get("ok")
+                and result.get("pre_transport_generation_rebound")
+            )
+        finally:
+            session.rollback()
+            session.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            old_future = pool.submit(old_transport)
+            new_future = pool.submit(new_generation)
+            old_won = old_future.result(timeout=12)
+            new_won = new_future.result(timeout=12)
+    finally:
+        engine.dispose()
+
+    assert old_won is not new_won, (old_won, new_won)
+    db.rollback()
+    readable, claim = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope="alpaca:paper",
+    )
+    assert readable is True and claim is not None
+    if old_won:
+        assert claim["phase"] == SUBMIT_INDETERMINATE
+        assert claim["metadata"]["entry_post_bind_token"] == old_binder
+        assert claim["metadata"]["entry_transport_started"]["post_bind_token"] == old_binder
+    else:
+        assert claim["phase"] == "claimed"
+        assert claim["metadata"]["entry_post_bind_token"] == new_binder
+        assert "entry_transport_started" not in claim["metadata"]
+        assert "pre_transport_generation_rebound" in claim["metadata"]
 
 
 def test_same_symbol_entry_vs_orphan_has_exactly_one_winner(db) -> None:

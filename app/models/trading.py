@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -82,6 +83,713 @@ class BrokerSymbolActionClaim(Base):
     resolved_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
 
 
+class CapturedPaperPostCommitOutbox(Base):
+    """Durable content-addressed handoff from captured PAPER phase one.
+
+    Content/identity columns are immutable in migration 337.  Only the bounded
+    lease/status snapshot changes; every such change is mirrored into the
+    append-only ``CapturedPaperPostCommitOutboxEvent`` hash chain.
+    """
+
+    __tablename__ = "captured_paper_post_commit_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_scope",
+            "client_order_id",
+            name="uq_captured_paper_outbox_account_cid",
+        ),
+        UniqueConstraint(
+            "binder_id",
+            name="uq_captured_paper_outbox_binder",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'leased', 'retry_wait', "
+            "'retry_exhausted', 'transport_started', "
+            "'transport_indeterminate', 'reconciling', "
+            "'fill_handoff_committed', 'completed')",
+            name="ck_captured_paper_outbox_status",
+        ),
+        CheckConstraint(
+            "char_length(completion_sha256) = 64 "
+            "AND char_length(payload_sha256) = 64 "
+            "AND char_length(route_token_sha256) = 64 "
+            "AND char_length(intent_sha256) = 64 "
+            "AND char_length(confirmed_arm_generation_sha256) = 64 "
+            "AND (opportunity_key_sha256 IS NULL "
+            " OR char_length(opportunity_key_sha256) = 64)",
+            name="ck_captured_paper_outbox_hashes",
+        ),
+        CheckConstraint(
+            "char_length(order_request_sha256) = 64 "
+            "AND char_length(transport_authority_sha256) = 64 "
+            "AND char_length(admission_record_sha256) = 64 "
+            "AND char_length(committed_admission_sha256) = 64 "
+            "AND char_length(transport_instruction_sha256) = 64 "
+            "AND char_length(order_request_canonical_json) > 1 "
+            "AND char_length(transport_authority_canonical_json) > 1 "
+            "AND char_length(admission_record_canonical_json) > 1 "
+            "AND char_length(committed_admission_canonical_json) > 1 "
+            "AND char_length(transport_instruction_canonical_json) > 1",
+            name="ck_captured_paper_outbox_durable_transport",
+        ),
+        CheckConstraint(
+            "(last_failure_sha256 IS NULL "
+            " OR char_length(last_failure_sha256) = 64) "
+            "AND (last_reconciliation_evidence_sha256 IS NULL "
+            " OR char_length(last_reconciliation_evidence_sha256) = 64)",
+            name="ck_captured_paper_outbox_optional_hashes",
+        ),
+        CheckConstraint(
+            "account_scope = 'alpaca:paper' "
+            "AND decision_id = client_order_id",
+            name="ck_captured_paper_outbox_identity",
+        ),
+        CheckConstraint(
+            "max_attempts > 0 AND attempt_count >= 0 "
+            "AND attempt_count <= max_attempts "
+            "AND max_reconciliation_attempts > 0 "
+            "AND reconciliation_attempt_count >= 0 "
+            "AND reconciliation_attempt_count <= max_reconciliation_attempts",
+            name="ck_captured_paper_outbox_attempts",
+        ),
+        CheckConstraint(
+            "reconciliation_retry_delay_seconds > 0 "
+            "AND reconciliation_retry_delay_seconds <= 604800 "
+            "AND reconciliation_health_escalation_delay_seconds > 0 "
+            "AND reconciliation_health_escalation_delay_seconds <= 604800 "
+            "AND reconciliation_total_attempt_count >= 0 "
+            "AND reconciliation_escalation_count >= 0 "
+            "AND reconciliation_health_state IN ('normal', 'escalated') "
+            "AND ((reconciliation_health_state = 'normal' "
+            "      AND reconciliation_escalation_count = 0 "
+            "      AND last_reconciliation_health_escalated_at IS NULL) "
+            " OR (reconciliation_health_state = 'escalated' "
+            "      AND reconciliation_escalation_count > 0 "
+            "      AND last_reconciliation_health_escalated_at IS NOT NULL)) "
+            "AND (reconciliation_next_attempt_at IS NULL "
+            "     OR status = 'transport_indeterminate')",
+            name="ck_captured_paper_outbox_reconciliation_health",
+        ),
+        CheckConstraint(
+            "((status IN ('leased', 'transport_started', 'reconciling') "
+            "  AND lease_token IS NOT NULL AND lease_owner_id IS NOT NULL "
+            "  AND lease_expires_at IS NOT NULL) OR "
+            " (status NOT IN ('leased', 'transport_started', 'reconciling') "
+            "  AND lease_token IS NULL AND lease_owner_id IS NULL "
+            "  AND lease_expires_at IS NULL))",
+            name="ck_captured_paper_outbox_lease_shape",
+        ),
+        CheckConstraint(
+            "((status = 'retry_wait' AND next_attempt_at IS NOT NULL) OR "
+            " (status <> 'retry_wait' AND next_attempt_at IS NULL))",
+            name="ck_captured_paper_outbox_retry_clock",
+        ),
+        CheckConstraint(
+            "((status IN ('transport_started', 'transport_indeterminate', "
+            "             'reconciling', 'fill_handoff_committed', "
+            "             'completed') "
+            "  AND transport_started_at IS NOT NULL "
+            "  AND transport_evidence_sha256 IS NOT NULL "
+            "  AND char_length(transport_evidence_sha256) = 64) OR "
+            " (status NOT IN ('transport_started', 'transport_indeterminate', "
+            "                 'reconciling', 'fill_handoff_committed', "
+            "                 'completed') "
+            "  AND transport_started_at IS NULL "
+            "  AND transport_evidence_sha256 IS NULL))",
+            name="ck_captured_paper_outbox_transport_marker",
+        ),
+        CheckConstraint(
+            "((status IN ('transport_indeterminate', 'reconciling', "
+            "             'fill_handoff_committed') "
+            "  AND transport_indeterminate_at IS NOT NULL "
+            "  AND indeterminate_evidence_sha256 IS NOT NULL "
+            "  AND char_length(indeterminate_evidence_sha256) = 64) OR "
+            " (status NOT IN ('transport_indeterminate', 'reconciling', "
+            "                 'fill_handoff_committed', 'completed') "
+            "  AND transport_indeterminate_at IS NULL "
+            "  AND indeterminate_evidence_sha256 IS NULL) OR "
+            " (status = 'completed' AND (("
+            "      transport_indeterminate_at IS NULL "
+            "      AND indeterminate_evidence_sha256 IS NULL) OR ("
+            "      transport_indeterminate_at IS NOT NULL "
+            "      AND indeterminate_evidence_sha256 IS NOT NULL "
+            "      AND char_length(indeterminate_evidence_sha256) = 64))))",
+            name="ck_captured_paper_outbox_indeterminate_marker",
+        ),
+        CheckConstraint(
+            "((status = 'completed' AND completed_at IS NOT NULL "
+            "  AND completion_proof_sha256 IS NOT NULL "
+            "  AND char_length(completion_proof_sha256) = 64) OR "
+            " (status <> 'completed' AND completed_at IS NULL "
+            "  AND completion_proof_sha256 IS NULL))",
+            name="ck_captured_paper_outbox_completion_marker",
+        ),
+        CheckConstraint(
+            "((event_sequence = 0 AND last_event_sha256 IS NULL) OR "
+            " (event_sequence > 0 AND char_length(last_event_sha256) = 64))",
+            name="ck_captured_paper_outbox_event_head",
+        ),
+        CheckConstraint(
+            "((status = 'fill_handoff_committed' "
+            "  AND fill_handoff_proof_canonical_json IS NOT NULL "
+            "  AND fill_handoff_proof_sha256 IS NOT NULL "
+            "  AND fill_handoff_receipt_canonical_json IS NOT NULL "
+            "  AND fill_handoff_receipt_sha256 IS NOT NULL "
+            "  AND fill_handoff_committed_at IS NOT NULL "
+            "  AND char_length(fill_handoff_proof_sha256) = 64 "
+            "  AND char_length(fill_handoff_receipt_sha256) = 64) OR "
+            " (status <> 'fill_handoff_committed' "
+            "  AND fill_handoff_proof_canonical_json IS NULL "
+            "  AND fill_handoff_proof_sha256 IS NULL "
+            "  AND fill_handoff_receipt_canonical_json IS NULL "
+            "  AND fill_handoff_receipt_sha256 IS NULL "
+            "  AND fill_handoff_committed_at IS NULL))",
+            name="ck_captured_paper_outbox_fill_handoff",
+        ),
+        Index(
+            "ix_captured_paper_outbox_due",
+            "status",
+            "next_attempt_at",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_captured_paper_outbox_session_symbol",
+            "session_id",
+            "symbol",
+        ),
+        Index(
+            "ix_captured_paper_outbox_reconciliation_due",
+            "status",
+            "reconciliation_next_attempt_at",
+            "transport_indeterminate_at",
+        ),
+    )
+
+    completion_sha256: str = Column(String(64), primary_key=True)
+    payload_sha256: str = Column(String(64), nullable=False)
+    route_token_sha256: str = Column(String(64), nullable=False)
+    intent_sha256: str = Column(String(64), nullable=False)
+    payload_canonical_json: str = Column(Text, nullable=False)
+    account_scope: str = Column(String(160), nullable=False)
+    expected_account_id = Column(UUID(as_uuid=True), nullable=False)
+    session_id: int = Column(BigInteger, nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    decision_id: str = Column(String(64), nullable=False)
+    client_order_id: str = Column(String(64), nullable=False)
+    binder_id = Column(UUID(as_uuid=True), nullable=False)
+    symbol_claim_token: str = Column(String(64), nullable=False)
+    confirmed_arm_generation_sha256: str = Column(String(64), nullable=False)
+    opportunity_key_sha256: Optional[str] = Column(String(64), nullable=True)
+    order_request_canonical_json: str = Column(Text, nullable=False)
+    order_request_sha256: str = Column(String(64), nullable=False)
+    transport_authority_canonical_json: str = Column(Text, nullable=False)
+    transport_authority_sha256: str = Column(String(64), nullable=False)
+    admission_record_canonical_json: str = Column(Text, nullable=False)
+    admission_record_sha256: str = Column(String(64), nullable=False)
+    committed_admission_canonical_json: str = Column(Text, nullable=False)
+    committed_admission_sha256: str = Column(String(64), nullable=False)
+    transport_instruction_canonical_json: str = Column(Text, nullable=False)
+    transport_instruction_sha256: str = Column(String(64), nullable=False)
+    reconciliation_retry_delay_seconds: int = Column(
+        Integer, nullable=False
+    )
+    reconciliation_health_escalation_delay_seconds: int = Column(
+        Integer, nullable=False
+    )
+    reconciliation_next_attempt_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    reconciliation_total_attempt_count: int = Column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    reconciliation_health_state: str = Column(
+        String(32), nullable=False, server_default="normal"
+    )
+    reconciliation_escalation_count: int = Column(
+        Integer, nullable=False, server_default="0"
+    )
+    last_reconciliation_health_escalated_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    status: str = Column(String(32), nullable=False, server_default="pending")
+    attempt_count: int = Column(Integer, nullable=False, server_default="0")
+    max_attempts: int = Column(SmallInteger, nullable=False)
+    reconciliation_attempt_count: int = Column(
+        Integer, nullable=False, server_default="0"
+    )
+    max_reconciliation_attempts: int = Column(SmallInteger, nullable=False)
+    lease_token = Column(UUID(as_uuid=True), nullable=True)
+    lease_owner_id = Column(UUID(as_uuid=True), nullable=True)
+    lease_expires_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_attempt_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    transport_started_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    transport_evidence_sha256: Optional[str] = Column(String(64), nullable=True)
+    transport_indeterminate_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    indeterminate_evidence_sha256: Optional[str] = Column(
+        String(64), nullable=True
+    )
+    last_failure_sha256: Optional[str] = Column(String(64), nullable=True)
+    last_reconciliation_evidence_sha256: Optional[str] = Column(
+        String(64), nullable=True
+    )
+    completion_proof_sha256: Optional[str] = Column(String(64), nullable=True)
+    completed_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    fill_handoff_proof_canonical_json: Optional[str] = Column(
+        Text, nullable=True
+    )
+    fill_handoff_proof_sha256: Optional[str] = Column(
+        String(64), nullable=True
+    )
+    fill_handoff_receipt_canonical_json: Optional[str] = Column(
+        Text, nullable=True
+    )
+    fill_handoff_receipt_sha256: Optional[str] = Column(
+        String(64), nullable=True
+    )
+    fill_handoff_committed_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    event_sequence: int = Column(BigInteger, nullable=False, server_default="0")
+    last_event_sha256: Optional[str] = Column(String(64), nullable=True)
+    version: int = Column(BigInteger, nullable=False, server_default="1")
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    updated_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class CapturedPaperPostCommitOutboxEvent(Base):
+    """Append-only hash-chained lifecycle event for one outbox request."""
+
+    __tablename__ = "captured_paper_post_commit_outbox_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "completion_sha256",
+            "sequence",
+            name="uq_captured_paper_outbox_event_sequence",
+        ),
+        CheckConstraint(
+            "sequence > 0 AND char_length(event_sha256) = 64 "
+            "AND char_length(event_payload_sha256) = 64 "
+            "AND ((sequence = 1 AND previous_event_sha256 IS NULL) OR "
+            "     (sequence > 1 AND char_length(previous_event_sha256) = 64))",
+            name="ck_captured_paper_outbox_event_lineage",
+        ),
+        Index(
+            "ix_captured_paper_outbox_event_time",
+            "completion_sha256",
+            "effective_at",
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    completion_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "captured_paper_post_commit_outbox.completion_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    sequence: int = Column(BigInteger, nullable=False)
+    event_type: str = Column(String(64), nullable=False)
+    previous_event_sha256: Optional[str] = Column(String(64), nullable=True)
+    event_sha256: str = Column(String(64), nullable=False, unique=True)
+    event_payload_sha256: str = Column(String(64), nullable=False)
+    event_payload_canonical_json: str = Column(Text, nullable=False)
+    effective_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AdaptiveRiskDecisionPacket(Base):
+    """Immutable resolver/admission evidence for one broker client-order id.
+
+    The mutable reservation deliberately lives in a separate table.  Migration
+    319 installs a database trigger which rejects UPDATE/DELETE here, so a retry
+    can return this exact packet but can never resize or recompute it in place.
+    """
+
+    __tablename__ = "adaptive_risk_decision_packets"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_scope",
+            "client_order_id",
+            name="uq_adaptive_risk_packet_account_cid",
+        ),
+        UniqueConstraint(
+            "account_scope",
+            "decision_id",
+            name="uq_adaptive_risk_packet_account_decision",
+        ),
+        Index(
+            "ix_adaptive_risk_packet_opportunity",
+            "account_scope",
+            "symbol",
+            "trading_date",
+            "setup_family",
+        ),
+        CheckConstraint(
+            "char_length(decision_packet_sha256) = 64 "
+            "AND char_length(reservation_request_sha256) = 64 "
+            "AND char_length(account_snapshot_sha256) = 64 "
+            "AND char_length(policy_sha256) = 64 "
+            "AND char_length(input_sha256) = 64 "
+            "AND char_length(economic_input_sha256) = 64 "
+            "AND char_length(economic_resolution_sha256) = 64 "
+            "AND char_length(evidence_sha256) = 64 "
+            "AND char_length(reservation_ledger_sha256) = 64",
+            name="ck_adaptive_risk_packet_hash_lengths",
+        ),
+        CheckConstraint(
+            "resolved_quantity_shares >= 0 AND entry_limit_price > 0",
+            name="ck_adaptive_risk_packet_values",
+        ),
+    )
+
+    decision_packet_sha256: str = Column(String(64), primary_key=True)
+    reservation_request_sha256: str = Column(String(64), nullable=False)
+    decision_id: str = Column(String(128), nullable=False)
+    account_scope: str = Column(String(160), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    trading_date: date = Column(Date, nullable=False)
+    setup_family: str = Column(String(96), nullable=False)
+    correlation_cluster: str = Column(String(96), nullable=False)
+    client_order_id: str = Column(String(160), nullable=False)
+    execution_surface: str = Column(String(32), nullable=False)
+    execution_family: str = Column(String(64), nullable=False)
+    broker_environment: str = Column(String(64), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    account_snapshot_sha256: str = Column(String(64), nullable=False)
+    account_snapshot_generation: str = Column(String(160), nullable=False)
+    policy_sha256: str = Column(String(64), nullable=False)
+    input_sha256: str = Column(String(64), nullable=False)
+    economic_input_sha256: str = Column(String(64), nullable=False)
+    economic_resolution_sha256: str = Column(String(64), nullable=False)
+    effective_config_sha256: str = Column(String(64), nullable=False)
+    code_build_sha256: str = Column(String(64), nullable=False)
+    feature_flags_sha256: str = Column(String(64), nullable=False)
+    capture_prefix_root_sha256: str = Column(String(64), nullable=False)
+    evidence_sha256: str = Column(String(64), nullable=False)
+    reservation_ledger_sha256: str = Column(String(64), nullable=False)
+    resolved_quantity_shares: int = Column(BigInteger, nullable=False)
+    structural_stop: float = Column(Numeric(28, 10), nullable=False)
+    entry_limit_price: float = Column(Numeric(28, 10), nullable=False)
+    resolver_valid: bool = Column(Boolean, nullable=False)
+    admission_accepted: bool = Column(Boolean, nullable=False)
+    rejection_reasons_json: list = Column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
+    account_snapshot_json: dict = Column(JSONB, nullable=False)
+    decision_packet_json: dict = Column(JSONB, nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AdaptiveRiskOpportunityClaim(Base):
+    """Current first-dip once-per-ET-day opportunity state.
+
+    ``reserved`` is not ``consumed``.  Only the first confirmed non-zero broker
+    fill transitions this row to ``consumed``; a safe zero-fill release returns
+    it to ``available``.
+    """
+
+    __tablename__ = "adaptive_risk_opportunity_claims"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_scope",
+            "symbol",
+            "trading_date",
+            "setup_family",
+            name="uq_adaptive_risk_opportunity_key",
+        ),
+        CheckConstraint(
+            "status IN ('available', 'reserved', 'consumed')",
+            name="ck_adaptive_risk_opportunity_status",
+        ),
+        CheckConstraint(
+            "(status = 'available' AND reservation_id IS NULL "
+            " AND consumed_by_reservation_id IS NULL) OR "
+            "(status = 'reserved' AND reservation_id IS NOT NULL "
+            " AND consumed_by_reservation_id IS NULL) OR "
+            "(status = 'consumed' AND reservation_id IS NULL "
+            " AND consumed_by_reservation_id IS NOT NULL "
+            " AND consumed_at IS NOT NULL)",
+            name="ck_adaptive_risk_opportunity_owner",
+        ),
+        CheckConstraint(
+            "event_sequence >= 0",
+            name="ck_adaptive_risk_opportunity_event_sequence",
+        ),
+        Index("ix_adaptive_risk_opportunity_status", "account_scope", "status"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    account_scope: str = Column(String(160), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    trading_date: date = Column(Date, nullable=False)
+    setup_family: str = Column(String(96), nullable=False)
+    status: str = Column(String(24), nullable=False)
+    reservation_id = Column(UUID(as_uuid=True), nullable=True)
+    consumed_by_reservation_id = Column(UUID(as_uuid=True), nullable=True)
+    event_sequence: int = Column(BigInteger, nullable=False, default=0)
+    last_event_sha256: Optional[str] = Column(String(64), nullable=True)
+    version: int = Column(BigInteger, nullable=False, default=1)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    updated_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    consumed_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+
+
+class AdaptiveRiskReservation(Base):
+    """Mutable current economic claim derived from one immutable packet."""
+
+    __tablename__ = "adaptive_risk_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('reserved', 'submitted', 'submit_indeterminate', "
+            "'partially_filled', 'filled', 'flat_pending_settlement', "
+            "'exposure_quarantined', 'released', 'closed')",
+            name="ck_adaptive_risk_reservation_state",
+        ),
+        CheckConstraint(
+            "(state = 'exposure_quarantined' "
+            " AND lifecycle_contradiction_source_state IS NOT NULL "
+            " AND lifecycle_contradiction_at IS NOT NULL "
+            " AND lifecycle_contradiction_evidence_sha256 IS NOT NULL "
+            " AND char_length(lifecycle_contradiction_evidence_sha256) = 64 "
+            " AND cumulative_filled_quantity_shares > 0) OR "
+            "(state <> 'exposure_quarantined' "
+            " AND lifecycle_contradiction_source_state IS NULL "
+            " AND lifecycle_contradiction_at IS NULL "
+            " AND lifecycle_contradiction_evidence_sha256 IS NULL)",
+            name="ck_adaptive_risk_reservation_contradiction",
+        ),
+        CheckConstraint(
+            "account_scope <> 'alpaca:paper' OR "
+            "state NOT IN ('flat_pending_settlement', 'closed') OR "
+            "(cumulative_filled_quantity_shares > 0 "
+            " AND open_quantity_shares = 0 "
+            " AND pending_structural_risk_usd = 0 "
+            " AND pending_gross_notional_usd = 0 "
+            " AND pending_buying_power_impact_usd = 0 "
+            " AND open_structural_risk_usd = 0 "
+            " AND open_gross_notional_usd = 0 "
+            " AND open_buying_power_impact_usd = 0 "
+            " AND released_at IS NULL "
+            " AND ((state = 'flat_pending_settlement' AND closed_at IS NULL) "
+            "      OR (state = 'closed' AND closed_at IS NOT NULL)))",
+            name="ck_adaptive_risk_reservation_settlement_state",
+        ),
+        CheckConstraint(
+            "(setup_family = 'first_dip_reclaim' "
+            " AND opportunity_claim_id IS NOT NULL) OR "
+            "(setup_family <> 'first_dip_reclaim' "
+            " AND opportunity_claim_id IS NULL)",
+            name="ck_adaptive_risk_reservation_opportunity_scope",
+        ),
+        CheckConstraint(
+            "planned_quantity_shares > 0 "
+            "AND cumulative_filled_quantity_shares >= 0 "
+            "AND open_quantity_shares >= 0 "
+            "AND open_quantity_shares <= cumulative_filled_quantity_shares",
+            name="ck_adaptive_risk_reservation_quantities",
+        ),
+        CheckConstraint(
+            "planned_structural_risk_usd > 0 "
+            "AND planned_gross_notional_usd > 0 "
+            "AND planned_buying_power_impact_usd > 0 "
+            "AND pending_structural_risk_usd >= 0 "
+            "AND pending_gross_notional_usd >= 0 "
+            "AND pending_buying_power_impact_usd >= 0 "
+            "AND open_structural_risk_usd >= 0 "
+            "AND open_gross_notional_usd >= 0 "
+            "AND open_buying_power_impact_usd >= 0",
+            name="ck_adaptive_risk_reservation_dimensions",
+        ),
+        CheckConstraint(
+            "(broker_source IS NULL "
+            " AND broker_connection_generation IS NULL "
+            " AND last_broker_observed_at IS NULL "
+            " AND last_broker_available_at IS NULL "
+            " AND last_source_event_content_sha256 IS NULL) OR "
+            "(broker_source IS NOT NULL "
+            " AND broker_connection_generation IS NOT NULL "
+            " AND broker_order_id IS NOT NULL "
+            " AND last_broker_observed_at IS NOT NULL "
+            " AND last_broker_available_at IS NOT NULL "
+            " AND last_source_event_content_sha256 IS NOT NULL)",
+            name="ck_adaptive_risk_reservation_lifecycle_binding",
+        ),
+        Index("ix_adaptive_risk_reservation_account_state", "account_scope", "state"),
+        Index("ix_adaptive_risk_reservation_symbol", "account_scope", "symbol"),
+        Index("ix_adaptive_risk_reservation_cluster", "account_scope", "correlation_cluster"),
+    )
+
+    reservation_id = Column(UUID(as_uuid=True), primary_key=True)
+    decision_packet_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "adaptive_risk_decision_packets.decision_packet_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+        unique=True,
+    )
+    opportunity_claim_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("adaptive_risk_opportunity_claims.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    account_scope: str = Column(String(160), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    trading_date: date = Column(Date, nullable=False)
+    setup_family: str = Column(String(96), nullable=False)
+    correlation_cluster: str = Column(String(96), nullable=False)
+    state: str = Column(String(32), nullable=False)
+    planned_quantity_shares: int = Column(BigInteger, nullable=False)
+    cumulative_filled_quantity_shares: int = Column(BigInteger, nullable=False, default=0)
+    open_quantity_shares: int = Column(BigInteger, nullable=False, default=0)
+    planned_structural_risk_usd: float = Column(Numeric(28, 10), nullable=False)
+    planned_gross_notional_usd: float = Column(Numeric(28, 10), nullable=False)
+    planned_buying_power_impact_usd: float = Column(Numeric(28, 10), nullable=False)
+    pending_structural_risk_usd: float = Column(Numeric(28, 10), nullable=False)
+    pending_gross_notional_usd: float = Column(Numeric(28, 10), nullable=False)
+    pending_buying_power_impact_usd: float = Column(Numeric(28, 10), nullable=False)
+    open_structural_risk_usd: float = Column(Numeric(28, 10), nullable=False)
+    open_gross_notional_usd: float = Column(Numeric(28, 10), nullable=False)
+    open_buying_power_impact_usd: float = Column(Numeric(28, 10), nullable=False)
+    broker_order_id: Optional[str] = Column(String(160), nullable=True)
+    broker_source: Optional[str] = Column(String(64), nullable=True)
+    broker_connection_generation: Optional[str] = Column(String(160), nullable=True)
+    last_broker_observed_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_broker_available_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_source_event_content_sha256: Optional[str] = Column(String(64), nullable=True)
+    event_sequence: int = Column(BigInteger, nullable=False, default=0)
+    last_event_sha256: Optional[str] = Column(String(64), nullable=True)
+    version: int = Column(BigInteger, nullable=False, default=1)
+    release_reason: Optional[str] = Column(String(64), nullable=True)
+    lifecycle_contradiction_source_state: Optional[str] = Column(
+        String(32), nullable=True
+    )
+    lifecycle_contradiction_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    lifecycle_contradiction_evidence_sha256: Optional[str] = Column(
+        String(64), nullable=True
+    )
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    updated_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    submitted_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    first_fill_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    released_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    closed_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+
+
+class AdaptiveRiskReservationEvent(Base):
+    """Append-only hash-chained reservation lifecycle fact."""
+
+    __tablename__ = "adaptive_risk_reservation_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "reservation_id",
+            "sequence",
+            name="uq_adaptive_risk_reservation_event_sequence",
+        ),
+        UniqueConstraint(
+            "reservation_id",
+            "broker_event_id",
+            name="uq_adaptive_risk_reservation_broker_event",
+        ),
+        CheckConstraint(
+            "char_length(event_sha256) = 64 "
+            "AND (previous_event_sha256 IS NULL "
+            " OR char_length(previous_event_sha256) = 64)",
+            name="ck_adaptive_risk_reservation_event_hash",
+        ),
+        Index("ix_adaptive_risk_reservation_event_time", "reservation_id", "effective_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("adaptive_risk_reservations.reservation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    sequence: int = Column(BigInteger, nullable=False)
+    event_type: str = Column(String(64), nullable=False)
+    previous_event_sha256: Optional[str] = Column(String(64), nullable=True)
+    event_sha256: str = Column(String(64), nullable=False, unique=True)
+    broker_event_id: Optional[str] = Column(String(192), nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False)
+    effective_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AdaptiveRiskOpportunityEvent(Base):
+    """Append-only hash-chained audit of available/reserved/consumed claims."""
+
+    __tablename__ = "adaptive_risk_opportunity_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "opportunity_claim_id",
+            "sequence",
+            name="uq_adaptive_risk_opportunity_event_sequence",
+        ),
+        CheckConstraint(
+            "char_length(event_sha256) = 64 "
+            "AND (previous_event_sha256 IS NULL "
+            " OR char_length(previous_event_sha256) = 64)",
+            name="ck_adaptive_risk_opportunity_event_hash",
+        ),
+        Index("ix_adaptive_risk_opportunity_event_time", "opportunity_claim_id", "effective_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    opportunity_claim_id: int = Column(
+        BigInteger,
+        ForeignKey("adaptive_risk_opportunity_claims.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reservation_id = Column(UUID(as_uuid=True), nullable=False)
+    sequence: int = Column(BigInteger, nullable=False)
+    event_type: str = Column(String(64), nullable=False)
+    previous_event_sha256: Optional[str] = Column(String(64), nullable=True)
+    event_sha256: str = Column(String(64), nullable=False, unique=True)
+    payload_json: dict = Column(JSONB, nullable=False)
+    effective_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
 # f-phase3-stop-bleed D6 — constants for the Trade.scan_pattern_id
 # validator. The 2026-05-15 audit found 210 trade rows with NULL
 # scan_pattern_id totalling $1,560 of realized losses (legacy pre-CHILI
@@ -95,6 +803,1362 @@ class BrokerSymbolActionClaim(Base):
 # the absence is documented rather than implicit.
 _RECONCILE_IMPORT_SOURCES = frozenset({"reconcile_import", "manual"})
 _NO_PATTERN_SENTINEL = -1
+
+
+class AlpacaPaperFillActivity(Base):
+    """Immutable provider fill fact assigned to one adaptive PAPER cycle.
+
+    The provider payload is retained as canonical JSON text (rather than only
+    JSONB) so its SHA-256 can be recomputed byte-for-byte after a database
+    round-trip. Migration 327 rejects every UPDATE/DELETE. V1 remains an
+    explicitly unverified diagnostic. V2 is emitted only by the
+    account-pinned Alpaca PAPER activity reader and retains executable fill,
+    order-owner, event-clock, and simulator-fee evidence. Missing values are
+    never coerced to zero.
+    """
+
+    __tablename__ = "alpaca_paper_fill_activities"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_scope",
+            "account_identity_sha256",
+            "provider_activity_id",
+            name="uq_alpaca_paper_fill_provider_activity",
+        ),
+        UniqueConstraint(
+            "reservation_id",
+            "sequence",
+            name="uq_alpaca_paper_fill_cycle_sequence",
+        ),
+        CheckConstraint(
+            "capture_schema_version IN ("
+            "'chili.alpaca-paper-fill-activity.v1', "
+            "'chili.alpaca-paper-fill-activity.v2')",
+            name="ck_alpaca_paper_fill_schema",
+        ),
+        CheckConstraint(
+            "(capture_schema_version = 'chili.alpaca-paper-fill-activity.v1' "
+            " AND capture_authority_status = 'unverified') OR "
+            "(capture_schema_version = 'chili.alpaca-paper-fill-activity.v2' "
+            " AND capture_authority_status = 'verified')",
+            name="ck_alpaca_paper_fill_capture_authority",
+        ),
+        CheckConstraint(
+            "account_scope = 'alpaca:paper'",
+            name="ck_alpaca_paper_fill_scope",
+        ),
+        CheckConstraint(
+            "execution_family = 'alpaca_spot' "
+            "AND position_direction = 'long'",
+            name="ck_alpaca_paper_fill_strategy_scope",
+        ),
+        CheckConstraint(
+            "provider_activity_type = 'fill' "
+            "AND provider_trade_type IN ('fill', 'partial_fill')",
+            name="ck_alpaca_paper_fill_activity_type",
+        ),
+        CheckConstraint(
+            "side IN ('buy', 'sell') "
+            "AND ((order_role = 'entry' AND side = 'buy') "
+            "OR (order_role = 'exit' AND side = 'sell')) "
+            "AND ((order_role = 'entry' "
+            " AND order_ownership_status = 'reservation_bound') "
+            "OR (order_role = 'exit' "
+            " AND ((capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v1' "
+            "AND order_ownership_status = 'unverified') OR "
+            "(capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v2' "
+            "AND order_ownership_status = 'authoritative')))) "
+            "AND ((order_role = 'entry' "
+            " AND provider_order_id = entry_provider_order_id) "
+            "OR (order_role = 'exit' "
+            " AND provider_order_id <> entry_provider_order_id))",
+            name="ck_alpaca_paper_fill_side_role",
+        ),
+        CheckConstraint(
+            "quantity > 0 AND price > 0 AND leaves_quantity >= 0 "
+            "AND cumulative_quantity >= quantity",
+            name="ck_alpaca_paper_fill_values",
+        ),
+        CheckConstraint(
+            "(capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v1' AND ("
+            "(provider_event_clock_status = 'unverified_mapping' "
+            " AND provider_event_at IS NOT NULL "
+            " AND provider_event_clock_field IS NOT NULL) "
+            "OR (provider_event_clock_status = 'provider_unavailable' "
+            " AND provider_event_at IS NULL "
+            " AND provider_event_clock_field IS NULL))) "
+            "OR (capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v2' "
+            "AND provider_event_clock_status = 'authoritative' "
+            "AND provider_event_clock_field = 'transaction_time' "
+            "AND provider_event_at = provider_transaction_at)",
+            name="ck_alpaca_paper_fill_event_clock",
+        ),
+        CheckConstraint(
+            "(capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v1' AND ("
+            "(provider_client_order_id_status = 'unverified_mapping' "
+            " AND provider_client_order_id IS NOT NULL "
+            " AND provider_order_payload_sha256 IS NOT NULL "
+            " AND provider_order_payload_canonical_json IS NOT NULL) "
+            "OR (provider_client_order_id_status = 'provider_unavailable' "
+            " AND provider_client_order_id IS NULL "
+            " AND provider_order_payload_sha256 IS NULL "
+            " AND provider_order_payload_canonical_json IS NULL))) "
+            "OR (capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v2' "
+            "AND provider_client_order_id_status = 'authoritative' "
+            "AND provider_client_order_id IS NOT NULL "
+            "AND provider_order_payload_sha256 IS NOT NULL "
+            "AND provider_order_payload_canonical_json IS NOT NULL)",
+            name="ck_alpaca_paper_fill_provider_cid",
+        ),
+        CheckConstraint(
+            "(capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v1' AND ("
+            "(fee_status = 'unverified_mapping' AND fee_usd IS NOT NULL "
+            " AND fee_usd >= 0 AND fee_evidence_sha256 IS NOT NULL "
+            " AND fee_evidence_canonical_json IS NOT NULL) "
+            "OR (fee_status = 'provider_unavailable' "
+            " AND fee_usd IS NULL AND fee_evidence_sha256 IS NULL "
+            " AND fee_evidence_canonical_json IS NULL))) "
+            "OR (capture_schema_version = "
+            "'chili.alpaca-paper-fill-activity.v2' "
+            "AND fee_status = 'authoritative' AND fee_usd IS NOT NULL "
+            "AND fee_usd = 0 AND fee_evidence_sha256 IS NOT NULL "
+            "AND fee_evidence_canonical_json IS NOT NULL)",
+            name="ck_alpaca_paper_fill_fee_truth",
+        ),
+        CheckConstraint(
+            "provider_transaction_at <= received_at "
+            "AND (provider_event_at IS NULL OR provider_event_at <= received_at) "
+            "AND received_at <= available_at",
+            name="ck_alpaca_paper_fill_clocks",
+        ),
+        CheckConstraint(
+            "sequence > 0 AND ((sequence = 1 "
+            " AND previous_event_sha256 IS NULL) OR (sequence > 1 "
+            " AND previous_event_sha256 IS NOT NULL))",
+            name="ck_alpaca_paper_fill_lineage",
+        ),
+        CheckConstraint(
+            "char_length(decision_packet_sha256) = 64 "
+            "AND char_length(reservation_request_sha256) = 64 "
+            "AND char_length(account_identity_sha256) = 64 "
+            "AND char_length(provider_account_id_sha256) = 64 "
+            "AND char_length(account_snapshot_sha256) = 64 "
+            "AND char_length(provider_payload_sha256) = 64 "
+            "AND char_length(order_binding_sha256) = 64 "
+            "AND char_length(record_content_sha256) = 64 "
+            "AND char_length(event_sha256) = 64 "
+            "AND (previous_event_sha256 IS NULL "
+            " OR char_length(previous_event_sha256) = 64) "
+            "AND (provider_order_payload_sha256 IS NULL "
+            " OR char_length(provider_order_payload_sha256) = 64) "
+            "AND (fee_evidence_sha256 IS NULL "
+            " OR char_length(fee_evidence_sha256) = 64)",
+            name="ck_alpaca_paper_fill_hashes",
+        ),
+        CheckConstraint(
+            "immutable_fill_identity_sha256 IS NULL "
+            "OR char_length(immutable_fill_identity_sha256) = 64",
+            name="ck_alpaca_paper_fill_identity_hash",
+        ),
+        CheckConstraint(
+            "capture_schema_version <> 'chili.alpaca-paper-fill-activity.v2' "
+            "OR immutable_fill_identity_sha256 IS NOT NULL",
+            name="ck_alpaca_paper_fill_v2_identity",
+        ),
+        Index(
+            "ix_alpaca_paper_fill_cycle_time",
+            "reservation_id",
+            "provider_transaction_at",
+        ),
+        Index(
+            "ix_alpaca_paper_fill_order",
+            "account_scope",
+            "account_identity_sha256",
+            "provider_order_id",
+        ),
+        Index(
+            "uq_alpaca_paper_fill_immutable_identity",
+            "immutable_fill_identity_sha256",
+            unique=True,
+            postgresql_where=text("immutable_fill_identity_sha256 IS NOT NULL"),
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    capture_schema_version: str = Column(String(64), nullable=False)
+    capture_authority_status: str = Column(String(32), nullable=False)
+    reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("adaptive_risk_reservations.reservation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision_packet_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "adaptive_risk_decision_packets.decision_packet_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    reservation_request_sha256: str = Column(String(64), nullable=False)
+    account_scope: str = Column(String(160), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    account_snapshot_sha256: str = Column(String(64), nullable=False)
+    account_snapshot_generation: str = Column(String(160), nullable=False)
+    broker_connection_generation: str = Column(String(160), nullable=False)
+    execution_family: str = Column(String(64), nullable=False)
+    position_direction: str = Column(String(8), nullable=False)
+    cycle_client_order_id: str = Column(String(160), nullable=False)
+    entry_provider_order_id: str = Column(String(160), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    order_role: str = Column(String(16), nullable=False)
+    order_ownership_status: str = Column(String(32), nullable=False)
+
+    provider_activity_id: str = Column(String(192), nullable=False)
+    provider_account_id_sha256: str = Column(String(64), nullable=False)
+    provider_activity_type: str = Column(String(32), nullable=False)
+    provider_trade_type: str = Column(String(32), nullable=False)
+    provider_order_id: str = Column(String(160), nullable=False)
+    provider_client_order_id_status: str = Column(String(32), nullable=False)
+    provider_client_order_id: Optional[str] = Column(String(160), nullable=True)
+    provider_order_status: str = Column(String(48), nullable=False)
+    side: str = Column(String(8), nullable=False)
+    quantity: float = Column(Numeric(28, 10), nullable=False)
+    price: float = Column(Numeric(28, 10), nullable=False)
+    leaves_quantity: float = Column(Numeric(28, 10), nullable=False)
+    cumulative_quantity: float = Column(Numeric(28, 10), nullable=False)
+
+    fee_status: str = Column(String(32), nullable=False)
+    fee_usd: Optional[float] = Column(Numeric(28, 10), nullable=True)
+    fee_evidence_sha256: Optional[str] = Column(String(64), nullable=True)
+    fee_evidence_canonical_json: Optional[str] = Column(Text, nullable=True)
+
+    provider_event_clock_status: str = Column(String(32), nullable=False)
+    provider_event_clock_field: Optional[str] = Column(String(64), nullable=True)
+    provider_event_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    provider_transaction_at: datetime = Column(
+        DateTime(timezone=True), nullable=False
+    )
+    received_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+
+    provider_payload_canonical_json: str = Column(Text, nullable=False)
+    provider_payload_sha256: str = Column(String(64), nullable=False)
+    immutable_fill_identity_sha256: Optional[str] = Column(String(64), nullable=True)
+    provider_order_payload_canonical_json: Optional[str] = Column(Text, nullable=True)
+    provider_order_payload_sha256: Optional[str] = Column(String(64), nullable=True)
+    order_binding_sha256: str = Column(String(64), nullable=False)
+    record_content_sha256: str = Column(String(64), nullable=False)
+    sequence: int = Column(BigInteger, nullable=False)
+    previous_event_sha256: Optional[str] = Column(String(64), nullable=True)
+    event_sha256: str = Column(String(64), nullable=False, unique=True)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperFillQueryObservation(Base):
+    """One immutable, pagination-complete broker poll for an adaptive cycle."""
+
+    __tablename__ = "alpaca_paper_fill_query_observations"
+    __table_args__ = (
+        CheckConstraint(
+            "observation_schema_version = "
+            "'chili.alpaca-paper-fill-query-observation.v1' "
+            "AND observation_authority_status = 'verified'",
+            name="ck_alpaca_fill_query_observation_schema",
+        ),
+        CheckConstraint(
+            "account_scope = 'alpaca:paper' "
+            "AND broker_environment = 'paper' "
+            "AND asset_class = 'us_equity' "
+            "AND execution_family = 'alpaca_spot' "
+            "AND position_direction = 'long'",
+            name="ck_alpaca_fill_query_observation_scope",
+        ),
+        CheckConstraint(
+            "order_role IN ('entry', 'exit') "
+            "AND exact_activity_count >= 0 AND page_count > 0 "
+            "AND pagination_complete "
+            "AND pagination_scope = "
+            "'pagination_only_not_fill_absence_or_economic_completeness'",
+            name="ck_alpaca_fill_query_observation_semantics",
+        ),
+        CheckConstraint(
+            "query_after <= query_until AND query_until <= received_at "
+            "AND received_at <= available_at AND available_at < expires_at",
+            name="ck_alpaca_fill_query_observation_clocks",
+        ),
+        CheckConstraint(
+            "observation_sha256 = observation_content_sha256 "
+            "AND char_length(observation_sha256) = 64 "
+            "AND char_length(decision_packet_sha256) = 64 "
+            "AND char_length(account_identity_sha256) = 64 "
+            "AND char_length(provider_account_id_sha256) = 64 "
+            "AND char_length(adapter_build_sha256) = 64 "
+            "AND char_length(provider_order_payload_sha256) = 64 "
+            "AND char_length(read_binding_sha256) = 64 "
+            "AND char_length(query_receipt_sha256) = 64",
+            name="ck_alpaca_fill_query_observation_hashes",
+        ),
+        Index(
+            "ix_alpaca_fill_query_observation_cycle_time",
+            "reservation_id",
+            "available_at",
+        ),
+        Index(
+            "ix_alpaca_fill_query_observation_order_time",
+            "account_identity_sha256",
+            "provider_order_id",
+            "available_at",
+        ),
+    )
+
+    observation_sha256: str = Column(String(64), primary_key=True)
+    observation_schema_version: str = Column(String(72), nullable=False)
+    observation_authority_status: str = Column(String(32), nullable=False)
+    reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("adaptive_risk_reservations.reservation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision_packet_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "adaptive_risk_decision_packets.decision_packet_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    account_scope: str = Column(String(160), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    provider_account_id_sha256: str = Column(String(64), nullable=False)
+    broker_environment: str = Column(String(32), nullable=False)
+    asset_class: str = Column(String(32), nullable=False)
+    execution_family: str = Column(String(64), nullable=False)
+    position_direction: str = Column(String(8), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    provider_order_id: str = Column(String(160), nullable=False)
+    expected_client_order_id: str = Column(String(160), nullable=False)
+    order_role: str = Column(String(16), nullable=False)
+    account_snapshot_generation: str = Column(String(160), nullable=False)
+    cycle_broker_connection_generation: str = Column(String(160), nullable=False)
+    adapter_connection_generation: str = Column(String(160), nullable=False)
+    adapter_build_sha256: str = Column(String(64), nullable=False)
+    provider_order_payload_canonical_json: str = Column(Text, nullable=False)
+    provider_order_payload_sha256: str = Column(String(64), nullable=False)
+    read_binding_canonical_json: str = Column(Text, nullable=False)
+    read_binding_sha256: str = Column(String(64), nullable=False)
+    query_receipt_canonical_json: str = Column(Text, nullable=False)
+    query_receipt_sha256: str = Column(String(64), nullable=False)
+    observation_content_canonical_json: str = Column(Text, nullable=False)
+    observation_content_sha256: str = Column(String(64), nullable=False)
+    query_after: datetime = Column(DateTime(timezone=True), nullable=False)
+    query_until: datetime = Column(DateTime(timezone=True), nullable=False)
+    received_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    expires_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    exact_activity_count: int = Column(Integer, nullable=False)
+    page_count: int = Column(Integer, nullable=False)
+    pagination_complete: bool = Column(Boolean, nullable=False)
+    pagination_scope: str = Column(String(96), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperFillPageObject(Base):
+    """Content-addressed exact request/response bytes for one provider page."""
+
+    __tablename__ = "alpaca_paper_fill_page_objects"
+    __table_args__ = (
+        CheckConstraint(
+            "page_schema_version = 'chili.alpaca-paper-fill-page-object.v1' "
+            "AND response_count >= 0",
+            name="ck_alpaca_fill_page_object_schema",
+        ),
+        CheckConstraint(
+            "char_length(page_object_sha256) = 64 "
+            "AND char_length(request_sha256) = 64 "
+            "AND char_length(response_sha256) = 64",
+            name="ck_alpaca_fill_page_object_hashes",
+        ),
+    )
+
+    page_object_sha256: str = Column(String(64), primary_key=True)
+    page_schema_version: str = Column(String(64), nullable=False)
+    request_canonical_json: str = Column(Text, nullable=False)
+    request_sha256: str = Column(String(64), nullable=False)
+    response_canonical_json: str = Column(Text, nullable=False)
+    response_sha256: str = Column(String(64), nullable=False)
+    response_count: int = Column(Integer, nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperFillObservationPage(Base):
+    """Ordered page/token/clock mapping for one immutable query observation."""
+
+    __tablename__ = "alpaca_paper_fill_observation_pages"
+    __table_args__ = (
+        CheckConstraint(
+            "page_index >= 0 AND requested_at <= received_at "
+            "AND received_at <= available_at",
+            name="ck_alpaca_fill_observation_page_clocks",
+        ),
+        CheckConstraint(
+            "char_length(page_object_sha256) = 64 "
+            "AND char_length(mapping_sha256) = 64",
+            name="ck_alpaca_fill_observation_page_hashes",
+        ),
+        UniqueConstraint(
+            "observation_sha256",
+            "mapping_sha256",
+            name="uq_alpaca_fill_observation_page_mapping",
+        ),
+    )
+
+    observation_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "alpaca_paper_fill_query_observations.observation_sha256",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    page_index: int = Column(Integer, primary_key=True)
+    page_object_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "alpaca_paper_fill_page_objects.page_object_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    request_page_token: Optional[str] = Column(String(192), nullable=True)
+    next_page_token: Optional[str] = Column(String(192), nullable=True)
+    requested_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    received_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    terminal: bool = Column(Boolean, nullable=False)
+    mapping_sha256: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperFillObservationActivity(Base):
+    """Append-only join from a broker poll to each exact immutable fill fact."""
+
+    __tablename__ = "alpaca_paper_fill_observation_activities"
+    __table_args__ = (
+        CheckConstraint(
+            "activity_ordinal >= 0 "
+            "AND char_length(fill_event_sha256) = 64 "
+            "AND char_length(immutable_fill_identity_sha256) = 64 "
+            "AND char_length(provider_payload_sha256) = 64 "
+            "AND char_length(mapping_sha256) = 64",
+            name="ck_alpaca_fill_observation_activity_hashes",
+        ),
+        UniqueConstraint(
+            "observation_sha256",
+            "fill_event_sha256",
+            name="uq_alpaca_fill_observation_activity_event",
+        ),
+    )
+
+    observation_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "alpaca_paper_fill_query_observations.observation_sha256",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    activity_ordinal: int = Column(Integer, primary_key=True)
+    fill_event_sha256: str = Column(
+        String(64),
+        ForeignKey("alpaca_paper_fill_activities.event_sha256", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    immutable_fill_identity_sha256: str = Column(String(64), nullable=False)
+    provider_activity_id: str = Column(String(192), nullable=False)
+    provider_payload_sha256: str = Column(String(64), nullable=False)
+    mapping_sha256: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperTerminalFillObservationReceipt(Base):
+    """Typed join proving which broker poll observed a settlement terminal fill."""
+
+    __tablename__ = "alpaca_paper_terminal_fill_observation_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "settlement_sha256",
+            name="uq_alpaca_terminal_fill_observation_settlement",
+        ),
+        CheckConstraint(
+            "receipt_schema_version = "
+            "'chili.alpaca-paper-terminal-fill-observation.v1' "
+            "AND authority_status = 'verified' "
+            "AND account_scope = 'alpaca:paper'",
+            name="ck_alpaca_terminal_fill_observation_schema",
+        ),
+        CheckConstraint(
+            "terminal_fill_observed_at <= terminal_fill_available_at",
+            name="ck_alpaca_terminal_fill_observation_clocks",
+        ),
+        CheckConstraint(
+            "receipt_sha256 = receipt_content_sha256 "
+            "AND char_length(receipt_sha256) = 64 "
+            "AND char_length(account_identity_sha256) = 64 "
+            "AND char_length(observation_sha256) = 64 "
+            "AND char_length(terminal_fill_event_sha256) = 64 "
+            "AND char_length(immutable_fill_identity_sha256) = 64 "
+            "AND char_length(query_receipt_sha256) = 64 "
+            "AND char_length(read_binding_sha256) = 64 "
+            "AND char_length(adapter_build_sha256) = 64",
+            name="ck_alpaca_terminal_fill_observation_hashes",
+        ),
+    )
+
+    receipt_sha256: str = Column(String(64), primary_key=True)
+    receipt_schema_version: str = Column(String(72), nullable=False)
+    authority_status: str = Column(String(32), nullable=False)
+    settlement_sha256: str = Column(
+        String(64),
+        ForeignKey("alpaca_paper_cycle_settlements.settlement_sha256", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("adaptive_risk_reservations.reservation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    account_scope: str = Column(String(160), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    observation_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "alpaca_paper_fill_query_observations.observation_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    terminal_fill_event_sha256: str = Column(
+        String(64),
+        ForeignKey("alpaca_paper_fill_activities.event_sha256", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    immutable_fill_identity_sha256: str = Column(String(64), nullable=False)
+    query_receipt_sha256: str = Column(String(64), nullable=False)
+    read_binding_sha256: str = Column(String(64), nullable=False)
+    adapter_connection_generation: str = Column(String(160), nullable=False)
+    adapter_build_sha256: str = Column(String(64), nullable=False)
+    terminal_fill_observed_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    terminal_fill_available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    receipt_content_canonical_json: str = Column(Text, nullable=False)
+    receipt_content_sha256: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperBuyingPowerReflectionReceipt(Base):
+    """Append-only aggregate A/account/B pending buying-power proof."""
+
+    __tablename__ = "alpaca_paper_bp_reflection_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "receipt_schema_version = 'chili.alpaca-paper-bp-reflection.v1' "
+            "AND authority_status = 'verified' "
+            "AND account_scope = 'alpaca:paper'",
+            name="ck_alpaca_bp_reflection_receipt_schema",
+        ),
+        CheckConstraint(
+            "pending_buying_power_impact_usd >= 0 "
+            "AND open_buying_power_impact_usd >= 0 "
+            "AND reflected_pending_buying_power_usd >= 0 "
+            "AND reflected_pending_buying_power_usd "
+            "    <= pending_buying_power_impact_usd "
+            "AND broker_buying_power_usd >= 0 "
+            "AND policy_buying_power_capacity_usd = "
+            "    broker_buying_power_usd + open_buying_power_impact_usd "
+            "    + reflected_pending_buying_power_usd "
+            "AND item_count >= 0",
+            name="ck_alpaca_bp_reflection_receipt_values",
+        ),
+        CheckConstraint(
+            "census_a_requested_at <= census_a_received_at "
+            "AND census_a_received_at <= census_a_available_at "
+            "AND census_a_available_at <= account_observed_at "
+            "AND account_observed_at <= account_available_at "
+            "AND account_available_at <= census_b_requested_at "
+            "AND census_b_requested_at <= census_b_received_at "
+            "AND census_b_received_at <= census_b_available_at",
+            name="ck_alpaca_bp_reflection_receipt_clocks",
+        ),
+        CheckConstraint(
+            "receipt_sha256 = receipt_content_sha256 "
+            "AND char_length(receipt_sha256) = 64 "
+            "AND char_length(batch_content_sha256) = 64 "
+            "AND char_length(account_identity_sha256) = 64 "
+            "AND char_length(account_snapshot_sha256) = 64 "
+            "AND char_length(account_read_receipt_sha256) = 64 "
+            "AND char_length(reservation_ledger_sha256) = 64 "
+            "AND char_length(census_a_read_binding_sha256) = 64 "
+            "AND char_length(census_a_query_receipt_sha256) = 64 "
+            "AND char_length(census_b_read_binding_sha256) = 64 "
+            "AND char_length(census_b_query_receipt_sha256) = 64 "
+            "AND char_length(census_a_inventory_sha256) = 64 "
+            "AND census_a_inventory_sha256 = census_b_inventory_sha256 "
+            "AND char_length(census_a_adapter_build_sha256) = 64 "
+            "AND census_a_adapter_build_sha256 = census_b_adapter_build_sha256 "
+            "AND census_a_adapter_connection_generation = "
+            "    census_b_adapter_connection_generation",
+            name="ck_alpaca_bp_reflection_receipt_hashes",
+        ),
+        Index(
+            "ix_alpaca_bp_reflection_receipt_account_time",
+            "account_identity_sha256",
+            "account_available_at",
+        ),
+    )
+
+    receipt_sha256: str = Column(String(64), primary_key=True)
+    receipt_schema_version: str = Column(String(72), nullable=False)
+    authority_status: str = Column(String(32), nullable=False)
+    batch_content_sha256: str = Column(String(64), nullable=False)
+    decision_id: str = Column(String(128), nullable=False)
+    run_id = Column(UUID(as_uuid=True), nullable=False)
+    generation: int = Column(BigInteger, nullable=False)
+    account_scope: str = Column(String(160), nullable=False)
+    account_id = Column(UUID(as_uuid=True), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    account_snapshot_sha256: str = Column(String(64), nullable=False)
+    account_read_receipt_sha256: str = Column(String(64), nullable=False)
+    account_provider_generation: str = Column(String(192), nullable=False)
+    account_observed_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    account_available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    broker_buying_power_usd: float = Column(Numeric(28, 10), nullable=False)
+    reservation_ledger_sha256: str = Column(String(64), nullable=False)
+    open_buying_power_impact_usd: float = Column(Numeric(28, 10), nullable=False)
+    pending_buying_power_impact_usd: float = Column(Numeric(28, 10), nullable=False)
+    reflected_pending_buying_power_usd: float = Column(Numeric(28, 10), nullable=False)
+    policy_buying_power_capacity_usd: float = Column(Numeric(28, 10), nullable=False)
+    census_a_read_binding_canonical_json: str = Column(Text, nullable=False)
+    census_a_read_binding_sha256: str = Column(String(64), nullable=False)
+    census_a_query_receipt_canonical_json: str = Column(Text, nullable=False)
+    census_a_query_receipt_sha256: str = Column(String(64), nullable=False)
+    census_a_inventory_canonical_json: str = Column(Text, nullable=False)
+    census_a_inventory_sha256: str = Column(String(64), nullable=False)
+    census_a_adapter_connection_generation: str = Column(String(192), nullable=False)
+    census_a_adapter_build_sha256: str = Column(String(64), nullable=False)
+    census_a_requested_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    census_a_received_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    census_a_available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    census_b_read_binding_canonical_json: str = Column(Text, nullable=False)
+    census_b_read_binding_sha256: str = Column(String(64), nullable=False)
+    census_b_query_receipt_canonical_json: str = Column(Text, nullable=False)
+    census_b_query_receipt_sha256: str = Column(String(64), nullable=False)
+    census_b_inventory_canonical_json: str = Column(Text, nullable=False)
+    census_b_inventory_sha256: str = Column(String(64), nullable=False)
+    census_b_adapter_connection_generation: str = Column(String(192), nullable=False)
+    census_b_adapter_build_sha256: str = Column(String(64), nullable=False)
+    census_b_requested_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    census_b_received_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    census_b_available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    item_count: int = Column(Integer, nullable=False)
+    receipt_content_canonical_json: str = Column(Text, nullable=False)
+    receipt_content_sha256: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperBuyingPowerReflectionItem(Base):
+    """One frozen local-reservation/provider-order match in a reflection proof."""
+
+    __tablename__ = "alpaca_paper_bp_reflection_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "receipt_sha256",
+            "reservation_id",
+            name="uq_alpaca_bp_reflection_item_reservation",
+        ),
+        CheckConstraint(
+            "classification IN ('unreflected_pre_transport', 'reflected_open_limit') "
+            "AND item_ordinal >= 0 "
+            "AND local_planned_quantity_shares > 0 "
+            "AND local_cumulative_filled_quantity_shares >= 0 "
+            "AND local_remaining_quantity_shares > 0 "
+            "AND local_pending_buying_power_impact_usd > 0 "
+            "AND local_planned_per_share_buying_power_usd > 0 "
+            "AND local_entry_limit_price > 0 "
+            "AND local_time_in_force IN ('day', 'gtc') "
+            "AND local_position_intent = 'buy_to_open' "
+            "AND (NOT local_extended_hours "
+            "     OR local_time_in_force = 'day') "
+            "AND local_pending_buying_power_impact_usd = "
+            "    local_remaining_quantity_shares * "
+            "    local_planned_per_share_buying_power_usd",
+            name="ck_alpaca_bp_reflection_item_values",
+        ),
+        CheckConstraint(
+            "(classification = 'unreflected_pre_transport' "
+            " AND provider_order_id IS NULL "
+            " AND provider_client_order_id IS NULL "
+            " AND provider_order_sha256 IS NULL "
+            " AND provider_order_status IS NULL "
+            " AND provider_order_side IS NULL "
+            " AND provider_order_type IS NULL "
+            " AND provider_quantity_shares IS NULL "
+            " AND provider_filled_quantity_shares IS NULL "
+            " AND provider_remaining_quantity_shares IS NULL "
+            " AND provider_limit_price IS NULL "
+            " AND provider_asset_class IS NULL "
+            " AND provider_time_in_force IS NULL "
+            " AND provider_extended_hours IS NULL "
+            " AND provider_position_intent IS NULL) OR "
+            "(classification = 'reflected_open_limit' "
+            " AND provider_order_id IS NOT NULL "
+            " AND provider_client_order_id = client_order_id "
+            " AND provider_order_sha256 IS NOT NULL "
+            " AND provider_order_status IS NOT NULL "
+            " AND provider_order_side = 'buy' "
+            " AND provider_order_type = 'limit' "
+            " AND provider_quantity_shares = local_planned_quantity_shares "
+            " AND provider_filled_quantity_shares = "
+            "     local_cumulative_filled_quantity_shares "
+            " AND provider_remaining_quantity_shares > 0 "
+            " AND provider_remaining_quantity_shares = "
+            "     local_remaining_quantity_shares "
+            " AND provider_quantity_shares = "
+            "     provider_filled_quantity_shares + "
+            "     provider_remaining_quantity_shares "
+            " AND provider_limit_price = local_entry_limit_price "
+            " AND provider_asset_class = 'us_equity' "
+            " AND provider_time_in_force = local_time_in_force "
+            " AND provider_extended_hours = local_extended_hours "
+            " AND (provider_position_intent IS NULL "
+            "      OR provider_position_intent = local_position_intent))",
+            name="ck_alpaca_bp_reflection_item_classification",
+        ),
+        CheckConstraint(
+            "char_length(decision_packet_sha256) = 64 "
+            "AND char_length(item_sha256) = 64 "
+            "AND char_length(local_outbox_completion_sha256) = 64 "
+            "AND char_length(local_action_claim_metadata_sha256) = 64 "
+            "AND (provider_order_sha256 IS NULL "
+            " OR char_length(provider_order_sha256) = 64)",
+            name="ck_alpaca_bp_reflection_item_hashes",
+        ),
+        CheckConstraint(
+            "(classification = 'unreflected_pre_transport' "
+            " AND reservation_state = 'reserved' "
+            " AND local_cumulative_filled_quantity_shares = 0 "
+            " AND local_broker_order_id IS NULL "
+            " AND local_broker_source IS NULL "
+            " AND local_broker_connection_generation IS NULL "
+            " AND local_action_claim_phase = 'claimed' "
+            " AND local_outbox_status IN "
+            "     ('pending', 'leased', 'retry_wait', 'retry_exhausted') "
+            " AND local_outbox_transport_started_at IS NULL "
+            " AND local_outbox_transport_evidence_sha256 IS NULL) OR "
+            "(classification = 'reflected_open_limit' "
+            " AND local_broker_order_id = provider_order_id "
+            " AND local_broker_source = 'alpaca' "
+            " AND local_broker_connection_generation IS NOT NULL "
+            " AND local_action_claim_phase IN "
+            "     ('submit_indeterminate', 'submitted') "
+            " AND local_outbox_status IN "
+            "     ('transport_started', 'transport_indeterminate', "
+            "      'reconciling', 'completed') "
+            " AND local_outbox_transport_started_at IS NOT NULL "
+            " AND char_length(local_outbox_transport_evidence_sha256) = 64)",
+            name="ck_alpaca_bp_reflection_item_transport_phase",
+        ),
+    )
+
+    receipt_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "alpaca_paper_bp_reflection_receipts.receipt_sha256",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    item_ordinal: int = Column(Integer, primary_key=True)
+    reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("adaptive_risk_reservations.reservation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision_packet_sha256: str = Column(String(64), nullable=False)
+    reservation_state: str = Column(String(32), nullable=False)
+    reservation_version: int = Column(BigInteger, nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    client_order_id: str = Column(String(160), nullable=False)
+    classification: str = Column(String(40), nullable=False)
+    local_planned_quantity_shares: int = Column(BigInteger, nullable=False)
+    local_cumulative_filled_quantity_shares: int = Column(BigInteger, nullable=False)
+    local_remaining_quantity_shares: int = Column(BigInteger, nullable=False)
+    local_pending_buying_power_impact_usd: float = Column(
+        Numeric(28, 10), nullable=False
+    )
+    local_planned_per_share_buying_power_usd: float = Column(
+        Numeric(28, 10), nullable=False
+    )
+    local_entry_limit_price: float = Column(Numeric(28, 10), nullable=False)
+    local_time_in_force: str = Column(String(16), nullable=False)
+    local_extended_hours: bool = Column(Boolean, nullable=False)
+    local_position_intent: str = Column(String(32), nullable=False)
+    local_broker_order_id: Optional[str] = Column(String(160), nullable=True)
+    local_broker_source: Optional[str] = Column(String(64), nullable=True)
+    local_broker_connection_generation: Optional[str] = Column(
+        String(160), nullable=True
+    )
+    local_action_claim_token: str = Column(String(64), nullable=False)
+    local_action_claim_phase: str = Column(String(32), nullable=False)
+    local_action_claim_metadata_sha256: str = Column(String(64), nullable=False)
+    provider_order_id: Optional[str] = Column(String(160), nullable=True)
+    provider_client_order_id: Optional[str] = Column(String(160), nullable=True)
+    provider_order_sha256: Optional[str] = Column(String(64), nullable=True)
+    provider_order_status: Optional[str] = Column(String(48), nullable=True)
+    provider_order_side: Optional[str] = Column(String(16), nullable=True)
+    provider_order_type: Optional[str] = Column(String(32), nullable=True)
+    provider_quantity_shares: Optional[float] = Column(Numeric(28, 10), nullable=True)
+    provider_filled_quantity_shares: Optional[float] = Column(
+        Numeric(28, 10), nullable=True
+    )
+    provider_remaining_quantity_shares: Optional[float] = Column(
+        Numeric(28, 10), nullable=True
+    )
+    provider_limit_price: Optional[float] = Column(Numeric(28, 10), nullable=True)
+    provider_asset_class: Optional[str] = Column(String(32), nullable=True)
+    provider_time_in_force: Optional[str] = Column(String(16), nullable=True)
+    provider_extended_hours: Optional[bool] = Column(Boolean, nullable=True)
+    provider_position_intent: Optional[str] = Column(String(32), nullable=True)
+    local_outbox_completion_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "captured_paper_post_commit_outbox.completion_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    local_outbox_status: str = Column(String(32), nullable=False)
+    local_outbox_version: int = Column(BigInteger, nullable=False)
+    local_outbox_transport_started_at: Optional[datetime] = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    local_outbox_transport_evidence_sha256: Optional[str] = Column(
+        String(64), nullable=True
+    )
+    item_content_canonical_json: str = Column(Text, nullable=False)
+    item_sha256: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperAccountSettlementHead(Base):
+    """Mutable, transaction-guarded cumulative head for one PAPER account.
+
+    The zero head is the only directly insertable state.  Migration 329 guards
+    every subsequent update against the next immutable cycle-settlement row,
+    and rejects DELETE/TRUNCATE.  The Alpaca PAPER lifecycle advances it only
+    in the same transaction that inserts a verified cycle settlement and
+    closes the adaptive reservation.
+    """
+
+    __tablename__ = "alpaca_paper_account_settlement_heads"
+    __table_args__ = (
+        CheckConstraint(
+            "settlement_schema_version = 'chili.alpaca-paper-cycle-settlement.v1'",
+            name="ck_alpaca_paper_settlement_head_schema",
+        ),
+        CheckConstraint(
+            "account_scope = 'alpaca:paper' "
+            "AND execution_family = 'alpaca_spot' "
+            "AND broker_environment = 'paper'",
+            name="ck_alpaca_paper_settlement_head_scope",
+        ),
+        CheckConstraint(
+            "char_length(account_identity_sha256) = 64 "
+            "AND char_length(head_content_sha256) = 64 "
+            "AND (last_settlement_sha256 IS NULL "
+            " OR char_length(last_settlement_sha256) = 64)",
+            name="ck_alpaca_paper_settlement_head_hashes",
+        ),
+        CheckConstraint(
+            "settled_cycle_sequence >= 0 "
+            "AND version = settled_cycle_sequence + 1 "
+            "AND cumulative_fee_usd >= 0 "
+            "AND cumulative_net_realized_pnl_usd = "
+            "    cumulative_gross_realized_pnl_usd - cumulative_fee_usd",
+            name="ck_alpaca_paper_settlement_head_values",
+        ),
+        CheckConstraint(
+            "(settled_cycle_sequence = 0 "
+            " AND last_settlement_sha256 IS NULL "
+            " AND last_settled_at IS NULL "
+            " AND cumulative_gross_realized_pnl_usd = 0 "
+            " AND cumulative_fee_usd = 0 "
+            " AND cumulative_net_realized_pnl_usd = 0) "
+            "OR (settled_cycle_sequence > 0 "
+            " AND last_settlement_sha256 IS NOT NULL "
+            " AND last_settled_at IS NOT NULL)",
+            name="ck_alpaca_paper_settlement_head_lineage",
+        ),
+    )
+
+    account_scope: str = Column(String(160), primary_key=True)
+    account_identity_sha256: str = Column(String(64), primary_key=True)
+    settlement_schema_version: str = Column(String(64), nullable=False)
+    execution_family: str = Column(String(64), nullable=False)
+    broker_environment: str = Column(String(64), nullable=False)
+    settled_cycle_sequence: int = Column(BigInteger, nullable=False, default=0)
+    last_settlement_sha256: Optional[str] = Column(String(64), nullable=True)
+    cumulative_gross_realized_pnl_usd: float = Column(
+        Numeric(28, 10), nullable=False, default=0
+    )
+    cumulative_fee_usd: float = Column(Numeric(28, 10), nullable=False, default=0)
+    cumulative_net_realized_pnl_usd: float = Column(
+        Numeric(28, 10), nullable=False, default=0
+    )
+    head_content_sha256: str = Column(String(64), nullable=False)
+    version: int = Column(BigInteger, nullable=False, default=1)
+    last_settled_at: Optional[datetime] = Column(DateTime(timezone=True), nullable=True)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    updated_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperCycleSettlement(Base):
+    """One immutable, content-addressed terminal settlement per PAPER cycle.
+
+    A row represents a fully flat cycle only; pending/unknown fee evidence
+    remains NULL in the append-only fill ledger and keeps the reservation in
+    ``flat_pending_settlement``.  Database triggers bind inserts to the exact
+    reservation, decision packet, complete authoritative fill chain, account
+    head, and same-transaction terminal close.
+    """
+
+    __tablename__ = "alpaca_paper_cycle_settlements"
+    __table_args__ = (
+        UniqueConstraint(
+            "reservation_id",
+            name="uq_alpaca_paper_cycle_settlement_reservation",
+        ),
+        UniqueConstraint(
+            "account_scope",
+            "account_identity_sha256",
+            "terminal_sequence",
+            name="uq_alpaca_paper_cycle_settlement_sequence",
+        ),
+        CheckConstraint(
+            "settlement_schema_version = 'chili.alpaca-paper-cycle-settlement.v1' "
+            "AND settlement_authority_status = 'sealed_verified'",
+            name="ck_alpaca_paper_cycle_settlement_schema",
+        ),
+        CheckConstraint(
+            "account_scope = 'alpaca:paper' "
+            "AND execution_family = 'alpaca_spot' "
+            "AND broker_environment = 'paper' "
+            "AND position_direction = 'long'",
+            name="ck_alpaca_paper_cycle_settlement_scope",
+        ),
+        CheckConstraint(
+            "capture_authority_status = 'verified' "
+            "AND provider_event_clock_status = 'authoritative' "
+            "AND provider_client_order_id_status = 'authoritative' "
+            "AND exit_order_ownership_status = 'authoritative' "
+            "AND fee_status = 'authoritative'",
+            name="ck_alpaca_paper_cycle_settlement_authority",
+        ),
+        CheckConstraint(
+            "terminal_sequence > 0 "
+            "AND source_fill_count > 0 "
+            "AND terminal_fill_sequence > 0 "
+            "AND entry_quantity > 0 "
+            "AND exit_quantity = entry_quantity "
+            "AND entry_cost_usd > 0 "
+            "AND exit_proceeds_usd >= 0 "
+            "AND fee_usd >= 0 "
+            "AND gross_realized_pnl_usd = exit_proceeds_usd - entry_cost_usd "
+            "AND net_realized_pnl_usd = gross_realized_pnl_usd - fee_usd",
+            name="ck_alpaca_paper_cycle_settlement_values",
+        ),
+        CheckConstraint(
+            "closed_observed_at <= closed_available_at",
+            name="ck_alpaca_paper_cycle_settlement_clocks",
+        ),
+        CheckConstraint(
+            "char_length(settlement_content_canonical_json) > 2",
+            name="ck_alpaca_paper_cycle_settlement_content",
+        ),
+        CheckConstraint(
+            "(terminal_sequence = 1 "
+            " AND previous_account_settlement_sha256 IS NULL) "
+            "OR (terminal_sequence > 1 "
+            " AND previous_account_settlement_sha256 IS NOT NULL)",
+            name="ck_alpaca_paper_cycle_settlement_lineage",
+        ),
+        CheckConstraint(
+            "char_length(settlement_sha256) = 64 "
+            "AND char_length(decision_packet_sha256) = 64 "
+            "AND char_length(reservation_request_sha256) = 64 "
+            "AND char_length(account_identity_sha256) = 64 "
+            "AND char_length(account_snapshot_sha256) = 64 "
+            "AND char_length(terminal_fill_event_sha256) = 64 "
+            "AND char_length(fill_chain_root_sha256) = 64 "
+            "AND char_length(flat_evidence_sha256) = 64 "
+            "AND char_length(capture_authority_receipt_sha256) = 64 "
+            "AND char_length(fee_evidence_root_sha256) = 64 "
+            "AND char_length(settlement_policy_sha256) = 64 "
+            "AND char_length(effective_config_sha256) = 64 "
+            "AND char_length(code_build_sha256) = 64 "
+            "AND char_length(feature_flags_sha256) = 64 "
+            "AND char_length(settlement_content_sha256) = 64 "
+            "AND (previous_account_settlement_sha256 IS NULL "
+            " OR char_length(previous_account_settlement_sha256) = 64)",
+            name="ck_alpaca_paper_cycle_settlement_hashes",
+        ),
+        Index(
+            "ix_alpaca_paper_cycle_settlement_account_time",
+            "account_scope",
+            "account_identity_sha256",
+            "closed_available_at",
+        ),
+    )
+
+    settlement_sha256: str = Column(String(64), primary_key=True)
+    settlement_schema_version: str = Column(String(64), nullable=False)
+    settlement_authority_status: str = Column(String(32), nullable=False)
+    reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("adaptive_risk_reservations.reservation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision_packet_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "adaptive_risk_decision_packets.decision_packet_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    reservation_request_sha256: str = Column(String(64), nullable=False)
+    account_scope: str = Column(String(160), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    account_snapshot_sha256: str = Column(String(64), nullable=False)
+    broker_connection_generation: str = Column(String(160), nullable=False)
+    execution_family: str = Column(String(64), nullable=False)
+    broker_environment: str = Column(String(64), nullable=False)
+    position_direction: str = Column(String(8), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    trading_date: date = Column(Date, nullable=False)
+    setup_family: str = Column(String(96), nullable=False)
+
+    terminal_sequence: int = Column(BigInteger, nullable=False)
+    previous_account_settlement_sha256: Optional[str] = Column(
+        String(64), nullable=True
+    )
+    source_fill_count: int = Column(BigInteger, nullable=False)
+    terminal_fill_sequence: int = Column(BigInteger, nullable=False)
+    terminal_fill_event_sha256: str = Column(
+        String(64),
+        ForeignKey("alpaca_paper_fill_activities.event_sha256", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    fill_chain_root_sha256: str = Column(String(64), nullable=False)
+    flat_evidence_sha256: str = Column(String(64), nullable=False)
+
+    capture_authority_status: str = Column(String(32), nullable=False)
+    capture_authority_receipt_sha256: str = Column(String(64), nullable=False)
+    provider_event_clock_status: str = Column(String(32), nullable=False)
+    provider_client_order_id_status: str = Column(String(32), nullable=False)
+    exit_order_ownership_status: str = Column(String(32), nullable=False)
+    fee_status: str = Column(String(32), nullable=False)
+    fee_evidence_root_sha256: str = Column(String(64), nullable=False)
+
+    entry_quantity: float = Column(Numeric(28, 10), nullable=False)
+    exit_quantity: float = Column(Numeric(28, 10), nullable=False)
+    entry_cost_usd: float = Column(Numeric(28, 10), nullable=False)
+    exit_proceeds_usd: float = Column(Numeric(28, 10), nullable=False)
+    gross_realized_pnl_usd: float = Column(Numeric(28, 10), nullable=False)
+    fee_usd: float = Column(Numeric(28, 10), nullable=False)
+    net_realized_pnl_usd: float = Column(Numeric(28, 10), nullable=False)
+
+    settlement_policy_sha256: str = Column(String(64), nullable=False)
+    effective_config_sha256: str = Column(String(64), nullable=False)
+    code_build_sha256: str = Column(String(64), nullable=False)
+    feature_flags_sha256: str = Column(String(64), nullable=False)
+    settlement_content_canonical_json: str = Column(Text, nullable=False)
+    settlement_content_sha256: str = Column(String(64), nullable=False)
+    closed_observed_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    closed_available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class AlpacaPaperPostSettlementFillContradiction(Base):
+    """Append-only exact late-entry fill observed after cycle settlement.
+
+    This ledger is intentionally separate from the immutable settled fill
+    chain.  Its rows can increase conservative exposure/buying-power heat, but
+    can never rewrite the prior settlement or its realized P&L.
+    """
+
+    __tablename__ = "alpaca_paper_post_settlement_fill_contradictions"
+    __table_args__ = (
+        UniqueConstraint(
+            "reservation_id",
+            "contradiction_sequence",
+            name="uq_alpaca_post_settlement_fill_sequence",
+        ),
+        UniqueConstraint(
+            "reservation_id",
+            "provider_activity_id",
+            name="uq_alpaca_post_settlement_fill_provider_activity",
+        ),
+        UniqueConstraint(
+            "reservation_id",
+            "immutable_fill_identity_sha256",
+            name="uq_alpaca_post_settlement_fill_identity",
+        ),
+        CheckConstraint(
+            "contradiction_schema_version = "
+            "'chili.alpaca-paper-post-settlement-fill-contradiction.v1' "
+            "AND authority_status = 'verified' "
+            "AND durability_kind = "
+            "'committed_alpaca_post_settlement_fill_contradiction'",
+            name="ck_alpaca_post_settlement_fill_schema",
+        ),
+        CheckConstraint(
+            "account_scope = 'alpaca:paper' "
+            "AND broker_environment = 'paper' "
+            "AND execution_family = 'alpaca_spot' "
+            "AND source_state IN ('closed', 'exposure_quarantined') "
+            "AND side = 'buy' AND order_role = 'entry' "
+            "AND order_ownership_status = 'reservation_bound' "
+            "AND provider_order_id = broker_order_id",
+            name="ck_alpaca_post_settlement_fill_scope",
+        ),
+        CheckConstraint(
+            "contradiction_sequence > 0 "
+            "AND ((contradiction_sequence = 1 "
+            "      AND previous_contradiction_sha256 IS NULL) "
+            " OR (contradiction_sequence > 1 "
+            "      AND previous_contradiction_sha256 IS NOT NULL)) "
+            "AND batch_activity_count > 0 "
+            "AND batch_activity_ordinal >= 0 "
+            "AND batch_activity_ordinal < batch_activity_count "
+            "AND is_projection_terminal = "
+            "    (batch_activity_ordinal = batch_activity_count - 1)",
+            name="ck_alpaca_post_settlement_fill_lineage",
+        ),
+        CheckConstraint(
+            "settlement_source_fill_count > 0 "
+            "AND settlement_entry_quantity > 0 "
+            "AND settlement_exit_quantity = settlement_entry_quantity "
+            "AND quantity > 0 AND price > 0 AND leaves_quantity >= 0 "
+            "AND prior_recorded_cumulative_quantity >= "
+            "    settlement_entry_quantity "
+            "AND positive_fill_delta = quantity "
+            "AND quantity = trunc(quantity) "
+            "AND broker_observed_cumulative_quantity = "
+            "    trunc(broker_observed_cumulative_quantity) "
+            "AND broker_observed_cumulative_quantity = "
+            "    prior_recorded_cumulative_quantity + positive_fill_delta "
+            "AND ((is_projection_terminal "
+            "      AND projection_prior_cumulative_quantity IS NOT NULL "
+            "      AND projection_positive_fill_delta IS NOT NULL "
+            "      AND projection_positive_fill_delta > 0 "
+            "      AND projected_open_quantity_shares IS NOT NULL "
+            "      AND projected_open_structural_risk_usd IS NOT NULL "
+            "      AND projected_open_gross_notional_usd IS NOT NULL "
+            "      AND projected_open_buying_power_impact_usd IS NOT NULL "
+            "      AND broker_observed_cumulative_quantity = "
+            "          projection_prior_cumulative_quantity + "
+            "          projection_positive_fill_delta) "
+            " OR (NOT is_projection_terminal "
+            "      AND projection_prior_cumulative_quantity IS NULL "
+            "      AND projection_positive_fill_delta IS NULL "
+            "      AND projected_open_quantity_shares IS NULL "
+            "      AND projected_open_structural_risk_usd IS NULL "
+            "      AND projected_open_gross_notional_usd IS NULL "
+            "      AND projected_open_buying_power_impact_usd IS NULL))",
+            name="ck_alpaca_post_settlement_fill_values",
+        ),
+        CheckConstraint(
+            "query_after <= query_until "
+            "AND query_until <= query_received_at "
+            "AND query_received_at <= query_available_at "
+            "AND query_available_at < query_expires_at "
+            "AND provider_transaction_at <= provider_available_at "
+            "AND provider_available_at <= query_available_at "
+            "AND capability_verified_at >= query_available_at "
+            "AND capability_verified_at <= query_expires_at",
+            name="ck_alpaca_post_settlement_fill_clocks",
+        ),
+        CheckConstraint(
+            "fee_status = 'authoritative' AND fee_usd >= 0 "
+            "AND char_length(fee_evidence_canonical_json) > 1",
+            name="ck_alpaca_post_settlement_fill_fee",
+        ),
+        CheckConstraint(
+            "contradiction_sha256 = contradiction_content_sha256 "
+            "AND char_length(contradiction_sha256) = 64 "
+            "AND char_length(decision_packet_sha256) = 64 "
+            "AND char_length(account_identity_sha256) = 64 "
+            "AND char_length(settlement_sha256) = 64 "
+            "AND char_length(settlement_terminal_fill_event_sha256) = 64 "
+            "AND char_length(batch_content_sha256) = 64 "
+            "AND char_length(observation_sha256) = 64 "
+            "AND char_length(provider_order_payload_sha256) = 64 "
+            "AND char_length(query_receipt_sha256) = 64 "
+            "AND char_length(read_binding_sha256) = 64 "
+            "AND char_length(adapter_build_sha256) = 64 "
+            "AND char_length(immutable_fill_identity_sha256) = 64 "
+            "AND char_length(provider_payload_sha256) = 64 "
+            "AND char_length(fee_evidence_sha256) = 64 "
+            "AND char_length(contradiction_content_canonical_json) > 1 "
+            "AND (previous_contradiction_sha256 IS NULL "
+            " OR char_length(previous_contradiction_sha256) = 64)",
+            name="ck_alpaca_post_settlement_fill_hashes",
+        ),
+        Index(
+            "ix_alpaca_post_settlement_fill_order_time",
+            "account_identity_sha256",
+            "broker_order_id",
+            "provider_transaction_at",
+        ),
+    )
+
+    contradiction_sha256: str = Column(String(64), primary_key=True)
+    contradiction_schema_version: str = Column(String(80), nullable=False)
+    authority_status: str = Column(String(32), nullable=False)
+    durability_kind: str = Column(String(80), nullable=False)
+    reservation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("adaptive_risk_reservations.reservation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    settlement_sha256: str = Column(
+        String(64),
+        ForeignKey("alpaca_paper_cycle_settlements.settlement_sha256", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision_packet_sha256: str = Column(
+        String(64),
+        ForeignKey(
+            "adaptive_risk_decision_packets.decision_packet_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    account_scope: str = Column(String(160), nullable=False)
+    account_identity_sha256: str = Column(String(64), nullable=False)
+    broker_environment: str = Column(String(32), nullable=False)
+    execution_family: str = Column(String(64), nullable=False)
+    symbol: str = Column(String(36), nullable=False)
+    expected_client_order_id: str = Column(String(160), nullable=False)
+    broker_order_id: str = Column(String(160), nullable=False)
+    broker_connection_generation: str = Column(String(160), nullable=False)
+    source_state: str = Column(String(32), nullable=False)
+
+    settlement_terminal_fill_event_sha256: str = Column(String(64), nullable=False)
+    settlement_source_fill_count: int = Column(BigInteger, nullable=False)
+    settlement_entry_quantity: float = Column(Numeric(28, 10), nullable=False)
+    settlement_exit_quantity: float = Column(Numeric(28, 10), nullable=False)
+    settlement_net_realized_pnl_usd: float = Column(Numeric(28, 10), nullable=False)
+
+    contradiction_sequence: int = Column(BigInteger, nullable=False)
+    previous_contradiction_sha256: Optional[str] = Column(String(64), nullable=True)
+    batch_activity_ordinal: int = Column(Integer, nullable=False)
+    batch_activity_count: int = Column(Integer, nullable=False)
+    is_projection_terminal: bool = Column(Boolean, nullable=False)
+    batch_content_canonical_json: str = Column(Text, nullable=False)
+    batch_content_sha256: str = Column(String(64), nullable=False)
+    observation_content_canonical_json: str = Column(Text, nullable=False)
+    observation_sha256: str = Column(String(64), nullable=False)
+    provider_order_payload_canonical_json: str = Column(Text, nullable=False)
+    provider_order_payload_sha256: str = Column(String(64), nullable=False)
+    query_receipt_canonical_json: str = Column(Text, nullable=False)
+    query_receipt_sha256: str = Column(String(64), nullable=False)
+    read_binding_canonical_json: str = Column(Text, nullable=False)
+    read_binding_sha256: str = Column(String(64), nullable=False)
+    adapter_connection_generation: str = Column(String(160), nullable=False)
+    adapter_build_sha256: str = Column(String(64), nullable=False)
+    capability_authority_status: str = Column(String(64), nullable=False)
+    capability_verified_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    query_after: datetime = Column(DateTime(timezone=True), nullable=False)
+    query_until: datetime = Column(DateTime(timezone=True), nullable=False)
+    query_received_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    query_available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    query_expires_at: datetime = Column(DateTime(timezone=True), nullable=False)
+
+    provider_activity_id: str = Column(String(192), nullable=False)
+    immutable_fill_identity_sha256: str = Column(String(64), nullable=False)
+    provider_order_id: str = Column(String(160), nullable=False)
+    provider_payload_canonical_json: str = Column(Text, nullable=False)
+    provider_payload_sha256: str = Column(String(64), nullable=False)
+    provider_transaction_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    provider_available_at: datetime = Column(DateTime(timezone=True), nullable=False)
+    side: str = Column(String(8), nullable=False)
+    order_role: str = Column(String(16), nullable=False)
+    order_ownership_status: str = Column(String(32), nullable=False)
+    quantity: float = Column(Numeric(28, 10), nullable=False)
+    price: float = Column(Numeric(28, 10), nullable=False)
+    leaves_quantity: float = Column(Numeric(28, 10), nullable=False)
+    prior_recorded_cumulative_quantity: float = Column(Numeric(28, 10), nullable=False)
+    broker_observed_cumulative_quantity: float = Column(Numeric(28, 10), nullable=False)
+    positive_fill_delta: float = Column(Numeric(28, 10), nullable=False)
+    projection_prior_cumulative_quantity: Optional[float] = Column(
+        Numeric(28, 10), nullable=True
+    )
+    projection_positive_fill_delta: Optional[float] = Column(
+        Numeric(28, 10), nullable=True
+    )
+    projected_open_quantity_shares: Optional[int] = Column(
+        BigInteger, nullable=True
+    )
+    projected_open_structural_risk_usd: Optional[float] = Column(
+        Numeric(28, 10), nullable=True
+    )
+    projected_open_gross_notional_usd: Optional[float] = Column(
+        Numeric(28, 10), nullable=True
+    )
+    projected_open_buying_power_impact_usd: Optional[float] = Column(
+        Numeric(28, 10), nullable=True
+    )
+    fee_status: str = Column(String(32), nullable=False)
+    fee_usd: float = Column(Numeric(28, 10), nullable=False)
+    fee_evidence_canonical_json: str = Column(Text, nullable=False)
+    fee_evidence_sha256: str = Column(String(64), nullable=False)
+    contradiction_content_canonical_json: str = Column(Text, nullable=False)
+    contradiction_content_sha256: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
 
 
 class Trade(Base):

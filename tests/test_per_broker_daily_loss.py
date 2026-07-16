@@ -372,10 +372,16 @@ def test_alpaca_read_only_peek_uses_broker_truth_when_generic_flag_is_off(monkey
     assert info["reason"] == "alpaca_account_daily_change_unavailable"
 
 
-def test_alpaca_large_account_uses_momentum_fixed_cap_and_blocks_minus_469(monkeypatch):
+def test_alpaca_large_account_uses_adaptive_equity_fraction(monkeypatch):
     monkeypatch.setattr(gov.settings, "chili_per_broker_daily_loss_enabled", True)
     monkeypatch.setattr(gov.settings, "chili_global_max_daily_loss_usd", 0.0)
     monkeypatch.setattr(gov.settings, "chili_global_max_daily_loss_pct_of_equity", 0.05)
+    monkeypatch.setattr(
+        gov.settings,
+        "chili_momentum_risk_daily_loss_fraction_of_equity",
+        0.05,
+        raising=False,
+    )
     monkeypatch.setattr(gov.settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)
     monkeypatch.setattr(rp, "_account_equity_usd", lambda *a, **k: 71_876.85)
     monkeypatch.setattr(
@@ -386,21 +392,27 @@ def test_alpaca_large_account_uses_momentum_fixed_cap_and_blocks_minus_469(monke
 
     blocked, info = gov.broker_daily_loss_breached(object(), "alpaca_spot")
 
-    assert blocked is True
+    assert blocked is False
     assert info["realized"] == pytest.approx(-469.0)
-    assert info["cap"] == pytest.approx(250.0)
-    assert info["source"] == "alpaca_momentum_fixed_usd_clamp"
+    assert info["cap"] == pytest.approx(3_593.8425)
+    assert info["source"] == "pct_cash_value"
     assert info["cap_detail"]["broker_equity_cap_usd"] == pytest.approx(3_593.8425)
-    assert info["cap_detail"]["momentum_fixed_cap_usd"] == pytest.approx(250.0)
-    assert gov.is_broker_daily_loss_blocked("alpaca_spot") is True
+    assert "momentum_fixed_cap_usd" not in info["cap_detail"]
+    assert gov.is_broker_daily_loss_blocked("alpaca_spot") is False
 
 
 @pytest.mark.parametrize("configured", [0.0, float("nan"), 1_000.0])
-def test_alpaca_daily_loss_setting_cannot_disable_or_lift_250_failsafe(
+def test_alpaca_fixed_daily_loss_setting_does_not_override_equity_fraction(
     monkeypatch, configured
 ):
     monkeypatch.setattr(gov.settings, "chili_global_max_daily_loss_usd", 0.0)
     monkeypatch.setattr(gov.settings, "chili_global_max_daily_loss_pct_of_equity", 0.05)
+    monkeypatch.setattr(
+        gov.settings,
+        "chili_momentum_risk_daily_loss_fraction_of_equity",
+        0.05,
+        raising=False,
+    )
     monkeypatch.setattr(
         gov.settings,
         "chili_momentum_risk_max_daily_loss_usd",
@@ -410,20 +422,26 @@ def test_alpaca_daily_loss_setting_cannot_disable_or_lift_250_failsafe(
 
     cap, source = gov.per_broker_daily_loss_cap_usd("alpaca_spot")
 
-    assert cap == pytest.approx(250.0)
-    assert source == "alpaca_momentum_fixed_usd_clamp"
+    assert cap == pytest.approx(5_000.0)
+    assert source == "pct_cash_value"
 
 
-def test_alpaca_daily_loss_setting_may_only_lower_the_250_failsafe(monkeypatch):
+def test_alpaca_fixed_daily_loss_setting_cannot_lower_adaptive_budget(monkeypatch):
     monkeypatch.setattr(gov.settings, "chili_global_max_daily_loss_usd", 0.0)
     monkeypatch.setattr(gov.settings, "chili_global_max_daily_loss_pct_of_equity", 0.05)
+    monkeypatch.setattr(
+        gov.settings,
+        "chili_momentum_risk_daily_loss_fraction_of_equity",
+        0.05,
+        raising=False,
+    )
     monkeypatch.setattr(gov.settings, "chili_momentum_risk_max_daily_loss_usd", 125.0)
     monkeypatch.setattr(rp, "_account_equity_usd", lambda *a, **k: 100_000.0)
 
     cap, source = gov.per_broker_daily_loss_cap_usd("alpaca_spot")
 
-    assert cap == pytest.approx(125.0)
-    assert source == "alpaca_momentum_fixed_usd_clamp"
+    assert cap == pytest.approx(5_000.0)
+    assert source == "pct_cash_value"
 
 
 def test_positive_alpaca_day_change_stays_open(monkeypatch):

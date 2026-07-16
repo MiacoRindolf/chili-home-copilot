@@ -45,7 +45,12 @@ import pytest
 import app.services.trading.momentum_neural.auto_arm as aa
 from app.services import coinbase_service
 from app.services.trading import governance, portfolio_risk
-from app.services.trading.momentum_neural import automation_query, operator_actions
+from app.services.trading.momentum_neural import (
+    automation_query,
+    operator_actions,
+    risk_policy,
+)
+from app.services.trading.venue import account_identity
 from app.services.trading.momentum_neural import paper_execution as pe
 from app.services.trading.momentum_neural.entry_gates import (
     first_pullback_break,
@@ -324,6 +329,12 @@ class TestLgvnDisciplinedLoss:
         monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_live_scheduler_enabled", True, raising=False)
         monkeypatch.setattr(aa.settings, "chili_momentum_live_runner_enabled", True, raising=False)
         monkeypatch.setattr(aa.settings, "chili_autotrader_user_id", 1, raising=False)
+        monkeypatch.setattr(
+            aa.settings,
+            "chili_momentum_decouple_watching_enabled",
+            False,
+            raising=False,
+        )
         monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
         monkeypatch.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 0)
         monkeypatch.setattr(portfolio_risk, "check_portfolio_drawdown_breaker", lambda db, uid: (False, None))
@@ -333,6 +344,39 @@ class TestLgvnDisciplinedLoss:
         monkeypatch.setattr(aa, "_symbol_free", lambda db, sym, uid: True)
         monkeypatch.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "pullback_break_ok"))
         monkeypatch.setattr(aa, "_candidate_freshness", lambda sym: None)
+        monkeypatch.setattr(
+            account_identity,
+            "read_current_non_alpaca_account_identity",
+            lambda _family: {
+                "ok": True,
+                "identity": "ross-parity-test-account-v1",
+                "reason": None,
+            },
+        )
+        monkeypatch.setattr(
+            risk_policy,
+            "load_current_live_loss_history",
+            lambda db, **kwargs: (
+                (),
+                {
+                    "history_available": True,
+                    "coverage_grade": "CURRENT_LIVE_COMPLETE",
+                    "replay_certifiable": False,
+                },
+            ),
+        )
+        monkeypatch.setattr(
+            risk_policy,
+            "consecutive_loss_halt_decision",
+            lambda db, **kwargs: (
+                False,
+                {
+                    "halted": False,
+                    "history_available": True,
+                    "config_provenance": {},
+                },
+            ),
+        )
         monkeypatch.setattr(coinbase_service, "connect", lambda: {"ok": True})
         monkeypatch.setattr(operator_actions, "begin_live_arm",
                             lambda db, **k: {"ok": True, "arm_token": "tok", "session_id": 99})
@@ -340,7 +384,11 @@ class TestLgvnDisciplinedLoss:
                             lambda db, **k: {"ok": True, "state": "queued_live"})
         # THE REVENGE GUARD: LGVN just took a loss -> it is in the post-loss block set, so the
         # candidate loop must skip it (loss_guard_skipped) and arm NOTHING this pass.
-        monkeypatch.setattr(aa, "_symbol_loss_guards", lambda db: ({"LGVN-USD"}, {}))
+        monkeypatch.setattr(
+            aa,
+            "_symbol_loss_guards",
+            lambda db, **kwargs: ({"LGVN-USD"}, {}),
+        )
 
         out = aa.run_auto_arm_pass(_FakeDB())
         assert out.get("armed", 0) == 0, f"must NOT revenge-re-arm a just-lost name: {out}"
@@ -366,6 +414,9 @@ class _FakeDB:
         pass
 
     def commit(self) -> None:
+        pass
+
+    def flush(self) -> None:
         pass
 
     def query(self, *_a, **_k):

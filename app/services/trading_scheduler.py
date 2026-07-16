@@ -865,10 +865,16 @@ def _run_momentum_live_runner_batch_job():
     def _work() -> None:
         from ..config import settings as _settings
         from ..db import SessionLocal
+        from .trading.momentum_neural.captured_paper_entry_intent import (
+            CapturedPaperPostCommitRequest,
+        )
+        from .trading.momentum_neural.captured_paper_dispatcher import (
+            dispatch_captured_paper_post_commit,
+            dispatch_live_runner_tick,
+        )
         from .trading.momentum_neural.live_runner import (
             cleanup_leaked_lane_locks,
             list_runnable_live_sessions,
-            tick_live_session,
         )
 
         if not _settings.chili_momentum_live_runner_enabled:
@@ -942,19 +948,40 @@ def _run_momentum_live_runner_batch_job():
             _t0 = time.monotonic()
             db_s = SessionLocal()
             ok = False
+            phase_one_committed = False
+            completion_request = None
             try:
-                tick_live_session(db_s, sid)
+                result = dispatch_live_runner_tick(db_s, sid)
+                if type(result) is CapturedPaperPostCommitRequest:
+                    completion_request = result
                 db_s.commit()
+                phase_one_committed = True
                 ok = True
             except Exception:
                 db_s.rollback()
                 logger.warning("[scheduler] live runner tick failed session=%s", sid, exc_info=True)
+            else:
+                if completion_request is not None:
+                    try:
+                        dispatch_captured_paper_post_commit(completion_request)
+                    except Exception:
+                        ok = False
+                        # The phase-one transaction is already durable.  Report
+                        # a retry-required completion failure without pretending
+                        # a rollback can undo it.
+                        logger.exception(
+                            "[scheduler] captured PAPER post-commit completion "
+                            "failed session=%s phase_one_committed=true "
+                            "retry_required=true",
+                            sid,
+                        )
             finally:
                 # FIX 46 pattern (rollback before close).
-                try:
-                    db_s.rollback()
-                except Exception:
-                    pass
+                if not phase_one_committed or completion_request is None:
+                    try:
+                        db_s.rollback()
+                    except Exception:
+                        pass
                 db_s.close()
             return ok, int((time.monotonic() - _t0) * 1000)
 

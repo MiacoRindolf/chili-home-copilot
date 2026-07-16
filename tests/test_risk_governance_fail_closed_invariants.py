@@ -87,7 +87,7 @@ def test_aggregate_admission_rejects_nonpositive_or_nonfinite_candidate(candidat
 
 
 @pytest.mark.parametrize("family", ["alpaca_spot", "alpaca_short"])
-def test_alpaca_per_trade_policy_cap_stays_at_fixed_fifty(
+def test_alpaca_per_trade_policy_cap_scales_from_equity(
     monkeypatch: pytest.MonkeyPatch,
     family: str,
 ):
@@ -103,7 +103,7 @@ def test_alpaca_per_trade_policy_cap_stays_at_fixed_fifty(
         raising=False,
     )
 
-    assert risk_policy.equity_relative_loss_cap(50.0, family) == 50.0
+    assert risk_policy.equity_relative_loss_cap(50.0, family) == 750.0
 
 
 @pytest.mark.parametrize(
@@ -111,7 +111,7 @@ def test_alpaca_per_trade_policy_cap_stays_at_fixed_fifty(
     [0.0, -1.0, float("nan"), "not-a-number", 50.01, 500.0],
 )
 @pytest.mark.parametrize("family", ["alpaca_spot", "alpaca_short"])
-def test_alpaca_hard_cap_config_never_exceeds_fifty_dollars(
+def test_alpaca_activation_only_hard_cap_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
     bad_or_oversized_cap,
     family: str,
@@ -123,7 +123,7 @@ def test_alpaca_hard_cap_config_never_exceeds_fifty_dollars(
         raising=False,
     )
 
-    assert risk_policy.alpaca_paper_hard_loss_cap_usd(family) == 50.0
+    assert risk_policy.alpaca_paper_hard_loss_cap_usd(family) is None
 
 
 def _entry_claim(*, phase: str = "resolved") -> dict:
@@ -1025,7 +1025,7 @@ def _install_durable_exit_seams(
     monkeypatch: pytest.MonkeyPatch,
     outbox: _DurableOwnerOutbox,
 ):
-    freshness = SimpleNamespace(age_seconds=lambda: 0.0)
+    freshness = SimpleNamespace(age_seconds=lambda **_kwargs: 0.0)
     final_tick = SimpleNamespace(
         product_id="ACTU",
         bid=2.48,
@@ -1059,7 +1059,11 @@ def _install_durable_exit_seams(
     )
     from app.services.trading.momentum_neural import market_profile
 
-    monkeypatch.setattr(market_profile, "market_session_now", lambda _symbol: "regular")
+    monkeypatch.setattr(
+        market_profile,
+        "market_session_now",
+        lambda _symbol, *, now=None: "regular",
+    )
 
 
 def test_alpaca_exit_transport_identity_is_durable_before_each_post(
@@ -1108,6 +1112,7 @@ def test_alpaca_exit_transport_identity_is_durable_before_each_post(
         mid=2.49,
     )
     assert first["ok"] is False
+    assert "outbox_commit:exit-cid-1" in events, (first, events, le)
     assert events.index("outbox_commit:exit-cid-1") < events.index("place:exit-cid-1")
     first_identity = le["exit_submit_transport_identities"][0]
     assert first_identity["attempt_no"] == 1

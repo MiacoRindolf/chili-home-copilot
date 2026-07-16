@@ -16,7 +16,11 @@ None live — capture it but EXCLUDE it from any discriminator/meta-label fit.
 """
 from __future__ import annotations
 
-from typing import Any
+from contextlib import contextmanager
+import contextvars
+from typing import Any, Callable, Iterator
+
+from .replay_errors import ReplayOhlcvInputUnavailableError
 
 _CANON_COLS = ("High", "Low", "Close", "Volume")
 
@@ -163,12 +167,32 @@ def capture_entry_features(
         return None
 
 
-# tiny TTL cache so SPY/IWM aren't refetched per candidate (keyed by symbol; wall-clock is fine
-# live — this module is never imported into a workflow/replay-determinism path for macro).
+# Tiny production TTL cache so SPY/IWM are not refetched per candidate. Captured paper and
+# ReplayV3 bind a fresh run-local cache; they never inherit this process-global state.
 _MACRO_CACHE: dict = {}
+_BOUND_MACRO_CACHE: contextvars.ContextVar[dict | None] = (
+    contextvars.ContextVar("_chili_bound_macro_feature_cache", default=None)
+)
 
 
-def macro_regime_features(now_ts: float | None = None) -> dict:
+@contextmanager
+def macro_feature_cache(cache: dict) -> Iterator[None]:
+    """Bind capture/replay-local macro state; never inherit process-global rows."""
+
+    if not isinstance(cache, dict):
+        raise TypeError("macro feature cache must be a dict")
+    token = _BOUND_MACRO_CACHE.set(cache)
+    try:
+        yield
+    finally:
+        _BOUND_MACRO_CACHE.reset(token)
+
+
+def macro_regime_features(
+    now_ts: float | None = None,
+    *,
+    fetcher: Callable[..., Any] | None = None,
+) -> dict:
     """Lookahead-free MACRO-REGIME features (Daniel-Moskowitz panic-regime encoding):
     BEAR indicator (market below its 20d trend) x trailing realized VOLATILITY interaction —
     momentum follow-through historically CRASHES in high-vol bear regimes (Sharpe flips
@@ -180,24 +204,32 @@ def macro_regime_features(now_ts: float | None = None) -> dict:
     try:
         import numpy as np
 
-        from ..market_data import fetch_ohlcv_df
+        if fetcher is None:
+            from ..market_data import fetch_ohlcv_df as _fetcher
+        else:
+            _fetcher = fetcher
 
         ts = now_ts if now_ts is not None else _t.time()
+        cache = _BOUND_MACRO_CACHE.get()
+        if cache is None:
+            cache = _MACRO_CACHE
         for sym, key, is_smallcap in (("SPY", "spy", False), ("IWM", "iwm", True)):
             try:
-                cached = _MACRO_CACHE.get(sym)
+                cached = cache.get(sym)
                 if cached and (ts - cached[0]) < 300.0:
                     c = cached[1]
                 else:
-                    df = fetch_ohlcv_df(sym, interval="1d", period="3mo")
+                    df = _fetcher(sym, interval="1d", period="3mo")
                     if df is None or len(df) < 21:
                         continue
                     c = df["Close"].astype(float).values[-21:]
-                    _MACRO_CACHE[sym] = (ts, c)
+                    cache[sym] = (ts, c)
                 out[f"{key}_trend"] = 1.0 if float(c[-1]) >= float(c[-20:].mean()) else 0.0
                 if is_smallcap:
                     rets = np.diff(np.log(c))
                     out["mkt_vol"] = float(np.std(rets) * (252.0 ** 0.5))
+            except ReplayOhlcvInputUnavailableError:
+                raise
             except Exception:
                 continue
         bear = 1.0 - out.get("iwm_trend", out.get("spy_trend", 1.0))
@@ -208,18 +240,20 @@ def macro_regime_features(now_ts: float | None = None) -> dict:
         # <1 backwardation (panic onset). Carries the PRICE of variance risk, ORTHOGONAL to
         # VIX level + bear×vol. The model should de-rate longs as it inverts toward backwardation.
         try:
-            cached = _MACRO_CACHE.get("VIXSLOPE")
+            cached = cache.get("VIXSLOPE")
             if cached and (ts - cached[0]) < 300.0:
                 out["vix_slope"] = cached[1]
             else:
-                _v = fetch_ohlcv_df("^VIX", interval="1d", period="5d")
-                _v3 = fetch_ohlcv_df("^VIX3M", interval="1d", period="5d")
+                _v = _fetcher("^VIX", interval="1d", period="5d")
+                _v3 = _fetcher("^VIX3M", interval="1d", period="5d")
                 if _v is not None and _v3 is not None and len(_v) and len(_v3):
                     _vix = float(_v["Close"].astype(float).values[-1])
                     _vix3 = float(_v3["Close"].astype(float).values[-1])
                     if _vix > 0:
                         out["vix_slope"] = _vix3 / _vix
-                        _MACRO_CACHE["VIXSLOPE"] = (ts, out["vix_slope"])
+                        cache["VIXSLOPE"] = (ts, out["vix_slope"])
+        except ReplayOhlcvInputUnavailableError:
+            raise
         except Exception:
             pass
 
@@ -240,6 +274,8 @@ def macro_regime_features(now_ts: float | None = None) -> dict:
                 out["fomc_even_week"] = 1.0 if ((_days // 7) % 2 == 0) else 0.0
         except Exception:
             pass
+    except ReplayOhlcvInputUnavailableError:
+        raise
     except Exception:
         pass
     return out

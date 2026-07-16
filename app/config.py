@@ -1,12 +1,14 @@
 """Centralized configuration for CHILI. Loads from .env with type safety."""
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SECONDS_PER_MINUTE = 60
+CAPTURED_PAPER_CONFIG_ISOLATION_ENV = "CHILI_CAPTURED_PAPER_CONFIG_ISOLATED"
 MINUTES_PER_HOUR = 60
 FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
 FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
@@ -2633,6 +2635,49 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_BUY_ENABLED"),
         description="Enable the algo-flush V-bounce dip-buy entry trigger (buy the reclaim after a fast flush).",
     )
+    chili_momentum_first_dip_reclaim_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_DIP_RECLAIM_ENABLED"),
+        description="Deprecated compatibility input retained for provenance only. It never changes the effective lifecycle mode, cannot activate candidate/promoted behavior, and cannot bypass typed receipt, OOS, or order safeguards. Prefer CHILI_MOMENTUM_FIRST_DIP_RECLAIM_POLICY_MODE.",
+    )
+    chili_momentum_first_dip_reclaim_policy_mode: str = Field(
+        default="baseline",
+        pattern="^(baseline|candidate|promoted)$",
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_FIRST_DIP_RECLAIM_POLICY_MODE"
+        ),
+        description="Explicit first-dip policy lifecycle request: baseline preserves the comparator; candidate exercises the identical sealed replay/paper policy for evidence collection; promoted fails the classified decision closed until a separate hash-bound OOS promotion receipt exists. This value is captured in decision provenance.",
+    )
+    chili_momentum_first_dip_tape_max_source_age_seconds: float = Field(
+        default=1.0,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_FIRST_DIP_TAPE_MAX_SOURCE_AGE_SECONDS"
+        ),
+        description="Maximum exact provider-event age at the first-dip decision. This is an explicit stale-data safeguard, captured and hash-bound with the tape policy; it never authorizes a missing or proxy-timestamp receipt.",
+    )
+    chili_momentum_first_dip_tape_minimum_prints: int = Field(
+        default=3,
+        ge=3,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_FIRST_DIP_TAPE_MINIMUM_PRINTS"
+        ),
+        description="Minimum exact ordered prints required by the first-dip tape calculation. Three is the mathematical minimum for the two-half acceleration estimator; the resolved value is captured in policy provenance.",
+    )
+    chili_momentum_first_dip_min_leg_atr_multiple: float = Field(
+        default=3.0,
+        gt=0.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_DIP_MIN_LEG_ATR_MULTIPLE"),
+        description="Minimum session day-leg percentage for the first-dip certificate, expressed as a multiple of the decision bar ATR percentage (no fixed-dollar threshold).",
+    )
+    chili_momentum_first_dip_max_retrace_fraction: float = Field(
+        default=0.618,
+        gt=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_DIP_MAX_RETRACE_FRACTION"),
+        description="Maximum close-basis retracement of the ET-day ignition leg allowed by the first-dip structural certificate; the flush wick remains governed by the existing bottoming-tail and structural-stop guards.",
+    )
     chili_momentum_red_vol_exhaustion_veto_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RED_VOL_EXHAUSTION_VETO_ENABLED"),
@@ -4173,6 +4218,257 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_DAILY_LOSS_FRACTION_OF_EQUITY"),
+    )
+    # Shared ReplayV3 / captured Alpaca PAPER adaptive-risk policy.  Every
+    # resolver input below is an explicit environment-backed setting so the
+    # strategy cannot acquire a hidden paper-only cap or a service-local
+    # default.  These defaults establish configuration mechanics only; they
+    # are not a profitability or OOS-certification claim.
+    chili_momentum_adaptive_risk_policy_version: str = Field(
+        default="chili-adaptive-risk-settings-v1",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_RISK_POLICY_VERSION"),
+    )
+    chili_momentum_adaptive_risk_policy_source: str = Field(
+        default="app.config.Settings:adaptive-risk",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_RISK_POLICY_SOURCE"),
+    )
+    # Aggregate portfolio risk deliberately reuses
+    # chili_momentum_risk_concurrent_open_risk_fraction.  Narrower symbol and
+    # correlation-cluster budgets remain independently visible here.
+    chili_momentum_adaptive_risk_cluster_fraction_of_equity: float = Field(
+        default=0.04,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_CLUSTER_FRACTION_OF_EQUITY"
+        ),
+    )
+    chili_momentum_adaptive_risk_symbol_fraction_of_equity: float = Field(
+        default=0.03,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_SYMBOL_FRACTION_OF_EQUITY"
+        ),
+    )
+    chili_momentum_adaptive_risk_daily_gap_reserve_fraction_of_equity: float = Field(
+        default=0.001,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_DAILY_GAP_RESERVE_FRACTION_OF_EQUITY"
+        ),
+    )
+    chili_momentum_adaptive_risk_max_buying_power_fraction_for_notional: float = Field(
+        default=0.50,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_MAX_BUYING_POWER_FRACTION_FOR_NOTIONAL"
+        ),
+    )
+    chili_momentum_adaptive_risk_max_portfolio_gross_fraction_of_equity: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_MAX_PORTFOLIO_GROSS_FRACTION_OF_EQUITY"
+        ),
+    )
+    chili_momentum_adaptive_risk_quality_multiplier_floor: float = Field(
+        default=0.50,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_QUALITY_MULTIPLIER_FLOOR"
+        ),
+    )
+    chili_momentum_adaptive_risk_quality_multiplier_ceiling: float = Field(
+        default=1.50,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_QUALITY_MULTIPLIER_CEILING"
+        ),
+    )
+    chili_momentum_adaptive_risk_volatility_reference_fraction: float = Field(
+        default=0.05,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_VOLATILITY_REFERENCE_FRACTION"
+        ),
+    )
+    chili_momentum_adaptive_risk_volatility_multiplier_floor: float = Field(
+        default=0.40,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_VOLATILITY_MULTIPLIER_FLOOR"
+        ),
+    )
+    chili_momentum_adaptive_risk_spread_reserve_multiple: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_SPREAD_RESERVE_MULTIPLE"
+        ),
+    )
+    chili_momentum_adaptive_risk_gap_reserve_volatility_multiple: float = Field(
+        default=0.10,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_GAP_RESERVE_VOLATILITY_MULTIPLE"
+        ),
+    )
+    chili_momentum_adaptive_risk_recent_volume_participation: float = Field(
+        default=0.10,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_RECENT_VOLUME_PARTICIPATION"
+        ),
+    )
+    chili_momentum_adaptive_risk_executable_depth_participation: float = Field(
+        default=0.50,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_EXECUTABLE_DEPTH_PARTICIPATION"
+        ),
+    )
+    chili_momentum_adaptive_risk_market_data_max_age_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_MARKET_DATA_MAX_AGE_SECONDS"
+        ),
+    )
+    chili_momentum_adaptive_risk_account_data_max_age_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_ACCOUNT_DATA_MAX_AGE_SECONDS"
+        ),
+    )
+    chili_momentum_adaptive_risk_reservation_data_max_age_seconds: float = Field(
+        default=0.25,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_RESERVATION_DATA_MAX_AGE_SECONDS"
+        ),
+    )
+    chili_momentum_adaptive_risk_context_data_max_age_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_ADAPTIVE_RISK_CONTEXT_DATA_MAX_AGE_SECONDS"
+        ),
+    )
+    # Non-economic durability/transport policy for the dedicated captured
+    # Alpaca PAPER service.  These settings control leases and reconciliation
+    # cadence only; they never cap dollars, symbols, positions, or valid setup
+    # concurrency.  The service hashes their parsed values with the shared
+    # adaptive policy before any provider/broker capability is constructed.
+    chili_momentum_captured_paper_action_claim_lease_seconds: int = Field(
+        default=30,
+        gt=0,
+        le=86_400,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_ACTION_CLAIM_LEASE_SECONDS"
+        ),
+    )
+    chili_momentum_captured_paper_outbox_max_attempts: int = Field(
+        default=3,
+        gt=0,
+        le=32_767,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_OUTBOX_MAX_ATTEMPTS"
+        ),
+    )
+    chili_momentum_captured_paper_outbox_max_reconciliation_attempts: int = Field(
+        default=3,
+        gt=0,
+        le=32_767,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_OUTBOX_MAX_RECONCILIATION_ATTEMPTS"
+        ),
+    )
+    chili_momentum_captured_paper_reconciliation_retry_delay_seconds: int = Field(
+        default=5,
+        gt=0,
+        le=604_800,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_RECONCILIATION_RETRY_DELAY_SECONDS"
+        ),
+    )
+    chili_momentum_captured_paper_reconciliation_health_escalation_seconds: int = Field(
+        default=30,
+        gt=0,
+        le=604_800,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_RECONCILIATION_HEALTH_ESCALATION_SECONDS"
+        ),
+    )
+    chili_momentum_captured_paper_time_in_force: str = Field(
+        default="day",
+        pattern="^(day|gtc)$",
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_TIME_IN_FORCE"
+        ),
+    )
+    chili_momentum_captured_paper_extended_hours: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_EXTENDED_HOURS"
+        ),
+    )
+    chili_momentum_captured_paper_worker_idle_poll_seconds: float = Field(
+        default=0.25,
+        ge=0.01,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_WORKER_IDLE_POLL_SECONDS"
+        ),
+    )
+    # Bounded capture-only retry policy for turning one strict IQFeed Q wake-up
+    # into its exact durable print receipt.  These are resource/clock bounds,
+    # not strategy, symbol, dollar, position, or risk caps.  Their resolved
+    # values are included in the isolated PAPER settings projection.
+    chili_momentum_captured_paper_trigger_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=64,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_TRIGGER_MAX_ATTEMPTS"
+        ),
+    )
+    chili_momentum_captured_paper_trigger_retry_delay_seconds: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_TRIGGER_RETRY_DELAY_SECONDS"
+        ),
+    )
+    chili_momentum_captured_paper_trigger_future_tolerance_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=5.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_TRIGGER_FUTURE_TOLERANCE_SECONDS"
+        ),
+    )
+    chili_momentum_captured_paper_trigger_exact_print_window_seconds: float = Field(
+        default=0.001,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_CAPTURED_PAPER_TRIGGER_EXACT_PRINT_WINDOW_SECONDS"
+        ),
     )
     # SIZING BASIS: use account BUYING POWER (margin-inclusive) rather than just settled
     # cash/equity as the base for the equity-relative caps above, so the lane utilizes
@@ -9610,8 +9906,10 @@ class Settings(BaseSettings):
     # PRIMARY EQUITY -> ALPACA PAPER routing (2026-07-07): when ON, the momentum lane routes the
     # PRIMARY equity arm to alpaca_spot (Alpaca PAPER, fake money) instead of the RH live rail —
     # for running the lane on Alpaca paper during the RH->Alpaca cash transfer (no real-money RH
-    # entries). Requires chili_alpaca_enabled + paper + key. alpaca_spot is excluded from real
-    # risk caps (paper-by-construction). Default OFF => byte-identical (RH live).
+    # entries). Requires chili_alpaca_enabled + paper credentials + the exact account UUID pin;
+    # if selected but incomplete, routing fails closed and can never fall through to RH live.
+    # alpaca_spot is excluded from legacy real-money caps (paper-by-construction); the adaptive
+    # equity/risk/exposure ledger remains mandatory. Default OFF => byte-identical (RH live).
     chili_momentum_equity_execution_via_alpaca_paper: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER"),
@@ -13079,5 +13377,27 @@ def get_active_profile_info() -> dict[str, Any]:
     return {"profile": name, "overrides": dict(profile)}
 
 
+def load_process_settings() -> Settings:
+    """Load process settings with an explicit captured-PAPER isolation seam.
+
+    The dedicated PAPER bootstrap installs its allowlisted values into
+    ``os.environ`` before importing ``app``.  Loading the desktop ``.env`` a
+    second time here would reintroduce unallowlisted/live-cash configuration.
+    Only the exact, bootstrap-owned marker value ``true`` disables the env
+    file; an invalid present value fails closed instead of silently escaping
+    isolation.  Normal processes with no marker retain the historical
+    ``Settings()`` behavior.
+    """
+
+    marker = os.environ.get(CAPTURED_PAPER_CONFIG_ISOLATION_ENV)
+    if marker is None:
+        return Settings()
+    if marker != "true":
+        raise RuntimeError(
+            f"{CAPTURED_PAPER_CONFIG_ISOLATION_ENV} must be exactly 'true'"
+        )
+    return Settings(_env_file=None)
+
+
 # Load once at import
-settings = Settings()
+settings = load_process_settings()

@@ -225,22 +225,24 @@ def test_wrong_paper_account_snapshot_cannot_reuse_last_good(monkeypatch) -> Non
         risk_policy._clear_alpaca_account_caches()
 
 
-def test_alpaca_daily_loss_cap_never_exceeds_fixed_250_defense(monkeypatch) -> None:
+def test_alpaca_daily_loss_cap_uses_equity_fraction_not_fixed_fallback(monkeypatch) -> None:
     monkeypatch.setattr(risk_policy.settings, "chili_alpaca_paper", True)
     monkeypatch.setattr(
-        risk_policy,
-        "_equity_relative_cap",
-        lambda *args, **kwargs: 1_400.0,
+        risk_policy.settings,
+        "chili_momentum_risk_daily_loss_fraction_of_equity",
+        0.05,
+        raising=False,
     )
+    monkeypatch.setattr(risk_policy, "_account_equity_usd", lambda *a, **k: 100_000.0)
 
     assert risk_policy.equity_relative_daily_loss_cap(
         250.0,
         "alpaca_spot",
-    ) == 250.0
+    ) == 5_000.0
     assert risk_policy.equity_relative_daily_loss_cap(
         100.0,
         "alpaca_spot",
-    ) == 100.0
+    ) == 5_000.0
 
 
 def test_live_posture_or_scope_cannot_open_risk_reservation_transaction(

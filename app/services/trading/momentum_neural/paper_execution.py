@@ -162,6 +162,33 @@ def roundtrip_fee_usd(
     return abs(notional) * 0.0025 * 2.0
 
 
+def modeled_fill_leg_fee_usd(
+    notional: float,
+    fee_to_target_ratio: float,
+    *,
+    entry: float = 0.0,
+    target: float = 0.0,
+    venue_rt_bps: float | None = None,
+) -> float:
+    """Allocate a symmetric round-trip fee model to one executed leg.
+
+    ``roundtrip_fee_usd`` is intentionally a complete entry+exit estimate.
+    A fill ledger records each leg separately, so charging that full amount on
+    both the buy and sell doubles modeled costs.  Until a sealed venue receipt
+    supplies asymmetric per-leg fees, allocate exactly half of the prospectively
+    bound round-trip model to each executed notional.  Partial fills remain
+    proportional because ``notional`` is the delta fill notional.
+    """
+
+    return roundtrip_fee_usd(
+        notional,
+        fee_to_target_ratio,
+        entry=entry,
+        target=target,
+        venue_rt_bps=venue_rt_bps,
+    ) / 2.0
+
+
 def crypto_paper_roundtrip_bps() -> float:
     """Round-trip commission (bps) a crypto PAPER trade should be charged.
 

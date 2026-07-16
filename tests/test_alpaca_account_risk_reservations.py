@@ -34,7 +34,7 @@ from app.services.trading.momentum_neural.risk_policy import (
 )
 
 
-TEST_ALPACA_ACCOUNT_ID = "acct-risk-reservation-test"
+TEST_ALPACA_ACCOUNT_ID = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
 
 
 @pytest.fixture(autouse=True)

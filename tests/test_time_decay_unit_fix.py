@@ -19,6 +19,7 @@ import pytest
 from app.models.trading import PaperTrade, ScanPattern
 from app.services.trading import live_exit_engine as lee
 from app.services.trading.timeframe_utils import (
+    canonical_interval_for_seconds,
     known_timeframes,
     timeframe_to_seconds,
 )
@@ -112,6 +113,11 @@ def test_timeframe_to_seconds_1m():
 def test_timeframe_to_seconds_unknown_raises():
     with pytest.raises(ValueError, match="Unknown timeframe"):
         timeframe_to_seconds("13h")
+
+
+def test_canonical_interval_uses_production_minute_spelling():
+    assert canonical_interval_for_seconds(60) == "1m"
+    assert canonical_interval_for_seconds(15) == "15s"
 
 
 def test_known_timeframes_covers_production_survey():

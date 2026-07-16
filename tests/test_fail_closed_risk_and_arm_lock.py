@@ -436,6 +436,153 @@ def test_begin_live_arm_lock_contention_or_failure_creates_nothing(
         ).count() == 0
 
 
+def test_begin_live_arm_rejects_account_rotation_before_session_or_claim(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.trading import portfolio_allocator
+
+    user, variant = _user_and_variant(db)
+    _add_viability(db, symbol="ROTATE", variant_id=int(variant.id))
+    monkeypatch.setattr(
+        operator_actions,
+        "_live_symbol_arm_lock_acquired",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        operator_actions,
+        "guard_alpaca_entry_ownership",
+        lambda *_a, **_k: (True, None, None),
+    )
+    monkeypatch.setattr(
+        operator_actions,
+        "resolve_effective_risk_policy",
+        lambda: {"auto_expire_pending_live_arm_seconds": 120.0},
+    )
+    monkeypatch.setattr(
+        operator_actions,
+        "evaluate_proposed_momentum_automation",
+        lambda *_a, **_k: {"allowed": True, "severity": "ok", "checks": []},
+    )
+    monkeypatch.setattr(
+        operator_actions,
+        "_certified_non_alpaca_account_identity",
+        lambda _family: ("account-generation-B", None),
+    )
+    monkeypatch.setattr(
+        portfolio_allocator,
+        "build_session_allocation_decision",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("allocation/session creation must not run after A->B rotation")
+        ),
+    )
+
+    result = operator_actions.begin_live_arm(
+        db,
+        user_id=int(user.id),
+        symbol="ROTATE",
+        variant_id=int(variant.id),
+        execution_family="robinhood_spot",
+        expected_guarded_account_identity="account-generation-A",
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "account_identity_changed_since_loss_guard"
+    assert db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.mode == "live"
+    ).count() == 0
+    assert db.query(BrokerSymbolActionClaim).count() == 0
+
+
+def test_begin_live_arm_dedup_does_not_reuse_other_guarded_generation(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user, variant = _user_and_variant(db)
+    existing = _session(
+        db,
+        user_id=int(user.id),
+        variant_id=int(variant.id),
+        symbol="DEDUPGEN",
+        state="watching_live",
+        execution_family="robinhood_spot",
+        extra_snapshot={
+            "non_alpaca_account_identity": "account-generation-B",
+            "arm_token": "must-not-reuse",
+        },
+    )
+    monkeypatch.setattr(
+        operator_actions,
+        "_live_symbol_arm_lock_acquired",
+        lambda *_a, **_k: True,
+    )
+
+    result = operator_actions.begin_live_arm(
+        db,
+        user_id=int(user.id),
+        symbol="DEDUPGEN",
+        variant_id=int(variant.id),
+        execution_family="robinhood_spot",
+        expected_guarded_account_identity="account-generation-A",
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "account_identity_changed_since_loss_guard"
+    assert db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.id == int(existing.id)
+    ).count() == 1
+    assert db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.mode == "live"
+    ).count() == 1
+
+
+def test_begin_live_arm_dedup_rereads_current_account_generation(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user, variant = _user_and_variant(db)
+    existing = _session(
+        db,
+        user_id=int(user.id),
+        variant_id=int(variant.id),
+        symbol="DEDUPROTATE",
+        state="watching_live",
+        execution_family="robinhood_spot",
+        extra_snapshot={
+            "non_alpaca_account_identity": "account-generation-A",
+            "arm_token": "must-not-reuse-after-rotation",
+        },
+    )
+    monkeypatch.setattr(
+        operator_actions,
+        "_live_symbol_arm_lock_acquired",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        operator_actions,
+        "_certified_non_alpaca_account_identity",
+        lambda _family: ("account-generation-B", None),
+    )
+
+    result = operator_actions.begin_live_arm(
+        db,
+        user_id=int(user.id),
+        symbol="DEDUPROTATE",
+        variant_id=int(variant.id),
+        execution_family="robinhood_spot",
+        expected_guarded_account_identity="account-generation-A",
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "account_identity_changed_since_loss_guard"
+    assert int(existing.id) == int(
+        db.query(TradingAutomationSession.id)
+        .filter(TradingAutomationSession.mode == "live")
+        .one()[0]
+    )
+    assert db.query(BrokerSymbolActionClaim).count() == 0
+
+
 def test_promote_live_arm_lock_contention_or_failure_creates_nothing(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -600,6 +747,13 @@ def test_promotion_reuses_existing_active_generation_sequentially(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_promotion_dependencies(monkeypatch)
+    snapshot_calls: list[dict] = []
+
+    def _capture_snapshot(*_args, **kwargs):
+        snapshot_calls.append(kwargs)
+        return dict(kwargs.get("extra") or {})
+
+    monkeypatch.setattr(operator_actions, "build_session_risk_snapshot", _capture_snapshot)
     user, variant = _user_and_variant(db)
     paper = _session(
         db,
@@ -629,6 +783,8 @@ def test_promotion_reuses_existing_active_generation_sequentially(
     assert second["ok"] is True
     assert second["deduped"] is True
     assert second["session_id"] == first["session_id"]
+    assert len(snapshot_calls) == 1
+    assert snapshot_calls[0]["execution_family"] == "robinhood_spot"
     assert db.query(TradingAutomationSession).filter(
         TradingAutomationSession.user_id == int(user.id),
         TradingAutomationSession.symbol == "SEQD",

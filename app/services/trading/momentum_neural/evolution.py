@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import func, or_
@@ -35,15 +35,19 @@ def record_evolution_trace(
     *,
     snapshot: dict[str, Any],
     graph_version: int = 1,
+    observed_at: Optional[datetime] = None,
 ) -> None:
     """Append a compact tick snapshot to the evolution observer node's local_state."""
     _ = graph_version
     st = get_or_create_state(db, EVOLUTION_NODE_ID)
     ls = dict(st.local_state) if isinstance(st.local_state, dict) else {}
     trace = list(ls.get("trace") or [])
+    now = observed_at or datetime.utcnow()
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone.utc).replace(tzinfo=None)
     trace.append(
         {
-            "at_utc": datetime.utcnow().isoformat(),
+            "at_utc": now.isoformat(),
             "top_family": snapshot.get("top_family_id"),
             "top_viability": snapshot.get("top_viability"),
             "regime_session": snapshot.get("session_label"),
@@ -52,7 +56,7 @@ def record_evolution_trace(
     ls["trace"] = trace[-_MAX_TRACE:]
     ls["momentum_neural_version"] = 1
     st.local_state = ls
-    st.updated_at = datetime.utcnow()
+    st.updated_at = now
 
 
 def _parse_terminal_at(row: MomentumAutomationOutcome) -> datetime:

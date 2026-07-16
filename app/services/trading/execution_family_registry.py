@@ -112,6 +112,20 @@ class ExecutionFamilyNotImplementedError(LookupError):
         super().__init__(f"execution_family not implemented: {execution_family!r}")
 
 
+class ExecutionFamilyRoutingError(RuntimeError):
+    """An explicitly selected execution route cannot be proven safe.
+
+    This is deliberately different from an unavailable optional venue.  Once the
+    operator selects the Alpaca-paper equity route, falling through to a live-cash
+    Robinhood family would change the broker/account boundary.  Callers must stop
+    instead of substituting another equity venue.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = str(reason or "execution_family_routing_unavailable")
+        super().__init__(self.reason)
+
+
 def normalize_execution_family(value: Optional[str]) -> str:
     s = (value or "").strip().lower()
     return s if s else EXECUTION_FAMILY_COINBASE_SPOT
@@ -237,15 +251,34 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
     (docs/DESIGN/ALPACA_LANE.md): the soak that measures DMA-style limit-posting
     fill quality against the RH live lane on the SAME names, at zero risk.
     """
+    _mode = str(mode or "").strip().lower()
+    _alpaca_equity_route_selected = False
     try:
-        from .venue.robinhood_spot import _is_crypto_product
-
         from ...config import settings
 
-        _alpaca_ready = (
-            bool(getattr(settings, "chili_alpaca_enabled", False))
-            and bool(getattr(settings, "chili_alpaca_paper", True))
-            and str(getattr(settings, "chili_alpaca_api_key", "") or "")
+        _alpaca_equity_route_selected = bool(
+            getattr(
+                settings,
+                "chili_momentum_equity_execution_via_alpaca_paper",
+                False,
+            )
+        )
+        from .venue.robinhood_spot import _is_crypto_product
+
+        _alpaca_ready = all(
+            (
+                bool(getattr(settings, "chili_alpaca_enabled", False)),
+                bool(getattr(settings, "chili_alpaca_paper", True)),
+                bool(str(getattr(settings, "chili_alpaca_api_key", "") or "").strip()),
+                bool(
+                    str(getattr(settings, "chili_alpaca_api_secret", "") or "").strip()
+                ),
+                bool(
+                    str(
+                        getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+                    ).strip()
+                ),
+            )
         )
         if _is_crypto_product(symbol):
             # CRYPTO -> ALPACA PAPER (2026-07-09, operator option A): route Alpaca-LISTED
@@ -271,16 +304,37 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
         # excluded from real daily-loss / aggregate-risk caps (risk_evaluator/risk_policy) =>
         # paper-by-construction. Default off => byte-identical (the twin-soak path still uses
         # mode="paper"; with this ON the primary is already alpaca so the twin block skips).
-        if _alpaca_ready and bool(
-            getattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", False)
-        ):
+        # The explicit primary-route flag is an operator promise that this
+        # equity decision cannot reach a live-cash Robinhood adapter. Missing
+        # Alpaca paper posture is therefore a routing error, never a reason to
+        # use the default equity family. Generic ``mode=paper`` is the legacy
+        # DB-only simulator selector: it may label an Alpaca shadow only when
+        # the full paper identity is ready, otherwise it retains its Robinhood
+        # simulation baseline and never invokes a broker adapter.
+        if _alpaca_equity_route_selected:
+            if not _alpaca_ready:
+                raise ExecutionFamilyRoutingError(
+                    "alpaca_paper_equity_route_not_ready"
+                )
             return EXECUTION_FAMILY_ALPACA_SPOT
-        if str(mode or "").lower() == "paper" and _alpaca_ready:
+        if _mode == "paper" and _alpaca_ready:
             return EXECUTION_FAMILY_ALPACA_SPOT
         if _equity_rail_is_agentic_mcp():
             return EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
         return EXECUTION_FAMILY_ROBINHOOD_SPOT
-    except Exception:
+    except ExecutionFamilyRoutingError:
+        raise
+    except Exception as exc:
+        # A selected paper-only equity topology is not allowed to degrade to a
+        # real-money venue when imports/configuration/routing fail.  The symbol
+        # heuristic is used only to avoid applying the equity latch to crypto.
+        if (
+            _alpaca_equity_route_selected
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            raise ExecutionFamilyRoutingError(
+                "alpaca_paper_equity_route_resolution_failed"
+            ) from exc
         # Fallback heuristic: a "-USD" pair is crypto -> Coinbase, else equity -> RH.
         return (
             EXECUTION_FAMILY_COINBASE_SPOT

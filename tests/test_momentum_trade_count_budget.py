@@ -36,10 +36,12 @@ from app.models.trading import (
 from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants
 from app.services.trading.momentum_neural.risk_policy import (
     RISK_SNAPSHOT_KEY,
+    _count_real_entries_today,
     _count_symbol_episodes_today,
     _percentile,
     _top_ranked_live_eligible_symbol,
     daily_trade_count_budget_decision,
+    replay_risk_clock,
 )
 
 _EF = "robinhood_agentic"
@@ -75,6 +77,14 @@ def _utc_today_et(hour: int = 12, minute: int = 0) -> datetime:
     ET session bounds the budget reads)."""
     now_et = datetime.now(_ET).replace(hour=hour, minute=minute, second=0, microsecond=0)
     return now_et.astimezone(_UTC).replace(tzinfo=None)
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_risk_frontier():
+    """Keep all ordinary fixture outcomes causal regardless of wall test time."""
+
+    with replay_risk_clock(_utc_today_et(hour=13, minute=30)):
+        yield
 
 
 def _add_entry(
@@ -131,9 +141,18 @@ def _add_entry(
 
 
 def _add_viability(
-    db: Session, *, symbol: str, variant_id: int, score: float, live: bool = True, fresh: bool = True
+    db: Session,
+    *,
+    symbol: str,
+    variant_id: int,
+    score: float,
+    live: bool = True,
+    fresh: bool = True,
+    freshness_at: datetime | None = None,
 ) -> None:
-    ts = datetime.utcnow() if fresh else (datetime.utcnow() - timedelta(hours=2))
+    ts = freshness_at or _utc_today_et(hour=13, minute=29)
+    if not fresh:
+        ts -= timedelta(hours=2)
     db.add(
         MomentumSymbolViability(
             symbol=symbol,
@@ -222,6 +241,23 @@ def test_never_entered_rows_not_counted(db: Session, monkeypatch) -> None:
     assert episodes == 0, meta
 
 
+def test_replay_frontier_excludes_future_same_day_entries(db: Session) -> None:
+    u, variants = _setup(db)
+    v = variants[0]
+    _add_entry(db, u, v, symbol="PAST", pnl=-10.0, outcome_class="stop_loss", hour=10)
+    _add_entry(db, u, v, symbol="FUTURE", pnl=-20.0, outcome_class="stop_loss", hour=14)
+    frontier = _utc_today_et(hour=12)
+
+    with replay_risk_clock(frontier):
+        entries = _count_real_entries_today(db, execution_family=_EF)
+        episodes, green, meta = _count_symbol_episodes_today(db, execution_family=_EF)
+
+    assert entries == 1
+    assert episodes == 1
+    assert green == set()
+    assert meta["distinct_symbol_list"] == ["PAST"]
+
+
 # ── A1(b) TOP-RANK read helper ──────────────────────────────────────────────────
 
 
@@ -248,6 +284,34 @@ def test_top_rank_empty_board_fail_closed(db: Session, monkeypatch) -> None:
     top_sym, top_score, p90, meta = _top_ranked_live_eligible_symbol(db, crypto=False)
     assert top_sym is None and top_score is None and p90 is None
     assert meta["reason"] in ("empty_board", "no_scored_symbols")
+
+
+def test_top_rank_excludes_future_viability_rows(db: Session) -> None:
+    _setup(db)
+    variants = db.query(MomentumStrategyVariant).all()
+    frontier = _utc_today_et(hour=12)
+    _add_viability(
+        db,
+        symbol="PAST",
+        variant_id=variants[0].id,
+        score=0.75,
+        freshness_at=frontier - timedelta(minutes=1),
+    )
+    _add_viability(
+        db,
+        symbol="FUTURE",
+        variant_id=variants[1 % len(variants)].id,
+        score=0.99,
+        freshness_at=frontier + timedelta(minutes=1),
+    )
+
+    with replay_risk_clock(frontier):
+        top_sym, top_score, _p90, _meta = _top_ranked_live_eligible_symbol(
+            db, crypto=False
+        )
+
+    assert top_sym == "PAST"
+    assert top_score == pytest.approx(0.75)
 
 
 # ── A1 the 07-02-SHAPE REPLAY: 5 B-episodes -> #1 allowed, non-#1 denied ─────────

@@ -61,3 +61,8 @@ def test_paper_draft_venue_matches_execution_family(db: Session) -> None:
     sess = db.get(TradingAutomationSession, int(res["session_id"]))
     assert sess.execution_family == "alpaca_spot"
     assert sess.venue == "alpaca"  # NOT the old hardcoded "coinbase"
+    derivation = (sess.risk_snapshot_json or {}).get("momentum_policy_caps_derivation") or {}
+    assert derivation
+    assert {
+        item.get("execution_family") for item in derivation.values()
+    } == {"alpaca_spot"}

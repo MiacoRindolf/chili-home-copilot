@@ -12,6 +12,7 @@ import json
 import hashlib
 import logging
 import math
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -19,6 +20,19 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ....config import settings
+from .adaptive_risk_policy import (
+    AdaptiveRiskContractError,
+    resolve_adaptive_risk,
+)
+from .adaptive_risk_reservation import (
+    AdaptiveRiskReservationStore,
+    load_adaptive_risk_reservation_request,
+)
+from .adaptive_risk_runtime_contract import (
+    AdaptiveRiskLedgerSnapshot,
+    load_and_verify_adaptive_risk_reservation_claim,
+    verify_adaptive_risk_claim_against_atomic_ledger,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -177,6 +191,9 @@ _ENTRY_IDENTITY_METADATA_KEYS = frozenset({
     # a CID is bound this value is immutable and is never overwritten by a
     # same-owner recovery worker.
     "entry_post_bind_token",
+    "adaptive_risk_decision_packet",
+    "adaptive_risk_reservation_claim",
+    "adaptive_risk_reservation_request",
 })
 
 
@@ -190,6 +207,31 @@ def _entry_identity_metadata_matches(
         if key not in existing or existing.get(key) != proposed.get(key):
             return False
     return True
+
+
+def _entry_pre_transport_generation_rebindable(
+    existing: dict[str, Any],
+    proposed: dict[str, Any],
+) -> bool:
+    """Require one complete immutable entry identity except for its binder.
+
+    A restarted worker may rotate only the expired pre-HTTP generation token.
+    Partial/legacy metadata cannot use this recovery seam because omission must
+    never turn into authority to reinterpret a CID-bound instruction.
+    """
+
+    required = set(_ENTRY_IDENTITY_METADATA_KEYS)
+    if not required.issubset(existing) or not required.issubset(proposed):
+        return False
+    prior_binder = str(existing.get("entry_post_bind_token") or "").strip()
+    next_binder = str(proposed.get("entry_post_bind_token") or "").strip()
+    if not prior_binder or not next_binder or prior_binder == next_binder:
+        return False
+    return all(
+        existing.get(key) == proposed.get(key)
+        for key in required
+        if key != "entry_post_bind_token"
+    )
 
 
 def _owner_transport_request_valid(
@@ -3399,9 +3441,106 @@ def acquire_action_claim(
         )
         replaceable = existing["phase"] == RESOLVED or expired_pre_http
 
+        proposed_metadata = dict(metadata or {})
+        existing_metadata = dict(existing.get("metadata") or {})
+        expired_bound_entry_generation = bool(
+            act == "entry"
+            and existing.get("action") == "entry"
+            and existing.get("claim_token") == token
+            and owner_session_id is not None
+            and existing.get("owner_session_id") == int(owner_session_id)
+            and cid is not None
+            and existing.get("client_order_id") == cid
+            and existing.get("phase") == CLAIMED
+            and existing.get("broker_order_id") is None
+            and existing.get("lease_expires_at") is not None
+            and existing["lease_expires_at"] <= now
+            and "entry_transport_started" not in existing_metadata
+            and "owner_transport" not in existing_metadata
+            and _entry_pre_transport_generation_rebindable(
+                existing_metadata,
+                proposed_metadata,
+            )
+        )
+        if expired_bound_entry_generation:
+            prior_binder = str(
+                existing_metadata.get("entry_post_bind_token") or ""
+            ).strip()
+            next_binder = str(
+                proposed_metadata.get("entry_post_bind_token") or ""
+            ).strip()
+            rebind_audit = {
+                "pre_transport_generation_rebound": {
+                    "schema_version": (
+                        "chili.alpaca-entry-pre-transport-generation.v1"
+                    ),
+                    "client_order_id": cid,
+                    "prior_binder_sha256": hashlib.sha256(
+                        prior_binder.encode("utf-8")
+                    ).hexdigest(),
+                    "next_binder_sha256": hashlib.sha256(
+                        next_binder.encode("utf-8")
+                    ).hexdigest(),
+                    "prior_lease_expires_at_utc": (
+                        existing["lease_expires_at"].isoformat()
+                    ),
+                    "rebound_at_utc": now.isoformat(),
+                    "reason": "expired_claim_only_pre_transport_recovery",
+                }
+            }
+            row = db.execute(
+                text(
+                    "UPDATE broker_symbol_action_claims SET "
+                    " metadata_json = metadata_json || CAST(:metadata AS jsonb)"
+                    "   || CAST(:rebind_audit AS jsonb),"
+                    " updated_at = :now, lease_expires_at = :lease_expires "
+                    "WHERE account_scope = :scope AND symbol = :symbol "
+                    " AND claim_token = :token AND action = 'entry'"
+                    " AND owner_session_id = :owner_session_id"
+                    " AND phase = 'claimed' AND broker_order_id IS NULL"
+                    " AND client_order_id = :client_order_id"
+                    " AND lease_expires_at <= :now"
+                    " AND COALESCE(metadata_json->>'entry_post_bind_token', '')"
+                    "     = :prior_binder"
+                    " AND NOT (metadata_json ? 'entry_transport_started')"
+                    " AND NOT (metadata_json ? 'owner_transport') "
+                    f"RETURNING {_CLAIM_COLUMNS}"
+                ),
+                {
+                    "scope": scope,
+                    "symbol": sym,
+                    "token": token,
+                    "owner_session_id": int(owner_session_id),
+                    "client_order_id": cid,
+                    "prior_binder": prior_binder,
+                    "metadata": json.dumps(
+                        {"entry_post_bind_token": next_binder},
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                    "rebind_audit": json.dumps(
+                        rebind_audit,
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                    "now": now,
+                    "lease_expires": lease_expires,
+                },
+            ).fetchone()
+            if row is None:
+                return {
+                    "ok": False,
+                    "reason": "entry_pre_transport_generation_rebind_lost",
+                    "claim": existing,
+                }
+            return {
+                "ok": True,
+                "claim": _row_to_claim(row),
+                "pre_transport_generation_rebound": True,
+                "prior_lease_expires_at": existing.get("lease_expires_at"),
+            }
+
         if same_owner and cid_compatible and existing["phase"] != RESOLVED:
-            proposed_metadata = dict(metadata or {})
-            existing_metadata = dict(existing.get("metadata") or {})
             if (
                 act == "entry"
                 and existing.get("client_order_id") is not None
@@ -4249,6 +4388,244 @@ def release_entry_claim_pre_post(
         return False
 
 
+class _CoordinatedPrePostReleaseBlocked(RuntimeError):
+    """The exact claim/reservation generation cannot be jointly released."""
+
+    def __init__(self, blocker: str) -> None:
+        super().__init__(blocker)
+        self.blocker = blocker
+
+
+def release_entry_and_adaptive_reservation_pre_post(
+    db: Session,
+    *,
+    reservation_id: str,
+    symbol: str,
+    claim_token: str,
+    owner_session_id: int,
+    client_order_id: str,
+    post_bind_token: str,
+    account_scope: str,
+    alpaca_account_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Release one proven-pre-HTTP claim and reservation in one transaction.
+
+    The adaptive reservation row is locked first, then this callback locks and
+    CAS-resolves the exact action claim, and only then may the first-dip
+    opportunity row be released.  Any mismatch or later validation failure
+    raises through the caller transaction so neither ledger can commit alone.
+    """
+
+    scope = str(account_scope or "").strip().lower()
+    sym = _symbol(symbol)
+    token = str(claim_token or "").strip()
+    cid = str(client_order_id or "").strip()
+    binder = str(post_bind_token or "").strip()
+    account_id = str(alpaca_account_id or "").strip()
+    why = str(reason or "").strip()
+    try:
+        rid = uuid.UUID(str(reservation_id))
+        owner_id = int(owner_session_id)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise _CoordinatedPrePostReleaseBlocked(
+            "coordinated_release_identity_invalid"
+        ) from exc
+    if not (
+        scope == "alpaca:paper"
+        and sym
+        and token
+        and cid
+        and binder
+        and account_id
+        and why
+        and owner_id > 0
+    ):
+        raise _CoordinatedPrePostReleaseBlocked(
+            "coordinated_release_identity_invalid"
+        )
+
+    bind = db.get_bind()
+    engine = getattr(bind, "engine", bind)
+    store = AdaptiveRiskReservationStore(engine)
+    if not db.in_transaction():
+        # ``_with_short_session`` commits the outer transaction after this
+        # function returns.  Start it explicitly so the reservation store can
+        # join the exact same transaction as the action-claim CAS.
+        db.begin()
+
+    def _release_exact_claim(
+        session: Session,
+        reservation: Any,
+    ) -> bool:
+        if (
+            str(getattr(reservation, "account_scope", "") or "").strip().lower()
+            != scope
+            or str(getattr(reservation, "symbol", "") or "").strip().upper()
+            != sym
+        ):
+            raise _CoordinatedPrePostReleaseBlocked(
+                "reservation_identity_mismatch"
+            )
+        readable, claim = read_action_claim(
+            session,
+            symbol=sym,
+            account_scope=scope,
+            for_update=True,
+        )
+        if not readable:
+            raise _CoordinatedPrePostReleaseBlocked("action_claim_unreadable")
+        if claim is None:
+            raise _CoordinatedPrePostReleaseBlocked("action_claim_missing")
+        metadata = claim.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        try:
+            exact_identity = bool(
+                claim.get("action") == "entry"
+                and claim.get("claim_token") == token
+                and int(claim.get("owner_session_id")) == owner_id
+                and claim.get("client_order_id") == cid
+                and claim.get("broker_order_id") is None
+                and str(metadata.get("alpaca_account_id") or "").strip()
+                == account_id
+                and str(metadata.get("entry_post_bind_token") or "").strip()
+                == binder
+            )
+        except (TypeError, ValueError):
+            exact_identity = False
+        if not exact_identity:
+            raise _CoordinatedPrePostReleaseBlocked(
+                "action_claim_identity_mismatch"
+            )
+
+        packet = metadata.get("adaptive_risk_decision_packet")
+        claim_payload = metadata.get("adaptive_risk_reservation_claim")
+        request_payload = metadata.get("adaptive_risk_reservation_request")
+        if not (
+            isinstance(packet, dict)
+            and isinstance(claim_payload, dict)
+            and isinstance(request_payload, dict)
+        ):
+            raise _CoordinatedPrePostReleaseBlocked(
+                "adaptive_claim_binding_missing"
+            )
+        try:
+            adaptive_claim = load_and_verify_adaptive_risk_reservation_claim(
+                packet,
+                claim_payload,
+            )
+            adaptive_request = load_adaptive_risk_reservation_request(
+                request_payload
+            )
+            packet_row = session.execute(
+                text(
+                    "SELECT reservation_request_sha256, account_scope, symbol, "
+                    "client_order_id, setup_family, correlation_cluster "
+                    "FROM adaptive_risk_decision_packets "
+                    "WHERE decision_packet_sha256 = :decision_packet_sha256"
+                ),
+                {
+                    "decision_packet_sha256": str(
+                        getattr(reservation, "decision_packet_sha256", "") or ""
+                    )
+                },
+            ).fetchone()
+            binding_matches = bool(
+                packet_row is not None
+                and adaptive_claim.decision_packet_sha256
+                == str(getattr(reservation, "decision_packet_sha256", "") or "")
+                and str(packet_row[0]) == adaptive_request.request_sha256
+                and str(packet_row[1]) == scope
+                and str(packet_row[2]).strip().upper() == sym
+                and str(packet_row[3]) == cid
+                and str(packet_row[4])
+                == str(getattr(reservation, "setup_family", "") or "")
+                and str(packet_row[5])
+                == str(getattr(reservation, "correlation_cluster", "") or "")
+                and adaptive_claim.claim_id == cid
+                and adaptive_claim.symbol == sym
+                and adaptive_claim.execution_surface == "alpaca_paper"
+                and adaptive_claim.execution_family == "alpaca_spot"
+                and adaptive_claim.venue == "alpaca"
+                and adaptive_claim.broker_environment == "paper"
+                and adaptive_request.client_order_id == cid
+                and adaptive_request.account_scope == scope
+                and adaptive_request.inputs.symbol == sym
+                and adaptive_request.setup_family
+                == str(getattr(reservation, "setup_family", "") or "")
+                and adaptive_request.correlation_cluster
+                == str(getattr(reservation, "correlation_cluster", "") or "")
+            )
+        except (AdaptiveRiskContractError, KeyError, TypeError, ValueError):
+            binding_matches = False
+        if not binding_matches:
+            raise _CoordinatedPrePostReleaseBlocked(
+                "adaptive_claim_binding_mismatch"
+            )
+
+        phase = str(claim.get("phase") or "").strip().lower()
+        if phase == RESOLVED:
+            proof = metadata.get("pre_post_release")
+            proof = proof if isinstance(proof, dict) else {}
+            if not (
+                proof.get("proven_no_transport") is True
+                and proof.get("client_order_id") == cid
+                and proof.get("post_bind_token") == binder
+                and proof.get("reason") == why
+                and "entry_transport_started" not in metadata
+                and "owner_transport" not in metadata
+            ):
+                raise _CoordinatedPrePostReleaseBlocked(
+                    "resolved_claim_lacks_exact_pre_post_proof"
+                )
+            return True
+        if (
+            phase != CLAIMED
+            or "entry_transport_started" in metadata
+            or "owner_transport" in metadata
+        ):
+            raise _CoordinatedPrePostReleaseBlocked(
+                "action_claim_transport_state_indeterminate"
+            )
+        if not release_entry_claim_pre_post(
+            session,
+            symbol=sym,
+            claim_token=token,
+            owner_session_id=owner_id,
+            client_order_id=cid,
+            post_bind_token=binder,
+            account_scope=scope,
+            alpaca_account_id=account_id,
+            reason=why,
+        ):
+            raise _CoordinatedPrePostReleaseBlocked(
+                "action_claim_release_cas_failed"
+            )
+        return True
+
+    state = store.release_zero_fill(
+        rid,
+        reason="pre_post_release",
+        session=db,
+        pre_post_claim_fence=_release_exact_claim,
+    )
+    if state.state != "released":
+        raise _CoordinatedPrePostReleaseBlocked(
+            "adaptive_reservation_release_unconfirmed"
+        )
+    return {
+        "ok": True,
+        "confirmed": True,
+        "adaptive_released": True,
+        "legacy_released": True,
+        "reason": why,
+        "reservation_id": str(state.reservation_id),
+        "reservation_state": state.state,
+        "opportunity_status": state.opportunity_status,
+        "state": state,
+    }
+
+
 def mark_entry_transport_started(
     db: Session,
     *,
@@ -4346,6 +4723,7 @@ def resolve_action_claim(
     orphan_handoff_broker_flat: bool = False,
     proven_no_transport: bool = False,
     broker_cid_absent_after_grace: bool = False,
+    expected_claim_updated_at: datetime | None = None,
     metadata: dict[str, Any] | None = None,
     account_scope: str | None = None,
 ) -> bool:
@@ -4369,6 +4747,14 @@ def resolve_action_claim(
             db, symbol=symbol, account_scope=scope, for_update=True
         )
         if not readable or claim is None or claim["claim_token"] != str(claim_token):
+            return False
+        if expected_claim_updated_at is not None and (
+            not isinstance(expected_claim_updated_at, datetime)
+            or claim.get("updated_at") != expected_claim_updated_at
+        ):
+            # A broker observation made against an older claim/binder generation
+            # cannot mutate the replacement generation. The caller must reread
+            # broker truth against the new durable claim snapshot.
             return False
         exact_cid = bool(
             claim.get("client_order_id")
@@ -4612,6 +4998,168 @@ def _certified_frozen_entry_request(
     )
 
 
+def _adaptive_reservation_from_container(
+    container: Any,
+) -> tuple[dict[str, Any], dict[str, Any], Any] | None:
+    """Load one strict packet+claim pair from session/claim metadata."""
+
+    if not isinstance(container, dict):
+        return None
+    packet = container.get("adaptive_risk_decision_packet")
+    claim_payload = container.get("adaptive_risk_reservation_claim")
+    if packet is None and claim_payload is None:
+        return None
+    if not isinstance(packet, dict) or not isinstance(claim_payload, dict):
+        raise AdaptiveRiskContractError("adaptive risk packet/claim pair is incomplete")
+    claim = load_and_verify_adaptive_risk_reservation_claim(packet, claim_payload)
+    return dict(packet), dict(claim_payload), claim
+
+
+def _adaptive_atomic_ledger_from_rows(
+    *,
+    session_rows: list[Any],
+    claim_rows: list[Any],
+    account_id: str,
+    account_identity_sha256: str,
+    candidate_symbol: str,
+    candidate_cluster: str,
+    current_owner_session_id: int,
+    current_claim_token: str,
+    current_client_order_id: str,
+) -> AdaptiveRiskLedgerSnapshot:
+    """Project all owned open+pending dimensions under the account advisory lock.
+
+    Legacy rows cannot be guessed into the adaptive ledger.  An open position or
+    risk-bearing pending instruction without its strict packet+claim pair makes
+    the ledger unreadable and therefore rejects the new candidate.
+    """
+
+    open_totals = {"risk": 0.0, "gross": 0.0, "bp": 0.0}
+    pending_totals = {"risk": 0.0, "gross": 0.0, "bp": 0.0}
+    open_symbol = pending_symbol = 0.0
+    open_cluster = pending_cluster = 0.0
+    opened_by_decision: dict[str, float] = {}
+
+    for sid, row_symbol, family, _state, snapshot in session_rows:
+        snap = snapshot if isinstance(snapshot, dict) else {}
+        live = snap.get("momentum_live_execution")
+        live = live if isinstance(live, dict) else {}
+        position = live.get("position")
+        if position is None:
+            continue
+        if not isinstance(position, dict):
+            raise AdaptiveRiskContractError("adaptive open position is unreadable")
+        if (
+            str(family or "").strip().lower() != "alpaca_spot"
+            or str(snap.get("alpaca_account_scope") or "").strip().lower()
+            != "alpaca:paper"
+            or str(snap.get("alpaca_account_id") or "").strip() != account_id
+        ):
+            raise AdaptiveRiskContractError("adaptive open position account mismatch")
+        reservation = _adaptive_reservation_from_container(live)
+        if reservation is None:
+            raise AdaptiveRiskContractError(
+                "adaptive open position lacks a strict reservation claim"
+            )
+        _packet, _payload, claim = reservation
+        try:
+            qty = abs(float(position.get("quantity")))
+        except (TypeError, ValueError):
+            qty = math.nan
+        if (
+            not math.isfinite(qty)
+            or qty <= 0.0
+            or claim.quantity_shares <= 0
+            or qty > float(claim.quantity_shares) + 1e-9
+            or claim.account_identity_sha256 != account_identity_sha256
+            or claim.symbol != str(row_symbol or "").strip().upper()
+        ):
+            raise AdaptiveRiskContractError("adaptive open position claim mismatch")
+        ratio = qty / float(claim.quantity_shares)
+        dims = {
+            "risk": float(claim.structural_risk_usd) * ratio,
+            "gross": float(claim.gross_notional_usd) * ratio,
+            "bp": float(claim.buying_power_impact_usd) * ratio,
+        }
+        for name, value in dims.items():
+            open_totals[name] += value
+        if claim.symbol == candidate_symbol:
+            open_symbol += dims["risk"]
+        if claim.correlation_cluster_id == candidate_cluster:
+            open_cluster += dims["risk"]
+        opened_by_decision[claim.decision_packet_sha256] = (
+            opened_by_decision.get(claim.decision_packet_sha256, 0.0) + qty
+        )
+
+    for (
+        row_symbol,
+        row_action,
+        owner_id,
+        row_cid,
+        row_token,
+        row_phase,
+        _row_oid,
+        metadata,
+    ) in claim_rows:
+        if str(row_action or "") != "entry":
+            continue
+        meta = metadata if isinstance(metadata, dict) else {}
+        is_current = bool(
+            str(row_symbol or "").strip().upper() == candidate_symbol
+            and str(row_token or "") == current_claim_token
+            and int(owner_id) == int(current_owner_session_id)
+            and (row_cid is None or str(row_cid) == current_client_order_id)
+        )
+        if is_current:
+            continue
+        # A watch/arm symbol claim has no broker instruction and no economics.
+        if (
+            str(row_phase) == CLAIMED
+            and row_cid is None
+            and not meta.get("order_request")
+            and meta.get("reserved_risk_usd") is None
+        ):
+            continue
+        reservation = _adaptive_reservation_from_container(meta)
+        if reservation is None:
+            raise AdaptiveRiskContractError(
+                "adaptive pending instruction lacks a strict reservation claim"
+            )
+        _packet, _payload, claim = reservation
+        if claim.account_identity_sha256 != account_identity_sha256:
+            raise AdaptiveRiskContractError("adaptive pending claim account mismatch")
+        filled_qty = opened_by_decision.get(claim.decision_packet_sha256, 0.0)
+        remaining_ratio = max(
+            0.0,
+            (float(claim.quantity_shares) - filled_qty)
+            / float(claim.quantity_shares),
+        )
+        dims = {
+            "risk": float(claim.structural_risk_usd) * remaining_ratio,
+            "gross": float(claim.gross_notional_usd) * remaining_ratio,
+            "bp": float(claim.buying_power_impact_usd) * remaining_ratio,
+        }
+        for name, value in dims.items():
+            pending_totals[name] += value
+        if claim.symbol == candidate_symbol:
+            pending_symbol += dims["risk"]
+        if claim.correlation_cluster_id == candidate_cluster:
+            pending_cluster += dims["risk"]
+
+    return AdaptiveRiskLedgerSnapshot.from_dimensions(
+        open_structural_risk_usd=open_totals["risk"],
+        pending_reserved_risk_usd=pending_totals["risk"],
+        existing_same_symbol_structural_risk_usd=open_symbol,
+        pending_same_symbol_structural_risk_usd=pending_symbol,
+        current_cluster_structural_risk_usd=open_cluster,
+        pending_correlation_cluster_risk_usd=pending_cluster,
+        portfolio_gross_notional_usd=open_totals["gross"],
+        pending_portfolio_gross_notional_usd=pending_totals["gross"],
+        open_buying_power_impact_usd=open_totals["bp"],
+        pending_buying_power_impact_usd=pending_totals["bp"],
+    )
+
+
 def _reserve_alpaca_entry_risk(
     db: Session,
     *,
@@ -4638,6 +5186,36 @@ def _reserve_alpaca_entry_risk(
     sym = _symbol(symbol)
     request = dict(order_request or {})
     role_meta = dict(role_metadata or {})
+    adaptive_packet = role_meta.get("adaptive_risk_decision_packet")
+    adaptive_claim_payload = role_meta.get("adaptive_risk_reservation_claim")
+    adaptive_request_payload = role_meta.get("adaptive_risk_reservation_request")
+    adaptive_pair_present = (
+        adaptive_packet is not None
+        or adaptive_claim_payload is not None
+        or adaptive_request_payload is not None
+    )
+    if not adaptive_pair_present:
+        return {"ok": False, "reason": "adaptive_risk_request_packet_claim_required"}
+    if not (
+        isinstance(adaptive_packet, dict)
+        and isinstance(adaptive_claim_payload, dict)
+        and isinstance(adaptive_request_payload, dict)
+    ):
+        return {"ok": False, "reason": "adaptive_risk_request_packet_claim_incomplete"}
+    try:
+        adaptive_claim = load_and_verify_adaptive_risk_reservation_claim(
+            adaptive_packet,
+            adaptive_claim_payload,
+        )
+        adaptive_request = load_adaptive_risk_reservation_request(
+            adaptive_request_payload
+        )
+        request_resolution = resolve_adaptive_risk(
+            adaptive_request.policy,
+            adaptive_request.inputs,
+        )
+    except AdaptiveRiskContractError:
+        return {"ok": False, "reason": "adaptive_risk_request_packet_claim_invalid"}
     if (
         not sym
         or alpaca_symbol_is_crypto_like(sym)
@@ -4660,13 +5238,10 @@ def _reserve_alpaca_entry_risk(
         equity = float("nan")
     if not math.isfinite(equity) or equity <= 0.0:
         return {"ok": False, "reason": "equity_unavailable"}
-    try:
-        symbol_cap = float(50.0 if per_symbol_cap_usd is None else per_symbol_cap_usd)
-    except (TypeError, ValueError):
-        symbol_cap = 50.0
-    if not math.isfinite(symbol_cap) or symbol_cap <= 0.0:
-        symbol_cap = 50.0
-    symbol_cap = min(50.0, symbol_cap)
+    # The strict adaptive resolver owns symbol, cluster, daily and portfolio
+    # budgets.  Missing adaptive economics is rejected above; there is no
+    # activation-only dollar fallback on this committed entry boundary.
+    symbol_cap = float("inf")
     if budget_fraction is None:
         try:
             budget_fraction = float(
@@ -4735,6 +5310,45 @@ def _reserve_alpaca_entry_risk(
     )
     if not request_ok:
         return {"ok": False, "reason": "invalid_order_request"}
+    try:
+        adaptive_request_ok = bool(
+            adaptive_claim.execution_surface == "alpaca_paper"
+            and adaptive_claim.execution_family == "alpaca_spot"
+            and adaptive_claim.venue == "alpaca"
+            and adaptive_claim.broker_environment == "paper"
+            and adaptive_claim.symbol == sym
+            and adaptive_claim.side == "long"
+            and adaptive_claim.claim_id == cid
+            and adaptive_claim.quantity_shares == int(request_qty)
+            and abs(request_qty - float(adaptive_claim.quantity_shares)) <= 1e-9
+            and adaptive_claim.structural_risk_usd > 0.0
+            and adaptive_claim.gross_notional_usd > 0.0
+            and adaptive_claim.buying_power_impact_usd > 0.0
+            and adaptive_request.client_order_id == cid
+            and adaptive_request.account_scope == scope
+            and adaptive_request.inputs.symbol == sym
+            and adaptive_request.inputs.execution_surface == "alpaca_paper"
+            and adaptive_request.inputs.execution_family == "alpaca_spot"
+            and adaptive_request.inputs.venue == "alpaca"
+            and adaptive_request.inputs.broker_environment == "paper"
+            and request_resolution.valid
+            and request_resolution.decision_packet_sha256
+            == adaptive_claim.decision_packet_sha256
+            and (
+                request_type != "limit"
+                or math.isclose(
+                    adaptive_request.entry_limit_price,
+                    float(request_limit),
+                    rel_tol=1e-12,
+                    abs_tol=1e-9,
+                )
+            )
+        )
+    except (TypeError, ValueError):
+        adaptive_request_ok = False
+    if not adaptive_request_ok:
+        return {"ok": False, "reason": "adaptive_risk_order_request_mismatch"}
+    candidate = float(adaptive_claim.structural_risk_usd)
 
     db.execute(
         text("SELECT pg_advisory_xact_lock(:key)"),
@@ -4770,6 +5384,14 @@ def _reserve_alpaca_entry_risk(
             if (
                 existing_meta.get("order_role") != role
                 or existing_meta.get("order_request") != request
+                or (
+                    existing_meta.get("adaptive_risk_decision_packet")
+                    != adaptive_packet
+                    or existing_meta.get("adaptive_risk_reservation_claim")
+                    != adaptive_claim_payload
+                    or existing_meta.get("adaptive_risk_reservation_request")
+                    != adaptive_request_payload
+                )
             ):
                 return {
                     "ok": False,
@@ -4840,6 +5462,38 @@ def _reserve_alpaca_entry_risk(
         if frozen_claim_account_id != request_account_id:
             return {"ok": False, "reason": "alpaca_account_generation_mismatch"}
 
+    adaptive_ledger = None
+    if adaptive_claim is not None:
+        try:
+            adaptive_ledger = _adaptive_atomic_ledger_from_rows(
+                session_rows=list(session_rows),
+                claim_rows=list(claim_rows),
+                account_id=request_account_id,
+                account_identity_sha256=adaptive_claim.account_identity_sha256,
+                candidate_symbol=sym,
+                candidate_cluster=adaptive_claim.correlation_cluster_id,
+                current_owner_session_id=int(owner_session_id),
+                current_claim_token=token,
+                current_client_order_id=cid,
+            )
+            verify_adaptive_risk_claim_against_atomic_ledger(
+                adaptive_packet,
+                adaptive_claim_payload,
+                adaptive_ledger,
+            )
+            packet_inputs = adaptive_packet.get("input_snapshot")
+            packet_inputs = packet_inputs if isinstance(packet_inputs, dict) else {}
+            packet_equity = float(packet_inputs.get("equity_usd"))
+            if abs(packet_equity - equity) > max(
+                1e-9,
+                max(abs(packet_equity), abs(equity)) * 1e-12,
+            ):
+                raise AdaptiveRiskContractError(
+                    "adaptive account equity differs at reservation"
+                )
+        except (AdaptiveRiskContractError, TypeError, ValueError):
+            return {"ok": False, "reason": "adaptive_risk_atomic_ledger_mismatch"}
+
     # Serial recertification posture: no add/pyramid may reserve while *any*
     # persisted position exists.  Classify position evidence before state so a
     # pending-entry row with a fill cannot fall through the legacy-pending path.
@@ -4865,13 +5519,15 @@ def _reserve_alpaca_entry_risk(
                     or not _certified_long_execution_envelope(live)
                 ):
                     raise ValueError("persisted_position_direction_not_certified")
-                return {
-                    "ok": False,
-                    "reason": "account_position_exposure_present",
-                    "position_session_id": int(sid),
-                    "position_symbol": str(row_symbol),
-                    "position_state": str(state),
-                }
+                if adaptive_claim is None:
+                    return {
+                        "ok": False,
+                        "reason": "account_position_exposure_present",
+                        "position_session_id": int(sid),
+                        "position_symbol": str(row_symbol),
+                        "position_state": str(state),
+                    }
+                continue
             if str(state) == "live_pending_entry" and live.get("entry_submitted"):
                 if (
                     str(family or "").strip().lower() != "alpaca_spot"
@@ -4953,6 +5609,8 @@ def _reserve_alpaca_entry_risk(
             risk = float(meta.get("reserved_risk_usd"))
             if not math.isfinite(risk) or risk <= 0.0:
                 raise ValueError("claim_reservation_invalid")
+            if adaptive_claim is not None:
+                continue
             return {
                 "ok": False,
                 "reason": "account_entry_claim_present",
@@ -4967,6 +5625,8 @@ def _reserve_alpaca_entry_risk(
             legacy_cid = str(live.get("entry_client_order_id") or "").strip()
             if legacy_cid and (sid, legacy_cid) in claim_owner_cids:
                 continue
+            if adaptive_claim is not None:
+                raise ValueError("legacy_pending_not_in_adaptive_ledger")
             risk = float(live.get("entry_inflight_risk_usd"))
             if (
                 not math.isfinite(risk)
@@ -4987,16 +5647,55 @@ def _reserve_alpaca_entry_risk(
     except Exception:
         return {"ok": False, "reason": "risk_ledger_unreadable"}
 
-    projected_account = candidate
-    projected_symbol = candidate
+    if adaptive_ledger is not None:
+        packet_risk_caps = adaptive_packet.get("risk_budget_caps_usd")
+        packet_risk_caps = (
+            packet_risk_caps if isinstance(packet_risk_caps, dict) else {}
+        )
+        open_account_risk = float(adaptive_ledger.open_structural_risk_usd)
+        pending_account_risk = float(adaptive_ledger.pending_reserved_risk_usd)
+        open_symbol_risk = float(
+            adaptive_ledger.existing_same_symbol_structural_risk_usd
+        )
+        pending_symbol_risk = float(
+            adaptive_ledger.pending_same_symbol_structural_risk_usd
+        )
+        projected_account = open_account_risk + pending_account_risk + candidate
+        projected_symbol = open_symbol_risk + pending_symbol_risk + candidate
+        try:
+            account_budget = (
+                open_account_risk
+                + pending_account_risk
+                + float(
+                    packet_risk_caps[
+                        "portfolio_remaining_after_open_and_pending"
+                    ]
+                )
+            )
+            symbol_cap = (
+                open_symbol_risk
+                + pending_symbol_risk
+                + float(
+                    packet_risk_caps[
+                        "symbol_remaining_after_existing_and_pending"
+                    ]
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "reason": "adaptive_risk_budget_caps_unreadable"}
+    else:
+        open_account_risk = pending_account_risk = 0.0
+        open_symbol_risk = pending_symbol_risk = 0.0
+        projected_account = candidate
+        projected_symbol = candidate
     detail = {
         "reserved_risk_usd": candidate,
-        "account_open_risk_usd": 0.0,
-        "active_claim_risk_usd": 0.0,
+        "account_open_risk_usd": open_account_risk,
+        "active_claim_risk_usd": pending_account_risk,
         "projected_account_risk_usd": projected_account,
         "account_budget_usd": account_budget,
-        "symbol_open_risk_usd": 0.0,
-        "symbol_active_claim_risk_usd": 0.0,
+        "symbol_open_risk_usd": open_symbol_risk,
+        "symbol_active_claim_risk_usd": pending_symbol_risk,
         "projected_symbol_risk_usd": projected_symbol,
         "symbol_cap_usd": symbol_cap,
     }
@@ -5019,6 +5718,24 @@ def _reserve_alpaca_entry_risk(
             "alpaca_account_id": request_account_id,
             "entry_post_bind_token": binder_token,
             "reserved_risk_usd": candidate,
+            **(
+                {
+                    "adaptive_risk_decision_packet": adaptive_packet,
+                    "adaptive_risk_reservation_claim": adaptive_claim_payload,
+                    "adaptive_risk_reservation_request": (
+                        adaptive_request_payload
+                    ),
+                    "reserved_gross_notional_usd": float(
+                        adaptive_claim.gross_notional_usd
+                    ),
+                    "reserved_buying_power_impact_usd": float(
+                        adaptive_claim.buying_power_impact_usd
+                    ),
+                    "correlation_cluster_id": adaptive_claim.correlation_cluster_id,
+                }
+                if adaptive_claim is not None
+                else {}
+            ),
             "role_metadata": role_meta,
             "account_risk_reservation": detail,
         },
@@ -5285,6 +6002,163 @@ def reserve_alpaca_entry_risk_committed(**kwargs: Any) -> dict[str, Any]:
         return {"ok": False, "reason": "reservation_commit_failed"}
 
 
+def _certify_alpaca_owned_entry_posture(
+    db: Session,
+    *,
+    broker_positions: list[dict[str, Any]],
+    broker_orders: list[Any],
+    account_scope: str,
+    alpaca_account_id: str,
+) -> dict[str, Any]:
+    """Allow concurrent entries only when every broker exposure is CHILI-owned."""
+
+    scope = str(account_scope or "").strip().lower()
+    account_id = str(alpaca_account_id or "").strip()
+    if scope != "alpaca:paper" or not account_id:
+        return {"ok": False, "reason": "alpaca_account_identity_unfrozen"}
+    rows = db.execute(text(
+        "SELECT id, upper(symbol), execution_family, state, risk_snapshot_json "
+        "FROM trading_automation_sessions "
+        "WHERE mode = 'live' AND execution_family IN ('alpaca_spot', 'alpaca_short')"
+    )).fetchall()
+    claims = db.execute(text(
+        "SELECT upper(symbol), owner_session_id, client_order_id, broker_order_id, "
+        "metadata_json FROM broker_symbol_action_claims "
+        "WHERE account_scope = :scope AND phase <> 'resolved'"
+    ), {"scope": scope}).fetchall()
+
+    expected_positions: dict[str, float] = {}
+    allowed_order_ids: set[str] = set()
+    allowed_client_ids: set[str] = set()
+    active_order_keys = (
+        "entry_order_id",
+        "pyramid_order_id",
+        "micropullback_reentry_order_id",
+        "pullback_add_order_id",
+        "flag_breakout_add_order_id",
+        "scale_out_order_id",
+    )
+    for _sid, row_symbol, family, _state, snapshot in rows:
+        snap = snapshot if isinstance(snapshot, dict) else {}
+        live = snap.get("momentum_live_execution")
+        live = live if isinstance(live, dict) else {}
+        if (
+            str(snap.get("alpaca_account_scope") or "").strip().lower() != scope
+            or str(snap.get("alpaca_account_id") or "").strip() != account_id
+            or str(family or "").strip().lower() != "alpaca_spot"
+        ):
+            # Rows with no economic footprint are harmless; exposed rows from a
+            # different generation are an account-identity quarantine.
+            if live.get("position") is not None or live.get("entry_submitted"):
+                return {
+                    "ok": False,
+                    "reason": "alpaca_account_generation_mismatch",
+                }
+            continue
+        position = live.get("position")
+        if position is not None:
+            if not isinstance(position, dict):
+                return {"ok": False, "reason": "owned_position_unreadable"}
+            try:
+                qty = abs(float(position.get("quantity")))
+            except (TypeError, ValueError):
+                qty = math.nan
+            if not math.isfinite(qty) or qty <= 0.0:
+                return {"ok": False, "reason": "owned_position_unreadable"}
+            sym = str(row_symbol or "").strip().upper()
+            expected_positions[sym] = expected_positions.get(sym, 0.0) + qty
+        for key in active_order_keys:
+            oid = str(live.get(key) or "").strip()
+            if oid:
+                allowed_order_ids.add(oid)
+        deadman = live.get("deadman_stop")
+        if isinstance(deadman, dict):
+            oid = str(deadman.get("order_id") or "").strip()
+            cid = str(deadman.get("client_order_id") or "").strip()
+            if oid:
+                allowed_order_ids.add(oid)
+            if cid:
+                allowed_client_ids.add(cid)
+
+    for _sym, _owner, cid, oid, metadata in claims:
+        if cid:
+            allowed_client_ids.add(str(cid))
+        if oid:
+            allowed_order_ids.add(str(oid))
+        meta = metadata if isinstance(metadata, dict) else {}
+        transport = meta.get("owner_transport")
+        if isinstance(transport, dict):
+            request = transport.get("order_request")
+            request = request if isinstance(request, dict) else {}
+            tcid = str(request.get("client_order_id") or "").strip()
+            toid = str(transport.get("broker_order_id") or "").strip()
+            if tcid:
+                allowed_client_ids.add(tcid)
+            if toid:
+                allowed_order_ids.add(toid)
+
+    observed_positions: dict[str, float] = {}
+    try:
+        for position in broker_positions:
+            if not isinstance(position, dict):
+                raise ValueError("broker position shape")
+            sym = str(position.get("product_id") or "").strip().upper()
+            qty = abs(float(position.get("qty")))
+            if not sym or not math.isfinite(qty) or qty <= 0.0:
+                raise ValueError("broker position value")
+            observed_positions[sym] = observed_positions.get(sym, 0.0) + qty
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "alpaca_account_posture_unreadable"}
+    all_symbols = set(expected_positions) | set(observed_positions)
+    for sym in all_symbols:
+        expected = expected_positions.get(sym, 0.0)
+        observed = observed_positions.get(sym, 0.0)
+        if abs(expected - observed) > max(1e-9, max(expected, observed) * 1e-9):
+            return {
+                "ok": False,
+                "reason": "alpaca_broker_local_position_mismatch",
+                "symbol": sym,
+                "expected_quantity": expected,
+                "observed_quantity": observed,
+            }
+
+    for order in broker_orders:
+        if isinstance(order, dict):
+            oid = str(order.get("order_id") or order.get("id") or "").strip()
+            cid = str(order.get("client_order_id") or "").strip()
+        else:
+            oid = str(getattr(order, "order_id", "") or "").strip()
+            cid = str(getattr(order, "client_order_id", "") or "").strip()
+        if not ((oid and oid in allowed_order_ids) or (cid and cid in allowed_client_ids)):
+            return {
+                "ok": False,
+                "reason": "alpaca_unowned_open_order_present",
+                "broker_order_id": oid or None,
+                "client_order_id": cid or None,
+            }
+    return {
+        "ok": True,
+        "reason": "broker_exposure_fully_owned",
+        "position_count": len(broker_positions),
+        "open_order_count": len(broker_orders),
+        "owned_position_symbols": sorted(expected_positions),
+    }
+
+
+def certify_alpaca_owned_entry_posture_committed(**kwargs: Any) -> dict[str, Any]:
+    """Read-only account-generation/ownership check for a fresh broker snapshot."""
+
+    try:
+        return dict(
+            _with_short_session(
+                lambda db: _certify_alpaca_owned_entry_posture(db, **kwargs)
+            )
+        )
+    except Exception:
+        _log.warning("[alpaca_claim] owned posture certification failed", exc_info=True)
+        return {"ok": False, "reason": "alpaca_account_posture_unreadable"}
+
+
 def release_entry_claim_pre_post_committed(**kwargs: Any) -> bool:
     """Commit the creator-generation, proven-no-HTTP entry release."""
     try:
@@ -5294,6 +6168,54 @@ def release_entry_claim_pre_post_committed(**kwargs: Any) -> bool:
     except Exception:
         _log.warning("[alpaca_claim] committed pre-post release failed", exc_info=True)
         return False
+
+
+def release_entry_and_adaptive_reservation_pre_post_committed(
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Commit both pre-HTTP releases or retain both for same-CID recovery."""
+
+    reason = str(kwargs.get("reason") or "").strip()
+    reservation_id = str(kwargs.get("reservation_id") or "").strip()
+    try:
+        return dict(
+            _with_short_session(
+                lambda db: release_entry_and_adaptive_reservation_pre_post(
+                    db,
+                    **kwargs,
+                )
+            )
+        )
+    except _CoordinatedPrePostReleaseBlocked as exc:
+        _log.warning(
+            "[alpaca_claim] coordinated pre-post release retained cid=%s blocker=%s",
+            str(kwargs.get("client_order_id") or ""),
+            exc.blocker,
+        )
+        return {
+            "ok": False,
+            "confirmed": False,
+            "adaptive_released": False,
+            "legacy_released": False,
+            "reason": reason,
+            "reservation_id": reservation_id or None,
+            "release_blocker": exc.blocker,
+        }
+    except Exception:
+        _log.warning(
+            "[alpaca_claim] coordinated pre-post release transaction failed cid=%s",
+            str(kwargs.get("client_order_id") or ""),
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "confirmed": False,
+            "adaptive_released": False,
+            "legacy_released": False,
+            "reason": reason,
+            "reservation_id": reservation_id or None,
+            "release_blocker": "coordinated_release_transaction_failed",
+        }
 
 
 def mark_entry_transport_started_committed(**kwargs: Any) -> bool:

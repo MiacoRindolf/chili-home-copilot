@@ -774,28 +774,38 @@ def print_recency_state(
     gap_since = now_naive - timedelta(seconds=float(gap_sample_window_s))
     try:
         # One round-trip: newest-print epoch + a recent-activity count + the median gap.
-        row = db.execute(
-            text(
-                "WITH recent AS ("
-                "  SELECT observed_at,"
-                "    EXTRACT(EPOCH FROM (observed_at - lag(observed_at) OVER ("
-                "      ORDER BY observed_at))) AS gap_s"
-                "  FROM iqfeed_trade_ticks"
-                # AS-OF bound (2026-07-09): live no-op (no future rows exist yet); in REPLAY
-                # the preloaded tape extends past sim-now, so an unbounded read both LOOKS
-                # AHEAD (halt inference sees post-halt prints => never suspects) and scans
-                # the whole window per call (3.8s/call on a 270k-row day).
-                "  WHERE symbol = :s AND observed_at >= :gap_since AND observed_at <= :now_naive"
-                ") "
-                "SELECT"
-                "  EXTRACT(EPOCH FROM (:now_naive - max(observed_at))) AS last_age_s,"
-                "  count(*) FILTER (WHERE observed_at >= :active_since) AS recent_n,"
-                "  percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_s)"
-                "    FILTER (WHERE gap_s IS NOT NULL AND gap_s > 0) AS median_gap_s "
-                "FROM recent"
-            ),
-            {"s": sym, "gap_since": gap_since, "active_since": active_since, "now_naive": now_naive},
-        ).fetchone()
+        # The host bridge owns this optional table.  Contain an absent/stale
+        # bridge schema inside a SAVEPOINT: catching PostgreSQL's undefined-table
+        # error without rolling back a savepoint leaves the caller's entire FSM
+        # transaction aborted, so every later event/order-state write fails.
+        with db.begin_nested():
+            row = db.execute(
+                text(
+                    "WITH recent AS ("
+                    "  SELECT observed_at,"
+                    "    EXTRACT(EPOCH FROM (observed_at - lag(observed_at) OVER ("
+                    "      ORDER BY observed_at))) AS gap_s"
+                    "  FROM iqfeed_trade_ticks"
+                    # AS-OF bound (2026-07-09): live no-op (no future rows exist yet); in REPLAY
+                    # the preloaded tape extends past sim-now, so an unbounded read both LOOKS
+                    # AHEAD (halt inference sees post-halt prints => never suspects) and scans
+                    # the whole window per call (3.8s/call on a 270k-row day).
+                    "  WHERE symbol = :s AND observed_at >= :gap_since AND observed_at <= :now_naive"
+                    ") "
+                    "SELECT"
+                    "  EXTRACT(EPOCH FROM (:now_naive - max(observed_at))) AS last_age_s,"
+                    "  count(*) FILTER (WHERE observed_at >= :active_since) AS recent_n,"
+                    "  percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_s)"
+                    "    FILTER (WHERE gap_s IS NOT NULL AND gap_s > 0) AS median_gap_s "
+                    "FROM recent"
+                ),
+                {
+                    "s": sym,
+                    "gap_since": gap_since,
+                    "active_since": active_since,
+                    "now_naive": now_naive,
+                },
+            ).fetchone()
     except Exception as exc:
         logger.debug("[nbbo_tape] print-recency read failed for %s: %s", sym, exc)
         return None

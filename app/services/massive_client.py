@@ -10,14 +10,17 @@ Symbol conventions:
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from typing import Any
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Iterator, Protocol, runtime_checkable
 
 import requests
 
@@ -87,6 +90,10 @@ _metrics: dict[str, int] = {
     "errors": 0,
     "rate_limits": 0,
     "entitlement_blocks": 0,
+    "ws_events": 0,
+    "ws_malformed_events": 0,
+    "ws_missing_event_clock": 0,
+    "ws_missing_sequence": 0,
 }
 
 
@@ -1041,7 +1048,21 @@ class QuoteSnapshot:
     ask: float | None = None
     bid_size: int | None = None
     ask_size: int | None = None
-    timestamp: float = 0.0  # time.time() when received
+    # Backward-compatible local receipt clock used by existing freshness checks.
+    # Do not use it as market/event time.
+    timestamp: float = 0.0
+    provider_event_at: float | None = None
+    received_at: float | None = None
+    available_at: float | None = None
+    provider_timestamp_ms: int | None = None
+    sequence: int | None = None
+    bid_exchange: int | None = None
+    ask_exchange: int | None = None
+    condition: int | None = None
+    indicators: tuple[int, ...] = ()
+    tape: int | None = None
+    bridge_run_id: str | None = None
+    connection_generation: int | None = None
 
 
 @dataclass
@@ -1049,11 +1070,110 @@ class TradeSnapshot:
     price: float
     size: int = 0
     timestamp: float = 0.0
+    provider_event_at: float | None = None
+    received_at: float | None = None
+    available_at: float | None = None
+    provider_timestamp_ms: int | None = None
+    participant_timestamp_ms: int | None = None
+    trf_timestamp_ms: int | None = None
+    sequence: int | None = None
+    exchange: int | None = None
+    trade_id: str | None = None
+    tape: int | None = None
+    conditions: tuple[int, ...] = ()
+    trf_id: int | None = None
+    fractional_size: str | None = None
+    bridge_run_id: str | None = None
+    connection_generation: int | None = None
+
+
+@runtime_checkable
+class MassiveWSCaptureSink(Protocol):
+    """Bounded exact-frame handoff called before operational fan-out.
+
+    Implementations must return after an in-memory admission attempt.  Slow
+    serialization and durable capture work belongs on their own bounded worker;
+    an admission overflow must be latched as an explicit coverage gap.
+    """
+
+    def on_massive_ws_subscription(self, evidence: dict[str, Any]) -> None: ...
+
+    def on_massive_ws_frame(
+        self, symbol: str, snapshot: QuoteSnapshot | TradeSnapshot
+    ) -> bool: ...
+
+    def on_massive_ws_gap(
+        self,
+        *,
+        reason: str,
+        symbol: str | None,
+        received_at: float,
+        lost_count: int,
+    ) -> None: ...
 
 
 _ws_cache: dict[str, QuoteSnapshot] = {}
 _ws_cache_lock = threading.Lock()
 _WS_STALENESS = 5.0  # seconds before a WS quote is considered stale
+_WS_CLOCK_FUTURE_TOLERANCE = 1.0
+_MASSIVE_WS_RUN_ID = str(uuid.uuid4())
+
+
+def _massive_unix_ms(value: Any) -> tuple[int, float] | None:
+    """Return exact Massive Unix-ms and seconds without wall-clock fallback."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        milliseconds = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if milliseconds <= 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    if isinstance(value, str) and value.strip() not in {
+        str(milliseconds),
+        f"{milliseconds}.0",
+    }:
+        return None
+    return milliseconds, milliseconds / 1000.0
+
+
+def _massive_sequence(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        sequence = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    if isinstance(value, str) and value.strip() not in {
+        str(sequence),
+        f"{sequence}.0",
+    }:
+        return None
+    return sequence if sequence >= 0 else None
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _integer_tuple(value: Any) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    out: list[int] = []
+    for item in value:
+        parsed = _optional_int(item)
+        if parsed is not None:
+            out.append(parsed)
+    return tuple(out)
 
 # Tick listener registry — callbacks receive (symbol, QuoteSnapshot|TradeSnapshot)
 from typing import Callable
@@ -1132,6 +1252,7 @@ class CandleAggregator:
     def __init__(self, interval_seconds: int = 60):
         self._interval = interval_seconds
         self._bars: dict[str, OHLCVBar] = {}  # ticker -> current open bar
+        self._last_sequence: dict[str, tuple[int, int]] = {}
         self._lock = threading.Lock()
         self._listeners: dict[str, list[CandleCallback]] = {}
         self._listeners_lock = threading.Lock()
@@ -1142,9 +1263,24 @@ class CandleAggregator:
 
     def on_trade(self, sym: str, snap: TradeSnapshot) -> None:
         """Process a trade tick — bucket into bars and emit on close."""
-        bucket_start = (snap.timestamp // self._interval) * self._interval
+        event_at = (
+            snap.provider_event_at
+            if snap.provider_event_at is not None
+            else snap.timestamp
+        )
+        bucket_start = (event_at // self._interval) * self._interval
         with self._lock:
+            if snap.sequence is not None:
+                event_day = int(event_at // 86_400)
+                prior = self._last_sequence.get(sym)
+                if prior is not None and prior[0] == event_day and snap.sequence <= prior[1]:
+                    return
+                self._last_sequence[sym] = (event_day, snap.sequence)
             bar = self._bars.get(sym)
+            # Raw capture retains late releases, but a live derived bar must not
+            # reopen a bucket the FSM has already observed as closed.
+            if bar is not None and bucket_start < bar.bucket_start:
+                return
             if bar is None or bar.bucket_start != bucket_start:
                 # Close previous bar if exists
                 if bar is not None:
@@ -1239,8 +1375,19 @@ def get_ws_quote(ticker: str) -> QuoteSnapshot | None:
         snap = _ws_cache.get(ticker.upper())
     if snap is None:
         return None
-    if time.time() - snap.timestamp > _WS_STALENESS:
+    now = time.time()
+    received_at = snap.received_at if snap.received_at is not None else snap.timestamp
+    received_age = now - received_at
+    if received_age < -_WS_CLOCK_FUTURE_TOLERANCE or received_age > _WS_STALENESS:
         return None
+    if snap.provider_event_at is not None:
+        provider_age = now - snap.provider_event_at
+        if provider_age < -_WS_CLOCK_FUTURE_TOLERANCE or provider_age > _WS_STALENESS:
+            return None
+    if snap.available_at is not None:
+        available_age = now - snap.available_at
+        if available_age < -_WS_CLOCK_FUTURE_TOLERANCE or available_age > _WS_STALENESS:
+            return None
     return snap
 
 
@@ -1259,11 +1406,322 @@ class MassiveWSClient:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._ws = None
-        self._subscriptions: set[str] = set()
+        # Exact provider channels requested per symbol.  A symbol-only set is
+        # insufficient here: reconnecting a Q-only certifying producer as Q+T
+        # would let uncaptured trades reach listeners and candle builders.
+        self._subscriptions: dict[str, set[str]] = {}
+        self._connection_generation = 0
+        self._authenticated_generation: int | None = None
+        self._capture_sinks: list[MassiveWSCaptureSink] = []
+        self._capture_sink_rosters: dict[
+            int, tuple[frozenset[str], frozenset[str], int]
+        ] = {}
+        # A capture guard outlives detach.  The process owner must explicitly
+        # release it after the consuming FSM has stopped; otherwise provider
+        # frames could slip through between producer close and RUN_CLOSED.
+        self._capture_guard_symbols: set[str] = set()
+        self._capture_sinks_lock = threading.RLock()
+        self._capture_sinks_condition = threading.Condition(
+            self._capture_sinks_lock
+        )
+        self._capture_callback_gates: dict[int, threading.Lock] = {}
+        # Copy-on-write parser views.  The websocket parser never waits on the
+        # control-plane lock held by attach/detach/subscription work.
+        self._capture_route_snapshot: tuple[
+            tuple[
+                MassiveWSCaptureSink,
+                frozenset[str],
+                frozenset[str],
+                int,
+                threading.Lock,
+            ],
+            ...,
+        ] = ()
+        self._capture_guard_snapshot: frozenset[str] = frozenset()
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def capture_source_identity(self) -> dict[str, Any]:
+        """Exact source identity a RUN_OPEN producer spec must declare."""
+
+        return {
+            "provider": "massive_ws",
+            "instance_id": _MASSIVE_WS_RUN_ID,
+            "connection_generation": self._connection_generation,
+            "authenticated": bool(
+                self._authenticated_generation == self._connection_generation
+                and self._connection_generation > 0
+            ),
+        }
+
+    def attach_capture_sink(self, sink: "MassiveWSCaptureSink") -> None:
+        """Reject roster-less capture bindings.
+
+        A sink that does not declare its exact Q/T ownership cannot protect the
+        operational fan-out.  Call ``attach_capture_sink_for_symbols`` instead.
+        """
+
+        del sink
+        raise RuntimeError(
+            "Massive capture sinks require an exact symbol/channel roster"
+        )
+
+    @staticmethod
+    def _normalize_capture_roster(
+        tickers: list[str], channels: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        symbols = tuple(
+            sorted(
+                {
+                    str(ticker).strip().upper()
+                    for ticker in tickers
+                    if str(ticker).strip()
+                }
+            )
+        )
+        if not symbols:
+            raise ValueError("capture subscription symbols are empty")
+        normalized_channels = tuple(
+            sorted({str(channel).strip().upper() for channel in channels})
+        )
+        if not normalized_channels or any(
+            channel not in {"Q", "T"} for channel in normalized_channels
+        ):
+            raise ValueError("capture subscription channels are invalid")
+        return symbols, normalized_channels
+
+    def _owned_capture_channels_locked(
+        self, symbol: str, *, generation: int | None = None
+    ) -> set[str]:
+        owned: set[str] = set()
+        for symbols, channels, bound_generation in self._capture_sink_rosters.values():
+            if symbol not in symbols:
+                continue
+            if generation is not None and bound_generation != generation:
+                continue
+            owned.update(channels)
+        return owned
+
+    def _refresh_capture_snapshots_locked(self) -> None:
+        self._capture_route_snapshot = tuple(
+            (
+                sink,
+                self._capture_sink_rosters[id(sink)][0],
+                self._capture_sink_rosters[id(sink)][1],
+                self._capture_sink_rosters[id(sink)][2],
+                self._capture_callback_gates[id(sink)],
+            )
+            for sink in self._capture_sinks
+        )
+        self._capture_guard_snapshot = frozenset(self._capture_guard_symbols)
+
+    def attach_capture_sink_for_symbols(
+        self,
+        sink: "MassiveWSCaptureSink",
+        tickers: list[str],
+        *,
+        channels: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Atomically install a sink and hand it the exact sent request."""
+
+        if not isinstance(sink, MassiveWSCaptureSink):
+            raise TypeError("Massive capture sink does not implement the contract")
+        symbols, normalized_channels = self._normalize_capture_roster(
+            tickers, channels
+        )
+        with self._capture_sinks_lock:
+            if sink in self._capture_sinks:
+                raise RuntimeError("Massive capture sink is already attached")
+            if (
+                self._connection_generation <= 0
+                or self._authenticated_generation != self._connection_generation
+            ):
+                raise RuntimeError(
+                    "Massive capture sink requires an authenticated connection generation"
+                )
+            for symbol in symbols:
+                owned_before = self._owned_capture_channels_locked(
+                    symbol, generation=self._connection_generation
+                )
+                overlap = owned_before.intersection(normalized_channels)
+                if overlap:
+                    raise RuntimeError(
+                        "Massive capture channel already has a certifying owner: "
+                        + ",".join(
+                            f"{channel}.{symbol}" for channel in sorted(overlap)
+                        )
+                    )
+                existing = set(self._subscriptions.get(symbol, set()))
+                uncovered = existing - owned_before - set(normalized_channels)
+                if uncovered:
+                    raise RuntimeError(
+                        "active Massive subscription contains uncaptured channels: "
+                        + ",".join(
+                            f"{channel}.{symbol}" for channel in sorted(uncovered)
+                        )
+                    )
+            self._capture_guard_symbols.update(symbols)
+            self._capture_sinks.append(sink)
+            self._capture_sink_rosters[id(sink)] = (
+                frozenset(symbols),
+                frozenset(normalized_channels),
+                self._connection_generation,
+            )
+            self._capture_callback_gates[id(sink)] = threading.Lock()
+            self._refresh_capture_snapshots_locked()
+            try:
+                evidence = self.subscribe_for_capture(
+                    list(symbols), channels=normalized_channels
+                )
+                sink.on_massive_ws_subscription(evidence)
+            except BaseException:
+                self._capture_sinks.remove(sink)
+                self._capture_sink_rosters.pop(id(sink), None)
+                self._capture_callback_gates.pop(id(sink), None)
+                self._refresh_capture_snapshots_locked()
+                raise
+            return evidence
+
+    def detach_capture_sink(self, sink: "MassiveWSCaptureSink") -> None:
+        # Atomically remove the parser route, then wait behind the one callback
+        # gate.  Parser callbacks acquire this gate nonblocking, so control
+        # plane shutdown can wait without ever stalling market-data parsing.
+        with self._capture_sinks_lock:
+            gate = self._capture_callback_gates.get(id(sink))
+            try:
+                self._capture_sinks.remove(sink)
+            except ValueError:
+                pass
+            self._capture_sink_rosters.pop(id(sink), None)
+            self._refresh_capture_snapshots_locked()
+        if gate is not None:
+            gate.acquire()
+            gate.release()
+            with self._capture_sinks_lock:
+                self._capture_callback_gates.pop(id(sink), None)
+
+    def release_capture_guard(self, tickers: list[str]) -> None:
+        """Release a fail-closed symbol guard after its consuming FSM stopped."""
+
+        symbols = {
+            str(ticker).strip().upper()
+            for ticker in tickers
+            if str(ticker).strip()
+        }
+        with self._capture_sinks_condition:
+            for symbol in symbols:
+                if self._owned_capture_channels_locked(symbol):
+                    raise RuntimeError(
+                        f"cannot release Massive capture guard with active owner: {symbol}"
+                    )
+            self._capture_guard_symbols.difference_update(symbols)
+            self._refresh_capture_snapshots_locked()
+
+    def _reserve_capture_callbacks(
+        self, *, symbol: str | None = None, channel: str | None = None
+    ) -> tuple[tuple["MassiveWSCaptureSink", threading.Lock], ...]:
+        routes = self._capture_route_snapshot
+        return tuple(
+            (sink, gate)
+            for sink, symbols, channels, _generation, gate in routes
+            if (
+                symbol is None
+                or (
+                    symbol in symbols
+                    and (channel is None or channel in channels)
+                )
+            )
+        )
+
+    def _publish_capture_frame(
+        self, symbol: str, snapshot: QuoteSnapshot | TradeSnapshot
+    ) -> bool:
+        channel = "Q" if isinstance(snapshot, QuoteSnapshot) else "T"
+        guarded = symbol in self._capture_guard_snapshot
+        if not guarded:
+            return True
+        sinks = self._reserve_capture_callbacks(symbol=symbol, channel=channel)
+        if not sinks:
+            self._publish_capture_gap(
+                reason=f"massive_ws_unowned_{channel.lower()}_frame",
+                symbol=symbol,
+                received_at=(
+                    snapshot.received_at
+                    if snapshot.received_at is not None
+                    else time.time()
+                ),
+            )
+            return False
+        admitted = True
+        for sink, gate in sinks:
+            if not gate.acquire(blocking=False):
+                admitted = False
+                continue
+            try:
+                if sink.on_massive_ws_frame(symbol, snapshot) is not True:
+                    admitted = False
+            except BaseException as exc:
+                admitted = False
+                logger.error(
+                    "[massive-ws] certifying capture sink rejected frame symbol=%s: %s",
+                    symbol,
+                    exc,
+                    exc_info=True,
+                )
+                try:
+                    sink.on_massive_ws_gap(
+                        reason="massive_ws_capture_sink_rejected",
+                        symbol=symbol,
+                        received_at=(
+                            snapshot.received_at
+                            if snapshot.received_at is not None
+                            else time.time()
+                        ),
+                        lost_count=1,
+                    )
+                except BaseException:
+                    logger.critical(
+                        "[massive-ws] capture sink could not persist its rejection gap",
+                        exc_info=True,
+                    )
+            finally:
+                gate.release()
+        return admitted
+
+    def _publish_capture_gap(
+        self,
+        *,
+        reason: str,
+        symbol: str | None,
+        received_at: float,
+        lost_count: int = 1,
+    ) -> None:
+        sinks = self._reserve_capture_callbacks(symbol=symbol)
+        for sink, gate in sinks:
+            if not gate.acquire(blocking=False):
+                logger.critical(
+                    "[massive-ws] capture callback gate busy while reporting gap=%s",
+                    reason,
+                )
+                continue
+            try:
+                sink.on_massive_ws_gap(
+                    reason=reason,
+                    symbol=symbol,
+                    received_at=received_at,
+                    lost_count=lost_count,
+                )
+            except BaseException:
+                logger.critical(
+                    "[massive-ws] capture sink could not persist provider gap=%s",
+                    reason,
+                    exc_info=True,
+                )
+            finally:
+                gate.release()
 
     def start(self, tickers: list[str] | None = None):
         if not _massive_ws_allowed_in_this_process():
@@ -1280,7 +1738,12 @@ class MassiveWSClient:
             return
 
         self._stop_event.clear()
-        self._subscriptions = {t.upper() for t in (tickers or [])}
+        with self._capture_sinks_lock:
+            self._subscriptions = {
+                str(ticker).strip().upper(): {"Q", "T"}
+                for ticker in (tickers or [])
+                if str(ticker).strip()
+            }
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="massive-ws",
         )
@@ -1297,22 +1760,121 @@ class MassiveWSClient:
         if self._thread:
             self._thread.join(timeout=5)
         self._thread = None
+        self._authenticated_generation = None
         logger.info("[massive-ws] WebSocket client stopped")
 
     def subscribe(self, tickers: list[str]):
-        new = {t.upper() for t in tickers} - self._subscriptions
-        if not new or not self._ws:
-            self._subscriptions.update(t.upper() for t in tickers)
-            return
-        self._subscriptions.update(new)
-        try:
-            params = ",".join(
-                f"Q.{t},T.{t}" for t in new
+        symbols = tuple(
+            sorted(
+                {
+                    str(ticker).strip().upper()
+                    for ticker in tickers
+                    if str(ticker).strip()
+                }
             )
+        )
+        if not symbols:
+            return
+        additions: list[tuple[str, str]] = []
+        rejected: list[tuple[str, str]] = []
+        with self._capture_sinks_lock:
+            for symbol in symbols:
+                requested = {"Q", "T"}
+                if symbol in self._capture_guard_symbols:
+                    owned = self._owned_capture_channels_locked(
+                        symbol, generation=self._connection_generation
+                    )
+                    rejected.extend(
+                        (symbol, channel) for channel in sorted(requested - owned)
+                    )
+                    requested.intersection_update(owned)
+                current = self._subscriptions.setdefault(symbol, set())
+                additions.extend(
+                    (symbol, channel)
+                    for channel in sorted(requested - current)
+                )
+                current.update(requested)
+            socket = self._ws
+        for symbol, channel in rejected:
+            self._publish_capture_gap(
+                reason=f"massive_ws_unowned_{channel.lower()}_subscription",
+                symbol=symbol,
+                received_at=time.time(),
+            )
+        if not additions or socket is None:
+            return
+        params = ",".join(
+            f"{channel}.{symbol}" for symbol, channel in additions
+        )
+        try:
             sub_msg = json.dumps({"action": "subscribe", "params": params})
-            self._ws.send(sub_msg)
+            socket.send(sub_msg)
         except Exception as e:
             logger.warning(f"[massive-ws] subscribe error: {e}")
+            for symbol, _channel in additions:
+                with self._capture_sinks_lock:
+                    guarded = symbol in self._capture_guard_symbols
+                if guarded:
+                    self._publish_capture_gap(
+                        reason="massive_ws_subscription_send_failed",
+                        symbol=symbol,
+                        received_at=time.time(),
+                    )
+
+    def subscribe_for_capture(
+        self, tickers: list[str], *, channels: tuple[str, ...]
+    ) -> dict[str, Any]:
+        """Send an exact subscription request or fail without claiming ACK.
+
+        Massive does not provide a durable per-symbol subscription receipt on
+        this socket.  The certifying producer therefore uses the first exact
+        Q/T frame as the acknowledgement, but it still needs proof that the
+        request was sent on the declared authenticated generation.
+        """
+
+        symbols, normalized_channels = self._normalize_capture_roster(
+            tickers, channels
+        )
+        with self._capture_sinks_lock:
+            if (
+                self._ws is None
+                or self._connection_generation <= 0
+                or self._authenticated_generation != self._connection_generation
+            ):
+                raise RuntimeError(
+                    "capture subscription requires an authenticated Massive socket"
+                )
+            for symbol in symbols:
+                owned = self._owned_capture_channels_locked(
+                    symbol, generation=self._connection_generation
+                )
+                if not set(normalized_channels).issubset(owned):
+                    raise RuntimeError(
+                        "capture subscription exceeds the bound producer roster"
+                    )
+            params = ",".join(
+                f"{channel}.{symbol}"
+                for symbol in symbols
+                for channel in normalized_channels
+            )
+            request = {"action": "subscribe", "params": params}
+            socket = self._ws
+            socket.send(
+                json.dumps(request, separators=(",", ":"), sort_keys=True)
+            )
+            for symbol in symbols:
+                self._subscriptions.setdefault(symbol, set()).update(
+                    normalized_channels
+                )
+        return {
+            "provider": "massive_ws",
+            "instance_id": _MASSIVE_WS_RUN_ID,
+            "connection_generation": self._connection_generation,
+            "symbols": list(symbols),
+            "channels": list(normalized_channels),
+            "request": request,
+            "acknowledgement": "first_exact_provider_frame_required",
+        }
 
     def _run(self):
         try:
@@ -1327,6 +1889,7 @@ class MassiveWSClient:
         while not self._stop_event.is_set():
             try:
                 self._ws = ws_lib.create_connection(url, timeout=30)
+                self._connection_generation += 1
                 self._authenticate()
                 self._subscribe_all()
 
@@ -1335,11 +1898,18 @@ class MassiveWSClient:
                         raw = self._ws.recv()
                     except Exception:
                         break
-                    self._handle_messages(raw)
+                    self._handle_messages(raw, received_at=time.time())
 
             except Exception as e:
                 logger.warning(f"[massive-ws] connection error: {e}")
             finally:
+                if self._connection_generation > 0:
+                    self._publish_capture_gap(
+                        reason="massive_ws_connection_closed",
+                        symbol=None,
+                        received_at=time.time(),
+                    )
+                self._authenticated_generation = None
                 if self._ws:
                     try:
                         self._ws.close()
@@ -1353,29 +1923,110 @@ class MassiveWSClient:
         auth_msg = json.dumps({"action": "auth", "params": settings.massive_api_key})
         self._ws.send(auth_msg)
         resp = self._ws.recv()
-        logger.debug(f"[massive-ws] auth response: {resp[:200]}")
+        try:
+            rows = json.loads(resp)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Massive authentication response was malformed") from exc
+        if not isinstance(rows, list):
+            rows = [rows]
+        authenticated = any(
+            isinstance(row, dict)
+            and str(row.get("status") or "").strip().lower() == "auth_success"
+            for row in rows
+        )
+        if not authenticated:
+            raise RuntimeError("Massive authentication was not acknowledged")
+        self._authenticated_generation = self._connection_generation
+        logger.debug("[massive-ws] authentication acknowledged")
 
     def _subscribe_all(self):
-        if not self._subscriptions:
+        with self._capture_sinks_lock:
+            pairs: list[tuple[str, str]] = []
+            for symbol in sorted(self._subscriptions):
+                channels = set(self._subscriptions[symbol])
+                if symbol in self._capture_guard_symbols:
+                    channels.intersection_update(
+                        self._owned_capture_channels_locked(
+                            symbol, generation=self._connection_generation
+                        )
+                    )
+                pairs.extend(
+                    (symbol, channel) for channel in sorted(channels)
+                )
+            socket = self._ws
+        if not pairs or socket is None:
             return
         params = ",".join(
-            f"Q.{t},T.{t}" for t in self._subscriptions
+            f"{channel}.{symbol}" for symbol, channel in pairs
         )
-        self._ws.send(json.dumps({"action": "subscribe", "params": params}))
+        socket.send(json.dumps({"action": "subscribe", "params": params}))
 
-    def _handle_messages(self, raw: str):
+    def _handle_messages(self, raw: str, *, received_at: float | None = None):
+        frame_received_at = time.time() if received_at is None else float(received_at)
         try:
             msgs = json.loads(raw)
         except json.JSONDecodeError:
+            _bump("ws_malformed_events")
+            self._publish_capture_gap(
+                reason="massive_ws_malformed_frame",
+                symbol=None,
+                received_at=frame_received_at,
+            )
             return
         if not isinstance(msgs, list):
             msgs = [msgs]
-        now = time.time()
         for msg in msgs:
-            ev = msg.get("ev")
-            sym = msg.get("sym", "").upper()
-            if not sym:
+            if not isinstance(msg, dict):
+                _bump("ws_malformed_events")
+                self._publish_capture_gap(
+                    reason="massive_ws_malformed_event",
+                    symbol=None,
+                    received_at=frame_received_at,
+                )
                 continue
+            ev = msg.get("ev")
+            raw_symbol = msg.get("sym")
+            sym = (
+                raw_symbol.strip().upper()
+                if isinstance(raw_symbol, str)
+                else ""
+            )
+            if not sym:
+                if ev in {"Q", "T"}:
+                    _bump("ws_malformed_events")
+                    self._publish_capture_gap(
+                        reason="massive_ws_missing_symbol",
+                        symbol=None,
+                        received_at=frame_received_at,
+                    )
+                continue
+
+            if ev not in {"Q", "T"}:
+                continue
+            _bump("ws_events")
+            provider_clock = _massive_unix_ms(msg.get("t"))
+            if provider_clock is None:
+                _bump("ws_missing_event_clock")
+                self._publish_capture_gap(
+                    reason="massive_ws_missing_event_clock",
+                    symbol=sym,
+                    received_at=frame_received_at,
+                )
+                continue
+            provider_timestamp_ms, provider_event_at = provider_clock
+            sequence = _massive_sequence(msg.get("q"))
+            if sequence is None:
+                _bump("ws_missing_sequence")
+                self._publish_capture_gap(
+                    reason="massive_ws_missing_sequence",
+                    symbol=sym,
+                    received_at=frame_received_at,
+                )
+                continue
+
+            # Stamp release immediately before publishing to the shared
+            # cache/listener graph; never substitute it for provider event time.
+            available_at = time.time()
 
             if ev == "Q":
                 snap = QuoteSnapshot(
@@ -1384,18 +2035,59 @@ class MassiveWSClient:
                     ask=msg.get("ap"),
                     bid_size=msg.get("bs"),
                     ask_size=msg.get("as"),
-                    timestamp=now,
+                    timestamp=frame_received_at,
+                    provider_event_at=provider_event_at,
+                    received_at=frame_received_at,
+                    available_at=available_at,
+                    provider_timestamp_ms=provider_timestamp_ms,
+                    sequence=sequence,
+                    bid_exchange=_optional_int(msg.get("bx")),
+                    ask_exchange=_optional_int(msg.get("ax")),
+                    condition=_optional_int(msg.get("c")),
+                    indicators=_integer_tuple(msg.get("i")),
+                    tape=_optional_int(msg.get("z")),
+                    bridge_run_id=_MASSIVE_WS_RUN_ID,
+                    connection_generation=self._connection_generation,
                 )
+                # Capture observes the parsed provider frame before cache or
+                # strategy listeners.  Its synchronous endpoint gives the FSM
+                # no path to consume this frame before the append-only ingress
+                # has accepted it (or latched a coverage gap).
+                if not self._publish_capture_frame(sym, snap):
+                    continue
                 with _ws_cache_lock:
                     _ws_cache[sym] = snap
                 _fire_tick_listeners(sym, snap)
 
             elif ev == "T":
+                participant_clock = _massive_unix_ms(msg.get("pt"))
+                trf_clock = _massive_unix_ms(msg.get("trft"))
                 trade = TradeSnapshot(
                     price=float(msg.get("p", 0)),
                     size=int(msg.get("s", 0)),
-                    timestamp=now,
+                    timestamp=frame_received_at,
+                    provider_event_at=provider_event_at,
+                    received_at=frame_received_at,
+                    available_at=available_at,
+                    provider_timestamp_ms=provider_timestamp_ms,
+                    participant_timestamp_ms=(
+                        participant_clock[0] if participant_clock is not None else None
+                    ),
+                    trf_timestamp_ms=(trf_clock[0] if trf_clock is not None else None),
+                    sequence=sequence,
+                    exchange=_optional_int(msg.get("x")),
+                    trade_id=(str(msg.get("i")) if msg.get("i") is not None else None),
+                    tape=_optional_int(msg.get("z")),
+                    conditions=_integer_tuple(msg.get("c")),
+                    trf_id=_optional_int(msg.get("trfi")),
+                    fractional_size=(
+                        str(msg.get("ds")) if msg.get("ds") is not None else None
+                    ),
+                    bridge_run_id=_MASSIVE_WS_RUN_ID,
+                    connection_generation=self._connection_generation,
                 )
+                if not self._publish_capture_frame(sym, trade):
+                    continue
                 _fire_tick_listeners(sym, trade)
                 # Feed trade ticks into candle aggregators
                 with _candle_agg_lock:
@@ -1426,6 +2118,101 @@ _snapshot_lock = threading.Lock()
 _snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
 _TTL_FULL_SNAPSHOT = 1800  # 30 min
 
+
+class MassiveFullSnapshotCaptureError(RuntimeError):
+    """A capture-required full-snapshot read could not be durably receipted."""
+
+
+@runtime_checkable
+class MassiveFullSnapshotCaptureSink(Protocol):
+    """Capture-only observer for the exact result already read by this client."""
+
+    def on_massive_full_snapshot(
+        self,
+        *,
+        include_otc: bool,
+        max_age_seconds: float | None,
+        provider_cache_ttl_seconds: float,
+        requested_at: datetime,
+        returned_at: datetime,
+        cache_hit: bool,
+        cache_age_seconds: float | None,
+        rows: list[dict[str, Any]],
+    ) -> bool: ...
+
+
+_MASSIVE_FULL_SNAPSHOT_CAPTURE_SINK: contextvars.ContextVar[
+    MassiveFullSnapshotCaptureSink | None
+] = contextvars.ContextVar(
+    "_chili_massive_full_snapshot_capture_sink",
+    default=None,
+)
+
+
+@contextlib.contextmanager
+def massive_full_snapshot_capture_sink(
+    sink: MassiveFullSnapshotCaptureSink | None,
+) -> Iterator[None]:
+    """Install a process-local capture sink without changing provider routing."""
+
+    if sink is not None and not isinstance(sink, MassiveFullSnapshotCaptureSink):
+        raise TypeError("Massive full-snapshot capture sink is malformed")
+    token = _MASSIVE_FULL_SNAPSHOT_CAPTURE_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _MASSIVE_FULL_SNAPSHOT_CAPTURE_SINK.reset(token)
+
+
+def _full_snapshot_effective_ttl(max_age_seconds: float | None) -> float:
+    ttl = float(_TTL_FULL_SNAPSHOT)
+    if max_age_seconds is not None:
+        try:
+            ttl = min(
+                float(_TTL_FULL_SNAPSHOT),
+                max(60.0, float(max_age_seconds)),
+            )
+        except (TypeError, ValueError):
+            ttl = float(_TTL_FULL_SNAPSHOT)
+    return ttl
+
+
+def _return_captured_full_snapshot(
+    rows: list[dict[str, Any]],
+    *,
+    sink: MassiveFullSnapshotCaptureSink | None,
+    include_otc: bool,
+    max_age_seconds: float | None,
+    provider_cache_ttl_seconds: float,
+    requested_at: datetime | None,
+    cache_hit: bool,
+    cache_age_seconds: float | None,
+) -> list[dict[str, Any]]:
+    if sink is None:
+        return rows
+    assert requested_at is not None
+    returned_at = datetime.now(timezone.utc)
+    try:
+        accepted = sink.on_massive_full_snapshot(
+            include_otc=include_otc,
+            max_age_seconds=max_age_seconds,
+            provider_cache_ttl_seconds=provider_cache_ttl_seconds,
+            requested_at=requested_at,
+            returned_at=returned_at,
+            cache_hit=cache_hit,
+            cache_age_seconds=cache_age_seconds,
+            rows=rows,
+        )
+    except Exception as exc:
+        raise MassiveFullSnapshotCaptureError(
+            "Massive full-snapshot capture sink failed"
+        ) from exc
+    if accepted is not True:
+        raise MassiveFullSnapshotCaptureError(
+            "Massive full-snapshot capture sink did not durably accept the read"
+        )
+    return rows
+
 def get_full_market_snapshot(
     *, include_otc: bool = False, max_age_seconds: float | None = None
 ) -> list[dict[str, Any]]:
@@ -1442,22 +2229,39 @@ def get_full_market_snapshot(
     triggers simply benefits them too (one shared snapshot).
     """
     global _snapshot_cache
-    ttl = _TTL_FULL_SNAPSHOT
-    if max_age_seconds is not None:
-        try:
-            ttl = min(_TTL_FULL_SNAPSHOT, max(60.0, float(max_age_seconds)))
-        except (TypeError, ValueError):
-            ttl = _TTL_FULL_SNAPSHOT
+    sink = _MASSIVE_FULL_SNAPSHOT_CAPTURE_SINK.get()
+    requested_at = datetime.now(timezone.utc) if sink is not None else None
+    ttl = _full_snapshot_effective_ttl(max_age_seconds)
     if _snapshot_cache is not None:
         ts, data = _snapshot_cache
-        if time.time() - ts < ttl:
-            return data
+        age = time.time() - ts
+        if 0.0 <= age < ttl:
+            return _return_captured_full_snapshot(
+                data,
+                sink=sink,
+                include_otc=include_otc,
+                max_age_seconds=max_age_seconds,
+                provider_cache_ttl_seconds=ttl,
+                requested_at=requested_at,
+                cache_hit=True,
+                cache_age_seconds=age,
+            )
 
     with _snapshot_lock:
         if _snapshot_cache is not None:
             ts, data = _snapshot_cache
-            if time.time() - ts < ttl:
-                return data
+            age = time.time() - ts
+            if 0.0 <= age < ttl:
+                return _return_captured_full_snapshot(
+                    data,
+                    sink=sink,
+                    include_otc=include_otc,
+                    max_age_seconds=max_age_seconds,
+                    provider_cache_ttl_seconds=ttl,
+                    requested_at=requested_at,
+                    cache_hit=True,
+                    cache_age_seconds=age,
+                )
 
         url = f"{_base()}/v2/snapshot/locale/us/markets/stocks/tickers"
         params: dict[str, Any] = {}
@@ -1466,12 +2270,30 @@ def get_full_market_snapshot(
         resp = _get(url, params)
         if resp is _NOT_FOUND or not resp or not resp.get("tickers"):
             logger.warning("[massive] Full market snapshot returned no tickers")
-            return []
+            return _return_captured_full_snapshot(
+                [],
+                sink=sink,
+                include_otc=include_otc,
+                max_age_seconds=max_age_seconds,
+                provider_cache_ttl_seconds=ttl,
+                requested_at=requested_at,
+                cache_hit=False,
+                cache_age_seconds=None,
+            )
 
         tickers = resp["tickers"]
         logger.info("[massive] Full market snapshot: %d tickers", len(tickers))
         _snapshot_cache = (time.time(), tickers)
-        return tickers
+        return _return_captured_full_snapshot(
+            tickers,
+            sink=sink,
+            include_otc=include_otc,
+            max_age_seconds=max_age_seconds,
+            provider_cache_ttl_seconds=ttl,
+            requested_at=requested_at,
+            cache_hit=False,
+            cache_age_seconds=None,
+        )
 
 
 def get_top_movers(direction: str = "gainers") -> list[dict[str, Any]]:

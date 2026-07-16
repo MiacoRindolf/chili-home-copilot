@@ -79,6 +79,16 @@ def _install_network_guard(monkeypatch) -> None:
 @pytest.fixture
 def _enable_runner(monkeypatch):
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    # This suite isolates the eligibility-recency grace. The independent Ross
+    # universe gate has its own fail-closed coverage and, when enabled, its
+    # profile proof intentionally backfills live eligibility before the grace
+    # branch can run.
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_ross_equity_universe_required",
+        False,
+        raising=False,
+    )
     monkeypatch.setattr(lr, "_venue_broker_connected", lambda ef: True)
     monkeypatch.setattr(lr, "is_kill_switch_active", lambda: False)
     # The risk evaluator imports is_kill_switch_active + get_kill_switch_status; neutralize.

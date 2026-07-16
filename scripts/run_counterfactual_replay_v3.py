@@ -101,6 +101,7 @@ def _summary_payload(payload: dict) -> dict:
         "symbols": payload.get("symbols") or [],
         "total_pnl_usd": payload.get("total_pnl_usd"),
         "total_pnl_r": payload.get("total_pnl_r"),
+        "exit_model": payload.get("exit_model") or {},
         "opportunity_label_summary": summary if isinstance(summary, dict) else {},
         "certification_failures": list(payload.get("certification_failures") or []),
     }
@@ -130,6 +131,31 @@ def _parse_tick_cap_sweep(values: list[str] | None) -> list[int | None]:
 
 def _tick_cap_label(cap: int | None) -> str:
     return "uncapped" if cap is None else str(int(cap))
+
+
+def _cleanup_read_only_session(db) -> None:
+    """Best-effort cleanup that cannot erase an already-emitted replay result.
+
+    Long read-only replays can outlive an idle/network database connection.  A
+    failed rollback in ``finally`` previously overrode a successful ``return``
+    and made an ``ok:true`` JSON run exit 1.  There are no replay writes to
+    recover; surface cleanup loss on stderr, then still attempt close.
+    """
+
+    try:
+        db.rollback()
+    except Exception as exc:
+        print(
+            f"warning: read-only replay rollback cleanup failed: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+    try:
+        db.close()
+    except Exception as exc:
+        print(
+            f"warning: read-only replay close cleanup failed: {type(exc).__name__}",
+            file=sys.stderr,
+        )
 
 
 def _tick_cap_sweep_payload(runs: list[tuple[int | None, dict, float]]) -> dict:
@@ -569,10 +595,24 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--symbols", nargs="+", required=True, help="Symbols to replay.")
-    parser.add_argument("--bar-seconds", type=int, default=15, help="Microbar size for bar gates.")
+    parser.add_argument(
+        "--bar-seconds",
+        type=int,
+        default=60,
+        help="Bar-gate cadence; defaults to the production 1-minute pullback clock.",
+    )
     parser.add_argument("--bar-eval-stride", type=int, default=1, help="Evaluate every Nth microbar.")
     parser.add_argument("--max-ticks-per-symbol", type=int, default=None, help="Optional performance cap.")
     parser.add_argument("--max-trades-per-symbol", type=int, default=3)
+    parser.add_argument(
+        "--require-causal-provenance",
+        action="store_true",
+        help=(
+            "Fail closed on legacy tape rows and replay only complete IQFeed Q rows "
+            "using bridge available_at as the conservative post-publication clock. "
+            "Required for certification."
+        ),
+    )
     parser.add_argument(
         "--allow-pre-source-entries",
         action="store_true",
@@ -633,13 +673,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-hold-seconds", type=float, default=None, help="Override max hold.")
     parser.add_argument(
         "--exit-model",
-        choices=("adaptive", "fixed_target", "momentum_trail", "live_runner_trail"),
+        choices=(
+            "adaptive",
+            "fixed_target",
+            "simple_target_armed_1r_trail",
+            "momentum_trail",
+            "live_runner_trail",
+        ),
         default="adaptive",
         help=(
             "Replay exit model. adaptive routes A+ VWAP/reclaim bursts to runner/trail "
             "and lower-quality starter/scalp entries to target-first; fixed_target exits "
-            "the whole position at target; momentum_trail/live_runner_trail arms a 1R "
-            "trail at target and extends the inactivity timer on new highs."
+            "the whole position at target; simple_target_armed_1r_trail arms a 1R trail "
+            "at target and extends the inactivity timer on new highs. momentum_trail and "
+            "live_runner_trail are legacy aliases for that same simplified model; none of "
+            "these execute the production live_runner exit FSM."
         ),
     )
     parser.add_argument(
@@ -745,8 +793,12 @@ def main(argv: list[str] | None = None) -> int:
                     fixed_qty=args.fixed_shares,
                     reward_risk=args.reward_risk,
                     max_hold_seconds=args.max_hold_seconds,
+                    cash_usd=args.cash_usd,
+                    cash_fraction=args.cash_fraction,
+                    exit_model=args.exit_model,
                     live_admission_mode=args.live_admission_mode,
                     account_equity_usd=args.account_equity_usd,
+                    require_causal_provenance=args.require_causal_provenance,
                 )
                 runs.append((cap, result_to_dict(result), perf_counter() - started))
             out = _tick_cap_sweep_payload(runs)
@@ -774,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
             exit_model=args.exit_model,
             live_admission_mode=args.live_admission_mode,
             account_equity_usd=args.account_equity_usd,
+            require_causal_provenance=args.require_causal_provenance,
         )
         payload = result_to_dict(result)
         failures = _certification_failures(
@@ -813,10 +866,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(out, indent=2, sort_keys=True, default=str))
         return 0 if payload.get("ok") else 2
     finally:
-        try:
-            db.rollback()
-        finally:
-            db.close()
+        _cleanup_read_only_session(db)
 
 
 if __name__ == "__main__":

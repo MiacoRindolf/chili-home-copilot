@@ -12,8 +12,9 @@ fill model:
     at the injected sim clock so the runner's stale-quote checks compare sim-to-sim.
   * Orders fill DETERMINISTICALLY at the recorded NBBO using the *pure paper-fill math*
     (``paper_execution.long_entry_fill_price`` / ``long_exit_fill_price`` /
-    ``roundtrip_fee_usd``) — REUSE, not a re-derivation. A long entry (buy) crosses the ask
-    + adverse slippage; an exit (sell) crosses the bid − slippage.
+    ``modeled_fill_leg_fee_usd``) — REUSE, not a re-derivation. A long entry
+    (buy) crosses the ask + adverse slippage; an exit (sell) crosses the bid −
+    slippage; each fill books only its leg of the bound round-trip fee model.
   * No BBO at ``t`` ⇒ ``get_best_bid_ask`` returns ``(None, …)`` and any place is REJECTED
     (``ok=False, error="no_bbo"``) — the RVMDW/warrant-class path the live runner branches on.
   * NO partials, NO ack-timeouts, NO fault injection — those are P1 (this is the skeleton).
@@ -28,10 +29,14 @@ See docs/DESIGN/REPLAY_V3_LIVE_FSM_SIM.md §2.1 / §4 (P0).
 from __future__ import annotations
 
 import itertools
+import copy
+import hashlib
+import json
 import logging
+import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping, Optional, Sequence
 
 from ..venue.protocol import (
     FreshnessMeta,
@@ -43,12 +48,41 @@ from ..venue.protocol import (
 from .paper_execution import (
     long_entry_fill_price,
     long_exit_fill_price,
-    roundtrip_fee_usd,
+    modeled_fill_leg_fee_usd,
 )
 
 _log = logging.getLogger(__name__)
 
 _VENUE = "replay_mock"
+REPLAY_MOCK_ACCOUNT_IDENTITY = "replay-mock-account-v1"
+SEALED_REPLAY_SYNC_ACK_ARCHITECTURAL_BLOCKER = (
+    "sealed_replay_synchronous_ack_unavailable_at_place"
+)
+SEALED_REPLAY_CANCEL_RECEIPT_ARCHITECTURAL_BLOCKER = (
+    "sealed_replay_cancel_request_response_not_captured"
+)
+EXACT_PRINT_MARKET_FILL_UNAVAILABLE = (
+    "exact_print_market_order_fill_authority_unavailable"
+)
+EXACT_PRINT_FILL_EVIDENCE_GRADE = "DIAGNOSTIC_ONLY"
+EXACT_PRINT_COUNTERFACTUAL_AUTHORITY_BLOCKERS = (
+    "sealed_counterfactual_driver_receipt_unavailable",
+    "exact_print_release_tail_completeness_receipt_unavailable",
+    "l2_queue_position_and_market_impact_unavailable",
+    "full_trade_fee_equity_path_receipt_unavailable",
+)
+_VERIFIED_EXACT_PRINT_TOKEN = object()
+_VERIFIED_EXACT_PRINT_INVENTORY_TOKEN = object()
+
+
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 # ── STEP-2 REALISTIC FILL MODEL — documented base constants ──────────────────────────
 #
@@ -130,21 +164,256 @@ class RecordedQuote:
             b, a = float(self.bid), float(self.ask)
         except (TypeError, ValueError):
             return False
-        return b > 0 and a > 0 and a >= b
+        return (
+            math.isfinite(b)
+            and math.isfinite(a)
+            and b > 0
+            and a > 0
+            and a >= b
+        )
+
+
+@dataclass(frozen=True)
+class VerifiedExactPrint:
+    """One non-serializable exact print released by a verified capture loader.
+
+    The object identity token prevents a dictionary or JSON row from being
+    mistaken for sealed input.  ``replay_v3`` mints these only while releasing a
+    previously verified ``CaptureIqfeedPrint`` through its dual-clock frontier.
+    This is input authority, not by itself counterfactual fill/OOS authority.
+    """
+
+    event_sha256: str
+    sequence: int
+    release_ordinal: int
+    capture_identity_sha256: str
+    final_capture_seal_sha256: str
+    release_order_root_sha256: str
+    product_id: str
+    provider_event_at: datetime
+    received_at: datetime
+    available_at: datetime
+    price: float
+    size: float
+    bid: Optional[float]
+    ask: Optional[float]
+    conditions: tuple[str, ...] = ()
+    _verification_token: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._verification_token is not _VERIFIED_EXACT_PRINT_TOKEN:
+            raise ValueError("exact print lacks verified sealed-capture provenance")
+        digest = str(self.event_sha256 or "").strip().lower()
+        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+            raise ValueError("exact print event_sha256 is invalid")
+        object.__setattr__(self, "event_sha256", digest)
+        if isinstance(self.sequence, bool) or int(self.sequence) <= 0:
+            raise ValueError("exact print sequence is invalid")
+        object.__setattr__(self, "sequence", int(self.sequence))
+        if isinstance(self.release_ordinal, bool) or int(self.release_ordinal) <= 0:
+            raise ValueError("exact print release_ordinal is invalid")
+        object.__setattr__(self, "release_ordinal", int(self.release_ordinal))
+        for name in (
+            "capture_identity_sha256",
+            "final_capture_seal_sha256",
+            "release_order_root_sha256",
+        ):
+            value = str(getattr(self, name) or "").strip().lower()
+            if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+                raise ValueError(f"exact print {name} is invalid")
+            object.__setattr__(self, name, value)
+        product_id = str(self.product_id or "").strip().upper()
+        if not product_id:
+            raise ValueError("exact print product_id is invalid")
+        object.__setattr__(self, "product_id", product_id)
+        for name in ("provider_event_at", "received_at", "available_at"):
+            value = getattr(self, name)
+            if not isinstance(value, datetime) or value.tzinfo is None:
+                raise ValueError(f"exact print {name} must be timezone-aware")
+            object.__setattr__(self, name, value.astimezone(timezone.utc))
+        if self.available_at < self.received_at:
+            raise ValueError("exact print available_at precedes received_at")
+        for name in ("price", "size"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"exact print {name} is invalid")
+            object.__setattr__(self, name, value)
+        if (self.bid is None) != (self.ask is None):
+            raise ValueError("exact print must carry both bid and ask or neither")
+        if self.bid is not None and self.ask is not None:
+            bid = float(self.bid)
+            ask = float(self.ask)
+            if (
+                not math.isfinite(bid)
+                or not math.isfinite(ask)
+                or bid <= 0.0
+                or ask < bid
+            ):
+                raise ValueError("exact print bid/ask is invalid")
+            object.__setattr__(self, "bid", bid)
+            object.__setattr__(self, "ask", ask)
+        conditions = tuple(str(value).strip() for value in self.conditions)
+        if any(not value for value in conditions):
+            raise ValueError("exact print conditions are malformed")
+        object.__setattr__(self, "conditions", conditions)
+
+
+def _mint_verified_exact_print(
+    *,
+    event_sha256: str,
+    sequence: int,
+    release_ordinal: int,
+    capture_identity_sha256: str,
+    final_capture_seal_sha256: str,
+    release_order_root_sha256: str,
+    product_id: str,
+    provider_event_at: datetime,
+    received_at: datetime,
+    available_at: datetime,
+    price: float,
+    size: float,
+    bid: Optional[float],
+    ask: Optional[float],
+    conditions: Sequence[str],
+) -> VerifiedExactPrint:
+    """Private bridge used by the already-verified ReplayV3 capture adapter."""
+
+    return VerifiedExactPrint(
+        event_sha256=event_sha256,
+        sequence=sequence,
+        release_ordinal=release_ordinal,
+        capture_identity_sha256=capture_identity_sha256,
+        final_capture_seal_sha256=final_capture_seal_sha256,
+        release_order_root_sha256=release_order_root_sha256,
+        product_id=product_id,
+        provider_event_at=provider_event_at,
+        received_at=received_at,
+        available_at=available_at,
+        price=price,
+        size=size,
+        bid=bid,
+        ask=ask,
+        conditions=tuple(conditions),
+        _verification_token=_VERIFIED_EXACT_PRINT_TOKEN,
+    )
+
+
+@dataclass(frozen=True)
+class VerifiedExactPrintInventory:
+    """Full sealed exact-print inventory expected by one allocation run."""
+
+    capture_identity_sha256: str
+    final_capture_seal_sha256: str
+    release_order_root_sha256: str
+    event_sha256s: tuple[str, ...]
+    inventory_root_sha256: str
+    _verification_token: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._verification_token is not _VERIFIED_EXACT_PRINT_INVENTORY_TOKEN:
+            raise ValueError("exact print inventory lacks verified capture provenance")
+        for name in (
+            "capture_identity_sha256",
+            "final_capture_seal_sha256",
+            "release_order_root_sha256",
+            "inventory_root_sha256",
+        ):
+            value = str(getattr(self, name) or "").strip().lower()
+            if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+                raise ValueError(f"exact print inventory {name} is invalid")
+            object.__setattr__(self, name, value)
+        event_sha256s = tuple(str(value or "").strip().lower() for value in self.event_sha256s)
+        if len(event_sha256s) != len(set(event_sha256s)) or any(
+            len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value)
+            for value in event_sha256s
+        ):
+            raise ValueError("exact print inventory event hashes are invalid")
+        object.__setattr__(self, "event_sha256s", event_sha256s)
+        expected_root = _canonical_sha256(
+            {
+                "schema_version": "chili.replay-exact-print-inventory.v1",
+                "capture_identity_sha256": self.capture_identity_sha256,
+                "final_capture_seal_sha256": self.final_capture_seal_sha256,
+                "release_order_root_sha256": self.release_order_root_sha256,
+                "event_sha256s": list(event_sha256s),
+            }
+        )
+        if self.inventory_root_sha256 != expected_root:
+            raise ValueError("exact print inventory root does not bind its events")
+
+
+def _mint_verified_exact_print_inventory(
+    *,
+    capture_identity_sha256: str,
+    final_capture_seal_sha256: str,
+    release_order_root_sha256: str,
+    event_sha256s: Sequence[str],
+) -> VerifiedExactPrintInventory:
+    payload = {
+        "schema_version": "chili.replay-exact-print-inventory.v1",
+        "capture_identity_sha256": str(capture_identity_sha256).strip().lower(),
+        "final_capture_seal_sha256": str(final_capture_seal_sha256).strip().lower(),
+        "release_order_root_sha256": str(release_order_root_sha256).strip().lower(),
+        "event_sha256s": [str(value).strip().lower() for value in event_sha256s],
+    }
+    return VerifiedExactPrintInventory(
+        capture_identity_sha256=payload["capture_identity_sha256"],
+        final_capture_seal_sha256=payload["final_capture_seal_sha256"],
+        release_order_root_sha256=payload["release_order_root_sha256"],
+        event_sha256s=tuple(payload["event_sha256s"]),
+        inventory_root_sha256=_canonical_sha256(payload),
+        _verification_token=_VERIFIED_EXACT_PRINT_INVENTORY_TOKEN,
+    )
+
+
+@dataclass(frozen=True)
+class ExactPrintFillAllocation:
+    """One FIFO allocation of a single print's bounded participation budget."""
+
+    event_sha256: str
+    sequence: int
+    release_ordinal: int
+    allocation_index: int
+    order_id: str
+    client_order_id: Optional[str]
+    product_id: str
+    side: str
+    quantity: float
+    price: float
+    provider_event_at: datetime
+    received_at: datetime
+    available_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event_sha256": self.event_sha256,
+            "sequence": self.sequence,
+            "release_ordinal": self.release_ordinal,
+            "allocation_index": self.allocation_index,
+            "order_id": self.order_id,
+            "client_order_id": self.client_order_id,
+            "product_id": self.product_id,
+            "side": self.side,
+            "quantity": self.quantity,
+            "price": self.price,
+            "provider_event_at": self.provider_event_at.isoformat(),
+            "received_at": self.received_at.isoformat(),
+            "available_at": self.available_at.isoformat(),
+        }
 
 
 @dataclass
 class _RestingOrder:
     """An order the runner can poll via ``get_order``.
 
-    Two fill modes (per the adapter's ``resting_limit_fills`` flag):
+    Every LIMIT obeys exchange price semantics. The compatibility
+    ``resting_limit_fills`` flag controls the richer resting-order model:
 
-      * **immediate** (P0, default): the order fills the moment it is created at the recorded
-        NBBO; ``status`` is terminal (``"filled"``) immediately. ``filled_size == base_size``.
-      * **resting** (P1): a LIMIT order rests ``status="open"`` with ``filled_size == 0`` until
-        a later recorded NBBO CROSSES its limit (buy: ask <= limit; sell: bid >= limit), at
-        which point ``_advance`` flips it to ``"filled"`` (or a partial). An optional
-        ``ack_delay_ticks`` holds the order ``open`` for N quote advances before it is even
+      * **basic** (P0, default): MARKET orders and marketable LIMIT orders fill immediately;
+        an unmarketable LIMIT remains open until recorded NBBO crosses its price.
+      * **realistic resting** (P1): the same price invariant plus optional acknowledgement
+        delay, partial fills, and printed-volume participation caps. An optional
+        ``ack_delay_ticks`` holds the order ``open`` for N quote advances before it is
         eligible to cross (exercises the runner's pending-entry ack-poll/timeout path)."""
 
     order_id: str
@@ -155,6 +424,9 @@ class _RestingOrder:
     base_size: float
     limit_price: Optional[float]
     created_time: str
+    created_at: Optional[datetime] = None
+    priority_sequence: int = 0
+    executable_event_at: Optional[datetime] = None
     # mutable fill state
     status: str = "filled"
     filled_size: float = 0.0
@@ -167,7 +439,9 @@ class _RestingOrder:
     # driver via ``set_printed_volume`` between ticks). The order's cumulative fill is
     # capped at ``volume_participation_frac × observed_printed_volume``.
     observed_printed_volume: float = 0.0
-    volume_participation_frac: float = 1.0  # 1.0 ⇒ uncapped (P0/P1 backward-compat)
+    # 1.0 means all observed prints when capping is enabled; the cap-disabled mode is
+    # represented separately by ``MockBrokerAdapter._volume_cap_enabled``.
+    volume_participation_frac: float = 1.0
 
     def to_normalized(self) -> NormalizedOrder:
         return NormalizedOrder(
@@ -182,6 +456,44 @@ class _RestingOrder:
             created_time=self.created_time,
             raw={"venue": _VENUE, "fee": self.fee},
         )
+
+
+@dataclass(frozen=True)
+class RecordedOrderIntent:
+    """Exact captured order request admitted by the sealed ReplayV3 broker.
+
+    This deliberately contains only request fields that cross the venue seam.
+    Capture/FSM provenance is verified by ``replay_v3`` before an intent reaches
+    this class; the mock then enforces byte-for-byte request parity at PLACE.
+    """
+
+    order_intent_sha256: str
+    client_order_id: str
+    product_id: str
+    side: str
+    order_type: str
+    base_size: float
+    time_in_force: str
+    extended_hours: bool
+    limit_price: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class RecordedBrokerTransition:
+    """One canonical broker transition released by ``available_at`` order."""
+
+    event_sha256: str
+    sequence: int
+    available_at: datetime
+    order_intent_sha256: str
+    client_order_id: str
+    broker_order_id: Optional[str]
+    transition: str
+    order_quantity: float
+    cumulative_filled_quantity: float
+    last_fill_quantity: float
+    last_fill_price: Optional[float]
+    reject_or_cancel_reason: Optional[str] = None
 
 
 class MockBrokerAdapter:
@@ -213,10 +525,14 @@ class MockBrokerAdapter:
         volume_cap_enabled: bool = False,
         volume_participation_frac: float = DEFAULT_VOLUME_PARTICIPATION_FRAC,
         optimistic_slippage_bps: float = 0.0,
+        exact_print_fills: bool = False,
+        exact_print_order_latency_seconds: Optional[float] = None,
+        account_identity: str = REPLAY_MOCK_ACCOUNT_IDENTITY,
     ) -> None:
         # Injected, per-product recorded NBBO (set as-of the sim clock by the driver).
         self._quotes: dict[str, RecordedQuote] = {}
         self._clock: datetime = datetime.now(timezone.utc).replace(tzinfo=None)
+        self._clock_explicitly_set = False
         self._orders: dict[str, _RestingOrder] = {}
         self._fills: list[NormalizedFill] = []
         self._order_seq = itertools.count(1)
@@ -225,16 +541,23 @@ class MockBrokerAdapter:
         self._venue_rt_bps = venue_rt_bps
         self._max_age_seconds = float(max_age_seconds)
         self._enabled = bool(enabled)
-        # P1 FIDELITY KNOBS (default OFF ⇒ the P0 immediate-fill model, byte-identical):
-        #  * resting_limit_fills: a LIMIT order RESTS open until the recorded NBBO crosses it.
+        self._account_identity = str(account_identity or "").strip()
+        # P1 FIDELITY KNOBS (default OFF keeps basic marketable-limit behavior):
+        #  * resting_limit_fills: enable latency/partial/volume-aware resting realism. Basic
+        #    LIMIT price semantics remain mandatory even when this richer mode is off.
         #  * ack_delay_ticks: hold a resting order `open` for N quote advances before it can
         #    cross (exercises the runner's pending-entry ack-poll/timeout path).
         #  * partial_first_fill: the first cross fills HALF; the remainder fills on the next
         #    cross (exercises the runner's partial-entry/partial-exit bookkeeping).
         self._resting_limit_fills = bool(resting_limit_fills)
-        self._ack_delay_ticks = max(0, int(ack_delay_ticks))
-        self._partial_first_fill = bool(partial_first_fill)
-        # "sim" (P0 contract) | "wall" (P1 driver: quote fresh vs the wall-clock stale gate).
+        self._ack_delay_ticks = (
+            max(0, int(ack_delay_ticks)) if self._resting_limit_fills else 0
+        )
+        self._partial_first_fill = (
+            bool(partial_first_fill) and self._resting_limit_fills
+        )
+        # "sim" is mandatory for sealed replay. "wall" remains only for
+        # explicitly noncertifying legacy diagnostics.
         self._freshness_mode = "wall" if str(freshness_mode).lower() == "wall" else "sim"
         # ── STEP-2 realistic fill model state ────────────────────────────────────────
         # (e) explicit conservative/optimistic mode. Conservative = adverse-side crossing
@@ -244,12 +567,78 @@ class MockBrokerAdapter:
         # (b) fill-VOLUME realism. When enabled, a resting order's cumulative fill is capped
         #     at ``volume_participation_frac × observed_printed_volume`` (the printed volume
         #     at-or-through its limit while it rested, fed by ``set_printed_volume``). Default
-        #     OFF ⇒ P0/P1 backward-compat (uncapped). Optimistic mode also bypasses the cap.
-        self._volume_cap_enabled = bool(volume_cap_enabled) and self._fill_mode == FillMode.CONSERVATIVE
-        self._volume_participation_frac = max(0.0, float(volume_participation_frac))
+        #     OFF means uncapped. Optimistic mode also bypasses the cap.
+        self._volume_cap_enabled = (
+            bool(volume_cap_enabled)
+            and self._resting_limit_fills
+            and self._fill_mode == FillMode.CONSERVATIVE
+        )
+        participation_frac = float(volume_participation_frac)
+        if (
+            not math.isfinite(participation_frac)
+            or participation_frac < 0.0
+            or participation_frac > 1.0
+        ):
+            raise ValueError("volume_participation_frac must be finite and within [0, 1]")
+        self._volume_participation_frac = participation_frac
         # OPTIMISTIC slippage: 0.0 (mid-favorable) by default. Kept separate so a run can be
         # deliberately optimistic-but-not-free.
         self._optimistic_slippage_bps = float(optimistic_slippage_bps)
+        self._exact_print_fills_enabled = bool(exact_print_fills)
+        if self._exact_print_fills_enabled:
+            if (
+                not self._resting_limit_fills
+                or not self._volume_cap_enabled
+                or self._fill_mode != FillMode.CONSERVATIVE
+            ):
+                raise ValueError(
+                    "exact_print_fills requires conservative resting limits with volume caps"
+                )
+            if exact_print_order_latency_seconds is None:
+                raise ValueError(
+                    "exact_print_fills requires an explicit order latency"
+                )
+            latency = float(exact_print_order_latency_seconds)
+            if not math.isfinite(latency) or latency < 0.0:
+                raise ValueError(
+                    "exact_print_order_latency_seconds must be finite and nonnegative"
+                )
+            if self._ack_delay_ticks:
+                raise ValueError(
+                    "exact_print_fills cannot mix tick delay with event-time latency"
+                )
+            self._exact_print_order_latency_seconds: Optional[float] = latency
+        else:
+            self._exact_print_order_latency_seconds = None
+        self._exact_print_policy_sha256 = _canonical_sha256(
+            {
+                "schema_version": "chili.replay-exact-print-fill-policy.v1",
+                "enabled": self._exact_print_fills_enabled,
+                "allocation": "fifo_submission_order_single_shared_print_budget",
+                "fifo_tie_key": "priority_sequence_then_order_id",
+                "participation_fraction": self._volume_participation_frac,
+                "order_latency_seconds": self._exact_print_order_latency_seconds,
+                "price_semantics": "quote_side_print_within_limit",
+                "quote_side_tolerance": "max_1e-9_or_price_times_1e-12_v1",
+                "clock_policy": (
+                    "provider_event_for_eligibility_available_at_for_release_"
+                    "strict_contiguous_release_ordinal"
+                ),
+                "condition_policy": "empty_conditions_only",
+                "market_order_policy": "coverage_unavailable",
+                "fee_to_target_ratio": self._fee_to_target_ratio,
+                "venue_round_trip_bps": self._venue_rt_bps,
+                "exact_print_price_slippage_bps": 0.0,
+            }
+        )
+        self._exact_print_last_release_ordinal = 0
+        self._exact_print_last_sequence = 0
+        self._exact_print_last_available_at: Optional[datetime] = None
+        self._exact_print_capture_binding: Optional[tuple[str, str, str]] = None
+        self._exact_print_inventory: Optional[VerifiedExactPrintInventory] = None
+        self._exact_print_seen: set[str] = set()
+        self._exact_print_allocations: list[ExactPrintFillAllocation] = []
+        self._exact_print_audit: list[dict[str, Any]] = []
         # (c) ack/latency: the driver may install a measured distribution via
         #     ``set_latency_distribution`` (percentile seconds). Absent one, the documented
         #     fallback base (module constants) is used to derive a per-order ack-delay.
@@ -260,6 +649,589 @@ class MockBrokerAdapter:
         )
         # Per-product printed-volume observed while an order rests (advanced by the driver).
         self._printed_volume_pending: dict[str, float] = {}
+        # Sealed ReplayV3 mode is opt-in and mutually exclusive with quote-
+        # generated fills.  It is configured only from a verified capture.  Once
+        # enabled, PLACE must match one exact captured intent and order/fill state
+        # changes only when a canonical lifecycle transition is released.
+        self._recorded_lifecycle_enabled = False
+        self._recorded_intents: dict[str, RecordedOrderIntent] = {}
+        self._recorded_intent_by_sha: dict[str, RecordedOrderIntent] = {}
+        self._recorded_all_transitions: dict[
+            str, tuple[RecordedBrokerTransition, ...]
+        ] = {}
+        self._recorded_released: dict[str, list[RecordedBrokerTransition]] = {}
+        self._recorded_bound_client_ids: set[str] = set()
+        self._recorded_applied_event_sha256s: set[str] = set()
+        # A captured PLACE response is not an input that the mock may look up
+        # from the final run inventory.  It becomes usable only after the
+        # ReplayV3 causal loader explicitly releases that exact SUBMITTED fact.
+        # This deliberately makes the current synchronous live-FSM seam fail
+        # closed when the response was captured after the decision prefix.
+        self._recorded_available_place_responses: dict[
+            str, RecordedBrokerTransition
+        ] = {}
+        self._recorded_request_violations: list[str] = []
+        # The current capture contract records broker lifecycle transitions,
+        # but not the exact cancel request/response receipt pair.  Remember at
+        # configuration time whether such a receipt would be required so the
+        # certification check cannot later infer completeness from the final
+        # transition inventory (or from a replay-issued cancel call).
+        self._recorded_cancel_receipt_required = False
+
+    @property
+    def recorded_lifecycle_enabled(self) -> bool:
+        return self._recorded_lifecycle_enabled
+
+    @property
+    def freshness_mode(self) -> str:
+        return self._freshness_mode
+
+    @property
+    def recorded_request_violations(self) -> tuple[str, ...]:
+        return tuple(self._recorded_request_violations)
+
+    @property
+    def recorded_applied_event_sha256s(self) -> tuple[str, ...]:
+        return tuple(sorted(self._recorded_applied_event_sha256s))
+
+    @property
+    def recorded_bound_client_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._recorded_bound_client_ids))
+
+    def recorded_place_response_available(self, client_order_id: str) -> bool:
+        """Whether the exact captured SUBMITTED response is causally released."""
+
+        cid = str(client_order_id or "").strip()
+        return cid in self._recorded_available_place_responses
+
+    @property
+    def recorded_cancel_request_complete(self) -> bool:
+        return not self._recorded_cancel_receipt_required
+
+    @property
+    def exact_print_fills_enabled(self) -> bool:
+        return self._exact_print_fills_enabled
+
+    @property
+    def exact_print_policy_sha256(self) -> str:
+        return self._exact_print_policy_sha256
+
+    @property
+    def exact_print_evidence_grade(self) -> str:
+        return EXACT_PRINT_FILL_EVIDENCE_GRADE
+
+    @property
+    def exact_print_counterfactual_authority(self) -> bool:
+        return False
+
+    @property
+    def exact_print_counterfactual_authority_blockers(self) -> tuple[str, ...]:
+        base = tuple(
+            value
+            for value in EXACT_PRINT_COUNTERFACTUAL_AUTHORITY_BLOCKERS
+            if value != "exact_print_release_tail_completeness_receipt_unavailable"
+            or not self.exact_print_terminal_complete
+        )
+        unresolved = {
+            "print_nbbo_unavailable",
+            "print_conditions_unsupported",
+            "inside_spread_aggressor_unresolved",
+            "print_quote_side_ambiguous",
+        }
+        semantic = tuple(
+            f"exact_print_execution_semantics_unavailable:{value['event_sha256']}"
+            for value in self._exact_print_audit
+            if value.get("disposition") in unresolved
+        )
+        return base + semantic
+
+    @property
+    def exact_print_terminal_complete(self) -> bool:
+        inventory = self._exact_print_inventory
+        return bool(
+            inventory is not None
+            and self._exact_print_last_release_ordinal == len(inventory.event_sha256s)
+            and self._exact_print_seen == set(inventory.event_sha256s)
+        )
+
+    @property
+    def exact_print_allocations(self) -> tuple[ExactPrintFillAllocation, ...]:
+        return tuple(self._exact_print_allocations)
+
+    @property
+    def exact_print_audit(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(copy.deepcopy(value) for value in self._exact_print_audit)
+
+    @property
+    def exact_print_allocation_root_sha256(self) -> str:
+        return _canonical_sha256(
+            {
+                "schema_version": "chili.replay-exact-print-allocation-ledger.v1",
+                "evidence_grade": EXACT_PRINT_FILL_EVIDENCE_GRADE,
+                "counterfactual_authority": False,
+                "counterfactual_authority_blockers": list(
+                    self.exact_print_counterfactual_authority_blockers
+                ),
+                "policy_sha256": self._exact_print_policy_sha256,
+                "capture_binding": (
+                    None
+                    if self._exact_print_capture_binding is None
+                    else {
+                        "capture_identity_sha256": self._exact_print_capture_binding[0],
+                        "final_capture_seal_sha256": self._exact_print_capture_binding[1],
+                        "release_order_root_sha256": self._exact_print_capture_binding[2],
+                    }
+                ),
+                "expected_inventory_root_sha256": (
+                    None
+                    if self._exact_print_inventory is None
+                    else self._exact_print_inventory.inventory_root_sha256
+                ),
+                "expected_print_count": (
+                    None
+                    if self._exact_print_inventory is None
+                    else len(self._exact_print_inventory.event_sha256s)
+                ),
+                "terminal_complete": self.exact_print_terminal_complete,
+                "events": self._exact_print_audit,
+                "allocations": [
+                    value.to_dict() for value in self._exact_print_allocations
+                ],
+            }
+        )
+
+    def configure_verified_exact_print_inventory(
+        self, inventory: VerifiedExactPrintInventory
+    ) -> None:
+        if not self._exact_print_fills_enabled:
+            raise ValueError("exact print inventory requires exact-print allocation mode")
+        if (
+            not isinstance(inventory, VerifiedExactPrintInventory)
+            or inventory._verification_token
+            is not _VERIFIED_EXACT_PRINT_INVENTORY_TOKEN
+        ):
+            raise ValueError("exact print inventory lacks verified capture provenance")
+        if self._exact_print_seen or self._exact_print_allocations or self._exact_print_audit:
+            raise ValueError("exact print inventory cannot change after release starts")
+        if self._exact_print_inventory is not None:
+            raise ValueError("exact print inventory was already configured")
+        self._exact_print_inventory = inventory
+        self._exact_print_capture_binding = (
+            inventory.capture_identity_sha256,
+            inventory.final_capture_seal_sha256,
+            inventory.release_order_root_sha256,
+        )
+
+    def configure_recorded_lifecycle(
+        self,
+        *,
+        intents: Sequence[RecordedOrderIntent],
+        transitions: Sequence[RecordedBrokerTransition],
+    ) -> None:
+        """Enable strict captured-lifecycle mode before the first replay tick.
+
+        The full transition inventory is used only to validate the FSM's output
+        request.  Broker state is never advanced from that inventory: callers
+        must explicitly release each transition at its captured ``available_at``.
+        """
+
+        if self._exact_print_fills_enabled:
+            raise ValueError(
+                "recorded lifecycle cannot mix with exact-print allocation mode"
+            )
+        if self._orders or self._fills or self._recorded_lifecycle_enabled:
+            raise ValueError("recorded lifecycle must be configured on a fresh mock")
+        by_cid: dict[str, RecordedOrderIntent] = {}
+        by_sha: dict[str, RecordedOrderIntent] = {}
+        for intent in intents:
+            if not isinstance(intent, RecordedOrderIntent):
+                raise TypeError("recorded order intent is malformed")
+            cid = intent.client_order_id.strip()
+            if (
+                not cid
+                or cid in by_cid
+                or intent.order_intent_sha256 in by_sha
+                or intent.product_id != intent.product_id.strip().upper()
+                or intent.side not in {"buy", "sell"}
+                or intent.order_type not in {"market", "limit"}
+                or intent.base_size <= 0
+            ):
+                raise ValueError("recorded order intent inventory is ambiguous")
+            by_cid[cid] = intent
+            by_sha[intent.order_intent_sha256] = intent
+
+        grouped: dict[str, list[RecordedBrokerTransition]] = {}
+        seen_events: set[str] = set()
+        for transition in sorted(
+            transitions,
+            key=lambda row: (row.available_at, row.sequence, row.event_sha256),
+        ):
+            if not isinstance(transition, RecordedBrokerTransition):
+                raise TypeError("recorded broker transition is malformed")
+            intent = by_sha.get(transition.order_intent_sha256)
+            if (
+                intent is None
+                or transition.client_order_id != intent.client_order_id
+                or transition.event_sha256 in seen_events
+                or transition.order_quantity != intent.base_size
+            ):
+                raise ValueError("recorded broker transition binding is ambiguous")
+            seen_events.add(transition.event_sha256)
+            grouped.setdefault(intent.client_order_id, []).append(transition)
+        if set(grouped) != set(by_cid):
+            raise ValueError("recorded lifecycle does not cover every order intent")
+        for cid, rows in grouped.items():
+            if rows[0].transition != "submitted":
+                raise ValueError(f"recorded lifecycle does not start submitted: {cid}")
+            if not rows[0].broker_order_id:
+                # The unchanged live FSM needs the POST response order identity.
+                # A capture that retained only a local SUBMITTED marker is useful
+                # diagnostically but cannot drive/certify this synchronous seam.
+                raise ValueError(
+                    f"recorded submitted transition lacks broker order id: {cid}"
+                )
+            broker_order_id = str(rows[0].broker_order_id or "").strip()
+            prior_available_at: datetime | None = None
+            prior_sequence = 0
+            prior_cumulative = 0.0
+            terminal_seen = False
+            for index, row in enumerate(rows):
+                if row.available_at.tzinfo is None:
+                    raise ValueError(
+                        f"recorded lifecycle clock is not timezone-aware: {cid}"
+                    )
+                if str(row.broker_order_id or "").strip() != broker_order_id:
+                    raise ValueError(
+                        f"recorded lifecycle broker order identity changed: {cid}"
+                    )
+                if prior_available_at is not None and (
+                    row.available_at < prior_available_at
+                    or (
+                        row.available_at == prior_available_at
+                        and row.sequence <= prior_sequence
+                    )
+                ):
+                    raise ValueError(
+                        f"recorded lifecycle causal order regressed: {cid}"
+                    )
+                if terminal_seen:
+                    raise ValueError(
+                        f"recorded lifecycle continues after terminal state: {cid}"
+                    )
+                status = self._recorded_status(row.transition)
+                cumulative = float(row.cumulative_filled_quantity)
+                delta = cumulative - prior_cumulative
+                if (
+                    row.order_quantity != by_cid[cid].base_size
+                    or cumulative < prior_cumulative
+                    or cumulative > float(row.order_quantity)
+                    or float(row.last_fill_quantity) < 0.0
+                    or abs(delta - float(row.last_fill_quantity)) > 1e-9
+                ):
+                    raise ValueError(
+                        f"recorded lifecycle fill chain is inconsistent: {cid}"
+                    )
+                if index == 0 and (
+                    cumulative != 0.0 or float(row.last_fill_quantity) != 0.0
+                ):
+                    raise ValueError(
+                        f"recorded submitted transition already contains a fill: {cid}"
+                    )
+                if delta > 0.0 and (
+                    row.last_fill_price is None
+                    or not math.isfinite(float(row.last_fill_price))
+                    or float(row.last_fill_price) <= 0.0
+                ):
+                    raise ValueError(
+                        f"recorded lifecycle fill has no exact price: {cid}"
+                    )
+                if row.transition == "filled" and cumulative != float(
+                    row.order_quantity
+                ):
+                    raise ValueError(
+                        f"recorded filled transition is not cumulative: {cid}"
+                    )
+                terminal_seen = status in {"filled", "canceled", "rejected"}
+                prior_available_at = row.available_at
+                prior_sequence = int(row.sequence)
+                prior_cumulative = cumulative
+
+        self._recorded_intents = by_cid
+        self._recorded_intent_by_sha = by_sha
+        self._recorded_all_transitions = {
+            cid: tuple(rows) for cid, rows in grouped.items()
+        }
+        self._recorded_cancel_receipt_required = any(
+            row.transition
+            in {"pending_cancel", "canceled", "pending_replace", "replaced"}
+            for rows in grouped.values()
+            for row in rows
+        )
+        self._recorded_released = {cid: [] for cid in by_cid}
+        self._recorded_lifecycle_enabled = True
+
+    @staticmethod
+    def _recorded_status(transition: str) -> str:
+        normalized = str(transition).strip().lower()
+        if normalized in {
+            "submitted",
+            "pending_new",
+            "new",
+            "accepted",
+            "accepted_for_bidding",
+            "pending_cancel",
+            "pending_replace",
+            "held",
+            "suspended",
+            "stopped",
+            "calculated",
+        }:
+            return "open"
+        if normalized == "partially_filled":
+            return "partially_filled"
+        if normalized == "filled":
+            return "filled"
+        if normalized in {"canceled", "replaced", "expired", "done_for_day"}:
+            return "canceled"
+        if normalized in {"rejected", "failed"}:
+            return "rejected"
+        raise ValueError(f"unsupported recorded broker transition: {transition}")
+
+    def release_recorded_transition(
+        self, transition: RecordedBrokerTransition
+    ) -> None:
+        """Release a post-PLACE lifecycle fact in exact chain order.
+
+        SUBMITTED is the synchronous PLACE response: merely reaching its
+        availability frontier must not create an order.  The matching exact
+        PLACE request consumes it inside ``_recorded_place``.  Later facts are
+        rejected until that request/response pair owns the order.
+        """
+
+        if not self._recorded_lifecycle_enabled:
+            raise ValueError("recorded lifecycle mode is not configured")
+        if transition.transition == "submitted":
+            if transition.event_sha256 in self._recorded_applied_event_sha256s:
+                return
+            expected = self._recorded_all_transitions.get(
+                transition.client_order_id, ()
+            )
+            if not expected or expected[0] != transition:
+                raise ValueError(
+                    "recorded PLACE response release order diverged"
+                )
+            if transition.client_order_id in self._recorded_available_place_responses:
+                raise ValueError("recorded PLACE response was released twice")
+            self._recorded_available_place_responses[
+                transition.client_order_id
+            ] = transition
+            return
+        if transition.client_order_id not in self._recorded_bound_client_ids:
+            raise ValueError(
+                "recorded broker transition became visible before its PLACE request"
+            )
+        self._apply_recorded_transition(transition)
+
+    def _apply_recorded_transition(
+        self,
+        transition: RecordedBrokerTransition,
+        *,
+        released_place_response: bool = False,
+    ) -> None:
+        """Apply one response/transition after its causal request boundary."""
+
+        if not self._recorded_lifecycle_enabled:
+            raise ValueError("recorded lifecycle mode is not configured")
+        if transition.event_sha256 in self._recorded_applied_event_sha256s:
+            raise ValueError("recorded broker transition was released twice")
+        intent = self._recorded_intent_by_sha.get(transition.order_intent_sha256)
+        if intent is None or intent.client_order_id != transition.client_order_id:
+            raise ValueError("recorded broker transition escaped its intent")
+        released = self._recorded_released[intent.client_order_id]
+        if released_place_response:
+            # PLACE may consume only the response object deposited by the causal
+            # release path.  In particular, it must not inspect the complete
+            # lifecycle inventory to discover or validate a future ACK.
+            if (
+                released
+                or transition.transition != "submitted"
+                or self._recorded_available_place_responses.get(
+                    intent.client_order_id
+                )
+                != transition
+            ):
+                raise ValueError("released PLACE response binding diverged")
+        else:
+            expected_rows = self._recorded_all_transitions[intent.client_order_id]
+            if (
+                len(released) >= len(expected_rows)
+                or expected_rows[len(released)] != transition
+            ):
+                raise ValueError("recorded broker transition release order diverged")
+
+        released.append(transition)
+        self._recorded_applied_event_sha256s.add(transition.event_sha256)
+        order_id = str(transition.broker_order_id or "").strip()
+        if not order_id:
+            raise ValueError("released broker transition has no broker order id")
+        ro = self._orders.get(order_id)
+        if ro is None:
+            ro = _RestingOrder(
+                order_id=order_id,
+                client_order_id=intent.client_order_id,
+                product_id=intent.product_id,
+                side=intent.side,
+                order_type=intent.order_type,
+                base_size=float(intent.base_size),
+                limit_price=intent.limit_price,
+                created_time=transition.available_at.astimezone(timezone.utc).isoformat(),
+                status=self._recorded_status(transition.transition),
+                filled_size=0.0,
+                fill_price=None,
+            )
+            self._orders[order_id] = ro
+        elif ro.client_order_id != intent.client_order_id:
+            raise ValueError("recorded broker order id changed ownership")
+
+        prior_cumulative = float(ro.filled_size)
+        if transition.cumulative_filled_quantity < prior_cumulative:
+            raise ValueError("recorded cumulative fill regressed")
+        delta = transition.cumulative_filled_quantity - prior_cumulative
+        if abs(delta - transition.last_fill_quantity) > 1e-9:
+            raise ValueError("recorded fill delta differs from cumulative fill")
+        if delta > 0:
+            if transition.last_fill_price is None:
+                raise ValueError("recorded fill delta has no exact price")
+            self._book_fill(
+                ro,
+                qty=float(delta),
+                price=float(transition.last_fill_price),
+                fill_id=f"{order_id}:{transition.event_sha256}",
+                raw={
+                    "venue": _VENUE,
+                    "recorded_lifecycle": True,
+                    "event_sha256": transition.event_sha256,
+                    "sequence": transition.sequence,
+                },
+            )
+        ro.status = self._recorded_status(transition.transition)
+
+    def _recorded_place(
+        self,
+        *,
+        product_id: str,
+        side: str,
+        base_size: float,
+        order_type: str,
+        limit_price: Optional[float],
+        client_order_id: Optional[str],
+        time_in_force: Optional[str],
+        extended_hours: bool,
+    ) -> dict[str, Any]:
+        cid = str(client_order_id or "").strip()
+        intent = self._recorded_intents.get(cid)
+        normalized_tif = str(time_in_force or "").strip().lower()
+        if normalized_tif == "gfd" or (
+            not normalized_tif and intent is not None and intent.order_type == "market"
+        ):
+            normalized_tif = "day"
+        violation: Optional[str] = None
+        if intent is None:
+            violation = "recorded_order_intent_missing"
+        elif cid in self._recorded_bound_client_ids:
+            violation = "recorded_order_intent_reused"
+        elif (
+            str(product_id).strip().upper() != intent.product_id
+            or str(side).strip().lower() != intent.side
+            or str(order_type).strip().lower() != intent.order_type
+            or abs(float(base_size) - float(intent.base_size)) > 1e-9
+            or normalized_tif != intent.time_in_force
+            or bool(extended_hours) is not intent.extended_hours
+            or (
+                (limit_price is None) != (intent.limit_price is None)
+                or (
+                    limit_price is not None
+                    and intent.limit_price is not None
+                    and abs(float(limit_price) - float(intent.limit_price)) > 1e-9
+                )
+            )
+        ):
+            violation = "recorded_order_intent_request_mismatch"
+        if violation is not None:
+            self._recorded_request_violations.append(f"{cid or '<missing>'}:{violation}")
+            return {
+                "ok": False,
+                "venue": _VENUE,
+                "error": violation,
+                "client_order_id": cid or None,
+            }
+
+        released = self._recorded_released.get(cid, [])
+        if released:
+            raise ValueError("recorded PLACE response was already consumed")
+        current = self._recorded_available_place_responses.get(cid)
+        if current is None:
+            # The unchanged live FSM expects a synchronous broker order id from
+            # PLACE.  If SUBMITTED was captured after this decision frontier,
+            # replay cannot manufacture that future response, move the decision
+            # clock, or pre-release the ACK.  Record an explicit architectural
+            # blocker and leave broker state completely untouched.
+            violation = SEALED_REPLAY_SYNC_ACK_ARCHITECTURAL_BLOCKER
+            self._recorded_request_violations.append(f"{cid}:{violation}")
+            return {
+                "ok": False,
+                "venue": _VENUE,
+                "error": violation,
+                "client_order_id": cid,
+                "architectural_blocker": True,
+                "blocker_detail": (
+                    "captured SUBMITTED response was not causally available "
+                    "when synchronous PLACE required its broker order id"
+                ),
+            }
+        if current.transition != "submitted":
+            raise ValueError("released PLACE response is not submitted")
+        # The exact request has now met the exact response at a causally
+        # released frontier.  Only this boundary may create broker state.
+        self._apply_recorded_transition(current, released_place_response=True)
+        order_id = str(current.broker_order_id or "")
+        ro = self._orders.get(order_id)
+        if ro is None:
+            raise ValueError("released recorded order state is missing")
+        self._recorded_bound_client_ids.add(cid)
+        self._recorded_available_place_responses.pop(cid, None)
+        return {
+            "ok": True,
+            "venue": _VENUE,
+            "order_id": order_id,
+            "client_order_id": cid,
+            "status": ro.status,
+            "raw": {
+                "recorded_lifecycle": True,
+                "filled_size": float(ro.filled_size),
+                "fill_price": (
+                    float(ro.fill_price) if ro.fill_price is not None else None
+                ),
+                "order_type": intent.order_type,
+                "limit_price": intent.limit_price,
+                "released_event_sha256": current.event_sha256,
+            },
+        }
+
+    def get_account_identity_truth(self) -> dict[str, Any]:
+        """Return the deterministic, non-secret identity frozen into replay sessions."""
+
+        identity = self._account_identity
+        return {
+            "readable": bool(identity),
+            "identity": identity or None,
+            "reason": None if identity else "replay_mock_account_identity_missing",
+        }
+
+    def set_account_identity(self, identity: str) -> None:
+        """Replay-only seam for modeling an account switch/identity rotation."""
+
+        self._account_identity = str(identity or "").strip()
 
     # ── driver-side injection seams (NOT part of the VenueAdapter protocol) ──────────
     def set_clock(self, t: datetime) -> None:
@@ -269,13 +1241,20 @@ class MockBrokerAdapter:
         ack-delay and re-test the cross against the current per-product quote."""
         if t.tzinfo is not None:
             t = t.astimezone(timezone.utc).replace(tzinfo=None)
+        if (
+            self._exact_print_fills_enabled
+            and self._clock_explicitly_set
+            and t < self._clock
+        ):
+            raise ValueError("exact-print simulation clock cannot move backwards")
         self._clock = t
-        if self._resting_limit_fills:
+        self._clock_explicitly_set = True
+        if not self._recorded_lifecycle_enabled:
             self._advance_resting_orders()
 
     def set_quote(self, product_id: str, quote: RecordedQuote) -> None:
         self._quotes[str(product_id).upper()] = quote
-        if self._resting_limit_fills:
+        if not self._recorded_lifecycle_enabled:
             # A new quote can satisfy a resting cross immediately (the driver may set the clock
             # then the quote, or only the quote, between ticks) — re-test on quote arrival too.
             self._advance_resting_orders(product_id=str(product_id).upper())
@@ -285,6 +1264,195 @@ class MockBrokerAdapter:
         self._quotes.pop(str(product_id).upper(), None)
 
     # ── STEP-2 realistic-fill driver seams (NOT part of the VenueAdapter protocol) ────
+    def release_verified_exact_print(self, print_event: VerifiedExactPrint) -> None:
+        """Allocate one sealed print once across eligible orders in FIFO order.
+
+        This path deliberately cannot consume caller-supplied aggregate volume.
+        The single participation budget belongs to the print, not to each open
+        order, so concurrent orders cannot each claim the same market liquidity.
+        """
+
+        if not self._exact_print_fills_enabled:
+            raise ValueError("exact print fill allocation is not enabled")
+        if (
+            not isinstance(print_event, VerifiedExactPrint)
+            or print_event._verification_token is not _VERIFIED_EXACT_PRINT_TOKEN
+        ):
+            raise ValueError("exact print lacks verified sealed-capture provenance")
+        inventory = self._exact_print_inventory
+        if inventory is None:
+            raise ValueError("verified exact print inventory is not configured")
+        if print_event.event_sha256 not in set(inventory.event_sha256s):
+            raise ValueError("exact print is outside the verified inventory")
+        if self._recorded_lifecycle_enabled:
+            raise ValueError("exact print fills cannot mix with recorded broker lifecycle")
+        if not self._clock_explicitly_set:
+            raise ValueError("exact print release requires an explicit simulation clock")
+        current_available = self._clock.replace(tzinfo=timezone.utc)
+        if print_event.available_at > current_available:
+            raise ValueError("exact print was released before its available_at frontier")
+        if print_event.provider_event_at > print_event.available_at:
+            raise ValueError("exact print provider clock is ahead of its availability clock")
+        if print_event.provider_event_at > print_event.received_at:
+            raise ValueError("exact print provider clock is ahead of its receive clock")
+        capture_binding = (
+            print_event.capture_identity_sha256,
+            print_event.final_capture_seal_sha256,
+            print_event.release_order_root_sha256,
+        )
+        if print_event.event_sha256 in self._exact_print_seen:
+            raise ValueError("exact print was released twice")
+        expected_release_ordinal = self._exact_print_last_release_ordinal + 1
+        if print_event.release_ordinal != expected_release_ordinal:
+            raise ValueError("exact print release ordinal is not contiguous")
+        if print_event.sequence <= self._exact_print_last_sequence:
+            raise ValueError("exact print capture sequence did not increase")
+        if (
+            self._exact_print_last_available_at is not None
+            and print_event.available_at < self._exact_print_last_available_at
+        ):
+            # CaptureCoverageManifest rejects this invariant before an adapter
+            # can mint the object; retain the check at the allocation boundary
+            # so a private-looking counterfeit cannot weaken causal order.
+            raise ValueError("exact print availability clock regressed")
+        if (
+            self._exact_print_capture_binding is not None
+            and capture_binding != self._exact_print_capture_binding
+        ):
+            raise ValueError("exact print capture binding changed within one allocation run")
+        self._exact_print_capture_binding = capture_binding
+        self._exact_print_seen.add(print_event.event_sha256)
+        self._exact_print_last_release_ordinal = print_event.release_ordinal
+        self._exact_print_last_sequence = print_event.sequence
+        self._exact_print_last_available_at = print_event.available_at
+
+        classified_side: Optional[str] = None
+        disposition = "no_eligible_order"
+        if print_event.bid is None or print_event.ask is None:
+            disposition = "print_nbbo_unavailable"
+        elif print_event.conditions:
+            disposition = "print_conditions_unsupported"
+        else:
+            tolerance = max(1e-9, abs(print_event.price) * 1e-12)
+            at_ask = print_event.price >= float(print_event.ask) - tolerance
+            at_bid = print_event.price <= float(print_event.bid) + tolerance
+            if float(print_event.ask) <= float(print_event.bid) + tolerance or (
+                at_ask and at_bid
+            ):
+                disposition = "print_quote_side_ambiguous"
+            elif at_ask:
+                classified_side = "buy"
+            elif at_bid:
+                classified_side = "sell"
+            else:
+                disposition = "inside_spread_aggressor_unresolved"
+
+        candidates: list[_RestingOrder] = []
+        if classified_side is not None:
+            accepted_sides = (
+                ("buy", "bid", "long")
+                if classified_side == "buy"
+                else ("sell", "ask", "short")
+            )
+            for order in self._orders.values():
+                if (
+                    order.status != "open"
+                    or order.product_id != print_event.product_id
+                    or order.order_type != "limit"
+                    or order.side not in accepted_sides
+                    or order.executable_event_at is None
+                    or order.executable_event_at > print_event.provider_event_at
+                    or order.limit_price is None
+                ):
+                    continue
+                limit = float(order.limit_price)
+                if classified_side == "buy" and print_event.price > limit:
+                    continue
+                if classified_side == "sell" and print_event.price < limit:
+                    continue
+                candidates.append(order)
+            candidates.sort(key=lambda value: (value.priority_sequence, value.order_id))
+
+        budget = self._volume_participation_frac * print_event.size
+        remaining_budget = budget
+        event_allocations: list[str] = []
+        for order in candidates:
+            remaining_order = max(0.0, order.base_size - order.filled_size)
+            quantity = min(remaining_order, remaining_budget)
+            if quantity <= 1e-9:
+                break
+            allocation_index = len(self._exact_print_allocations) + 1
+            fill_id = (
+                f"{order.order_id}:exact:{print_event.event_sha256}:"
+                f"{allocation_index}"
+            )
+            self._book_fill(
+                order,
+                qty=quantity,
+                price=print_event.price,
+                fill_id=fill_id,
+                trade_time=print_event.provider_event_at,
+                raw={
+                    "venue": _VENUE,
+                    "exact_print_allocation": True,
+                    "event_sha256": print_event.event_sha256,
+                    "sequence": print_event.sequence,
+                    "release_ordinal": print_event.release_ordinal,
+                    "provider_event_at": print_event.provider_event_at.isoformat(),
+                    "received_at": print_event.received_at.isoformat(),
+                    "available_at": print_event.available_at.isoformat(),
+                    "policy_sha256": self._exact_print_policy_sha256,
+                },
+            )
+            order.status = (
+                "filled"
+                if order.base_size - order.filled_size <= 1e-9
+                else "open"
+            )
+            allocation = ExactPrintFillAllocation(
+                event_sha256=print_event.event_sha256,
+                sequence=print_event.sequence,
+                release_ordinal=print_event.release_ordinal,
+                allocation_index=allocation_index,
+                order_id=order.order_id,
+                client_order_id=order.client_order_id,
+                product_id=order.product_id,
+                side=classified_side,
+                quantity=quantity,
+                price=print_event.price,
+                provider_event_at=print_event.provider_event_at,
+                received_at=print_event.received_at,
+                available_at=print_event.available_at,
+            )
+            self._exact_print_allocations.append(allocation)
+            event_allocations.append(fill_id)
+            remaining_budget -= quantity
+        if event_allocations:
+            disposition = "allocated"
+        self._exact_print_audit.append(
+            {
+                "event_sha256": print_event.event_sha256,
+                "sequence": print_event.sequence,
+                "release_ordinal": print_event.release_ordinal,
+                "capture_identity_sha256": print_event.capture_identity_sha256,
+                "final_capture_seal_sha256": print_event.final_capture_seal_sha256,
+                "release_order_root_sha256": print_event.release_order_root_sha256,
+                "product_id": print_event.product_id,
+                "provider_event_at": print_event.provider_event_at.isoformat(),
+                "received_at": print_event.received_at.isoformat(),
+                "available_at": print_event.available_at.isoformat(),
+                "price": print_event.price,
+                "size": print_event.size,
+                "classified_side": classified_side,
+                "participation_budget": budget,
+                "candidate_order_ids": [value.order_id for value in candidates],
+                "allocation_fill_ids": event_allocations,
+                "allocated_quantity": budget - remaining_budget,
+                "unallocated_quantity": remaining_budget,
+                "disposition": disposition,
+            }
+        )
+
     def set_printed_volume(self, product_id: str, printed_volume: float) -> None:
         """Feed the recorded printed volume that traded AT-OR-THROUGH a resting order's
         limit during THIS advance window (from ``iqfeed_trade_ticks`` prints the driver
@@ -294,14 +1462,20 @@ class MockBrokerAdapter:
 
         Additive across advances — the driver passes the INCREMENT since the last advance
         (or the full at-or-through-limit volume for a single-advance immediate order)."""
+        if self._exact_print_fills_enabled:
+            raise ValueError(
+                "aggregate printed volume cannot enter exact-print allocation mode"
+            )
         pid = str(product_id).upper()
-        inc = max(0.0, float(printed_volume))
+        inc = float(printed_volume)
+        if not math.isfinite(inc) or inc < 0.0:
+            raise ValueError("printed_volume must be finite and nonnegative")
         self._printed_volume_pending[pid] = self._printed_volume_pending.get(pid, 0.0) + inc
         # accrue onto every resting order for this product, then re-test the cross/cap
         for ro in self._orders.values():
             if ro.status == "open" and ro.product_id == pid:
                 ro.observed_printed_volume += inc
-        if self._resting_limit_fills:
+        if not self._recorded_lifecycle_enabled:
             self._advance_resting_orders(product_id=pid)
 
     def set_latency_distribution(
@@ -340,22 +1514,11 @@ class MockBrokerAdapter:
     def _freshness(self) -> FreshnessMeta:
         # The freshness STAMP. Two modes (``freshness_mode``):
         #
-        #   * ``"sim"`` (P0 default): stamp at the sim clock — the documented P0 contract
-        #     (``test_replay_v3_p0`` pins ``retrieved_at_utc == sim clock``). Honest, but see
-        #     the caveat below.
-        #   * ``"wall"`` (the P1 DRIVER uses this): stamp at the REAL wall clock so the quote is
-        #     fresh by construction.
+        #   * ``"sim"`` (default): stamp at the replay clock.
+        #   * ``"wall"``: legacy diagnostic mode only; sealed ReplayV3 rejects it.
         #
-        # WHY ``"wall"`` exists (documented hidden real-time dep — design R2/R7): the runner's
-        # stale-quote gate calls ``protocol.is_fresh_enough(meta)`` WITHOUT a ``now=`` override,
-        # so freshness is measured against ``datetime.now(timezone.utc)`` — the WALL clock, NOT
-        # the sim clock (``live_runner._utcnow``). It is the ONE market read the P0/P1 clock seam
-        # does not reach. Stamping a past sim instant would make EVERY replayed quote look stale
-        # and the runner would never leave ``queued_live``. The faithful replay semantics: the
-        # injected quote IS the current quote for THIS step, so it is fresh by construction.
-        # The gate still works in replay — a ``clear_quote``d name returns no_bbo (not stale),
-        # exercising the quoteless decline path. A clean sim-now ``is_fresh_enough`` override
-        # threaded from the runner is the P5 cleanup that makes ``"sim"`` viable end-to-end.
+        # The live runner passes its replay-aware clock into freshness checks,
+        # so historical stamps are deterministic without a wall-time escape.
         if self._freshness_mode == "wall":
             stamp = datetime.now(timezone.utc)
             return FreshnessMeta(
@@ -434,9 +1597,50 @@ class MockBrokerAdapter:
         ]
         return list(opens[: int(limit)]), self._freshness()
 
+    def list_open_orders_truth(
+        self, *, product_id: Optional[str] = None, limit: int = 50
+    ) -> dict[str, Any]:
+        orders, freshness = self.list_open_orders(
+            product_id=product_id, limit=limit
+        )
+        return {
+            "readable": True,
+            "orders": orders,
+            "freshness": freshness,
+            "reason": None,
+        }
+
     def get_order(self, order_id: str) -> tuple[Optional[NormalizedOrder], FreshnessMeta]:
         o = self._orders.get(str(order_id))
         return (o.to_normalized() if o is not None else None), self._freshness()
+
+    def get_order_truth(self, order_id: str) -> dict[str, Any]:
+        order, freshness = self.get_order(order_id)
+        return {
+            "readable": True,
+            "found": order is not None,
+            "order": order,
+            "freshness": freshness,
+            "reason": None,
+        }
+
+    def get_position_quantity_truth(self, product_id: str) -> dict[str, Any]:
+        pid = str(product_id or "").strip().upper()
+        quantity = 0.0
+        for fill in self._fills:
+            if fill.product_id != pid:
+                continue
+            quantity += (
+                float(fill.size)
+                if str(fill.side).lower() in {"buy", "bid", "long"}
+                else -float(fill.size)
+            )
+        return {
+            "readable": True,
+            "product_id": pid,
+            "quantity": quantity,
+            "reason": None,
+        }
 
     def get_fills(
         self, *, product_id: Optional[str] = None, limit: int = 50
@@ -466,6 +1670,8 @@ class MockBrokerAdapter:
             order_type="market",
             limit_price=None,
             client_order_id=client_order_id,
+            time_in_force=kwargs.get("time_in_force"),
+            extended_hours=bool(kwargs.get("extended_hours", False)),
         )
 
     def place_limit_order_gtc(
@@ -486,6 +1692,8 @@ class MockBrokerAdapter:
             order_type="limit",
             limit_price=limit_price,
             client_order_id=client_order_id,
+            time_in_force=kwargs.get("time_in_force"),
+            extended_hours=bool(extended_hours),
         )
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
@@ -493,6 +1701,39 @@ class MockBrokerAdapter:
         # marked ``cancelled`` so a later cross can't fill an order the runner abandoned (the
         # ack-timeout → re-watch path); a partial keeps its already-filled size.
         o = self._orders.get(str(order_id))
+        if self._recorded_lifecycle_enabled:
+            if o is None:
+                self._recorded_request_violations.append(
+                    f"{order_id}:recorded_cancel_order_missing"
+                )
+                return {
+                    "ok": False,
+                    "venue": _VENUE,
+                    "order_id": str(order_id),
+                    "error": "recorded_cancel_order_missing",
+                }
+            cid = str(o.client_order_id or "")
+            # A lifecycle-only capture cannot prove the request the FSM sent or
+            # the synchronous response it observed.  In particular, looking at
+            # the remaining recorded transitions to decide that this request
+            # "would have" succeeded leaks future facts.  Until exact cancel
+            # request/response receipts are part of the sealed prefix, fail
+            # closed and leave the recorded order/lifecycle state untouched.
+            violation = SEALED_REPLAY_CANCEL_RECEIPT_ARCHITECTURAL_BLOCKER
+            self._recorded_request_violations.append(f"{cid}:{violation}")
+            return {
+                "ok": False,
+                "venue": _VENUE,
+                "order_id": str(order_id),
+                "client_order_id": cid,
+                "status": o.status,
+                "error": violation,
+                "architectural_blocker": True,
+                "blocker_detail": (
+                    "sealed capture has broker lifecycle transitions but no exact "
+                    "cancel request/response receipt"
+                ),
+            }
         if o is not None and o.status == "open":
             o.status = "cancelled"
         return {"ok": True, "venue": _VENUE, "order_id": str(order_id), "status": "cancelled"}
@@ -523,6 +1764,8 @@ class MockBrokerAdapter:
         order_type: str,
         limit_price: Optional[str],
         client_order_id: Optional[str],
+        time_in_force: Optional[str] = None,
+        extended_hours: bool = False,
     ) -> dict[str, Any]:
         q = self._quote_for(product_id)
         if q is None:
@@ -542,24 +1785,76 @@ class MockBrokerAdapter:
                 "error": "bad_base_size",
                 "client_order_id": client_order_id,
             }
-        if not (size > 0):
+        if not math.isfinite(size) or not (size > 0):
             return {
                 "ok": False,
                 "venue": _VENUE,
                 "error": "bad_base_size",
                 "client_order_id": client_order_id,
             }
-
-        s = str(side).lower()
-        order_id = f"{_VENUE}-{next(self._order_seq):08d}"
-        created = self._clock.replace(tzinfo=timezone.utc).isoformat()
+        s = str(side or "").strip().lower()
+        if s not in {"buy", "bid", "long", "sell", "ask", "short"}:
+            return {
+                "ok": False,
+                "venue": _VENUE,
+                "error": "bad_side",
+                "client_order_id": client_order_id,
+            }
+        normalized_order_type = str(order_type or "").strip().lower()
+        if normalized_order_type not in {"market", "limit"}:
+            return {
+                "ok": False,
+                "venue": _VENUE,
+                "error": "bad_order_type",
+                "client_order_id": client_order_id,
+            }
         _lim = _float_or_none(limit_price)
+        if normalized_order_type == "limit" and (
+            _lim is None or not math.isfinite(_lim) or _lim <= 0.0
+        ):
+            return {
+                "ok": False,
+                "venue": _VENUE,
+                "error": "bad_limit_price",
+                "client_order_id": client_order_id,
+            }
 
-        # RESTING MODE (P1): a marketable LIMIT does NOT necessarily cross on placement —
-        # it rests ``open`` until a recorded NBBO crosses it. A MARKET order (no limit / the
-        # exit) still crosses immediately. ``ack_delay_ticks`` holds even a crossable limit
-        # ``open`` for N quote advances first (the pending-entry ack window).
-        if self._resting_limit_fills and order_type == "limit":
+        if self._recorded_lifecycle_enabled:
+            return self._recorded_place(
+                product_id=product_id,
+                side=s,
+                base_size=size,
+                order_type=normalized_order_type,
+                limit_price=_lim,
+                client_order_id=client_order_id,
+                time_in_force=time_in_force,
+                extended_hours=extended_hours,
+            )
+
+        if self._exact_print_fills_enabled and normalized_order_type != "limit":
+            # Exact prints can conservatively allocate a bounded resting-limit
+            # participation budget. They do not prove the contemporaneous depth,
+            # queue, or sweep needed to fabricate a market-order execution.
+            return {
+                "ok": False,
+                "venue": _VENUE,
+                "error": EXACT_PRINT_MARKET_FILL_UNAVAILABLE,
+                "client_order_id": client_order_id,
+                "coverage_unavailable": True,
+            }
+
+        priority_sequence = next(self._order_seq)
+        order_id = f"{_VENUE}-{priority_sequence:08d}"
+        created_at = self._clock.replace(tzinfo=timezone.utc)
+        created = created_at.isoformat()
+        order_type = normalized_order_type
+
+        # Every LIMIT honors its price even in the legacy immediate model. A marketable limit
+        # can still fill on the placement quote; an unmarketable limit rests until a later
+        # recorded NBBO crosses it. ``resting_limit_fills`` retains the richer latency,
+        # partial-fill, and printed-volume behavior, but can never toggle basic limit-price
+        # semantics off. MARKET orders continue to cross immediately.
+        if order_type == "limit":
             pid_u = str(product_id).upper()
             ro = _RestingOrder(
                 order_id=order_id,
@@ -570,6 +1865,18 @@ class MockBrokerAdapter:
                 base_size=size,
                 limit_price=_lim,
                 created_time=created,
+                created_at=created_at,
+                priority_sequence=priority_sequence,
+                executable_event_at=(
+                    created_at
+                    + timedelta(
+                        seconds=float(
+                            self._exact_print_order_latency_seconds or 0.0
+                        )
+                    )
+                    if self._exact_print_fills_enabled
+                    else created_at
+                ),
                 status="open",
                 filled_size=0.0,
                 fill_price=None,
@@ -602,7 +1909,7 @@ class MockBrokerAdapter:
                 },
             }
 
-        # IMMEDIATE MODE (P0 default; and all MARKET orders even in resting mode): cross now.
+        # IMMEDIATE MODE applies only to MARKET orders: cross now.
         fill_price = self._cross_price(s, q)
         ro = _RestingOrder(
             order_id=order_id,
@@ -613,6 +1920,9 @@ class MockBrokerAdapter:
             base_size=size,
             limit_price=_lim,
             created_time=created,
+            created_at=created_at,
+            priority_sequence=priority_sequence,
+            executable_event_at=created_at,
             status="filled",
         )
         self._orders[order_id] = ro
@@ -663,6 +1973,22 @@ class MockBrokerAdapter:
             return float(q.ask) <= float(ro.limit_price) + 1e-12
         return float(q.bid) >= float(ro.limit_price) - 1e-12
 
+    def _limit_bounded_cross_price(self, ro: _RestingOrder, q: RecordedQuote) -> float:
+        """Return a modeled fill that can never violate the order's limit.
+
+        The quote-side crossing test establishes marketability. Adverse slippage can move the
+        modeled execution toward the limit, but a BUY can never execute above its limit and a
+        SELL can never execute below it. This is an exchange-order invariant, not optimistic
+        price improvement.
+        """
+
+        price = self._cross_price(ro.side, q)
+        if ro.limit_price is None:
+            return price
+        if ro.side in ("buy", "bid", "long"):
+            return min(price, float(ro.limit_price))
+        return max(price, float(ro.limit_price))
+
     def _volume_cap_available(self, ro: _RestingOrder) -> Optional[float]:
         """STEP-2 (b): the additional qty this order may fill given the printed volume it has
         observed at-or-through its limit. Returns ``None`` when volume-capping is not active
@@ -670,7 +1996,7 @@ class MockBrokerAdapter:
         ``max(0, frac × observed_printed_volume − already_filled)`` — a partial results when
         the tape was thin, and 0 (no fill) when NO volume printed through the limit yet
         (the no-fill-through-empty-tape property)."""
-        if not self._volume_cap_enabled or ro.volume_participation_frac >= 1.0:
+        if not self._volume_cap_enabled:
             return None
         allowed_total = ro.volume_participation_frac * float(ro.observed_printed_volume)
         return max(0.0, allowed_total - float(ro.filled_size))
@@ -680,6 +2006,11 @@ class MockBrokerAdapter:
         fill (or partial-fill) when the limit crosses, capped by the observed printed volume.
         Idempotent on terminal orders."""
         if ro.status != "open" or q is None or not q.is_valid():
+            return
+        if self._exact_print_fills_enabled:
+            # Quote changes establish marketability but cannot spend liquidity.
+            # Only one causally released exact print may allocate its own shared
+            # participation budget through ``release_verified_exact_print``.
             return
         if ro.ack_delay_remaining > 0:
             ro.ack_delay_remaining -= 1
@@ -698,7 +2029,7 @@ class MockBrokerAdapter:
                 # No (more) printed volume available through the limit yet ⇒ stay open,
                 # accrue on later advances. This is the no-fill-through-empty-tape guarantee.
                 return
-            px = self._cross_price(ro.side, q)
+            px = self._limit_bounded_cross_price(ro, q)
             self._book_fill(ro, qty=fillable, price=px)
             # terminal only once the FULL size is filled; else keep resting for more volume
             ro.status = "filled" if (ro.base_size - ro.filled_size) <= 1e-9 else "open"
@@ -706,11 +2037,11 @@ class MockBrokerAdapter:
         # PARTIAL: the first cross fills half, leaving the order ``open`` for the next cross.
         if ro.partial_first_fill and ro.filled_size <= 0 and remaining > 1e-9:
             half = remaining / 2.0
-            px = self._cross_price(ro.side, q)
+            px = self._limit_bounded_cross_price(ro, q)
             self._book_fill(ro, qty=half, price=px)
             ro.status = "open"  # stays resting for the remainder
             return
-        px = self._cross_price(ro.side, q)
+        px = self._limit_bounded_cross_price(ro, q)
         self._book_fill(ro, qty=remaining, price=px)
         ro.status = "filled"
 
@@ -723,7 +2054,16 @@ class MockBrokerAdapter:
                 continue
             self._maybe_cross(ro, self._quote_for(ro.product_id))
 
-    def _book_fill(self, ro: _RestingOrder, *, qty: float, price: float) -> None:
+    def _book_fill(
+        self,
+        ro: _RestingOrder,
+        *,
+        qty: float,
+        price: float,
+        fill_id: Optional[str] = None,
+        trade_time: Optional[datetime] = None,
+        raw: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         """Record a (possibly partial) fill on ``ro`` + append a NormalizedFill. Updates the
         size-weighted average fill price + accrues the proportional fee."""
         if qty <= 0:
@@ -735,20 +2075,28 @@ class MockBrokerAdapter:
         ro.fill_price = (prev_px * prev_filled + price * qty) / new_filled if new_filled > 0 else price
         ro.filled_size = new_filled
         notional = abs(price * qty)
-        ro.fee += roundtrip_fee_usd(
+        fill_fee = modeled_fill_leg_fee_usd(
             notional, self._fee_to_target_ratio, venue_rt_bps=self._venue_rt_bps
         )
+        ro.fee += fill_fee
         self._fills.append(
             NormalizedFill(
-                fill_id=f"{ro.order_id}-f{len([f for f in self._fills if f.order_id == ro.order_id]) + 1}",
+                fill_id=(
+                    fill_id
+                    or f"{ro.order_id}-f{len([f for f in self._fills if f.order_id == ro.order_id]) + 1}"
+                ),
                 order_id=ro.order_id,
                 product_id=ro.product_id,
                 side=ro.side,
                 size=float(qty),
                 price=float(price),
-                fee=float(roundtrip_fee_usd(notional, self._fee_to_target_ratio, venue_rt_bps=self._venue_rt_bps)),
-                trade_time=self._clock.replace(tzinfo=timezone.utc).isoformat(),
-                raw={"venue": _VENUE},
+                fee=float(fill_fee),
+                trade_time=(
+                    trade_time.astimezone(timezone.utc).isoformat()
+                    if trade_time is not None and trade_time.tzinfo is not None
+                    else self._clock.replace(tzinfo=timezone.utc).isoformat()
+                ),
+                raw=dict(raw or {"venue": _VENUE}),
             )
         )
 

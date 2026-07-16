@@ -174,6 +174,11 @@ def test_fix_b_reset_helper_clears_all_adoption_keys_keeps_session_state():
         "entry_stop_atr_pct": 0.05,
         "exit_order_id": "AREC-EXIT-1",
         "pending_exit_reason": "stop",
+        lr.KEY_ADAPTIVE_RISK_RESERVATION_REQUEST: {"request": "old-cycle"},
+        lr.KEY_ADAPTIVE_ALPACA_LIFECYCLE: {"reservation_id": "old-cycle"},
+        "alpaca_cycle_exit_fill_owners": [{"provider_order_id": "AREC-EXIT-1"}],
+        "alpaca_cycle_settlement_pending": {"reason": "old-cycle"},
+        "alpaca_cycle_settlement": {"settlement_sha256": "a" * 64},
         "scale_limit_order_id": "AREC-SCALE-1",
         "pyramid_order_id": "AREC-PYR-1",
         "anticipation_add_order_id": "AREC-ANT-1",
@@ -193,6 +198,8 @@ def test_fix_b_reset_helper_clears_all_adoption_keys_keeps_session_state():
         "last_exit_reason": "stop",
         "last_exit_price": 2.10,
         "halt_chain_up_count": 2,
+        "benched_backside_hod": 13.25,
+        "benched_backside_session_date_et": "2026-07-13",
         "eod_flatten_done": True,
         "tick_count": 17,
     }
@@ -207,6 +214,10 @@ def test_fix_b_reset_helper_clears_all_adoption_keys_keeps_session_state():
     # sample lifecycle keys gone
     for k in ("entry_submit_utc", "entry_limit_price", "entry_stop_atr_pct",
               "exit_order_id", "pending_exit_reason", "scale_limit_order_id",
+              lr.KEY_ADAPTIVE_RISK_RESERVATION_REQUEST,
+              lr.KEY_ADAPTIVE_ALPACA_LIFECYCLE,
+              "alpaca_cycle_exit_fill_owners", "alpaca_cycle_settlement_pending",
+              "alpaca_cycle_settlement",
               "pyramid_order_id", "anticipation_add_order_id",
               "micropullback_reentry_order_id", "max_loss_circuit_fired",
               "structural_stop_price", "halt_entry_size_mult"):
@@ -218,6 +229,8 @@ def test_fix_b_reset_helper_clears_all_adoption_keys_keeps_session_state():
         ("realized_pnl_usd", -42.0),
         ("fees_usd_total", 1.5),
         ("halt_chain_up_count", 2),
+        ("benched_backside_hod", 13.25),
+        ("benched_backside_session_date_et", "2026-07-13"),
         ("eod_flatten_done", True),
         ("tick_count", 17),
     ):
@@ -234,6 +247,42 @@ def test_fix_b_reset_set_covers_every_adoption_gate_key():
     for k in ("entry_order_id", "entry_order_ids_all", "entry_orders_resolved",
               "entry_submitted", "position"):
         assert k in lr._RECYCLE_ENTRY_STATE_KEYS, f"{k} missing from _RECYCLE_ENTRY_STATE_KEYS"
+
+
+def test_backside_bench_scope_resets_only_on_new_et_session():
+    le = {
+        "benched_backside_hod": 13.25,
+        "benched_backside_session_date_et": "2026-07-13",
+    }
+
+    anchor, reset = lr._scope_backside_bench_to_et_session(
+        le,
+        session_date_et="2026-07-13",
+    )
+    assert anchor == 13.25
+    assert reset is False
+
+    anchor2, reset2 = lr._scope_backside_bench_to_et_session(
+        le,
+        session_date_et="2026-07-14",
+    )
+    assert anchor2 is None
+    assert reset2 is True
+    assert "benched_backside_hod" not in le
+    assert "benched_backside_session_date_et" not in le
+
+
+def test_legacy_backside_bench_is_adopted_into_current_session():
+    le = {"benched_backside_hod": 13.25}
+
+    anchor, reset = lr._scope_backside_bench_to_et_session(
+        le,
+        session_date_et="2026-07-13",
+    )
+
+    assert anchor == 13.25
+    assert reset is False
+    assert le["benched_backside_session_date_et"] == "2026-07-13"
 
 
 def _seed_cooldown_session(db, *, symbol, name, cooldown_expired=True):

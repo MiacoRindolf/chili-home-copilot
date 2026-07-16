@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import inspect as sa_inspect
@@ -564,6 +564,7 @@ def persist_neural_momentum_tick(
     features: ExecutionReadinessFeatures,
     correlation_id: Optional[str],
     source_node_id: Optional[str],
+    observed_at: Optional[datetime] = None,
 ) -> int:
     """Upsert ``MomentumSymbolViability`` for each computed row; returns rows written."""
     if not _momentum_tables_present(db):
@@ -573,7 +574,9 @@ def persist_neural_momentum_tick(
     ensure_momentum_strategy_variants(db)
 
     exec_json = features.to_public_dict()
-    now = datetime.utcnow()
+    now = observed_at or datetime.utcnow()
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone.utc).replace(tzinfo=None)
     n = 0
     skipped_crypto = 0
     # AREA D — CRYPTO VIABILITY GATE: when crypto is not traded, skip persisting

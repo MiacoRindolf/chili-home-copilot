@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import math
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from datetime import datetime
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any, Iterator, Mapping, Optional, Protocol, runtime_checkable
 
 from sqlalchemy.orm import Session
 
@@ -21,6 +23,13 @@ from .context import build_momentum_regime_context
 
 from .evolution import record_evolution_trace
 from .features import ExecutionReadinessFeatures
+from .replay_capture_contract import CaptureMicrostructureOperation
+from .replay_errors import (
+    ReplayDecisionLocalMicrostructureCoverageUnavailableError,
+    ReplayInputContractError,
+    ReplayMicrostructureInputUnavailableError,
+    ReplayPipelineInputUnavailableError,
+)
 from .telemetry import log_tick
 from .variants import iter_momentum_families
 from .viability import score_viability
@@ -30,6 +39,114 @@ HUB_NODE_ID = "nm_momentum_crypto_intel"
 VIABILITY_NODE_ID = "nm_momentum_viability_pool"
 
 _log = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class MicrostructureReadProvider(Protocol):
+    """Exact no-fetch provider used by captured PAPER and sealed ReplayV3."""
+
+    @property
+    def network_fallback_allowed(self) -> bool: ...
+
+    def read_microstructure(
+        self,
+        *,
+        operation: CaptureMicrostructureOperation,
+        symbol: str,
+        decision_at: datetime,
+        parameters: Mapping[str, Any],
+    ) -> Any: ...
+
+
+_MICROSTRUCTURE_READ_PROVIDER: ContextVar[
+    MicrostructureReadProvider | None
+] = ContextVar("chili_microstructure_read_provider", default=None)
+_MICROSTRUCTURE_PROVIDER_FAILURE: ContextVar[
+    ReplayInputContractError | None
+] = ContextVar("chili_microstructure_provider_failure", default=None)
+_MICROSTRUCTURE_PROVIDER_MISSING = object()
+_MICROSTRUCTURE_COVERAGE_UNAVAILABLE = object()
+
+
+@contextmanager
+def microstructure_read_provider(
+    provider: MicrostructureReadProvider | None,
+) -> Iterator[MicrostructureReadProvider | None]:
+    """Bind one decision-local raw-source provider without global cache state."""
+
+    if provider is not None:
+        if not isinstance(provider, MicrostructureReadProvider):
+            raise ReplayMicrostructureInputUnavailableError(
+                "microstructure read provider is malformed"
+            )
+        if provider.network_fallback_allowed:
+            raise ReplayMicrostructureInputUnavailableError(
+                "microstructure read provider permits network fallback"
+            )
+    token = _MICROSTRUCTURE_READ_PROVIDER.set(provider)
+    failure_token = _MICROSTRUCTURE_PROVIDER_FAILURE.set(None)
+    body_raised = False
+    try:
+        yield provider
+    except BaseException:
+        body_raised = True
+        raise
+    finally:
+        unresolved_failure = _MICROSTRUCTURE_PROVIDER_FAILURE.get()
+        _MICROSTRUCTURE_PROVIDER_FAILURE.reset(failure_token)
+        _MICROSTRUCTURE_READ_PROVIDER.reset(token)
+        # Several legacy feature/exit call sites deliberately catch broad
+        # exceptions and fail open when an optional LIVE feed is absent.  A
+        # bound capture/replay provider is not optional: swallowing its causal
+        # contract rejection would let the FSM continue toward an order using
+        # an unsealed input set.  Re-raise the first rejection at the decision
+        # scope boundary even when an inner legacy caller caught it.
+        if not body_raised and unresolved_failure is not None:
+            raise unresolved_failure
+
+
+def _microstructure_provider_read(
+    *,
+    operation: CaptureMicrostructureOperation,
+    symbol: str,
+    as_of: datetime | None,
+    parameters: Mapping[str, Any],
+) -> Any:
+    provider = _MICROSTRUCTURE_READ_PROVIDER.get()
+    if provider is None:
+        return _MICROSTRUCTURE_PROVIDER_MISSING
+    decision_at = _tape_asof_default(as_of)
+    if decision_at.tzinfo is None:
+        decision_at = decision_at.replace(tzinfo=timezone.utc)
+    else:
+        decision_at = decision_at.astimezone(timezone.utc)
+    try:
+        return provider.read_microstructure(
+            operation=operation,
+            symbol=symbol,
+            decision_at=decision_at,
+            parameters=dict(parameters),
+        )
+    except ReplayDecisionLocalMicrostructureCoverageUnavailableError:
+        # A capture-native L2 provider has already emitted an append-only
+        # COVERAGE_UNAVAILABLE gap.  Return a private sentinel so the exact
+        # reader can produce its established type-safe missing value.  This is
+        # deliberately distinct from PROVIDER_MISSING: callers must never fall
+        # through to current DB/ring/network state while a capture provider is
+        # bound.  Exact-print, identity/clock, and receipt failures still take
+        # the hard branch below and reject the whole captured decision.
+        return _MICROSTRUCTURE_COVERAGE_UNAVAILABLE
+    except ReplayInputContractError as exc:
+        if _MICROSTRUCTURE_PROVIDER_FAILURE.get() is None:
+            _MICROSTRUCTURE_PROVIDER_FAILURE.set(exc)
+        raise
+    except Exception as exc:
+        wrapped = ReplayMicrostructureInputUnavailableError(
+            "microstructure provider rejected the exact decision read"
+        )
+        if _MICROSTRUCTURE_PROVIDER_FAILURE.get() is None:
+            _MICROSTRUCTURE_PROVIDER_FAILURE.set(wrapped)
+        raise wrapped from exc
 
 
 def _tape_asof_default(as_of):
@@ -48,6 +165,14 @@ def _tape_asof_default(as_of):
         return _lr_utcnow()
     except Exception:
         return datetime.utcnow()
+
+
+def _replay_clock_is_bound() -> bool:
+    """Whether this call is executing inside the historical ReplayV3 clock."""
+
+    from .live_runner import _SIM_NOW
+
+    return _SIM_NOW.get() is not None
 
 
 def _symbol_country(symbol: str) -> str | None:
@@ -93,6 +218,19 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
     s = (symbol or "").strip().upper()
     if not s:
         return None
+    captured = _microstructure_provider_read(
+        operation=CaptureMicrostructureOperation.BOOK_IMBALANCE,
+        symbol=s,
+        as_of=None,
+        parameters={
+            "window_seconds": 15.0,
+            "maximum_snapshot_age_seconds": 15.0,
+        },
+    )
+    if captured is _MICROSTRUCTURE_COVERAGE_UNAVAILABLE:
+        return None
+    if captured is not _MICROSTRUCTURE_PROVIDER_MISSING:
+        return captured
     try:
         if s.endswith("-USD"):
             from ..microstructure import get_features
@@ -111,7 +249,10 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
                 # Bounded as-of read via the replay-aware chokepoint (live-identical,
                 # replay-honest — see _tape_asof_default).
                 _ao_q = _tape_asof_default(None)
-                row = db.execute(
+                from .optional_db_read import optional_fetchone
+
+                row = optional_fetchone(
+                    db,
                     _sql(
                         "SELECT imbalance5 FROM iqfeed_depth_snapshots "
                         "WHERE symbol = :s AND observed_at > :as_of - interval '15 seconds' "
@@ -119,7 +260,7 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
                         "ORDER BY observed_at DESC LIMIT 1"
                     ),
                     {"s": s, "as_of": _ao_q},
-                ).fetchone()
+                )
                 if row is not None and row[0] is not None:
                     return float(row[0])
             except Exception:
@@ -263,6 +404,21 @@ def _live_ofi_microprice(
         window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
     except (TypeError, ValueError):
         window = 15.0
+    captured = _microstructure_provider_read(
+        operation=CaptureMicrostructureOperation.OFI_MICROPRICE,
+        symbol=s,
+        as_of=as_of,
+        parameters={
+            "window_seconds": window,
+            "multilevel_ofi_enabled": bool(
+                getattr(settings, "chili_momentum_l2_multilevel_ofi_enabled", True)
+            ),
+        },
+    )
+    if captured is _MICROSTRUCTURE_COVERAGE_UNAVAILABLE:
+        return None, None
+    if captured is not _MICROSTRUCTURE_PROVIDER_MISSING:
+        return captured
     try:
         if s.endswith("-USD"):
             # Crypto L2: prefer the in-process Coinbase book ring (sub-second), and
@@ -305,7 +461,9 @@ def _live_ofi_microprice(
                 "AND snapshot_at <= :as_of ORDER BY snapshot_at ASC"
             )
             _p = {"s": s, "w": window, "as_of": _ao_q}
-            rows = db.execute(_sql(_q), _p).fetchall()
+            from .optional_db_read import optional_fetchall
+
+            rows = optional_fetchall(db, _sql(_q), _p)
             for r in rows:
                 bl, al = r[0], r[1]
                 try:
@@ -327,7 +485,9 @@ def _live_ofi_microprice(
                 "AND observed_at <= :as_of ORDER BY observed_at ASC"
             )
             _p = {"s": s, "w": window, "as_of": _ao_q}
-            rows = db.execute(_sql(_q), _p).fetchall()
+            from .optional_db_read import optional_fetchall
+
+            rows = optional_fetchall(db, _sql(_q), _p)
             seq = [
                 (float(r[0]), float(r[1]), float(r[2]), float(r[3]))
                 for r in rows
@@ -371,6 +531,14 @@ def _live_trade_flow(
         window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
     except (TypeError, ValueError):
         window = 15.0
+    captured = _microstructure_provider_read(
+        operation=CaptureMicrostructureOperation.TRADE_FLOW,
+        symbol=s,
+        as_of=as_of,
+        parameters={"window_seconds": window},
+    )
+    if captured is not _MICROSTRUCTURE_PROVIDER_MISSING:
+        return captured
     # crypto: in-process microstructure tape (no historical as_of -> live ring only)
     if s.endswith("-USD"):
         if as_of is not None:
@@ -399,7 +567,9 @@ def _live_trade_flow(
         q = ("SELECT price, size, bid, ask FROM iqfeed_trade_ticks WHERE symbol = :s AND "
              "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of ORDER BY observed_at ASC")
         p = {"s": s, "w": window, "as_of": _ao}
-        rows = db.execute(_sql(q), p).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(q), p)
     except Exception:
         return None
     return _aggressor_imbalance(rows)
@@ -555,6 +725,17 @@ def _live_realized_vol(
             grid_secs = float(getattr(settings, "chili_momentum_volnorm_trail_grid_secs", 2.0) or 2.0)
         except (TypeError, ValueError):
             grid_secs = 2.0
+    captured = _microstructure_provider_read(
+        operation=CaptureMicrostructureOperation.REALIZED_VOL,
+        symbol=s,
+        as_of=as_of,
+        parameters={
+            "window_seconds": window,
+            "grid_seconds": float(grid_secs),
+        },
+    )
+    if captured is not _MICROSTRUCTURE_PROVIDER_MISSING:
+        return captured
     if db is None:
         return None
     try:
@@ -568,7 +749,9 @@ def _live_realized_vol(
              "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
              "ORDER BY observed_at ASC")
         p = {"s": s, "w": window, "as_of": _ao}
-        rows = db.execute(_sql(q), p).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(q), p)
     except Exception:
         return None
     returns, tick_rate, dbg = _event_grid_log_returns(rows, grid_secs=grid_secs)
@@ -723,6 +906,18 @@ def _live_flow_slope(
     except (TypeError, ValueError):
         half_life = 4.0
     half_life = max(1.0, half_life)
+    captured = _microstructure_provider_read(
+        operation=CaptureMicrostructureOperation.FLOW_SLOPE,
+        symbol=s,
+        as_of=as_of,
+        parameters={
+            "window_seconds": window,
+            "grid_seconds": float(grid_secs),
+            "half_life_steps": half_life,
+        },
+    )
+    if captured is not _MICROSTRUCTURE_PROVIDER_MISSING:
+        return captured
     if db is None:
         return None
     try:
@@ -737,7 +932,9 @@ def _live_flow_slope(
              "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
              "ORDER BY observed_at ASC")
         p = {"s": s, "w": window, "as_of": _ao}
-        rows = db.execute(_sql(q), p).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(q), p)
     except Exception:
         return None
     # EXPLICIT latest-tick-age gate (fail-closed on a frozen tape). The rolling-window
@@ -841,6 +1038,22 @@ def read_ladder_distribution(
     s = (symbol or "").strip().upper()
     if not s or db is None:
         return _NULL
+    captured = _microstructure_provider_read(
+        operation=CaptureMicrostructureOperation.LADDER_DISTRIBUTION,
+        symbol=s,
+        as_of=as_of,
+        parameters={
+            "window_seconds": 30.0,
+            "snapshot_limit": int(k),
+            "multilevel_ofi_enabled": bool(
+                getattr(settings, "chili_momentum_l2_multilevel_ofi_enabled", True)
+            ),
+        },
+    )
+    if captured is _MICROSTRUCTURE_COVERAGE_UNAVAILABLE:
+        return _NULL
+    if captured is not _MICROSTRUCTURE_PROVIDER_MISSING:
+        return captured
     if as_of is not None and getattr(as_of, "tzinfo", None) is not None:
         as_of = as_of.replace(tzinfo=None)
     ofi, micro = None, None
@@ -877,7 +1090,9 @@ def _ladder_crypto(
                 "AND snapshot_at <= :as_of ORDER BY snapshot_at DESC LIMIT :k"
             )
             _p = {"s": s, "w": 30.0, "k": int(k), "as_of": as_of}
-        rows = db.execute(_sql(_q), _p).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(_q), _p)
     except Exception:
         rows = []
     if not rows:
@@ -975,7 +1190,9 @@ def _ladder_equity(
                 "AND observed_at <= :as_of ORDER BY observed_at DESC LIMIT :k"
             )
             _p = {"s": s, "w": 30.0, "k": int(k), "as_of": as_of}
-        rows = db.execute(_sql(_q), _p).fetchall()
+        from .optional_db_read import optional_fetchall
+
+        rows = optional_fetchall(db, _sql(_q), _p)
     except Exception:
         rows = []
     if not rows:
@@ -1137,10 +1354,19 @@ def run_momentum_neural_tick(
     meta: Optional[dict[str, Any]] = None,
     correlation_id: Optional[str] = None,
     graph_version: int = 1,
+    decision_as_of_utc: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """Compute regime + family viability; persist on hub and viability pool nodes."""
     _ = graph_version
     meta = dict(meta or {})
+    decision_at = _tape_asof_default(decision_as_of_utc)
+    if decision_at.tzinfo is not None:
+        decision_at = decision_at.astimezone(timezone.utc).replace(tzinfo=None)
+    if _replay_clock_is_bound():
+        raise ReplayPipelineInputUnavailableError(
+            "replay selection_pipeline inputs are unavailable: "
+            "complete content-addressed provider bundle not bound"
+        )
     tickers = meta.get("tickers")
     if isinstance(tickers, list) and tickers:
         symbols = [str(t).strip().upper() for t in tickers if t][:32]
@@ -2300,7 +2526,7 @@ def run_momentum_neural_tick(
     rows.sort(key=lambda r: r["viability"], reverse=True)
     top = rows[0] if rows else {}
 
-    now = datetime.utcnow().isoformat()
+    now = decision_at.isoformat()
     hub_payload = {
         "momentum_neural_version": 1,
         "last_tick_utc": now,
@@ -2325,13 +2551,13 @@ def run_momentum_neural_tick(
 
     hub = get_or_create_state(db, HUB_NODE_ID)
     hub.local_state = hub_payload
-    hub.last_activated_at = datetime.utcnow()
-    hub.updated_at = datetime.utcnow()
+    hub.last_activated_at = decision_at
+    hub.updated_at = decision_at
 
     pool = get_or_create_state(db, VIABILITY_NODE_ID)
     pool.local_state = viability_payload
-    pool.last_activated_at = datetime.utcnow()
-    pool.updated_at = datetime.utcnow()
+    pool.last_activated_at = decision_at
+    pool.updated_at = decision_at
 
     record_evolution_trace(
         db,
@@ -2340,6 +2566,7 @@ def run_momentum_neural_tick(
             "top_viability": top.get("viability"),
             "session_label": ctx.session_label,
         },
+        observed_at=decision_at,
     )
 
     persistence_ok = True
@@ -2353,6 +2580,7 @@ def run_momentum_neural_tick(
             features=feats,
             correlation_id=correlation_id,
             source_node_id=HUB_NODE_ID,
+            observed_at=decision_at,
         )
         if n:
             log_tick("persisted viability rows=%s", n)

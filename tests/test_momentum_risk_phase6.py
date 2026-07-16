@@ -229,11 +229,12 @@ def test_live_equity_risk_accepts_ross_universe_profile(monkeypatch, db: Session
     assert check["detail"]["reason"] == "ross_universe_profile_ok"
 
 
-def test_aggregate_risk_uses_candidate_venue_and_positive_planned_risk(
+def test_alpaca_arm_defers_legacy_session_and_hypothetical_aggregate_risk(
     monkeypatch, db: Session
 ) -> None:
-    import app.services.trading.momentum_neural.risk_policy as risk_policy
+    import app.services.trading.governance as governance
     import app.services.trading.momentum_neural.risk_evaluator as risk_evaluator
+    import app.services.trading.momentum_neural.risk_policy as risk_policy
 
     monkeypatch.setattr(settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
     monkeypatch.setattr(
@@ -245,21 +246,66 @@ def test_aggregate_risk_uses_candidate_venue_and_positive_planned_risk(
         signal={"price": 4.25, "todays_change_perc": 18.0, "volume": 400_000},
     )
     uid = _uid(db, "aggregate_alpaca")
-    equity_calls: list[tuple[tuple, dict]] = []
-    loss_calls: list[tuple[float, str | None]] = []
+    legacy_loss_calls: list[tuple[float, str | None]] = []
 
-    def _equity(*args, **kwargs):
-        equity_calls.append((args, kwargs))
-        return 10_000.0
-
-    def _loss(fixed, family=None):
-        loss_calls.append((float(fixed), family))
+    def _legacy_loss_spy(fixed: float, family: str | None = None) -> float:
+        legacy_loss_calls.append((float(fixed), family))
         return 100.0
 
-    monkeypatch.setattr(risk_policy, "_account_equity_usd", _equity)
-    monkeypatch.setattr(risk_policy, "equity_relative_loss_cap", _loss)
     monkeypatch.setattr(
-        risk_evaluator, "aggregate_open_risk_usd", lambda *_args, **_kwargs: (150.0, [])
+        risk_policy,
+        "_account_equity_usd",
+        lambda *_args, **_kwargs: 100_000.0,
+    )
+    monkeypatch.setattr(
+        governance,
+        "_peek_broker_breach",
+        lambda *_args, **_kwargs: (
+            False,
+            {"family": "alpaca_spot", "realized": 0.0, "cap": 5_000.0},
+        ),
+    )
+    monkeypatch.setattr(
+        risk_evaluator,
+        "alpaca_paper_arm_resource_capacity",
+        lambda *_args, **_kwargs: {
+            "available": True,
+            "risk_usd": 0.0,
+            "field_size": 8,
+            "watching": 5,
+            "capacity": 8,
+            "headroom": 3,
+            "provenance": {
+                "authority": "resource_only_watch_fanout",
+                "financial_authority": "final_adaptive_reservation",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        risk_evaluator,
+        "count_concurrent_automation_sessions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy session count must not authorize an Alpaca watcher")
+        ),
+    )
+    monkeypatch.setattr(
+        risk_evaluator,
+        "count_open_positions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("position slots must not authorize an Alpaca watcher")
+        ),
+    )
+    monkeypatch.setattr(
+        risk_evaluator,
+        "aggregate_open_risk_usd",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("arm time has no exact candidate R")
+        ),
+    )
+    monkeypatch.setattr(
+        risk_policy,
+        "equity_relative_loss_cap",
+        _legacy_loss_spy,
     )
 
     ev = evaluate_proposed_momentum_automation(
@@ -270,13 +316,155 @@ def test_aggregate_risk_uses_candidate_venue_and_positive_planned_risk(
         mode="live",
         execution_family="alpaca_spot",
     )
-    check = next(c for c in ev["checks"] if c["id"] == "aggregate_open_risk_cap")
+    by_id = {check["id"]: check for check in ev["checks"]}
 
-    assert (("alpaca_spot",), {"prefer_equity": True}) in equity_calls
-    assert any(family == "alpaca_spot" and fixed > 0 for fixed, family in loss_calls)
-    assert check["detail"]["planned_risk_usd"] == 100.0
-    assert check["detail"]["open_risk_usd"] == 150.0
-    assert check["detail"]["cap_usd"] == 300.0
+    assert by_id["max_concurrent_sessions"]["ok"] is True
+    assert by_id["max_concurrent_sessions"]["detail"]["bypassed"] is True
+    assert by_id["max_concurrent_live_sessions"]["ok"] is True
+    assert by_id["alpaca_paper_watch_resource_capacity"]["ok"] is True
+    aggregate = by_id["aggregate_open_risk_cap"]
+    assert aggregate["ok"] is True
+    assert aggregate["detail"]["bypassed"] is True
+    assert aggregate["detail"]["candidate_risk_usd"] is None
+    assert aggregate["detail"]["authority"] == "final_adaptive_reservation"
+    assert all(family != "alpaca_spot" for _fixed, family in legacy_loss_calls)
+    assert (
+        ev["effective_policy_summary"]["new_risk_concurrency_authority"]
+        == "final_adaptive_reservation"
+    )
+
+
+def test_alpaca_arm_still_fails_closed_when_watcher_resources_are_full(
+    monkeypatch, db: Session
+) -> None:
+    import app.services.trading.governance as governance
+    import app.services.trading.momentum_neural.risk_evaluator as risk_evaluator
+    import app.services.trading.momentum_neural.risk_policy as risk_policy
+
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_ross_equity_universe_required",
+        True,
+        raising=False,
+    )
+    vid, _ = _seed_equity_live_row(
+        db,
+        symbol="FULL",
+        signal={"price": 4.25, "todays_change_perc": 18.0, "volume": 400_000},
+    )
+    uid = _uid(db, "alpaca_watch_full")
+    monkeypatch.setattr(
+        risk_policy,
+        "_account_equity_usd",
+        lambda *_args, **_kwargs: 100_000.0,
+    )
+    monkeypatch.setattr(
+        governance,
+        "_peek_broker_breach",
+        lambda *_args, **_kwargs: (
+            False,
+            {"family": "alpaca_spot", "realized": 0.0, "cap": 5_000.0},
+        ),
+    )
+    monkeypatch.setattr(
+        risk_evaluator,
+        "alpaca_paper_arm_resource_capacity",
+        lambda *_args, **_kwargs: {
+            "available": False,
+            "risk_usd": 0.0,
+            "field_size": 9,
+            "watching": 9,
+            "capacity": 9,
+            "headroom": 0,
+            "provenance": {
+                "authority": "resource_only_watch_fanout",
+                "financial_authority": "final_adaptive_reservation",
+            },
+        },
+    )
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="FULL",
+        variant_id=vid,
+        mode="live",
+        execution_family="alpaca_spot",
+    )
+    check = next(
+        row
+        for row in ev["checks"]
+        if row["id"] == "alpaca_paper_watch_resource_capacity"
+    )
+
+    assert check["ok"] is False
+    assert check["severity"] == "block"
+    assert check["detail"]["risk_usd"] == 0.0
+    assert ev["allowed"] is False
+
+
+def test_selected_direct_alpaca_route_rejects_stale_robinhood_family(
+    monkeypatch, db: Session
+) -> None:
+    import app.services.trading.governance as governance
+    import app.services.trading.momentum_neural.risk_evaluator as risk_evaluator
+    import app.services.trading.momentum_neural.risk_policy as risk_policy
+
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_equity_execution_via_alpaca_paper",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_ross_equity_universe_required",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        risk_evaluator,
+        "resolve_execution_family_for_symbol",
+        lambda _symbol, *, mode="live": "alpaca_spot",
+    )
+    vid, _ = _seed_equity_live_row(
+        db,
+        symbol="ROUT",
+        signal={"price": 4.25, "todays_change_perc": 18.0, "volume": 400_000},
+    )
+    uid = _uid(db, "alpaca_exact_route")
+    monkeypatch.setattr(
+        risk_policy,
+        "_account_equity_usd",
+        lambda *_args, **_kwargs: 100_000.0,
+    )
+    monkeypatch.setattr(
+        governance,
+        "_peek_broker_breach",
+        lambda *_args, **_kwargs: (
+            False,
+            {"family": "robinhood_spot", "realized": 0.0, "cap": 5_000.0},
+        ),
+    )
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="ROUT",
+        variant_id=vid,
+        mode="live",
+        execution_family="robinhood_spot",
+    )
+    check = next(
+        row
+        for row in ev["checks"]
+        if row["id"] == "execution_family_variant_alignment"
+    )
+
+    assert check["ok"] is False
+    assert check["severity"] == "block"
+    assert check["detail"]["symbol_resolved"] == "alpaca_spot"
+    assert check["detail"]["direct_alpaca_route_required"] is True
 
 
 def test_alpaca_risk_gate_uses_broker_daily_stop_when_generic_flag_is_off(

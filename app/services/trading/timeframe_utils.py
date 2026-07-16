@@ -49,6 +49,22 @@ def timeframe_to_seconds(tf: str) -> int:
     )
 
 
+def canonical_interval_for_seconds(seconds: int) -> str:
+    """Return the production interval spelling for an exact bar duration.
+
+    Known durations use the canonical timeframe key (most importantly,
+    ``60`` seconds is ``"1m"`` rather than the equivalent-but-noncanonical
+    ``"60s"``).  Sub-minute replay bars that have no production timeframe
+    key retain an explicit seconds spelling such as ``"15s"``.
+    """
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
+        raise ValueError(f"Bar duration must be a positive integer number of seconds: {seconds!r}")
+    for timeframe, duration in _TIMEFRAME_SECONDS.items():
+        if duration == seconds:
+            return timeframe
+    return f"{seconds}s"
+
+
 def known_timeframes() -> list[str]:
     """Return the list of allowed timeframe strings, in ascending duration order."""
     return list(_TIMEFRAME_SECONDS.keys())

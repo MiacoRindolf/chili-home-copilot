@@ -850,7 +850,10 @@ def _real_daily_loss_family_clause(session_model: Any) -> Any:
 
 
 def global_realized_pnl_today_et(
-    db: Session, user_id: int | None = None
+    db: Session,
+    user_id: int | None = None,
+    *,
+    as_of_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """Sum realized PnL across ALL trading paths for today's US/Eastern calendar day.
 
@@ -868,11 +871,24 @@ def global_realized_pnl_today_et(
     from ...models.trading import Trade, MomentumAutomationOutcome
 
     et = ZoneInfo("America/New_York")
-    now_et = _dt.now(et)
-    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_et = start_et + _td(days=1)
-    start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-    end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    utc = ZoneInfo("UTC")
+    if as_of_utc is None:
+        reference = _dt.now(utc)
+    elif as_of_utc.tzinfo is None:
+        reference = as_of_utc.replace(tzinfo=utc)
+    else:
+        reference = as_of_utc.astimezone(utc)
+    today_et = reference.astimezone(et).date()
+    tomorrow_et = today_et + _td(days=1)
+    start_et = _dt(
+        today_et.year, today_et.month, today_et.day, tzinfo=et
+    )
+    end_et = _dt(
+        tomorrow_et.year, tomorrow_et.month, tomorrow_et.day, tzinfo=et
+    )
+    start_utc = start_et.astimezone(utc).replace(tzinfo=None)
+    end_utc = end_et.astimezone(utc).replace(tzinfo=None)
+    frontier_utc = reference.astimezone(utc).replace(tzinfo=None)
 
     # Trade rows (all versions; v1 and any future variants)
     tq = db.query(Trade).filter(
@@ -880,6 +896,7 @@ def global_realized_pnl_today_et(
         Trade.exit_date.isnot(None),
         Trade.exit_date >= start_utc,
         Trade.exit_date < end_utc,
+        Trade.exit_date <= frontier_utc,
     )
     if user_id is not None:
         tq = tq.filter(Trade.user_id == user_id)
@@ -902,6 +919,7 @@ def global_realized_pnl_today_et(
     ).filter(
         MomentumAutomationOutcome.terminal_at >= start_utc,
         MomentumAutomationOutcome.terminal_at < end_utc,
+        MomentumAutomationOutcome.terminal_at <= frontier_utc,
         _real_daily_loss_family_clause(_TAS),
     )
     if user_id is not None:
@@ -921,6 +939,7 @@ def check_daily_loss_breach(
     user_id: int | None = None,
     equity_usd: float | None = None,
     activate: bool = True,
+    as_of_utc: datetime | None = None,
 ) -> dict[str, Any]:
     """Check if today's realized loss breaches the global daily-loss cap.
 
@@ -956,7 +975,9 @@ def check_daily_loss_breach(
     except (TypeError, ValueError, OverflowError):
         usd_cap = pct_cap = math.nan
 
-    pnl = global_realized_pnl_today_et(db, user_id)
+    pnl = global_realized_pnl_today_et(
+        db, user_id, as_of_utc=as_of_utc
+    )
     try:
         realized = float(pnl["total_usd"])
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -1247,20 +1268,38 @@ def _per_broker_daily_loss_cap_detail(
     routed through the last-good guard so a flaky read cannot collapse the cap to ~$1
     (the documented failure mode, risk_policy.py:264-266). SIZING is unchanged (it keeps
     apply_margin_multiple=True / buying-power basis elsewhere). pct reuses the existing
-    chili_global_max_daily_loss_pct_of_equity knob (no new magic number); conservative-wins
-    with the optional usd cap. Fail-CLOSED to a documented floor when cash value is
-    unavailable (Hard Rule #2: never an uncapped path).
-
-    Alpaca PAPER adds one venue-scoped conservative clamp: no runtime setting may
-    lift or disable the fixed $250 recertification ceiling. A lower positive
-    configured value remains valid. This keeps a large simulated account from
-    turning a 5%-of-equity budget into a multi-thousand-dollar paper loss. It does
-    not alter any live Robinhood/Coinbase cap. The returned detail exposes both bases.
+    global fraction/optional USD override for legacy real-capital rails. Alpaca
+    paper instead uses the momentum adaptive daily-risk equity fraction directly;
+    missing equity/fraction returns an invalid zero cap so admission fails closed,
+    never an invented activation-only dollar ceiling.
     """
     from .momentum_neural.risk_policy import _account_equity_usd
 
-    pct = float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.0) or 0.0)
-    usd_cap = float(getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0)
+    fam = _normalize_real_family(family)
+    if fam in PAPER_DAILY_LOSS_FAMILIES:
+        pct = float(
+            getattr(
+                settings,
+                "chili_momentum_risk_daily_loss_fraction_of_equity",
+                0.0,
+            )
+            or 0.0
+        )
+        # Adaptive paper daily risk is equity-fraction/R based.  The legacy
+        # absolute global override is not an alternate activation policy.
+        usd_cap = 0.0
+    else:
+        pct = float(
+            getattr(
+                settings,
+                "chili_global_max_daily_loss_pct_of_equity",
+                0.0,
+            )
+            or 0.0
+        )
+        usd_cap = float(
+            getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0
+        )
     eq = _account_equity_usd(family, prefer_cash_value=True)
 
     candidates: list[tuple[float, str]] = []
@@ -1268,43 +1307,27 @@ def _per_broker_daily_loss_cap_detail(
         candidates.append((usd_cap, "usd"))
     if pct > 0 and eq is not None and float(eq) > 0:
         candidates.append((pct * float(eq), "pct_cash_value"))
+    if not candidates and fam in PAPER_DAILY_LOSS_FAMILIES:
+        return 0.0, "adaptive_equity_fraction_unavailable", {
+            "selected_cap_usd": 0.0,
+            "selected_source": "adaptive_equity_fraction_unavailable",
+            "account_equity_usd": eq,
+            "daily_risk_fraction_of_equity": pct,
+        }
     if not candidates:
         floor = float(getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0) or 300.0)
         base_cap, base_source = floor, "usd_failsafe"
     else:
         base_cap, base_source = min(candidates, key=lambda kv: kv[0])
 
-    fam = _normalize_real_family(family)
     detail: dict[str, Any] = {
         "broker_equity_cap_usd": float(base_cap),
         "broker_equity_cap_source": base_source,
+        "account_equity_usd": eq,
+        "daily_risk_fraction_of_equity": pct,
     }
     selected_cap = float(base_cap)
     selected_source = base_source
-    if fam in PAPER_DAILY_LOSS_FAMILIES:
-        from math import isfinite
-
-        failsafe_cap = 250.0
-        try:
-            configured_cap = float(
-                getattr(
-                    settings,
-                    "chili_momentum_risk_max_daily_loss_usd",
-                    failsafe_cap,
-                )
-            )
-        except (TypeError, ValueError, OverflowError):
-            configured_cap = failsafe_cap
-        momentum_fixed = (
-            min(configured_cap, failsafe_cap)
-            if isfinite(configured_cap) and configured_cap > 0.0
-            else failsafe_cap
-        )
-        detail["momentum_fixed_cap_usd"] = momentum_fixed
-        detail["momentum_fixed_failsafe_ceiling_usd"] = failsafe_cap
-        if momentum_fixed < selected_cap:
-            selected_cap = momentum_fixed
-            selected_source = "alpaca_momentum_fixed_usd_clamp"
     detail.update(selected_cap_usd=selected_cap, selected_source=selected_source)
     return selected_cap, selected_source, detail
 

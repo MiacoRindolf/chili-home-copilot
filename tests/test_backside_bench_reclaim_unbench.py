@@ -136,6 +136,40 @@ def test_flag_off_byte_identical(monkeypatch):
     assert reason2 == "unbenched_fresh_hod"
 
 
+def test_historical_wick_above_anchor_does_not_clear_failed_backside(monkeypatch):
+    """A prior wick above the anchor is not a current phase transition."""
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_backside_bench_reclaim_unbench_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settings,
+        "chili_momentum_entry_vwap_hold_buffer",
+        0.0,
+        raising=False,
+    )
+    df = _df(_jem_faded_below_vwap_day())
+    historical_hod = float(df["High"].astype(float).max())
+    anchor = historical_hod - 0.01
+    current = float(df["Close"].iloc[-1])
+    assert historical_hod > anchor
+    assert current < anchor
+
+    benched, reason, hod_out, dbg = evaluate_sticky_backside_bench(
+        df,
+        benched_at_hod=anchor,
+        live_price=current,
+    )
+
+    assert benched is True
+    assert reason == "benched_backside_sticky"
+    assert hod_out == anchor
+    assert dbg.get("current_px") == current
+    assert "unbenched_new_high" not in dbg
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

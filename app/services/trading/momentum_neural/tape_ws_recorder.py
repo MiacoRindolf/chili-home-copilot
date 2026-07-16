@@ -12,8 +12,10 @@ participation math, which diff consecutive rows): rows carry
 snapshot sampler's authoritative cumulative (source='massive_snapshot') every
 time a newer sampler row lands. WS TradeSnapshot sizes accumulate in between.
 
-Write-only side path: no trading logic reads this module; a failure degrades
-to the 1-min sampler tape.
+Write-only diagnostic side path: no trading logic reads this module; a failure
+degrades to the 1-min sampler tape.  This throttled SQL tape is never itself a
+full-fidelity coverage proof.  Certifying capture uses the separate append-only
+runtime, whose queue overflow and continuity rules fail closed explicitly.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ _log = logging.getLogger(__name__)
 _MIN_ROW_SPACING_S = 1.0     # per-symbol floor between recorded rows
 _FLUSH_INTERVAL_S = 5.0      # buffer -> DB batch cadence
 _REFRESH_INTERVAL_S = 30.0   # tracked-symbol + volume-baseline re-anchor cadence
-_BUFFER_CAP = 5000           # hard cap; oldest rows drop (sampler still covers)
+_BUFFER_CAP = 5000           # diagnostic only; never grants full-fidelity coverage
 
 
 class TapeWsRecorder:
@@ -209,10 +211,36 @@ class TapeWsRecorder:
         row = {
             "symbol": sym,
             "observed_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            "provider_event_at": (
+                datetime.fromtimestamp(
+                    float(snap.provider_event_at), tz=timezone.utc
+                )
+                if getattr(snap, "provider_event_at", None) is not None
+                else None
+            ),
+            "received_at": (
+                datetime.fromtimestamp(float(snap.received_at), tz=timezone.utc)
+                if getattr(snap, "received_at", None) is not None
+                else None
+            ),
+            "available_at": (
+                datetime.fromtimestamp(float(snap.available_at), tz=timezone.utc)
+                if getattr(snap, "available_at", None) is not None
+                else None
+            ),
             "bid": float(bid), "ask": float(ask), "mid": mid,
             "spread_bps": (ask - bid) / mid * 10_000.0 if mid > 0 else None,
             "day_volume": self._vol_base.get(sym, 0.0) + self._vol_ws.get(sym, 0.0),
             "source": source,
+            "timestamp_basis": (
+                "massive_sip_unix_ms"
+                if getattr(snap, "provider_event_at", None) is not None
+                else "local_receive_only"
+            ),
+            "bridge_version": "massive_ws_v2_sip_clock",
+            "message_type": "Q",
+            "bridge_run_id": getattr(snap, "bridge_run_id", None),
+            "connection_generation": getattr(snap, "connection_generation", None),
         }
         with self._lock:
             self._buffer.append(row)
@@ -239,8 +267,13 @@ class TapeWsRecorder:
                 db.execute(
                     text(
                         "INSERT INTO momentum_nbbo_spread_tape "
-                        "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) "
-                        "VALUES (:symbol, :observed_at, :bid, :ask, :mid, :spread_bps, :day_volume, :source)"
+                        "(symbol, observed_at, provider_event_at, received_at, available_at, "
+                        "bid, ask, mid, spread_bps, day_volume, source, timestamp_basis, "
+                        "bridge_version, message_type, bridge_run_id, connection_generation) "
+                        "VALUES (:symbol, :observed_at, :provider_event_at, :received_at, "
+                        ":available_at, :bid, :ask, :mid, :spread_bps, :day_volume, :source, "
+                        ":timestamp_basis, :bridge_version, :message_type, :bridge_run_id, "
+                        ":connection_generation)"
                     ),
                     rows,
                 )

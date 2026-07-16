@@ -11,16 +11,52 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, Optional
 
-from sqlalchemy import or_
+from sqlalchemy import and_, func
 
 from ....config import settings
-from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
+from ..execution_family_registry import (
+    EXECUTION_FAMILY_COINBASE_SPOT,
+    normalize_execution_family,
+)
 
 logger = logging.getLogger(__name__)
 
 POLICY_VERSION = 1
 RISK_SNAPSHOT_KEY = "momentum_risk"
 POLICY_SNAPSHOT_KEY = "momentum_risk_policy_summary"
+
+_REPLAY_RISK_NOW: contextvars.ContextVar[Optional[datetime]] = (
+    contextvars.ContextVar("_chili_replay_risk_now", default=None)
+)
+
+
+def _risk_now_aware() -> datetime:
+    value = _REPLAY_RISK_NOW.get()
+    if value is None:
+        return datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _risk_now_naive() -> datetime:
+    return _risk_now_aware().replace(tzinfo=None)
+
+
+@contextlib.contextmanager
+def replay_risk_clock(ts: datetime) -> Iterator[None]:
+    """Bind every risk-policy calendar decision to one replay tick instant."""
+
+    if not isinstance(ts, datetime):
+        raise TypeError("replay risk clock requires datetime")
+    value = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(
+        timezone.utc
+    )
+    token = _REPLAY_RISK_NOW.set(value)
+    try:
+        yield
+    finally:
+        _REPLAY_RISK_NOW.reset(token)
 
 # Per-trade cap keys subject to the rolling-median spike guard (both derive from the
 # same per-venue account-equity read, so a single spiked read inflates both at once).
@@ -616,18 +652,12 @@ def equity_relative_notional_cap(fixed_fallback_usd: float, execution_family: st
 def alpaca_paper_hard_loss_cap_usd(
     execution_family: str | None,
 ) -> float | None:
-    """Absolute per-position risk ceiling for the shared Alpaca paper account.
+    """Deprecated activation-only cap hook.
 
-    Frozen watcher snapshots can predate a policy change, and later sizing
-    multipliers may raise an equity-relative base. This current-config boundary is
-    therefore applied again immediately before any risk-increasing broker call and
-    by the live max-loss circuit. It never affects real-capital venues.
+    Adaptive paper sizing is owned by the content-addressed resolver packet and
+    its structural-R/portfolio reservation.  Returning a dollar ceiling here
+    would silently re-clamp that quantity and break replay/paper parity.
     """
-    # Recertification boundary, not a tuning knob: stale snapshots and malformed
-    # runtime overrides must never lift the paper lane above the approved $50
-    # maximum.  A lower positive configured value remains valid; an invalid or
-    # larger value falls back/clamps to this fixed safety ceiling.
-    failsafe_cap = 50.0
     try:
         from ..execution_family_registry import normalize_execution_family
 
@@ -636,18 +666,9 @@ def alpaca_paper_hard_loss_cap_usd(
             return None
         if not bool(getattr(settings, "chili_alpaca_paper", True)):
             return None
-        configured_cap = float(
-            getattr(
-                settings,
-                "chili_momentum_risk_max_loss_per_trade_usd",
-                failsafe_cap,
-            )
-        )
-        if not math.isfinite(configured_cap) or configured_cap <= 0.0:
-            return failsafe_cap
-        return min(configured_cap, failsafe_cap)
+        return None
     except (TypeError, ValueError, OverflowError):
-        return failsafe_cap
+        return None
 
 
 def equity_relative_loss_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
@@ -658,14 +679,6 @@ def equity_relative_loss_cap(fixed_fallback_usd: float, execution_family: str | 
         getattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01),
         execution_family,
     )
-    # Alpaca is the paper recertification rail.  A large simulated balance must
-    # not silently turn the existing $ max-loss policy into a ~$700 one-trade
-    # budget while the broker-local daily stop is only $250.  Keep the normal
-    # equity-relative scaling for live-capital families; paper uses the lower of
-    # that value and the already-configured fixed per-trade ceiling.
-    hard_cap = alpaca_paper_hard_loss_cap_usd(execution_family)
-    if hard_cap is not None:
-        return min(float(cap), hard_cap)
     return cap
 
 
@@ -673,28 +686,45 @@ def equity_relative_daily_loss_cap(fixed_fallback_usd: float, execution_family: 
     """Daily-loss cap as a fraction of account equity (documented DAILY risk knob).
     Evaluated live so the daily circuit-breaker adapts to current equity.
     docs/DESIGN/MOMENTUM_LANE.md"""
-    cap = _equity_relative_cap(
-        fixed_fallback_usd,
-        getattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05),
-        execution_family,
-        prefer_equity=True,  # daily-loss cap off STABLE account equity, not fluctuating BP
-    )
-    family = ""
     try:
         from ..execution_family_registry import normalize_execution_family
 
         family = normalize_execution_family(execution_family)
-        fixed = float(fixed_fallback_usd)
         if (
             family in {"alpaca_spot", "alpaca_short"}
             and bool(getattr(settings, "chili_alpaca_paper", True))
         ):
-            fixed_ceiling = fixed if math.isfinite(fixed) and fixed > 0.0 else 250.0
-            return min(float(cap), fixed_ceiling, 250.0)
+            fraction = float(
+                getattr(
+                    settings,
+                    "chili_momentum_risk_daily_loss_fraction_of_equity",
+                    0.0,
+                )
+                or 0.0
+            )
+            equity = _account_equity_usd(
+                execution_family,
+                prefer_equity=True,
+            )
+            if (
+                not math.isfinite(fraction)
+                or fraction <= 0.0
+                or equity is None
+                or not math.isfinite(float(equity))
+                or float(equity) <= 0.0
+            ):
+                # Zero is an explicit fail-closed/unavailable result at callers;
+                # no embedded dollar fallback may invent an adaptive paper budget.
+                return 0.0
+            return round(float(equity) * fraction, 2)
     except (TypeError, ValueError, OverflowError):
-        if family in {"alpaca_spot", "alpaca_short"}:
-            return min(float(cap), 250.0)
-    return cap
+        return 0.0
+    return _equity_relative_cap(
+        fixed_fallback_usd,
+        getattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05),
+        execution_family,
+        prefer_equity=True,
+    )
 
 
 def adaptive_max_concurrent_live_sessions() -> int:
@@ -923,6 +953,10 @@ def streak_risk_multiplier(db, *, execution_family: str | None = None) -> tuple[
         ).filter(
             MomentumAutomationOutcome.mode == "live",
             MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+            # Replay/live parity: never let a historical decision observe an outcome
+            # that terminates after its causal frontier.  In production this is simply
+            # ``now``; under ``replay_risk_clock`` it is the recorded tick instant.
+            MomentumAutomationOutcome.terminal_at <= _risk_now_naive(),
         )
         if execution_family:
             q = q.filter(MomentumAutomationOutcome.execution_family == execution_family)
@@ -975,7 +1009,7 @@ def cushion_risk_multiplier(db, *, base_loss_usd: float) -> tuple[float, dict]:
     try:
         from ..governance import global_realized_pnl_today_et
 
-        day = global_realized_pnl_today_et(db)
+        day = global_realized_pnl_today_et(db, as_of_utc=_risk_now_aware())
         realized = float(day.get("total_usd") or 0.0)
         cushion = max(0.0, realized)
         base = float(base_loss_usd or 0.0)
@@ -1103,7 +1137,9 @@ def red_intraday_size_down_multiplier(
             return 1.0, {"red_intraday_mult": 1.0, "reason": "no_base_loss"}
         from ..governance import global_realized_pnl_today_et
 
-        day = global_realized_pnl_today_et(db, user_id)
+        day = global_realized_pnl_today_et(
+            db, user_id, as_of_utc=_risk_now_aware()
+        )
         realized = float(day.get("total_usd") or 0.0)
         if realized >= 0.0:
             return 1.0, {
@@ -1126,74 +1162,695 @@ def red_intraday_size_down_multiplier(
         return 1.0, {"red_intraday_mult": 1.0, "reason": "error_fail_neutral"}
 
 
-def account_wide_consecutive_losses(
-    db: Any, *, lookback: int = 40
-) -> tuple[int, dict[str, Any]]:
-    """ROSS RISK GAP 3 — count CONSECUTIVE realized LOSSES across ALL symbols + families.
+@dataclass(frozen=True)
+class CurrentLiveLossHistoryEntry:
+    """One broker-authoritative, causally available entered outcome."""
 
-    Ross's tilt rule: 2-3 reds in a row = walk away. The streak dial only de-SIZES, the
-    count day-blocks are PER-SYMBOL, and the account-wide halts are DOLLAR-based — so N small
-    losses across N different tickers trip no halt. This counts the run of consecutive realized
-    LOSSES over the most-recent REAL ENTERED live outcomes ACROSS ALL execution families
-    (account-wide — NOT lane-segregated), most-recent first, stopping at the first WIN.
+    session_id: int
+    outcome_id: int
+    symbol: str
+    terminal_at: datetime
+    outcome_class: str
+    realized_pnl_usd: float
+    return_bps: float | None
+    broker_reconciled_at: datetime
 
-    A "loss" is a real ENTERED outcome with realized_pnl_usd < 0; a break-even (== 0) entered
-    trade is treated as NON-loss (it does not extend the tilt run, matching 'a red in a row').
-    Never-entered rows (cancel / no-fill / risk-block carry realized=0.0 NOT NULL) are pruned
-    via ``is_real_entry_outcome`` so they neither count as losses nor reset the run.
 
-    NEW-DAY RESET: only TODAY's ET-session outcomes are considered (the count resets each ET
-    day automatically — a fresh day starts the streak at 0). Read-only, lookahead-free.
-    Returns ``(consecutive_losses, meta)``; thin/failed history ⇒ ``(0, ...)`` (no halt)."""
-    meta: dict[str, Any] = {"consecutive_losses": 0, "lookback": int(lookback)}
-    if db is None or lookback <= 0:
-        return 0, {**meta, "reason": "no_input"}
+CurrentLiveLossHistoryReceipt = tuple[
+    tuple[CurrentLiveLossHistoryEntry, ...],
+    dict[str, Any],
+]
+
+
+_LOSS_HISTORY_TERMINAL_STATES = frozenset(
+    {
+        "live_exited",
+        "live_cooldown",
+        "live_finished",
+        "live_cancelled",
+        "live_error",
+        "expired",
+        "archived",
+    }
+)
+_LOSS_HISTORY_ENTRY_EVENTS = frozenset(
+    {
+        "live_entry_filled",
+        "live_exit_filled",
+        "live_partial_exit_filled",
+    }
+)
+_LOSS_HISTORY_ENTRY_IMPLYING_TERMINAL_STATES = frozenset(
+    {"live_exited", "live_cooldown", "live_finished"}
+)
+_LOSS_HISTORY_AMBIGUOUS_ENTRY_CLASSES = frozenset(
+    {
+        "cancelled_in_trade",
+        "error_exit",
+        "flat_unknown",
+        "governance_exit",
+        "stale_data_abort",
+    }
+)
+
+
+def _loss_history_finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        from ....models.trading import MomentumAutomationOutcome, TradingAutomationSession
-        from .outcome_labels import is_real_entry_outcome
+        resolved = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return resolved if math.isfinite(resolved) else None
 
-        # TODAY's ET session only (auto new-day reset). Exclude both quarantined Alpaca paper families
-        # (fake money) so their outcomes never trip the real-account tilt halt.
-        start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
-        rows = (
-            db.query(
-                MomentumAutomationOutcome.realized_pnl_usd,
-                MomentumAutomationOutcome.outcome_class,
-            )
+
+def _loss_history_numeric_state(value: Any) -> str:
+    """Classify an optional numeric label without treating corruption as proof."""
+
+    if value is None:
+        return "absent"
+    if isinstance(value, bool):
+        return "invalid"
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "invalid"
+    if not math.isfinite(resolved):
+        return "invalid"
+    return "zero" if abs(resolved) <= 1e-12 else "nonzero"
+
+
+def _loss_history_notional_state(value: Any) -> str:
+    if value is None:
+        return "absent"
+    if isinstance(value, bool):
+        return "invalid"
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "invalid"
+    if not math.isfinite(resolved):
+        return "invalid"
+    return "positive" if resolved > 0.0 else "nonpositive"
+
+
+def _loss_history_sign(value: float) -> int:
+    if value > 1e-12:
+        return 1
+    if value < -1e-12:
+        return -1
+    return 0
+
+
+def _loss_history_naive_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _loss_history_snapshot_entry_proof(session: Any) -> bool:
+    snapshot = (
+        session.risk_snapshot_json
+        if isinstance(getattr(session, "risk_snapshot_json", None), dict)
+        else {}
+    )
+    live = snapshot.get("momentum_live_execution")
+    if not isinstance(live, dict):
+        return False
+    # Same durable proof as outcome_extract._entry_occurred_durable: unlike
+    # position quantity, these survive terminal broker-zero reconciliation.
+    return (
+        live.get("realized_pnl_usd") is not None
+        or live.get("last_exit_entry_price") is not None
+    )
+
+
+def _loss_history_generation_state(
+    session: Any,
+    *,
+    execution_family: str,
+    account_scope: str | None,
+    account_identity: str,
+) -> str:
+    """Return ``current``, ``other``, or ``unknown`` account generation."""
+
+    snapshot = (
+        session.risk_snapshot_json
+        if isinstance(getattr(session, "risk_snapshot_json", None), dict)
+        else {}
+    )
+    if execution_family in {"alpaca_spot", "alpaca_short"}:
+        stored_scope = str(snapshot.get("alpaca_account_scope") or "").strip().lower()
+        stored_identity = str(snapshot.get("alpaca_account_id") or "").strip()
+        if not stored_scope or not stored_identity:
+            return "unknown"
+        if stored_scope != str(account_scope or "").strip().lower():
+            return "other"
+        return "current" if stored_identity == account_identity else "other"
+    stored_identity = str(
+        snapshot.get("non_alpaca_account_identity") or ""
+    ).strip()
+    if not stored_identity:
+        return "unknown"
+    return "current" if stored_identity == account_identity else "other"
+
+
+def _loss_history_entry_classification(
+    outcome: Any,
+    session: Any,
+    *,
+    entry_event_seen: bool,
+) -> str:
+    """Classify as ``entered``, explicit ``not_entered``, ``unknown``, or conflict."""
+
+    from .outcome_labels import ALL_OUTCOME_CLASSES, NEVER_ENTERED_OUTCOMES
+
+    outcome_class = str(getattr(outcome, "outcome_class", "") or "").strip().lower()
+    durable_runtime = bool(entry_event_seen) or _loss_history_snapshot_entry_proof(
+        session
+    )
+    economic_states = tuple(
+        _loss_history_numeric_state(value)
+        for value in (
+            getattr(outcome, "realized_pnl_usd", None),
+            getattr(outcome, "return_bps", None),
+            getattr(outcome, "broker_realized_pnl_usd", None),
+            getattr(outcome, "broker_return_bps", None),
+        )
+    )
+    economic_nonzero = "nonzero" in economic_states
+    economic_invalid = "invalid" in economic_states
+    notional_state = _loss_history_notional_state(
+        getattr(outcome, "broker_notional_basis_usd", None)
+    )
+    if notional_state in {"invalid", "nonpositive"}:
+        return "conflict"
+    durable_runtime = durable_runtime or notional_state == "positive"
+
+    if outcome_class not in ALL_OUTCOME_CLASSES:
+        return "unknown"
+    if outcome_class in NEVER_ENTERED_OUTCOMES:
+        if durable_runtime or economic_nonzero or economic_invalid:
+            return "conflict"
+        return "not_entered"
+    if outcome_class in _LOSS_HISTORY_AMBIGUOUS_ENTRY_CLASSES:
+        if durable_runtime or economic_nonzero:
+            return "entered"
+        if economic_invalid:
+            return "conflict"
+        return "unknown"
+    # stop_loss/success/bailout/timed_exit/etc. explicitly describe economics.
+    # Missing broker data makes coverage unavailable; it does not erase the trade.
+    return "entered"
+
+
+def load_current_live_loss_history(
+    db: Any,
+    *,
+    user_id: int | None,
+    execution_family: str | None,
+    account_scope: str | None = None,
+    account_identity: str | None = None,
+    decision_as_of: datetime | None = None,
+) -> CurrentLiveLossHistoryReceipt:
+    """Load one ET day's complete broker-authoritative loss-guard ledger.
+
+    The reader starts from the same-lane terminal-session inventory, not an
+    inner join of whichever outcome rows happen to exist. Every durable entered
+    session in the selected account generation must have an outcome and a finite
+    broker P&L whose reconciliation availability clock crossed the frontier.
+
+    This is mutable operational-DB history for a *current live* decision only.
+    It is never a ReplayV3 receipt and never falls back to legacy self-report.
+    """
+
+    raw_family = str(execution_family or "").strip()
+    try:
+        uid = int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        uid = None
+    family = normalize_execution_family(raw_family) if raw_family else ""
+    scope = str(account_scope or "").strip().lower()
+    identity = str(account_identity or "").strip()
+    meta: dict[str, Any] = {
+        "schema_version": "chili.current-live-loss-history.v2",
+        "user_id": uid,
+        "execution_family": family or None,
+        "account_scope": scope or None,
+        "account_identity_bound": bool(identity),
+        "history_authority": "broker_reconciled_current_live_db_only",
+        "label_source": "momentum_automation_outcomes.broker_*",
+        "legacy_pnl_fallback_used": False,
+        "replay_certifiable": False,
+    }
+    if db is None:
+        return (), {
+            **meta,
+            "reason": "loss_guard_db_unavailable",
+            "history_unavailable": True,
+        }
+    if uid is None:
+        return (), {
+            **meta,
+            "reason": "loss_guard_user_unavailable",
+            "required_scope_unavailable": True,
+        }
+    if not family:
+        return (), {
+            **meta,
+            "reason": "loss_guard_execution_family_unavailable",
+            "required_scope_unavailable": True,
+        }
+    if family in {"alpaca_spot", "alpaca_short"} and scope != "alpaca:paper":
+        return (), {
+            **meta,
+            "reason": "alpaca_loss_guard_scope_unavailable",
+            "required_scope_unavailable": True,
+        }
+    if not identity:
+        return (), {
+            **meta,
+            "reason": (
+                "alpaca_loss_guard_identity_unavailable"
+                if family in {"alpaca_spot", "alpaca_short"}
+                else "non_alpaca_loss_guard_identity_unavailable"
+            ),
+            "required_scope_unavailable": True,
+        }
+
+    frontier = decision_as_of or _risk_now_aware()
+    if frontier.tzinfo is None:
+        frontier = frontier.replace(tzinfo=timezone.utc)
+    else:
+        frontier = frontier.astimezone(timezone.utc)
+    frontier_utc = frontier.replace(tzinfo=None)
+    day_start, day_end = _et_day_bounds_utc(as_of_utc=frontier)
+    meta["decision_as_of_utc"] = frontier.isoformat()
+
+    try:
+        from ....models.trading import (
+            MomentumAutomationOutcome,
+            TradingAutomationEvent,
+            TradingAutomationSession,
+        )
+
+        outcome_rows = (
+            db.query(MomentumAutomationOutcome, TradingAutomationSession)
             .join(
                 TradingAutomationSession,
-                TradingAutomationSession.id == MomentumAutomationOutcome.session_id,
+                TradingAutomationSession.id
+                == MomentumAutomationOutcome.session_id,
             )
             .filter(
                 MomentumAutomationOutcome.mode == "live",
-                MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
-                MomentumAutomationOutcome.terminal_at >= start_utc,
-                MomentumAutomationOutcome.terminal_at < end_utc,
-                or_(
-                    TradingAutomationSession.execution_family.is_(None),
-                    TradingAutomationSession.execution_family.notin_(
-                        ("alpaca_spot", "alpaca_short")
-                    ),
-                ),
+                TradingAutomationSession.mode == "live",
+                MomentumAutomationOutcome.user_id == uid,
+                TradingAutomationSession.user_id == uid,
+                MomentumAutomationOutcome.execution_family == family,
+                TradingAutomationSession.execution_family == family,
+                MomentumAutomationOutcome.terminal_at >= day_start,
+                MomentumAutomationOutcome.terminal_at < day_end,
+                MomentumAutomationOutcome.terminal_at <= frontier_utc,
+                MomentumAutomationOutcome.created_at <= frontier_utc,
             )
-            .order_by(MomentumAutomationOutcome.terminal_at.desc())
-            .limit(int(lookback))
+            .order_by(
+                MomentumAutomationOutcome.terminal_at.desc(),
+                MomentumAutomationOutcome.id.desc(),
+            )
             .all()
         )
+
+        terminal_clock = func.coalesce(
+            TradingAutomationSession.ended_at,
+            TradingAutomationSession.updated_at,
+        )
+        terminal_rows = (
+            db.query(TradingAutomationSession, MomentumAutomationOutcome)
+            .outerjoin(
+                MomentumAutomationOutcome,
+                and_(
+                    MomentumAutomationOutcome.session_id
+                    == TradingAutomationSession.id,
+                    MomentumAutomationOutcome.created_at <= frontier_utc,
+                ),
+            )
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.user_id == uid,
+                TradingAutomationSession.execution_family == family,
+                TradingAutomationSession.state.in_(
+                    tuple(sorted(_LOSS_HISTORY_TERMINAL_STATES))
+                ),
+                terminal_clock >= day_start,
+                terminal_clock < day_end,
+                terminal_clock <= frontier_utc,
+                TradingAutomationSession.created_at <= frontier_utc,
+            )
+            .order_by(
+                terminal_clock.desc(),
+                TradingAutomationSession.id.desc(),
+            )
+            .all()
+        )
+
+        session_ids = {
+            int(session.id) for _outcome, session in outcome_rows
+        } | {int(session.id) for session, _outcome in terminal_rows}
+        event_bounds: dict[int, tuple[datetime, datetime]] = {}
+        for outcome, session in outcome_rows:
+            lower = _loss_history_naive_utc(session.created_at)
+            outcome_terminal = _loss_history_naive_utc(outcome.terminal_at)
+            session_terminal = _loss_history_naive_utc(
+                session.ended_at or session.updated_at
+            )
+            if lower is not None and outcome_terminal is not None and session_terminal is not None:
+                event_bounds[int(session.id)] = (
+                    lower,
+                    min(outcome_terminal, session_terminal, frontier_utc),
+                )
+        for session, _outcome in terminal_rows:
+            session_id = int(session.id)
+            if session_id in event_bounds:
+                continue
+            lower = _loss_history_naive_utc(session.created_at)
+            upper = _loss_history_naive_utc(session.ended_at or session.updated_at)
+            if lower is not None and upper is not None:
+                event_bounds[session_id] = (lower, min(upper, frontier_utc))
+        event_entry_session_ids: set[int] = set()
+        if session_ids:
+            event_rows = (
+                db.query(
+                    TradingAutomationEvent.session_id,
+                    TradingAutomationEvent.ts,
+                )
+                .filter(
+                    TradingAutomationEvent.session_id.in_(tuple(session_ids)),
+                    TradingAutomationEvent.event_type.in_(
+                        tuple(sorted(_LOSS_HISTORY_ENTRY_EVENTS))
+                    ),
+                    TradingAutomationEvent.ts <= frontier_utc,
+                )
+                .all()
+            )
+            for session_id, event_ts in event_rows:
+                bounds = event_bounds.get(int(session_id))
+                normalized_event_ts = _loss_history_naive_utc(event_ts)
+                if (
+                    bounds is not None
+                    and normalized_event_ts is not None
+                    and bounds[0] <= normalized_event_ts <= bounds[1]
+                ):
+                    event_entry_session_ids.add(int(session_id))
     except Exception:
-        logger.debug("[momentum_neural] account-wide consec-loss read failed", exc_info=True)
-        return 0, {**meta, "reason": "read_failed"}
+        logger.debug(
+            "[momentum_neural] current-live loss-history read failed",
+            exc_info=True,
+        )
+        return (), {
+            **meta,
+            "reason": "loss_guard_history_unavailable",
+            "history_unavailable": True,
+        }
+
+    gaps: dict[str, list[int]] = {}
+
+    def _gap(reason: str, session_id: int) -> None:
+        gaps.setdefault(reason, []).append(int(session_id))
+
+    entries: list[CurrentLiveLossHistoryEntry] = []
+    processed_session_ids: set[int] = set()
+    bps_fallbacks = 0
+    for outcome, session in outcome_rows:
+        session_id = int(session.id)
+        processed_session_ids.add(session_id)
+        classification = _loss_history_entry_classification(
+            outcome,
+            session,
+            entry_event_seen=session_id in event_entry_session_ids,
+        )
+        if classification == "not_entered":
+            continue
+        generation = _loss_history_generation_state(
+            session,
+            execution_family=family,
+            account_scope=scope or None,
+            account_identity=identity,
+        )
+        if generation == "other":
+            continue
+        if generation == "unknown":
+            _gap("loss_guard_account_generation_unknown", session_id)
+            continue
+        if classification == "conflict":
+            _gap("loss_guard_entry_classification_conflict", session_id)
+            continue
+        if classification == "unknown":
+            _gap("loss_guard_entry_classification_unknown", session_id)
+            continue
+        if str(session.state or "") not in _LOSS_HISTORY_TERMINAL_STATES:
+            _gap("loss_guard_outcome_session_state_mismatch", session_id)
+            continue
+        session_terminal_at = _loss_history_naive_utc(
+            session.ended_at or session.updated_at
+        )
+        if session_terminal_at is None:
+            _gap("loss_guard_session_terminal_clock_unavailable", session_id)
+            continue
+        if not (
+            day_start <= session_terminal_at < day_end
+            and session_terminal_at <= frontier_utc
+        ):
+            _gap("loss_guard_session_terminal_frontier_mismatch", session_id)
+            continue
+        terminal_at = _loss_history_naive_utc(outcome.terminal_at)
+        if terminal_at is None:
+            _gap("loss_guard_outcome_terminal_clock_unavailable", session_id)
+            continue
+        if terminal_at != session_terminal_at:
+            _gap("loss_guard_outcome_session_terminal_clock_mismatch", session_id)
+            continue
+
+        # The legacy Alpaca session/outcome ledger cannot prove broker-NET cycle
+        # economics.  Its order payload has no per-fill fee; the old runner
+        # coerces that missing value to numeric zero before writing
+        # ``momentum_fill_outcomes``.  The legacy reconciler can therefore label a
+        # gross result ``reconciled`` merely because a fabricated zero is
+        # non-NULL, and it also collapses recycled/multi-exit sessions into one
+        # row.  Neither condition may authorize another PAPER entry.  Keep the
+        # current session reader explicitly unavailable until the immutable
+        # reservation-scoped fill/cycle settlement ledger supersedes this branch.
+        if family in {"alpaca_spot", "alpaca_short"}:
+            _gap("loss_guard_alpaca_cycle_settlement_unavailable", session_id)
+            continue
+
+        if str(outcome.broker_recon_status or "").strip().lower() != "reconciled":
+            _gap("loss_guard_broker_reconciliation_unavailable", session_id)
+            continue
+        reconciled_at = outcome.broker_reconciled_at
+        if not isinstance(reconciled_at, datetime):
+            _gap("loss_guard_broker_reconciled_at_unavailable", session_id)
+            continue
+        reconciled_at = _loss_history_naive_utc(reconciled_at)
+        if reconciled_at is None:
+            _gap("loss_guard_broker_reconciled_at_unavailable", session_id)
+            continue
+        if reconciled_at > frontier_utc:
+            _gap("loss_guard_broker_label_not_available_as_of", session_id)
+            continue
+        if reconciled_at < terminal_at:
+            _gap("loss_guard_broker_label_precedes_terminal", session_id)
+            continue
+        broker_pnl = _loss_history_finite_float(outcome.broker_realized_pnl_usd)
+        if broker_pnl is None:
+            _gap("loss_guard_broker_pnl_nonfinite_or_unavailable", session_id)
+            continue
+        broker_bps = _loss_history_finite_float(outcome.broker_return_bps)
+        if broker_bps is None:
+            bps_fallbacks += 1
+        elif _loss_history_sign(broker_pnl) != _loss_history_sign(broker_bps):
+            _gap("loss_guard_broker_label_sign_mismatch", session_id)
+            continue
+        broker_notional = _loss_history_finite_float(
+            outcome.broker_notional_basis_usd
+        )
+        if broker_notional is not None and broker_notional > 0.0 and broker_bps is not None:
+            expected_bps = (broker_pnl / broker_notional) * 10_000.0
+            if not math.isclose(
+                broker_bps,
+                expected_bps,
+                rel_tol=1e-6,
+                abs_tol=1e-6,
+            ):
+                _gap("loss_guard_broker_return_formula_mismatch", session_id)
+                continue
+        broker_win = outcome.broker_win
+        if broker_win is not None:
+            if not isinstance(broker_win, bool):
+                _gap("loss_guard_broker_win_invalid", session_id)
+                continue
+            pnl_win = _loss_history_sign(broker_pnl) > 0
+            bps_win = (
+                _loss_history_sign(broker_bps) > 0
+                if broker_bps is not None
+                else pnl_win
+            )
+            if broker_win != pnl_win or broker_win != bps_win:
+                _gap("loss_guard_broker_win_mismatch", session_id)
+                continue
+        outcome_symbol = str(outcome.symbol or "").strip().upper()
+        session_symbol = str(session.symbol or "").strip().upper()
+        if not outcome_symbol or not session_symbol:
+            _gap("loss_guard_symbol_unavailable", session_id)
+            continue
+        if outcome_symbol != session_symbol:
+            _gap("loss_guard_symbol_mismatch", session_id)
+            continue
+        symbol = outcome_symbol
+        entries.append(
+            CurrentLiveLossHistoryEntry(
+                session_id=session_id,
+                outcome_id=int(outcome.id),
+                symbol=symbol,
+                terminal_at=terminal_at,
+                outcome_class=str(outcome.outcome_class or "").strip().lower(),
+                realized_pnl_usd=broker_pnl,
+                return_bps=broker_bps,
+                broker_reconciled_at=reconciled_at,
+            )
+        )
+
+    # A terminal/flat session can exist before its asynchronously emitted outcome.
+    # Post-entry terminal states are themselves an incomplete-history signal even
+    # if a crash lost the snapshot/events; they can never be treated as no-entry.
+    for session, outcome in terminal_rows:
+        session_id = int(session.id)
+        if session_id in processed_session_ids:
+            continue
+        generation = _loss_history_generation_state(
+            session,
+            execution_family=family,
+            account_scope=scope or None,
+            account_identity=identity,
+        )
+        if generation == "other":
+            continue
+        if outcome is None:
+            durable = (
+                str(session.state or "")
+                in _LOSS_HISTORY_ENTRY_IMPLYING_TERMINAL_STATES
+                or _loss_history_snapshot_entry_proof(session)
+                or session_id in event_entry_session_ids
+            )
+        else:
+            durable = _loss_history_entry_classification(
+                outcome,
+                session,
+                entry_event_seen=session_id in event_entry_session_ids,
+            ) != "not_entered"
+        if not durable:
+            continue
+        if generation == "unknown":
+            _gap("loss_guard_account_generation_unknown", session_id)
+        elif outcome is None:
+            _gap("loss_guard_terminal_outcome_unavailable", session_id)
+        else:
+            _gap("loss_guard_outcome_frontier_mismatch", session_id)
+
+    if gaps:
+        first_reason = next(iter(gaps))
+        return (), {
+            **meta,
+            "reason": first_reason,
+            "history_unavailable": True,
+            "coverage_grade": "COVERAGE_UNAVAILABLE",
+            "coverage_gap_counts": {
+                reason: len(ids) for reason, ids in gaps.items()
+            },
+            "coverage_gap_session_ids": sorted(
+                {session_id for ids in gaps.values() for session_id in ids}
+            ),
+            "terminal_session_inventory_count": len(terminal_rows),
+            "outcome_inventory_count": len(outcome_rows),
+        }
+
+    return tuple(entries), {
+        **meta,
+        "history_available": True,
+        "coverage_grade": "CURRENT_LIVE_COMPLETE",
+        "terminal_session_inventory_count": len(terminal_rows),
+        "outcome_inventory_count": len(outcome_rows),
+        "durable_entered_outcomes": len(entries),
+        "broker_return_bps_fixed_cooldown_fallbacks": int(bps_fallbacks),
+    }
+
+
+def account_wide_consecutive_losses(
+    db: Any,
+    *,
+    user_id: int | None,
+    execution_family: str | None,
+    account_scope: str | None = None,
+    account_identity: str | None = None,
+    decision_as_of: datetime | None = None,
+    lookback: int = 40,
+    _current_live_history: CurrentLiveLossHistoryReceipt | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Count consecutive realized losses for one account-scoped execution lane.
+
+    The guard is account-wide across symbols, but never process-global across
+    unrelated users, execution families, or broker accounts.  Alpaca paper rows
+    are included for Alpaca paper decisions and must match the exact account scope
+    and frozen non-secret account UUID persisted on their owning session.
+
+    The ET-day window and terminal frontier use ``decision_as_of`` (or the bound
+    risk clock).  This current-live-DB reader also requires ``created_at`` to have
+    crossed the decision frontier, preventing a late/backfilled row from appearing
+    in an earlier diagnostic decision.  That is necessary but not sufficient for
+    ReplayV3 certification: sealed replay must use an append-only recorded history
+    receipt with its own availability clock and must not call this DB reader.
+
+    A missing account-generation identity or unreadable history is reported
+    explicitly; the halt decision converts either condition to a fail-closed
+    new-arm stop without fabricating a loss count.
+    """
+    if lookback <= 0:
+        return 0, {
+            "consecutive_losses": 0,
+            "lookback": int(lookback),
+            "reason": "loss_guard_lookback_invalid",
+            "history_unavailable": True,
+            "replay_certifiable": False,
+        }
+    history = _current_live_history or load_current_live_loss_history(
+        db,
+        user_id=user_id,
+        execution_family=execution_family,
+        account_scope=account_scope,
+        account_identity=account_identity,
+        decision_as_of=decision_as_of,
+    )
+    entries, history_meta = history
+    meta = {
+        **history_meta,
+        "consecutive_losses": 0,
+        "lookback": int(lookback),
+    }
+    if (
+        history_meta.get("required_scope_unavailable") is True
+        or history_meta.get("history_unavailable") is True
+    ):
+        return 0, meta
+
     consec = 0
     seen = 0
-    for pnl, oc in rows:  # newest first
-        if not is_real_entry_outcome(oc):
-            continue  # never-entered: neither a loss nor a reset
+    # The shared classifier already removed true no-entry rows and sorted newest
+    # first. Apply the bounded lookback only now so no-fill churn cannot push real
+    # losses out of the window.
+    for entry in entries[: int(lookback)]:
         seen += 1
-        try:
-            pv = float(pnl)
-        except (TypeError, ValueError):
-            continue
-        if pv < 0:
+        if entry.realized_pnl_usd < 0:
             consec += 1
         else:
             break  # a win (or break-even) ends the consecutive-loss run
@@ -1201,10 +1858,20 @@ def account_wide_consecutive_losses(
         **meta,
         "consecutive_losses": int(consec),
         "real_entries_today_seen": int(seen),
+        "history_available": True,
     }
 
 
-def consecutive_loss_halt_decision(db: Any) -> tuple[bool, dict[str, Any]]:
+def consecutive_loss_halt_decision(
+    db: Any,
+    *,
+    user_id: int | None,
+    execution_family: str | None,
+    account_scope: str | None = None,
+    account_identity: str | None = None,
+    decision_as_of: datetime | None = None,
+    _current_live_history: CurrentLiveLossHistoryReceipt | None = None,
+) -> tuple[bool, dict[str, Any]]:
     """ROSS RISK GAP 3 — account-wide consecutive-loss ARM HALT decision (HALTS ARMING ONLY).
 
     After ``chili_momentum_consecutive_loss_halt_count`` consecutive account-wide realized
@@ -1213,27 +1880,70 @@ def consecutive_loss_halt_decision(db: Any) -> tuple[bool, dict[str, Any]]:
     daily-loss cap; it resets on a win or a new ET day, and is reversible.
 
     Returns ``(halted, meta)``. ⚠️ The caller MUST only gate NEW ARMS with this — open
-    positions still manage + exit normally (this never runs on any exit path). ADDITIVE /
-    FAIL-OPEN: flag OFF / any error ⇒ ``(False, ...)`` so arming is byte-identical to today."""
+    positions still manage + exit normally (this never runs on any exit path).
+    Disabled remains a no-op, but missing scope/history fails CLOSED for new arms.
+    It never blocks management or exits of an existing position."""
     if not bool(getattr(settings, "chili_momentum_consecutive_loss_halt_enabled", True)):
         return False, {"halted": False, "reason": "disabled"}
     try:
         threshold = int(getattr(settings, "chili_momentum_consecutive_loss_halt_count", 4) or 4)
         if threshold < 2:
             threshold = 2
-        consec, meta = account_wide_consecutive_losses(db)
+        consec, meta = account_wide_consecutive_losses(
+            db,
+            user_id=user_id,
+            execution_family=execution_family,
+            account_scope=account_scope,
+            account_identity=account_identity,
+            decision_as_of=decision_as_of,
+            _current_live_history=_current_live_history,
+        )
+        provenance = {
+            "halt_count": {
+                "value": int(threshold),
+                "source": "settings.chili_momentum_consecutive_loss_halt_count",
+            },
+            "enabled": {
+                "value": True,
+                "source": "settings.chili_momentum_consecutive_loss_halt_enabled",
+            },
+            "validation_status": "offline_oos_required",
+        }
+        if (
+            meta.get("required_scope_unavailable") is True
+            or meta.get("history_unavailable") is True
+        ):
+            return True, {
+                "halted": True,
+                "consecutive_losses": 0,
+                "halt_count": int(threshold),
+                "reason": str(meta.get("reason") or "loss_guard_scope_unavailable"),
+                "required_scope_unavailable": bool(
+                    meta.get("required_scope_unavailable")
+                ),
+                "history_unavailable": bool(meta.get("history_unavailable")),
+                "config_provenance": provenance,
+            }
         halted = consec >= threshold
         return halted, {
             "halted": bool(halted),
             "consecutive_losses": int(consec),
             "halt_count": int(threshold),
+            "config_provenance": provenance,
             **{k: v for k, v in meta.items() if k not in ("consecutive_losses",)},
         }
     except Exception:
-        return False, {"halted": False, "reason": "error_fail_open"}
+        return True, {
+            "halted": True,
+            "consecutive_losses": 0,
+            "reason": "loss_guard_history_unavailable",
+            "history_unavailable": True,
+        }
 
 
-def _et_day_bounds_utc(*, days_ago: int = 0) -> tuple[datetime, datetime]:
+def _et_day_bounds_utc(
+    *, days_ago: int = 0, as_of_utc: datetime | None = None
+) -> tuple[datetime, datetime]:
     """[start_utc, end_utc) (naive UTC) for the US/Eastern calendar day ``days_ago`` back.
 
     Mirrors ``governance.global_realized_pnl_today_et``'s ET-session windowing so the
@@ -1250,7 +1960,10 @@ def _et_day_bounds_utc(*, days_ago: int = 0) -> tuple[datetime, datetime]:
     # across a DST transition, so `now_et.replace(hour=0) - timedelta(days=N)` drifted the
     # window an hour on transition days. Subtract days on the DATE, then build the aware ET
     # midnight from that date via zoneinfo so each [start,end) is a true ET calendar day.
-    today_et_date = datetime.now(et).date()
+    reference = as_of_utc or _risk_now_aware()
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    today_et_date = reference.astimezone(et).date()
     start_date = today_et_date - _td(days=days_ago)
     end_date = start_date + _td(days=1)
     start_et = _dt(start_date.year, start_date.month, start_date.day, 0, 0, 0, 0, tzinfo=et)
@@ -1274,6 +1987,7 @@ def _count_real_entries_today(db: Any, *, execution_family: str | None) -> int:
         from .outcome_labels import is_real_entry_outcome
 
         start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        frontier_utc = _risk_now_naive()
         rows = (
             db.query(MomentumAutomationOutcome.outcome_class)
             .filter(
@@ -1281,6 +1995,7 @@ def _count_real_entries_today(db: Any, *, execution_family: str | None) -> int:
                 MomentumAutomationOutcome.mode == "live",
                 MomentumAutomationOutcome.terminal_at >= start_utc,
                 MomentumAutomationOutcome.terminal_at < end_utc,
+                MomentumAutomationOutcome.terminal_at <= frontier_utc,
             )
             .all()
         )
@@ -1318,6 +2033,7 @@ def _count_symbol_episodes_today(
         from .outcome_labels import is_real_entry_outcome
 
         start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        frontier_utc = _risk_now_naive()
         rows = (
             db.query(
                 MomentumAutomationOutcome.symbol,
@@ -1329,6 +2045,7 @@ def _count_symbol_episodes_today(
                 MomentumAutomationOutcome.mode == "live",
                 MomentumAutomationOutcome.terminal_at >= start_utc,
                 MomentumAutomationOutcome.terminal_at < end_utc,
+                MomentumAutomationOutcome.terminal_at <= frontier_utc,
             )
             .all()
         )
@@ -1409,13 +2126,15 @@ def _top_ranked_live_eligible_symbol(
         max_age = float(
             getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
         )
-        cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+        frontier_utc = _risk_now_naive()
+        cutoff = frontier_utc - timedelta(seconds=max_age)
         q = db.query(
             MomentumSymbolViability.symbol, MomentumSymbolViability.viability_score
         ).filter(
             MomentumSymbolViability.scope == "symbol",
             MomentumSymbolViability.live_eligible.is_(True),
             MomentumSymbolViability.freshness_ts >= cutoff,
+            MomentumSymbolViability.freshness_ts <= frontier_utc,
         )
         if crypto:
             q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
@@ -1523,7 +2242,12 @@ def daily_trade_count_budget_decision(
         try:
             from ..governance import global_realized_pnl_today_et
 
-            realized_today = float(global_realized_pnl_today_et(db).get("total_usd") or 0.0)
+            realized_today = float(
+                global_realized_pnl_today_et(
+                    db, as_of_utc=_risk_now_aware()
+                ).get("total_usd")
+                or 0.0
+            )
             base_loss = equity_relative_loss_cap(
                 float(getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0),
                 execution_family,
@@ -1663,7 +2387,7 @@ def _minutes_since_rth_open_et() -> float | None:
         from zoneinfo import ZoneInfo
 
         et = ZoneInfo("America/New_York")
-        now_et = datetime.now(et)
+        now_et = _risk_now_aware().astimezone(et)
         open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
         if now_et < open_et:
             return None
@@ -1909,7 +2633,9 @@ def day_open_risk_ramp_multiplier(
         try:
             from ..governance import global_realized_pnl_today_et
 
-            day = global_realized_pnl_today_et(db)
+            day = global_realized_pnl_today_et(
+                db, as_of_utc=_risk_now_aware()
+            )
             realized_today = float(day.get("total_usd") or 0.0)
         except Exception:
             realized_today = 0.0
@@ -2782,6 +3508,7 @@ def symbol_day_banked_pnl_other_sessions(
         from .outcome_labels import is_real_entry_outcome
 
         start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        frontier_utc = _risk_now_naive()
         q = (
             db.query(
                 MomentumAutomationOutcome.session_id,
@@ -2793,6 +3520,7 @@ def symbol_day_banked_pnl_other_sessions(
                 MomentumAutomationOutcome.mode == "live",
                 MomentumAutomationOutcome.terminal_at >= start_utc,
                 MomentumAutomationOutcome.terminal_at < end_utc,
+                MomentumAutomationOutcome.terminal_at <= frontier_utc,
             )
         )
         if execution_family:
@@ -2961,7 +3689,7 @@ def resolve_effective_risk_policy() -> dict[str, Any]:
     p = MomentumAutomationRiskPolicy.from_settings()
     d = asdict(p)
     d["policy_version"] = POLICY_VERSION
-    d["resolved_at_utc"] = datetime.now(timezone.utc).isoformat()
+    d["resolved_at_utc"] = _risk_now_aware().isoformat()
     return d
 
 
@@ -3093,7 +3821,7 @@ def time_of_day_risk_multiplier(db: Any, *, now_et_hour_frac: float | None = Non
         from zoneinfo import ZoneInfo
 
         if now_et_hour_frac is None:
-            _et = _dt.now(ZoneInfo("America/New_York"))
+            _et = _risk_now_aware().astimezone(ZoneInfo("America/New_York"))
             now_et_hour_frac = _et.hour + _et.minute / 60.0
         floor = 0.25
         # PRIOR: the documented Ross discipline (discovery window full-risk).
@@ -3107,7 +3835,11 @@ def time_of_day_risk_multiplier(db: Any, *, now_et_hour_frac: float | None = Non
         import time as _time
 
         _now_mono = _time.monotonic()
-        cached = _TOD_CACHE.get("buckets")
+        _as_of_utc = _risk_now_naive()
+        _is_replay = _REPLAY_RISK_NOW.get() is not None
+        # A wall-TTL cache is valid for a live lane, but not for replay: a later A/B
+        # run could otherwise poison an earlier run with future-derived buckets.
+        cached = None if _is_replay else _TOD_CACHE.get("buckets")
         if cached is None or (_now_mono - _TOD_CACHE.get("at", 0.0)) > 600.0:
             from sqlalchemy import text as _sql
 
@@ -3115,12 +3847,14 @@ def time_of_day_risk_multiplier(db: Any, *, now_et_hour_frac: float | None = Non
                 "SELECT extract(hour FROM (ts AT TIME ZONE 'UTC') AT TIME ZONE 'America/New_York')::int AS h, "
                 "       count(*) AS n, avg((payload_json->>'realized_r')::numeric) AS avg_r "
                 "FROM trading_automation_events "
-                "WHERE event_type='momentum_mfe_realized' AND ts > (now() at time zone 'utc') - interval '30 days' "
+                "WHERE event_type='momentum_mfe_realized' "
+                "AND ts > :as_of_utc - interval '30 days' AND ts <= :as_of_utc "
                 "GROUP BY 1"
-            )).fetchall()
+            ), {"as_of_utc": _as_of_utc}).fetchall()
             cached = {int(r[0]): (int(r[1]), float(r[2])) for r in rows}
-            _TOD_CACHE["buckets"] = cached
-            _TOD_CACHE["at"] = _now_mono
+            if not _is_replay:
+                _TOD_CACHE["buckets"] = cached
+                _TOD_CACHE["at"] = _now_mono
         hour = int(now_et_hour_frac)
         n, avg_r = cached.get(hour, (0, 0.0))
         # avg_r >= 0 -> 1.0; avg_r <= -1 -> floor; linear in between.
@@ -3178,6 +3912,7 @@ def _recent_realized_r(
             .filter(MomentumAutomationOutcome.execution_family == execution_family)
             .filter(MomentumAutomationOutcome.mode == "live")
             .filter(MomentumAutomationOutcome.realized_pnl_usd.isnot(None))
+            .filter(MomentumAutomationOutcome.terminal_at <= _risk_now_naive())
             .order_by(MomentumAutomationOutcome.terminal_at.desc())
             .limit(fetch)
             .all()

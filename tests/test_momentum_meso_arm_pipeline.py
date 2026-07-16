@@ -34,7 +34,9 @@ from app.services.trading.momentum_neural import (
     automation_query,
     market_profile,
     operator_actions,
+    risk_policy,
 )
+from app.services.trading.venue import account_identity
 
 # Capture the REAL _entry_trigger_fires at import time so a test that exercises its real
 # pullback -> exhaustion composition can restore it (the happy fixture stubs it out).
@@ -80,6 +82,9 @@ class _FakeDB:
     def commit(self) -> None:
         pass
 
+    def flush(self) -> None:
+        pass
+
     def rollback(self) -> None:
         pass
 
@@ -99,6 +104,8 @@ def happy(monkeypatch):
     # Ross lane = equities only (so the board / tape / late-day gates run on equity names).
     monkeypatch.setattr(s, "chili_momentum_auto_arm_crypto_only", False, raising=False)
     monkeypatch.setattr(s, "chili_momentum_auto_arm_equity_only", True, raising=False)
+    monkeypatch.setattr(s, "chili_momentum_ross_equity_universe_required", False, raising=False)
+    monkeypatch.setattr(s, "chili_momentum_decouple_watching_enabled", False, raising=False)
     monkeypatch.setattr(s, "chili_momentum_auto_arm_max_arms_per_pass", 1, raising=False)
     monkeypatch.setattr(s, "chili_momentum_reap_cooldown_sec", 0, raising=False)
     # New-initiation gates default OFF unless a test flips them on.
@@ -118,13 +125,54 @@ def happy(monkeypatch):
     monkeypatch.setattr(portfolio_risk, "check_portfolio_drawdown_breaker", lambda db, uid: (False, None))
     monkeypatch.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 0)
     monkeypatch.setattr(automation_query, "expire_stale_live_arm_sessions", lambda db, *, user_id: 0)
+    monkeypatch.setattr(
+        automation_query,
+        "reap_stale_live_sessions",
+        lambda db, *, user_id: {"reaped": 0},
+    )
     monkeypatch.setattr(aa, "_reap_stale_watching_sessions", lambda db, *, user_id, now: 0)
 
     # Selection seams.
     monkeypatch.setattr(aa, "_symbol_free", lambda db, sym, uid: True)
     monkeypatch.setattr(aa, "_venue_broker_ready_for", lambda sym, cache: True)
     monkeypatch.setattr(aa, "_symbols_with_active_live_session", lambda db, *, user_id: set())
-    monkeypatch.setattr(aa, "_symbol_loss_guards", lambda db: (set(), {}))
+    monkeypatch.setattr(aa, "_symbol_loss_guards", lambda db, **kwargs: (set(), {}))
+    monkeypatch.setattr(
+        account_identity,
+        "read_current_non_alpaca_account_identity",
+        lambda _family: {
+            "ok": True,
+            "identity": "meso-account-v1",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(
+        risk_policy,
+        "load_current_live_loss_history",
+        lambda db, **kwargs: (
+            (),
+            {
+                "history_available": True,
+                "coverage_grade": "CURRENT_LIVE_COMPLETE",
+                "history_authority": "broker_reconciled_current_live_db_only",
+                "replay_certifiable": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        risk_policy,
+        "consecutive_loss_halt_decision",
+        lambda db, **kwargs: (
+            False,
+            {
+                "halted": False,
+                "consecutive_losses": 0,
+                "halt_count": 4,
+                "history_available": True,
+                "config_provenance": {},
+            },
+        ),
+    )
     monkeypatch.setattr(aa, "_paper_shadow_arm", lambda db, **k: 0)
     # Default board: a single firing equity mover.
     monkeypatch.setattr(
@@ -150,6 +198,216 @@ def happy(monkeypatch):
 # ════════════════════════════════════════════════════════════════════════════════════
 # A. A CLEAR A+ BOARD ARMS THE TOP MOVER
 # ════════════════════════════════════════════════════════════════════════════════════
+def test_live_loss_guards_share_one_adapter_identity_read(happy):
+    calls = {"identity": 0}
+    observed: dict[str, object] = {}
+    happy.setattr(
+        aa.settings,
+        "chili_momentum_auto_arm_equity_only",
+        False,
+        raising=False,
+    )
+
+    def _identity(_family):
+        calls["identity"] += 1
+        return {
+            "ok": True,
+            "identity": "shared-live-account-v2",
+            "reason": None,
+        }
+
+    def _symbol_guard(db, **kwargs):
+        observed["symbol_scope"] = kwargs.get("_resolved_scope")
+        return set(), {}
+
+    def _consecutive(db, **kwargs):
+        observed["consecutive_identity"] = kwargs.get("account_identity")
+        return False, {
+            "halted": False,
+            "consecutive_losses": 0,
+            "halt_count": 4,
+            "history_available": True,
+            "config_provenance": {},
+        }
+
+    happy.setattr(
+        account_identity,
+        "read_current_non_alpaca_account_identity",
+        _identity,
+    )
+    happy.setattr(aa, "_symbol_loss_guards", _symbol_guard)
+    happy.setattr(risk_policy, "consecutive_loss_halt_decision", _consecutive)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 1
+    assert calls["identity"] == 1
+    assert observed["symbol_scope"]["account_identity"] == (
+        "shared-live-account-v2"
+    )
+    assert observed["consecutive_identity"] == "shared-live-account-v2"
+    assert out["loss_guard_policy"]["account_identity_bound"] is True
+    assert out["loss_guard_policy"]["account_identity_source"] == (
+        "adapter_current_account_identity"
+    )
+
+
+def test_finalized_nth_loss_is_visible_to_same_pass_halt(happy):
+    initial = datetime(2026, 7, 14, 16, 0, 0)
+    refreshed = initial + timedelta(seconds=1)
+    calls = {"clock": 0, "begin": 0}
+    threshold = int(
+        getattr(aa.settings, "chili_momentum_consecutive_loss_halt_count", 4)
+        or 4
+    )
+
+    def _frontier(_value=None):
+        calls["clock"] += 1
+        return initial if calls["clock"] == 1 else refreshed
+
+    entries = tuple(
+        risk_policy.CurrentLiveLossHistoryEntry(
+            session_id=index,
+            outcome_id=index,
+            symbol=f"LOSS{index}",
+            terminal_at=refreshed - timedelta(milliseconds=index),
+            outcome_class="stop_loss",
+            realized_pnl_usd=-5.0,
+            return_bps=-50.0,
+            broker_reconciled_at=refreshed - timedelta(milliseconds=index),
+        )
+        for index in range(1, threshold + 1)
+    )
+
+    def _history(db, **kwargs):
+        assert kwargs["decision_as_of"] == refreshed
+        return entries, {
+            "history_available": True,
+            "coverage_grade": "CURRENT_LIVE_COMPLETE",
+            "history_authority": "broker_reconciled_current_live_db_only",
+            "replay_certifiable": False,
+        }
+
+    def _halt(db, **kwargs):
+        observed, _meta = kwargs["_current_live_history"]
+        return len(observed) >= threshold, {
+            "halted": True,
+            "consecutive_losses": len(observed),
+            "halt_count": threshold,
+            "history_available": True,
+            "config_provenance": {},
+        }
+
+    happy.setattr(aa, "_decision_as_of_naive_utc", _frontier)
+    happy.setattr(
+        aa,
+        "_finalize_stale_exited_sessions",
+        lambda db, *, user_id, now: 1,
+    )
+    happy.setattr(risk_policy, "load_current_live_loss_history", _history)
+    happy.setattr(risk_policy, "consecutive_loss_halt_decision", _halt)
+    happy.setattr(
+        operator_actions,
+        "begin_live_arm",
+        lambda db, **kwargs: calls.__setitem__("begin", calls["begin"] + 1),
+    )
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert calls["clock"] >= 2
+    assert calls["begin"] == 0
+    assert out["finalized_exited"] == 1
+    assert out["skipped"] == "consecutive_loss_halt"
+    assert out["consecutive_losses"] == threshold
+
+
+def test_loss_history_read_failure_creates_no_arm(happy):
+    calls = {"begin": 0}
+    happy.setattr(
+        aa.settings,
+        "chili_momentum_auto_arm_equity_only",
+        False,
+        raising=False,
+    )
+
+    def _history_unavailable(db, **kwargs):
+        raise aa._LossGuardHistoryUnavailable(
+            "symbol_loss_guard_history_unavailable"
+        )
+
+    def _begin(db, **kwargs):
+        calls["begin"] += 1
+        return {"ok": True, "arm_token": "must-not-run", "session_id": 999}
+
+    happy.setattr(aa, "_symbol_loss_guards", _history_unavailable)
+    happy.setattr(operator_actions, "begin_live_arm", _begin)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 0
+    assert out["skipped"] == "loss_guard_history_unavailable"
+    assert out["loss_guard_history"]["coverage_grade"] == (
+        "COVERAGE_UNAVAILABLE"
+    )
+    assert calls["begin"] == 0
+
+
+def test_live_account_identity_failure_creates_no_arm(happy):
+    calls = {"begin": 0}
+    happy.setattr(
+        account_identity,
+        "read_current_non_alpaca_account_identity",
+        lambda _family: {
+            "ok": False,
+            "identity": None,
+            "reason": "non_alpaca_account_identity_unknown",
+        },
+    )
+
+    def _begin(db, **kwargs):
+        calls["begin"] += 1
+        return {"ok": True, "arm_token": "must-not-run", "session_id": 999}
+
+    happy.setattr(operator_actions, "begin_live_arm", _begin)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 0
+    assert out["skipped"] == "loss_guard_scope_unavailable"
+    assert out["loss_guard_scope_reason"] == (
+        "non_alpaca_account_identity_unknown"
+    )
+    assert calls["begin"] == 0
+
+
+def test_live_win_cycle_guard_receives_pass_decision_clock(happy):
+    observed: dict[str, object] = {}
+    happy.setattr(
+        aa.settings,
+        "chili_momentum_auto_arm_equity_only",
+        False,
+        raising=False,
+    )
+
+    def _count(db, **kwargs):
+        observed.update(kwargs)
+        return 0
+
+    happy.setattr(
+        aa.settings,
+        "chili_momentum_win_cycle_fatigue_enabled",
+        True,
+        raising=False,
+    )
+    happy.setattr(aa, "_win_cycle_clean_win_count", _count)
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["armed"] == 1
+    assert isinstance(observed.get("as_of_utc"), datetime)
+    assert observed["execution_family"] == aa._lane_execution_family()
+
+
 def test_aplus_board_arms_top_mover(happy):
     """A clear A+ board (high ross_score top mover, sit-cash + timeofday gates ENABLED but
     the regime is strong) arms the TOP mover and reports it. The sit-cash gate must NOT

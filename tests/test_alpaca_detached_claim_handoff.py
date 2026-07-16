@@ -1,19 +1,33 @@
 from __future__ import annotations
 
+import json
 import uuid
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
 
-from app.models.trading import MomentumStrategyVariant, TradingAutomationSession
+from app.models.trading import (
+    AdaptiveRiskDecisionPacket,
+    MomentumStrategyVariant,
+    TradingAutomationSession,
+)
 from app.services.trading.momentum_neural import alpaca_reconcile as ar
+from app.services.trading.momentum_neural import live_runner
+from app.services.trading.momentum_neural.adaptive_risk_runtime_contract import (
+    build_adaptive_risk_reservation_claim,
+)
 from app.services.trading.momentum_neural.alpaca_orphan_claims import (
     SUBMITTED,
     acquire_action_claim,
     read_action_claim,
     update_action_claim_phase,
 )
+from tests.test_adaptive_alpaca_lifecycle import (
+    _live_session as _adaptive_live_session,
+    _reservation_request as _adaptive_reservation_request,
+)
+from tests.test_alpaca_account_risk_reservations import TEST_ALPACA_ACCOUNT_ID
 
 
 class _Fresh:
@@ -242,6 +256,132 @@ def _seed_entry_claim(
         qty=qty,
         filled=qty if filled is None else filled,
     )
+
+
+def _seed_complete_adaptive_entry_claim(
+    db,
+    monkeypatch,
+    *,
+    symbol: str,
+    status: str,
+    filled: int,
+):
+    # Root-owned targeted cleanup now includes the adaptive ledgers and the dependent
+    # append-only Alpaca fill/cycle tables. Do not issue a fixture-local TRUNCATE: CASCADE
+    # would correctly hit the append-only trigger and make suite order affect the result.
+    monkeypatch.setattr(
+        ar.settings,
+        "chili_alpaca_expected_account_id",
+        TEST_ALPACA_ACCOUNT_ID,
+        raising=False,
+    )
+    sess = _adaptive_live_session(db, symbol=symbol)
+    cid = f"chili-ar-{uuid.uuid4().hex[:12]}"
+    request = _adaptive_reservation_request(symbol=symbol, cid=cid)
+    le = dict(sess.risk_snapshot_json[live_runner.KEY_LIVE_EXEC])
+    ensured = live_runner._ensure_adaptive_alpaca_reservation(
+        sess,
+        le,
+        request_payload=request.to_payload(),
+    )
+    if ensured["ok"] is not True:
+        rejected_packet = (
+            db.query(AdaptiveRiskDecisionPacket)
+            .filter(
+                AdaptiveRiskDecisionPacket.reservation_request_sha256
+                == request.request_sha256
+            )
+            .one_or_none()
+        )
+        raise AssertionError(
+            {
+                "ensured": ensured,
+                "decision_packet": (
+                    dict(rejected_packet.decision_packet_json)
+                    if rejected_packet is not None
+                    else None
+                ),
+            }
+        )
+    packet_row = db.get(
+        AdaptiveRiskDecisionPacket,
+        ensured["decision"].decision_packet_sha256,
+    )
+    assert packet_row is not None
+    packet = dict(packet_row.decision_packet_json)
+    reservation_claim = build_adaptive_risk_reservation_claim(
+        packet,
+        claim_id=cid,
+    ).to_payload()
+    planned = int(ensured["decision"].quantity_shares)
+    assert 0 <= filled <= planned
+    oid = f"adaptive-entry-{uuid.uuid4().hex[:10]}"
+    token = f"adaptive-entry-token-{uuid.uuid4().hex}"
+    order_request = {
+        "product_id": symbol,
+        "side": "buy",
+        "base_size": planned,
+        "limit_price": request.entry_limit_price,
+        "client_order_id": cid,
+        "position_intent": "buy_to_open",
+        "order_type": "limit",
+        "time_in_force": "day",
+        "extended_hours": False,
+        "asset_class": "us_equity",
+        "alpaca_account_id": TEST_ALPACA_ACCOUNT_ID,
+    }
+    metadata = {
+        "order_role": "primary",
+        "order_request": order_request,
+        "alpaca_account_id": TEST_ALPACA_ACCOUNT_ID,
+        "adaptive_risk_decision_packet": packet,
+        "adaptive_risk_reservation_claim": reservation_claim,
+        "adaptive_risk_reservation_request": request.to_payload(),
+        "adaptive_risk_lifecycle_binding": dict(ensured["binding"]),
+    }
+    acquired = acquire_action_claim(
+        db,
+        symbol=symbol,
+        action="entry",
+        claim_token=token,
+        owner_session_id=int(sess.id),
+        client_order_id=cid,
+        metadata=metadata,
+        account_scope="alpaca:paper",
+    )
+    assert acquired["ok"]
+    assert update_action_claim_phase(
+        db,
+        symbol=symbol,
+        claim_token=token,
+        phase=SUBMITTED,
+        client_order_id=cid,
+        broker_order_id=oid,
+        account_scope="alpaca:paper",
+    )
+    sess.state = "live_cancelled"
+    db.commit()
+    order = _order(
+        oid=oid,
+        cid=cid,
+        symbol=symbol,
+        side="buy",
+        status=status,
+        qty=planned,
+        filled=filled,
+        limit_price=request.entry_limit_price,
+        time_in_force="day",
+        extended_hours=False,
+        position_intent="buy_to_open",
+    )
+    return {
+        "session": sess,
+        "request": request,
+        "order": order,
+        "planned": planned,
+        "reservation_id": ensured["decision"].reservation_id,
+        "store": ensured["store"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -535,6 +675,218 @@ def test_terminal_entry_with_broker_flat_resolves_without_close_post(
     readable, claim = read_action_claim(db, symbol=symbol, account_scope="alpaca:paper")
     assert readable and claim is not None
     assert claim["phase"] == "resolved"
+
+
+def test_adaptive_partial_fill_handoff_tracks_open_remainder_and_flat_atomically(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(ar, "market_session_now", lambda _symbol: "regular")
+    symbol = f"A{uuid.uuid4().hex[:3].upper()}"
+    seeded = _seed_complete_adaptive_entry_claim(
+        db,
+        monkeypatch,
+        symbol=symbol,
+        status="canceled",
+        filled=1,
+    )
+    planned = int(seeded["planned"])
+    filled = max(1, planned // 2)
+    seeded["order"].filled_size = float(filled)
+    adapter = _Adapter(seeded["order"], signed_qty=float(filled))
+
+    handed = ar._sweep_detached_entry_claims(db, adapter)
+
+    assert handed["detached_entry_claims_handed_off"] == 1
+    assert handed["detached_entry_closes_submitted"] == 1
+    state = seeded["store"].read_state(seeded["reservation_id"])
+    assert state.state == "filled"
+    assert state.cumulative_filled_quantity_shares == filled
+    assert state.open_quantity_shares == filled
+    assert float(state.pending_structural_risk_usd) == 0.0
+    readable, close_claim = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope="alpaca:paper",
+    )
+    assert readable and close_claim is not None
+    assert close_claim["action"] == "orphan_flatten"
+    binding = close_claim["metadata"]["adaptive_risk_lifecycle_binding"]
+    assert binding["cumulative_filled_quantity_shares"] == filled
+    assert binding["open_quantity_shares"] == filled
+
+    close_order = adapter.orders_by_oid[close_claim["broker_order_id"]]
+    close_order.status = "filled"
+    close_order.filled_size = float(filled)
+    close_order.raw["alpaca_status"] = "filled"
+    adapter.signed_qty = 0.0
+    closed = ar._sweep_active_orphan_claims(db, adapter)
+
+    # The fake adapter deliberately has no authoritative account-activity
+    # reader. Broker-flat/order status alone cannot self-certify fill economics,
+    # so the exact claim and owned risk stay retained for a later same-CID read.
+    assert closed["claims_recovered"] == 0
+    assert closed["claims_still_pending"] == 1
+    durable = seeded["store"].read_state(seeded["reservation_id"])
+    assert durable.state == "filled"
+    assert durable.open_quantity_shares == filled
+    assert durable.opportunity_status == "consumed"
+    readable, retained = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope="alpaca:paper",
+    )
+    assert readable and retained is not None
+    assert retained["phase"] != "resolved"
+
+    replayed = ar._sweep_active_orphan_claims(db, adapter)
+    assert replayed["claims_still_pending"] == 1
+    assert seeded["store"].read_state(seeded["reservation_id"]).state == "filled"
+
+
+def test_adaptive_terminal_zero_fill_releases_opportunity_idempotently(
+    db,
+    monkeypatch,
+):
+    symbol = f"Z{uuid.uuid4().hex[:3].upper()}"
+    seeded = _seed_complete_adaptive_entry_claim(
+        db,
+        monkeypatch,
+        symbol=symbol,
+        status="canceled",
+        filled=0,
+    )
+    adapter = _Adapter(seeded["order"], signed_qty=0.0)
+
+    first = ar._sweep_detached_entry_claims(db, adapter)
+    second = ar._sweep_detached_entry_claims(db, adapter)
+
+    assert first["detached_entry_claims_resolved"] == 1
+    assert second["detached_entry_claims_resolved"] == 0
+    state = seeded["store"].read_state(seeded["reservation_id"])
+    assert state.state == "released"
+    assert state.opportunity_status == "available"
+    assert state.cumulative_filled_quantity_shares == 0
+    assert adapter.market_calls == []
+    assert adapter.cancel_calls == []
+
+
+def test_partial_adaptive_marker_quarantines_before_any_broker_mutation(
+    db,
+):
+    symbol = f"APM{uuid.uuid4().hex[:4].upper()}"
+    owner = _terminal_owner(db, symbol)
+    order = _seed_entry_claim(
+        db,
+        symbol=symbol,
+        side="buy",
+        qty=10.0,
+        owner_session_id=owner.id,
+        status="open",
+        filled=0.0,
+    )
+    readable, claim = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope="alpaca:paper",
+    )
+    assert readable and claim is not None
+    metadata = dict(claim["metadata"])
+    metadata["adaptive_risk_reservation_request"] = {"partial": True}
+    db.execute(
+        text(
+            "UPDATE broker_symbol_action_claims "
+            "SET metadata_json = CAST(:metadata AS jsonb) "
+            "WHERE account_scope = 'alpaca:paper' AND symbol = :symbol"
+        ),
+        {"metadata": json.dumps(metadata), "symbol": symbol},
+    )
+    db.commit()
+    adapter = _Adapter(order, signed_qty=0.0)
+
+    result = ar._sweep_detached_entry_claims(db, adapter)
+
+    assert result["detached_adaptive_lifecycle_quarantined"] == 1
+    assert adapter.cancel_calls == []
+    assert adapter.market_calls == []
+    assert adapter.limit_calls == []
+
+
+@pytest.mark.parametrize("mismatch", ["connection_generation", "account_identity"])
+def test_complete_adaptive_claim_identity_mismatch_is_broker_dark(
+    db,
+    monkeypatch,
+    mismatch,
+):
+    symbol = f"I{uuid.uuid4().hex[:3].upper()}"
+    seeded = _seed_complete_adaptive_entry_claim(
+        db,
+        monkeypatch,
+        symbol=symbol,
+        status="open",
+        filled=0,
+    )
+    if mismatch == "connection_generation":
+        readable, claim = read_action_claim(
+            db,
+            symbol=symbol,
+            account_scope="alpaca:paper",
+        )
+        assert readable and claim is not None
+        metadata = dict(claim["metadata"])
+        binding = dict(metadata["adaptive_risk_lifecycle_binding"])
+        binding["connection_generation"] = "alpaca-arm:wrong-generation"
+        metadata["adaptive_risk_lifecycle_binding"] = binding
+        db.execute(
+            text(
+                "UPDATE broker_symbol_action_claims "
+                "SET metadata_json = CAST(:metadata AS jsonb) "
+                "WHERE account_scope = 'alpaca:paper' AND symbol = :symbol"
+            ),
+            {"metadata": json.dumps(metadata), "symbol": symbol},
+        )
+        db.commit()
+    else:
+        monkeypatch.setattr(
+            ar.settings,
+            "chili_alpaca_expected_account_id",
+            "different-paper-account",
+            raising=False,
+        )
+    adapter = _Adapter(seeded["order"], signed_qty=0.0)
+
+    result = ar._sweep_detached_entry_claims(db, adapter)
+
+    assert result["detached_adaptive_lifecycle_quarantined"] == 1
+    assert adapter.cancel_calls == []
+    assert adapter.market_calls == []
+    assert adapter.limit_calls == []
+
+
+def test_adaptive_replaced_entry_waits_for_exact_successor_lineage(
+    db,
+    monkeypatch,
+):
+    symbol = f"R{uuid.uuid4().hex[:3].upper()}"
+    seeded = _seed_complete_adaptive_entry_claim(
+        db,
+        monkeypatch,
+        symbol=symbol,
+        status="pending",
+        filled=0,
+    )
+    seeded["order"].raw["alpaca_status"] = "replaced"
+    seeded["order"].raw["replaced_by"] = f"successor-{uuid.uuid4().hex[:8]}"
+    adapter = _Adapter(seeded["order"], signed_qty=0.0)
+
+    result = ar._sweep_detached_entry_claims(db, adapter)
+
+    assert result["detached_replacement_lineage_unresolved"] == 1
+    assert result["detached_entry_claims_pending"] == 1
+    assert adapter.cancel_calls == []
+    assert adapter.market_calls == []
+    state = seeded["store"].read_state(seeded["reservation_id"])
+    assert state.state == "reserved"
 
 
 def _seed_orphan_claim(

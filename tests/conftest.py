@@ -199,13 +199,32 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
         "broker_credentials",
         "broker_sessions",
         "broker_symbol_action_claims",
+        "captured_paper_post_commit_outbox",
+        "captured_paper_post_commit_outbox_events",
+        "captured_paper_completed_fill_watch",
+        "captured_paper_completed_fill_watch_events",
+        "captured_paper_phase_one_handoffs",
+        "captured_paper_phase_one_handoff_events",
+        "alpaca_paper_fill_activities",
+        "alpaca_paper_fill_query_observations",
+        "alpaca_paper_fill_page_objects",
+        "alpaca_paper_fill_observation_pages",
+        "alpaca_paper_fill_observation_activities",
+        "alpaca_paper_post_settlement_fill_contradictions",
+        "alpaca_paper_terminal_fill_observation_receipts",
+        "alpaca_paper_bp_reflection_receipts",
+        "alpaca_paper_bp_reflection_items",
+        "alpaca_paper_cycle_settlements",
+        "alpaca_paper_account_settlement_heads",
         "brain_batch_jobs",
         "pattern_evidence_corrections",
         "scan_patterns",
         *(
             table.name
             for table in Base.metadata.sorted_tables
-            if table.name.startswith(("trading_", "fast_path_", "momentum_"))
+            if table.name.startswith(
+                ("trading_", "fast_path_", "momentum_", "adaptive_risk_")
+            )
         ),
     }
 )
@@ -214,6 +233,8 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     # the scoped cleanup path so each invariant test does not TRUNCATE every
     # unrelated application table in the dedicated test database.
     "test_alpaca_account_risk_reservations.py",
+    "test_alpaca_fill_activity_capture.py",
+    "test_alpaca_buying_power_reflection.py",
     "test_alpaca_close_only_claim_fencing.py",
     "test_alpaca_crypto_paper.py",
     "test_alpaca_deadman_close_handoff.py",
@@ -223,6 +244,8 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_alpaca_posture_quarantine.py",
     "test_alpaca_replacement_containment_claim.py",
     "test_alpaca_spot_adapter.py",
+    "test_adaptive_db_paper_boundary.py",
+    "test_auto_arm_causal_frontier.py",
     "test_adopt_on_cancel_fill.py",
     "test_aggregate_risk_cap.py",
     "test_automation_operator_exit_truth.py",
@@ -240,6 +263,9 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_live_arm_generation_fence.py",
     "test_live_exit_phantom_reconcile.py",
     "test_live_runner_loop.py",
+    "test_captured_paper_admission.py",
+    "test_captured_paper_outbox.py",
+    "test_captured_paper_phase_one_handoff.py",
     "test_live_runner_non_alpaca_account_identity.py",
     "test_mode_scoped_session_cap.py",
     "test_momentum_atomic_admission.py",
@@ -494,12 +520,73 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
     # Static neural mesh topology is seeded by migration 086; keep nodes/edges so tests
     # do not need to re-seed the graph definition every time.
     _skip_truncate = frozenset({"schema_version", "brain_graph_nodes", "brain_graph_edges"})
+    _append_only_targeted_delete_tables = frozenset(
+        {
+            "adaptive_risk_decision_packets",
+            "adaptive_risk_reservation_events",
+            "adaptive_risk_opportunity_events",
+            "captured_paper_post_commit_outbox",
+            "captured_paper_post_commit_outbox_events",
+            "captured_paper_completed_fill_watch_events",
+            "alpaca_paper_fill_activities",
+            "alpaca_paper_fill_query_observations",
+            "alpaca_paper_fill_page_objects",
+            "alpaca_paper_fill_observation_pages",
+            "alpaca_paper_fill_observation_activities",
+            "alpaca_paper_post_settlement_fill_contradictions",
+            "alpaca_paper_terminal_fill_observation_receipts",
+            "alpaca_paper_bp_reflection_receipts",
+            "alpaca_paper_bp_reflection_items",
+            "alpaca_paper_cycle_settlements",
+            "alpaca_paper_account_settlement_heads",
+            "trading_automation_simulated_fills",
+        }
+    )
     if table_names is not None:
         _evict_idle_in_transaction_peers()
         _terminate_stale_truncate_peers()
         with engine.begin() as conn:
+            # Migration-owned captured-paper ledger tables intentionally have
+            # no ORM models.  Clean them explicitly in the guarded *_test DB,
+            # child first, while restoring their append-only triggers before
+            # this cleanup transaction commits.
+            for relation in (
+                "captured_paper_completed_fill_watch_events",
+                "captured_paper_completed_fill_watch",
+                "captured_paper_phase_one_handoff_events",
+                "captured_paper_phase_one_handoffs",
+            ):
+                if relation not in table_names:
+                    continue
+                present = conn.execute(
+                    text("SELECT to_regclass(:name) IS NOT NULL"),
+                    {"name": relation},
+                ).scalar_one()
+                if present:
+                    conn.execute(text(f'ALTER TABLE "{relation}" DISABLE TRIGGER USER'))
+                    conn.execute(text(f'DELETE FROM "{relation}"'))
+                    conn.execute(text(f'ALTER TABLE "{relation}" ENABLE TRIGGER USER'))
             for table in reversed(Base.metadata.sorted_tables):
                 if table.name in _skip_truncate or table.name not in table_names:
+                    continue
+                if table.name in _append_only_targeted_delete_tables:
+                    # Migrations 319/324 deliberately reject UPDATE/DELETE of adaptive
+                    # lifecycle evidence. Targeted pytest cleanup runs only against the
+                    # conftest-guarded ``*_test`` database, so disable USER triggers
+                    # transactionally for this cleanup statement and restore them before
+                    # commit. A failure rolls the ALTER back with the DELETE; production
+                    # and test assertions still see every append-only trigger enabled.
+                    conn.execute(text(
+                        f'ALTER TABLE "{table.name}" '
+                        "DISABLE TRIGGER USER"
+                    ))
+                    conn.execute(text(
+                        f'DELETE FROM "{table.name}"'
+                    ))
+                    conn.execute(text(
+                        f'ALTER TABLE "{table.name}" '
+                        "ENABLE TRIGGER USER"
+                    ))
                     continue
                 conn.execute(text(f'DELETE FROM "{table.name}"'))
         return
@@ -524,8 +611,34 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
                 conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
                 conn.execute(text(f"SET LOCAL statement_timeout = '{statement_s}s'"))
                 names = [f'"{name}"' for name in _truncate_relation_names(conn, logical_names)]
+                # Production append-only tables also reject TRUNCATE. Test
+                # isolation is allowed to bypass USER triggers only inside the
+                # guarded *_test database transaction, then restores them
+                # before commit. Any failure rolls both ALTERs back.
+                # Some append-only evidence relations are migration-owned and
+                # therefore absent from ``Base.metadata`` even though they are
+                # reached by TRUNCATE ... CASCADE from an ORM-owned parent.
+                # Discover every known relation in the guarded test database so
+                # its statement-level TRUNCATE trigger is disabled for exactly
+                # this cleanup transaction too.
+                append_only_for_cleanup = [
+                    table_name
+                    for table_name in sorted(_append_only_targeted_delete_tables)
+                    if conn.execute(
+                        text("SELECT to_regclass(:table_name) IS NOT NULL"),
+                        {"table_name": f"public.{table_name}"},
+                    ).scalar_one()
+                ]
+                for table_name in append_only_for_cleanup:
+                    conn.execute(text(
+                        f'ALTER TABLE "{table_name}" DISABLE TRIGGER USER'
+                    ))
                 stmt = text(f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE")
                 conn.execute(stmt)
+                for table_name in append_only_for_cleanup:
+                    conn.execute(text(
+                        f'ALTER TABLE "{table_name}" ENABLE TRIGGER USER'
+                    ))
             # #region agent log
             if attempt:
                 _agent_ndjson(

@@ -19,16 +19,21 @@ All deterministic (no RNG / no wall clock / no network). One assertion-block per
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import hashlib
 
 import pytest
 
 from app.services.trading.momentum_neural.replay_mock_broker import (
     DEFAULT_ACK_LATENCY_SECONDS,
     DEFAULT_VOLUME_PARTICIPATION_FRAC,
+    EXACT_PRINT_MARKET_FILL_UNAVAILABLE,
     FillMode,
     MockBrokerAdapter,
     RecordedQuote,
+    VerifiedExactPrint,
+    _mint_verified_exact_print,
+    _mint_verified_exact_print_inventory,
 )
 
 _BASE = datetime(2026, 6, 30, 14, 30, 0)  # naive-UTC (the _utcnow shape)
@@ -204,6 +209,85 @@ def test_volume_cap_still_never_fills_through_an_empty_or_uncrossed_book():
     assert (o.filled_size or 0.0) == 0.0
 
 
+def test_full_participation_fraction_still_requires_observed_printed_volume():
+    """A 100% participation bound means at most all observed prints, not uncapped fills."""
+
+    m = _volcap_broker(frac=1.0)
+    m.set_clock(_BASE)
+    m.set_quote("ONE", RecordedQuote(bid=9.99, ask=10.00))
+    placed = m.place_limit_order_gtc(
+        product_id="ONE", side="buy", base_size="100", limit_price="10.05"
+    )
+    before, _ = m.get_order(placed["order_id"])
+    assert before.status == "open"
+    assert before.filled_size == pytest.approx(0.0)
+
+    m.set_printed_volume("ONE", 40.0)
+    after, _ = m.get_order(placed["order_id"])
+    assert after.status == "open"
+    assert after.filled_size == pytest.approx(40.0)
+
+
+@pytest.mark.parametrize("fraction", [-0.01, 1.01, float("nan"), float("inf")])
+def test_invalid_participation_fraction_fails_closed(fraction: float):
+    with pytest.raises(ValueError, match="volume_participation_frac"):
+        MockBrokerAdapter(volume_participation_frac=fraction)
+
+
+def test_default_mode_non_marketable_limit_rests_until_recorded_quote_crosses():
+    """The legacy immediate mode may not fabricate a fill through an unmarketable limit."""
+
+    m = MockBrokerAdapter()
+    m.set_clock(_BASE)
+    m.set_quote("LIM", RecordedQuote(bid=9.99, ask=10.00))
+    placed = m.place_limit_order_gtc(
+        product_id="LIM", side="buy", base_size="10", limit_price="9.95"
+    )
+    before, _ = m.get_order(placed["order_id"])
+    assert before.status == "open"
+    assert before.filled_size == pytest.approx(0.0)
+
+    m.set_quote("LIM", RecordedQuote(bid=9.93, ask=9.94))
+    after, _ = m.get_order(placed["order_id"])
+    assert after.status == "filled"
+    assert after.filled_size == pytest.approx(10.0)
+    assert after.average_filled_price == pytest.approx(9.94)
+
+    m.set_quote("SELLREST", RecordedQuote(bid=9.00, ask=9.02))
+    sell = m.place_limit_order_gtc(
+        product_id="SELLREST", side="sell", base_size="10", limit_price="9.80"
+    )
+    sell_before, _ = m.get_order(sell["order_id"])
+    assert sell_before.status == "open"
+    assert sell_before.filled_size == pytest.approx(0.0)
+
+    m.set_quote("SELLREST", RecordedQuote(bid=9.81, ask=9.83))
+    sell_after, _ = m.get_order(sell["order_id"])
+    assert sell_after.status == "filled"
+    assert sell_after.average_filled_price == pytest.approx(9.81)
+
+
+def test_adverse_slippage_cannot_execute_limit_worse_than_order_bound():
+    m = MockBrokerAdapter(resting_limit_fills=True, slippage_bps=100.0)
+    m.set_clock(_BASE)
+
+    m.set_quote("BUY", RecordedQuote(bid=9.98, ask=10.00))
+    buy = m.place_limit_order_gtc(
+        product_id="BUY", side="buy", base_size="10", limit_price="10.05"
+    )
+    buy_order, _ = m.get_order(buy["order_id"])
+    assert buy_order.status == "filled"
+    assert buy_order.average_filled_price == pytest.approx(10.05)
+
+    m.set_quote("SELL", RecordedQuote(bid=10.00, ask=10.02))
+    sell = m.place_limit_order_gtc(
+        product_id="SELL", side="sell", base_size="10", limit_price="9.95"
+    )
+    sell_order, _ = m.get_order(sell["order_id"])
+    assert sell_order.status == "filled"
+    assert sell_order.average_filled_price == pytest.approx(9.95)
+
+
 # ── (c) ACK / LATENCY from the observed distribution ─────────────────────────────────
 def test_default_ack_latency_base_is_documented_median():
     assert DEFAULT_ACK_LATENCY_SECONDS == pytest.approx(10.0)
@@ -269,3 +353,472 @@ def test_fill_model_is_deterministic_across_two_identical_runs():
         return (o.status, round(o.filled_size, 6), round(o.average_filled_price or 0.0, 6))
 
     assert _run() == _run()
+
+
+def _exact_print_broker(
+    *,
+    participation: float = 0.25,
+    latency_seconds: float = 0.0,
+    expected_sequences: tuple[int, ...] = tuple(range(1, 11)),
+) -> MockBrokerAdapter:
+    broker = MockBrokerAdapter(
+        resting_limit_fills=True,
+        volume_cap_enabled=True,
+        volume_participation_frac=participation,
+        exact_print_fills=True,
+        exact_print_order_latency_seconds=latency_seconds,
+    )
+    broker.configure_verified_exact_print_inventory(
+        _mint_verified_exact_print_inventory(
+            capture_identity_sha256="a" * 64,
+            final_capture_seal_sha256="b" * 64,
+            release_order_root_sha256="c" * 64,
+            event_sha256s=tuple(
+                hashlib.sha256(f"exact-print-{sequence}".encode()).hexdigest()
+                for sequence in expected_sequences
+            ),
+        )
+    )
+    return broker
+
+
+def _exact_print(
+    sequence: int,
+    *,
+    release_ordinal: int | None = None,
+    provider_offset: float,
+    received_offset: float | None = None,
+    available_offset: float,
+    price: float = 10.0,
+    size: float = 100.0,
+    bid: float | None = 9.99,
+    ask: float | None = 10.0,
+    conditions: tuple[str, ...] = (),
+    capture_identity_sha256: str = "a" * 64,
+):
+    base = _BASE.replace(tzinfo=timezone.utc)
+    return _mint_verified_exact_print(
+        event_sha256=hashlib.sha256(f"exact-print-{sequence}".encode()).hexdigest(),
+        sequence=sequence,
+        release_ordinal=release_ordinal or sequence,
+        capture_identity_sha256=capture_identity_sha256,
+        final_capture_seal_sha256="b" * 64,
+        release_order_root_sha256="c" * 64,
+        product_id="XPR",
+        provider_event_at=base + timedelta(seconds=provider_offset),
+        received_at=base
+        + timedelta(
+            seconds=(available_offset if received_offset is None else received_offset)
+        ),
+        available_at=base + timedelta(seconds=available_offset),
+        price=price,
+        size=size,
+        bid=bid,
+        ask=ask,
+        conditions=conditions,
+    )
+
+
+def test_exact_print_budget_is_shared_fifo_across_concurrent_orders():
+    broker = _exact_print_broker(participation=0.25)
+    broker.set_clock(_BASE)
+    broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    first = broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="20", limit_price="10.05"
+    )
+    second = broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="20", limit_price="10.05"
+    )
+    assert broker.get_order(first["order_id"])[0].filled_size == pytest.approx(0.0)
+    assert broker.get_order(second["order_id"])[0].filled_size == pytest.approx(0.0)
+
+    broker.set_clock(_BASE + timedelta(seconds=2))
+    broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    )
+
+    first_order = broker.get_order(first["order_id"])[0]
+    second_order = broker.get_order(second["order_id"])[0]
+    assert first_order.status == "filled"
+    assert first_order.filled_size == pytest.approx(20.0)
+    assert second_order.status == "open"
+    assert second_order.filled_size == pytest.approx(5.0)
+    allocations = broker.exact_print_allocations
+    assert [value.quantity for value in allocations] == pytest.approx([20.0, 5.0])
+    assert sum(value.quantity for value in allocations) == pytest.approx(25.0)
+    assert broker.exact_print_audit[0]["participation_budget"] == pytest.approx(25.0)
+
+
+def test_exact_print_mode_rejects_aggregate_volume_and_market_fill_shortcuts():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE)
+    broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    with pytest.raises(ValueError, match="aggregate printed volume"):
+        broker.set_printed_volume("XPR", 1000.0)
+    result = broker.place_market_order(product_id="XPR", side="buy", base_size="10")
+    assert result["ok"] is False
+    assert result["error"] == EXACT_PRINT_MARKET_FILL_UNAVAILABLE
+    assert result["coverage_unavailable"] is True
+
+
+def test_exact_print_provider_event_before_order_cannot_fill_on_late_release():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE + timedelta(seconds=10))
+    broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    placed = broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="20", limit_price="10.05"
+    )
+    broker.set_clock(_BASE + timedelta(seconds=15))
+    broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=5.0, available_offset=15.0)
+    )
+    order = broker.get_order(placed["order_id"])[0]
+    assert order.status == "open"
+    assert order.filled_size == pytest.approx(0.0)
+    assert broker.exact_print_audit[0]["candidate_order_ids"] == []
+
+
+def test_exact_print_requires_latency_to_elapse_in_provider_event_time():
+    broker = _exact_print_broker(latency_seconds=1.0)
+    broker.set_clock(_BASE)
+    broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    placed = broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="20", limit_price="10.05"
+    )
+    broker.set_clock(_BASE + timedelta(seconds=2))
+    broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=0.5, available_offset=2.0)
+    )
+    assert broker.get_order(placed["order_id"])[0].filled_size == pytest.approx(0.0)
+    broker.set_clock(_BASE + timedelta(seconds=3))
+    broker.release_verified_exact_print(
+        _exact_print(2, provider_offset=1.5, available_offset=3.0)
+    )
+    assert broker.get_order(placed["order_id"])[0].filled_size == pytest.approx(20.0)
+
+
+def test_exact_print_sell_requires_bid_side_print_and_respects_limit():
+    broker = _exact_print_broker(participation=1.0)
+    broker.set_clock(_BASE)
+    broker.set_quote("XPR", RecordedQuote(bid=10.0, ask=10.02))
+    placed = broker.place_limit_order_gtc(
+        product_id="XPR", side="sell", base_size="10", limit_price="9.95"
+    )
+    broker.set_clock(_BASE + timedelta(seconds=2))
+    broker.release_verified_exact_print(
+        _exact_print(
+            1,
+            provider_offset=1.0,
+            available_offset=2.0,
+            price=10.0,
+            size=10.0,
+            bid=10.0,
+            ask=10.02,
+        )
+    )
+    order = broker.get_order(placed["order_id"])[0]
+    assert order.status == "filled"
+    assert order.average_filled_price == pytest.approx(10.0)
+    assert broker.exact_print_allocations[0].side == "sell"
+
+
+@pytest.mark.parametrize(
+    ("price", "bid", "ask", "conditions", "disposition"),
+    [
+        (9.995, 9.99, 10.0, (), "inside_spread_aggressor_unresolved"),
+        (10.0, 9.99, 10.0, ("UNMAPPED",), "print_conditions_unsupported"),
+        (10.0, None, None, (), "print_nbbo_unavailable"),
+        (10.0, 10.0, 10.0, (), "print_quote_side_ambiguous"),
+    ],
+)
+def test_exact_print_unresolved_execution_semantics_fail_closed(
+    price, bid, ask, conditions, disposition
+):
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE)
+    broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    placed = broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="10", limit_price="10.05"
+    )
+    broker.set_clock(_BASE + timedelta(seconds=2))
+    broker.release_verified_exact_print(
+        _exact_print(
+            1,
+            provider_offset=1.0,
+            available_offset=2.0,
+            price=price,
+            bid=bid,
+            ask=ask,
+            conditions=conditions,
+        )
+    )
+    assert broker.get_order(placed["order_id"])[0].filled_size == pytest.approx(0.0)
+    assert broker.exact_print_audit[0]["disposition"] == disposition
+    assert any(
+        value.startswith("exact_print_execution_semantics_unavailable:")
+        for value in broker.exact_print_counterfactual_authority_blockers
+    )
+
+
+def test_exact_print_rejects_future_duplicate_and_regressing_release():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE + timedelta(seconds=1))
+    future = _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    before_future = broker.exact_print_allocation_root_sha256
+    with pytest.raises(ValueError, match="before its available_at"):
+        broker.release_verified_exact_print(future)
+    assert broker.exact_print_allocation_root_sha256 == before_future
+    broker.set_clock(_BASE + timedelta(seconds=3))
+    later = _exact_print(
+        2, release_ordinal=1, provider_offset=2.0, available_offset=3.0
+    )
+    broker.release_verified_exact_print(later)
+    with pytest.raises(ValueError, match="released twice"):
+        broker.release_verified_exact_print(later)
+
+    separate = _exact_print_broker()
+    separate.set_clock(_BASE + timedelta(seconds=4))
+    separate.release_verified_exact_print(later)
+    earlier = _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    with pytest.raises(ValueError, match="release ordinal is not contiguous"):
+        separate.release_verified_exact_print(earlier)
+
+
+def test_exact_print_rejects_availability_regression_even_with_valid_ordinal():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE + timedelta(seconds=5))
+    first_released = _exact_print(
+        2,
+        release_ordinal=1,
+        provider_offset=2.0,
+        available_offset=4.0,
+    )
+    delayed_prefix_release = _exact_print(
+        5,
+        release_ordinal=2,
+        provider_offset=1.0,
+        available_offset=3.0,
+    )
+    broker.release_verified_exact_print(first_released)
+    before = broker.exact_print_allocation_root_sha256
+    with pytest.raises(ValueError, match="availability clock regressed"):
+        broker.release_verified_exact_print(delayed_prefix_release)
+    assert broker.exact_print_allocation_root_sha256 == before
+
+
+def test_exact_print_release_ordinal_cannot_skip_and_clock_cannot_regress():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE + timedelta(seconds=3))
+    with pytest.raises(ValueError, match="release ordinal is not contiguous"):
+        broker.release_verified_exact_print(
+            _exact_print(
+                3,
+                release_ordinal=3,
+                provider_offset=2.0,
+                available_offset=3.0,
+            )
+        )
+    with pytest.raises(ValueError, match="clock cannot move backwards"):
+        broker.set_clock(_BASE + timedelta(seconds=2))
+
+
+def test_exact_print_capture_binding_cannot_change_mid_run():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE + timedelta(seconds=3))
+    broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    )
+    before = broker.exact_print_allocation_root_sha256
+    with pytest.raises(ValueError, match="capture binding changed"):
+        broker.release_verified_exact_print(
+            _exact_print(
+                2,
+                provider_offset=2.0,
+                available_offset=3.0,
+                capture_identity_sha256="d" * 64,
+            )
+        )
+    assert broker.exact_print_allocation_root_sha256 == before
+
+
+def test_one_exact_print_cannot_fill_opposing_sides():
+    broker = _exact_print_broker(participation=1.0)
+    broker.set_clock(_BASE)
+    broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    buy = broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="10", limit_price="10.05"
+    )
+    sell = broker.place_limit_order_gtc(
+        product_id="XPR", side="sell", base_size="10", limit_price="9.95"
+    )
+    broker.set_clock(_BASE + timedelta(seconds=2))
+    broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    )
+    assert broker.get_order(buy["order_id"])[0].status == "filled"
+    assert broker.get_order(sell["order_id"])[0].status == "open"
+    assert {value.side for value in broker.exact_print_allocations} == {"buy"}
+
+
+def test_canceled_order_and_price_beyond_limit_receive_no_exact_allocation():
+    canceled_broker = _exact_print_broker(participation=1.0)
+    canceled_broker.set_clock(_BASE)
+    canceled_broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    placed = canceled_broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="10", limit_price="10.05"
+    )
+    canceled_broker.cancel_order(placed["order_id"])
+    canceled_broker.set_clock(_BASE + timedelta(seconds=2))
+    canceled_broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    )
+    assert canceled_broker.exact_print_allocations == ()
+
+    boundary_broker = _exact_print_broker(participation=1.0)
+    boundary_broker.set_clock(_BASE)
+    boundary_broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    strict = boundary_broker.place_limit_order_gtc(
+        product_id="XPR", side="buy", base_size="10", limit_price="10.0"
+    )
+    boundary_broker.set_clock(_BASE + timedelta(seconds=2))
+    boundary_broker.release_verified_exact_print(
+        _exact_print(
+            1,
+            provider_offset=1.0,
+            available_offset=2.0,
+            price=10.0000000000001,
+            bid=9.99,
+            ask=10.0,
+        )
+    )
+    assert boundary_broker.get_order(strict["order_id"])[0].filled_size == 0.0
+
+
+def test_exact_print_provider_clock_ahead_of_receive_clock_fails_without_mutation():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE + timedelta(seconds=3))
+    before = broker.exact_print_allocation_root_sha256
+    with pytest.raises(ValueError, match="ahead of its receive clock"):
+        broker.release_verified_exact_print(
+            _exact_print(
+                1,
+                provider_offset=2.0,
+                received_offset=1.5,
+                available_offset=3.0,
+            )
+        )
+    assert broker.exact_print_allocation_root_sha256 == before
+    assert broker.exact_print_terminal_complete is False
+
+
+def test_exact_print_direct_construction_and_invalid_mode_fail_closed():
+    base = _BASE.replace(tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="verified sealed-capture provenance"):
+        VerifiedExactPrint(
+            event_sha256="a" * 64,
+            sequence=1,
+            release_ordinal=1,
+            capture_identity_sha256="b" * 64,
+            final_capture_seal_sha256="c" * 64,
+            release_order_root_sha256="d" * 64,
+            product_id="XPR",
+            provider_event_at=base,
+            received_at=base,
+            available_at=base,
+            price=10.0,
+            size=10.0,
+            bid=9.99,
+            ask=10.0,
+        )
+    with pytest.raises(ValueError, match="requires conservative resting limits"):
+        MockBrokerAdapter(
+            exact_print_fills=True,
+            exact_print_order_latency_seconds=0.0,
+        )
+    with pytest.raises(ValueError, match="requires an explicit order latency"):
+        MockBrokerAdapter(
+            resting_limit_fills=True,
+            volume_cap_enabled=True,
+            exact_print_fills=True,
+        )
+
+
+def test_exact_print_allocation_ledger_root_is_deterministic():
+    def run() -> tuple[str, str]:
+        broker = _exact_print_broker()
+        broker.set_clock(_BASE)
+        broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+        broker.place_limit_order_gtc(
+            product_id="XPR", side="buy", base_size="20", limit_price="10.05"
+        )
+        broker.set_clock(_BASE + timedelta(seconds=2))
+        broker.release_verified_exact_print(
+            _exact_print(1, provider_offset=1.0, available_offset=2.0)
+        )
+        assert broker.exact_print_evidence_grade == "DIAGNOSTIC_ONLY"
+        assert broker.exact_print_counterfactual_authority is False
+        assert broker.exact_print_counterfactual_authority_blockers
+        return broker.exact_print_policy_sha256, broker.exact_print_allocation_root_sha256
+
+    assert run() == run()
+
+
+def test_verified_exact_print_inventory_proves_tail_completeness_only_at_terminal():
+    broker = _exact_print_broker(expected_sequences=(1, 2))
+    broker.set_clock(_BASE + timedelta(seconds=3))
+    assert broker.exact_print_terminal_complete is False
+    broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    )
+    assert broker.exact_print_terminal_complete is False
+    assert (
+        "exact_print_release_tail_completeness_receipt_unavailable"
+        in broker.exact_print_counterfactual_authority_blockers
+    )
+    broker.release_verified_exact_print(
+        _exact_print(2, provider_offset=2.0, available_offset=3.0)
+    )
+    assert broker.exact_print_terminal_complete is True
+    assert (
+        "exact_print_release_tail_completeness_receipt_unavailable"
+        not in broker.exact_print_counterfactual_authority_blockers
+    )
+    assert broker.exact_print_counterfactual_authority is False
+
+
+def test_exact_print_audit_exposure_is_deep_copied():
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE + timedelta(seconds=2))
+    broker.release_verified_exact_print(
+        _exact_print(1, provider_offset=1.0, available_offset=2.0)
+    )
+    before = broker.exact_print_allocation_root_sha256
+    exposed = broker.exact_print_audit[0]
+    exposed["candidate_order_ids"].append("forged-order")
+    exposed["allocation_fill_ids"].append("forged-fill")
+    assert broker.exact_print_allocation_root_sha256 == before
+    assert broker.exact_print_audit[0]["candidate_order_ids"] == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"side": "unknown", "base_size": "10", "limit_price": "10"}, "bad_side"),
+        ({"side": "buy", "base_size": "inf", "limit_price": "10"}, "bad_base_size"),
+        ({"side": "buy", "base_size": "10", "limit_price": "inf"}, "bad_limit_price"),
+        ({"side": "buy", "base_size": "10", "limit_price": "0"}, "bad_limit_price"),
+    ],
+)
+def test_order_inputs_fail_closed_before_exact_print_allocation(kwargs, error):
+    broker = _exact_print_broker()
+    broker.set_clock(_BASE)
+    broker.set_quote("XPR", RecordedQuote(bid=9.99, ask=10.0))
+    result = broker.place_limit_order_gtc(product_id="XPR", **kwargs)
+    assert result["ok"] is False
+    assert result["error"] == error
+
+
+def test_exact_print_mode_refuses_recorded_lifecycle_configuration():
+    broker = _exact_print_broker()
+    with pytest.raises(ValueError, match="cannot mix with exact-print"):
+        broker.configure_recorded_lifecycle(intents=(), transitions=())

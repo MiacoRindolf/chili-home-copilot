@@ -76,6 +76,10 @@ pytest>=8.2,<9
 httpx==0.28.1
 playwright>=1.49.0
 psutil>=5.9.0
+# Production replay capture: fast streaming compression with substantially
+# lower CPU/file-I/O cost than per-row storage.  The capture runtime fails
+# closed if zstd is selected but this explicit dependency is unavailable.
+zstandard>=0.23.0,<1
 esprima>=4.0.1
 # Phase C (tech-debt) dev additions:
 # pytest-cov + coverage: coverage baseline for app/services/trading +

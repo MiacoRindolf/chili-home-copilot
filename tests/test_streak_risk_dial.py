@@ -119,12 +119,22 @@ def test_broker_truth_reclassified_kept_and_consec_floor():
 
 def test_consec_loss_counts_only_real_entries():
     # 2 leading NON-entry rows must not become 2 leading losses
-    rows = [(0.0, "cancelled_pre_entry"), (0.0, "error_exit"), (-50, "stop_loss"),
+    rows = [(0.0, "cancelled_pre_entry"), (0.0, "no_fill"), (-50, "stop_loss"),
             (100, "success"), (150, "success"), (120, "success"), (90, "success")]
     m, meta = streak_risk_multiplier(_db(rows))
     assert meta["n"] == 5                       # 2 non-entries pruned
     assert meta["consecutive_losses"] == 1     # only the real stop_loss, NOT 3 -> no floor
     assert m == pytest.approx(1.3)             # win_rate 0.8
+
+
+def test_ambiguous_class_only_outcomes_remain_eligible_for_legacy_callers():
+    from app.services.trading.momentum_neural.outcome_labels import (
+        is_real_entry_outcome,
+    )
+
+    assert is_real_entry_outcome("cancelled_in_trade") is True
+    assert is_real_entry_outcome("error_exit") is True
+    assert is_real_entry_outcome("no_fill") is False
 
 
 def test_window_headroom_finds_real_entries_past_non_entries():

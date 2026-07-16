@@ -68,6 +68,34 @@ def test_realized_r_computation(db):
     assert rr == pytest.approx([-1.0, 1.5])  # most-recent-first
 
 
+def test_replay_frontier_excludes_future_outcomes_from_run_r_and_streak(db):
+    frontier = _base() + timedelta(minutes=10)
+    for i in range(5):
+        _closed(
+            db,
+            realized_pnl=30.0,
+            max_loss_cap=20.0,
+            terminal_at=_base() + timedelta(minutes=i),
+            outcome_class="win",
+        )
+    for i in range(3):
+        _closed(
+            db,
+            realized_pnl=-200.0,
+            max_loss_cap=20.0,
+            terminal_at=frontier + timedelta(minutes=i + 1),
+            outcome_class="loss",
+        )
+
+    with rp.replay_risk_clock(frontier):
+        rr = rp._recent_realized_r(db, execution_family=FAM, lookback=40)
+        streak, meta = rp.streak_risk_multiplier(db, execution_family=FAM)
+
+    assert rr == pytest.approx([1.5] * 5)
+    assert streak == pytest.approx(1.5)
+    assert meta["n"] == 5
+
+
 def test_thin_history_fails_open(db):
     for i in range(5):  # < min_history (8)
         _closed(db, realized_pnl=-20.0, max_loss_cap=20.0, terminal_at=_base() + timedelta(minutes=i))

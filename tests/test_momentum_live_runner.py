@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -433,6 +433,7 @@ def test_confirmed_live_exit_is_the_only_flatten_path(monkeypatch) -> None:
         state=STATE_LIVE_ENTERED,
         mode="live",
         symbol="BTC-USD",
+        execution_family="coinbase_spot",
         risk_snapshot_json={},
         correlation_id="corr-confirmed",
     )
@@ -1322,10 +1323,11 @@ def test_a4_rescores_eligibility_only_block_when_running_up(monkeypatch, db: Ses
     monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
     calls = {"n": 0}
 
-    def _fake_tick(_db, meta=None):
+    def _fake_tick(_db, meta=None, decision_as_of_utc=None):
         calls["n"] += 1
         assert meta and meta.get("tickers") == ["CLRO"]
-        return {"ok": True}
+        assert decision_as_of_utc is not None
+        return {"ok": True, "persistence_ok": True}
 
     monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick", _fake_tick)
     monkeypatch.setattr("app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds", lambda *a, **k: 3.0)
@@ -1365,13 +1367,116 @@ def test_a4_rate_limited_to_cadence(monkeypatch, db: Session) -> None:
     monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
     calls = {"n": 0}
     monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
-                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or {"ok": True})
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or {"ok": True, "persistence_ok": True})
     monkeypatch.setattr("app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds", lambda *a, **k: 10.0)
     s = _armed_sess()
     assert _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev()) is True
     # a second call within the cadence is throttled (no second re-score).
     assert _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev()) is False
     assert calls["n"] == 1
+
+
+def test_a4_failed_persistence_releases_cadence_slot(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds",
+        lambda *a, **k: 10.0,
+    )
+    calls: list[datetime] = []
+
+    def _fake_tick(_db, *, meta=None, decision_as_of_utc=None, **_kwargs):
+        assert meta and meta.get("tickers") == ["CLRO"]
+        assert isinstance(decision_as_of_utc, datetime)
+        calls.append(decision_as_of_utc)
+        return {"ok": True, "persistence_ok": len(calls) > 1}
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+        _fake_tick,
+    )
+    t0 = datetime(2026, 7, 13, 13, 5, 0)
+    state = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(state), _lr.replay_clock(t0):
+        assert _lr._maybe_rescore_eligibility_block(
+            db, _armed_sess(), _elig_only_ev()
+        ) is False
+        assert state.a4_rescore_last == {}
+        assert _lr._maybe_rescore_eligibility_block(
+            db, _armed_sess(), _elig_only_ev()
+        ) is True
+    assert calls == [t0, t0]
+
+
+def test_a4_replay_cadence_and_second_run_are_deterministic(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds",
+        lambda *a, **k: 10.0,
+    )
+    calls: list[datetime] = []
+
+    def _fake_tick(_db, *, decision_as_of_utc=None, **_kwargs):
+        calls.append(decision_as_of_utc)
+        return {"ok": True, "persistence_ok": True}
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+        _fake_tick,
+    )
+    t0 = datetime(2026, 7, 13, 13, 5, 0)
+    first = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(first):
+        with _lr.replay_clock(t0):
+            assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is True
+        with _lr.replay_clock(t0 + timedelta(seconds=9)):
+            assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is False
+        with _lr.replay_clock(t0 + timedelta(seconds=10)):
+            assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is True
+
+    second = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(second), _lr.replay_clock(t0):
+        assert _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev()) is True
+
+    assert calls == [t0, t0 + timedelta(seconds=10), t0]
+
+
+def test_a4_replay_network_contract_error_propagates_and_releases_slot(
+    monkeypatch, db: Session
+) -> None:
+    from app.services.trading.momentum_neural.replay_capture_runtime import (
+        ReplayNetworkAccessError,
+    )
+
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds",
+        lambda *a, **k: 10.0,
+    )
+
+    def _forbidden_tick(*_args, **_kwargs):
+        raise ReplayNetworkAccessError("forbidden replay network fallback")
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+        _forbidden_tick,
+    )
+    t0 = datetime(2026, 7, 13, 13, 5, 0)
+    state = _lr.DecisionRuntimeState(clock_domain="replay_utc")
+    with _lr.decision_runtime_state(state), _lr.replay_clock(t0):
+        with pytest.raises(
+            ReplayNetworkAccessError,
+            match="forbidden replay network fallback",
+        ):
+            _lr._maybe_rescore_eligibility_block(
+                db, _armed_sess(), _elig_only_ev()
+            )
+
+    assert state.a4_rescore_last == {}
 
 
 def test_a4_flag_off_no_rescore(monkeypatch, db: Session) -> None:

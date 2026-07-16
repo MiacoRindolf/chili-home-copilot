@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
+import app.services.trading.momentum_neural.captured_paper_dispatcher as dispatch_mod
 import app.services.trading.momentum_neural.live_runner_loop as loop_mod
 from app.services.trading.momentum_neural.live_runner_loop import (
     _EVENT_TICK_MIN_SPACING_S,
@@ -36,8 +38,32 @@ def _q(bid=None, mid=None):
     return SimpleNamespace(bid=bid, mid=mid, price=mid)
 
 
-_IQFEED_PIN = "iqfeed-l1-quote-provenance-v2+sha256:0123456789abcdef"
+_IQFEED_PIN = "iqfeed-l1-exact-print-provenance-v3+sha256:0123456789abcdef"
 _IQFEED_RUN_ID = "12553525-2da8-4b22-a69f-d3034871e90c"
+_CAPTURED_PAPER_ACCOUNT_ID = "d7cc580c-2b8f-432f-b771-1cecfb3fe87a"
+_CAPTURED_PAPER_GENERATION = "f6ef5ba0-5b91-49bf-a2f5-e71e8e270eb3"
+
+
+def _captured_paper_owner_marker(
+    *,
+    session_id: int,
+    symbol: str,
+    account_id: str = _CAPTURED_PAPER_ACCOUNT_ID,
+    generation: str = _CAPTURED_PAPER_GENERATION,
+) -> dict:
+    request = dispatch_mod.CapturedPaperDispatchRequest(
+        session_id=session_id,
+        symbol=symbol,
+        execution_family="alpaca_spot",
+        account_scope="alpaca:paper",
+        expected_account_id=account_id,
+        code_build_sha256="a" * 64,
+        config_sha256="b" * 64,
+        capture_receipt_sha256="c" * 64,
+        runtime_generation=generation,
+        first_dip_policy_mode="candidate",
+    )
+    return dispatch_mod.captured_paper_session_owner_marker(request)
 
 
 def _iqfeed_payload(now: datetime, **overrides) -> str:
@@ -223,6 +249,37 @@ def test_stop_confirmation_bypasses_ordinary_event_debounce():
     loop._dispatch(88, guarantee_after_inflight=True)
 
     assert ran == [88]
+
+
+def test_entry_continuation_runs_post_inflight_without_scheduler_spacing():
+    loop = LiveRunnerLoop()
+    loop._running = True
+    ran: list[int] = []
+
+    def _mechanical_three_state_tick(sid):
+        ran.append(sid)
+        if len(ran) < 3:
+            assert loop.schedule_entry_continuation(sid) is True
+
+    class _SyncPool:
+        def submit(self, fn, *args):
+            fn(*args)
+
+    loop._tick_session = _mechanical_three_state_tick  # type: ignore
+    loop._pool = _SyncPool()  # type: ignore
+    loop._last_event_tick[99] = time.monotonic()
+
+    # candidate -> pending -> pre-submit runs as three committed invocations,
+    # but neither transition waits for the ordinary two-second debounce or a
+    # minute-scale scheduler pulse.
+    assert loop._dispatch(99, guarantee_after_inflight=True) is True
+    assert ran == [99, 99, 99]
+    assert loop._stop_confirm_redispatch == {}
+
+
+def test_entry_continuation_is_noop_without_active_owner():
+    loop = LiveRunnerLoop()
+    assert loop.schedule_entry_continuation(99) is False
 
 
 def test_fresh_exact_build_q_notify_dispatches_once(monkeypatch):
@@ -718,6 +775,853 @@ def test_old_generation_tracker_refresh_cannot_overwrite_new_snapshot(monkeypatc
     assert [row["session_id"] for row in tracker.get_sessions_for_symbol("NEW")] == [2]
 
 
+def test_captured_paper_inventory_validator_accepts_exact_owner_marker():
+    marker = _captured_paper_owner_marker(session_id=41, symbol="ACTU")
+    row = SimpleNamespace(
+        id=41,
+        symbol="ACTU",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_owner": deepcopy(marker),
+        },
+    )
+
+    verified = dispatch_mod.validate_captured_paper_session_owner_inventory(
+        row,
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        expected_runtime_generation=_CAPTURED_PAPER_GENERATION,
+        expected_execution_family="alpaca_spot",
+    )
+
+    assert verified == marker
+    assert verified is not marker
+
+
+def test_captured_paper_inventory_validator_rejects_missing_owner_marker():
+    row = SimpleNamespace(
+        id=41,
+        symbol="ACTU",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+        },
+    )
+
+    with pytest.raises(
+        dispatch_mod.CapturedPaperRuntimeUnavailableError,
+        match="captured_paper_session_owner_missing",
+    ):
+        dispatch_mod.validate_captured_paper_session_owner_inventory(
+            row,
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            expected_runtime_generation=_CAPTURED_PAPER_GENERATION,
+        )
+
+
+def test_captured_paper_inventory_validator_rejects_owner_hash_tamper():
+    marker = _captured_paper_owner_marker(session_id=41, symbol="ACTU")
+    marker["config_sha256"] = "9" * 64
+    row = SimpleNamespace(
+        id=41,
+        symbol="ACTU",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_owner": marker,
+        },
+    )
+
+    with pytest.raises(
+        dispatch_mod.CapturedPaperRuntimeUnavailableError,
+        match="captured_paper_session_owner_marker_hash_mismatch",
+    ):
+        dispatch_mod.validate_captured_paper_session_owner_inventory(
+            row,
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            expected_runtime_generation=_CAPTURED_PAPER_GENERATION,
+        )
+
+
+def test_captured_paper_inventory_validator_rejects_empty_owner_generation():
+    marker = _captured_paper_owner_marker(session_id=41, symbol="ACTU")
+    marker["runtime_generation"] = ""
+    row = SimpleNamespace(
+        id=41,
+        symbol="ACTU",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_owner": marker,
+        },
+    )
+
+    with pytest.raises(
+        dispatch_mod.CapturedPaperRuntimeUnavailableError,
+        match="captured_paper_session_owner_marker_invalid",
+    ):
+        dispatch_mod.validate_captured_paper_session_owner_inventory(
+            row,
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            expected_runtime_generation=_CAPTURED_PAPER_GENERATION,
+        )
+
+
+@pytest.mark.parametrize(
+    ("row_overrides", "scope_overrides", "reason"),
+    [
+        (
+            {"id": 42},
+            {},
+            "captured_paper_session_owner_route_mismatch",
+        ),
+        (
+            {"symbol": "OTHER"},
+            {},
+            "captured_paper_session_owner_route_mismatch",
+        ),
+        (
+            {"execution_family": "coinbase_spot"},
+            {},
+            "captured_paper_session_owner_route_mismatch",
+        ),
+        (
+            {},
+            {"expected_account_id": "3929f568-40fb-4c1d-a263-4c3d0ee38ae8"},
+            "captured_paper_session_owner_inventory_scope_mismatch",
+        ),
+        (
+            {},
+            {
+                "expected_runtime_generation": (
+                    "be1694d0-76c9-477a-a355-8fb110276302"
+                )
+            },
+            "captured_paper_session_owner_inventory_scope_mismatch",
+        ),
+        (
+            {},
+            {"expected_execution_family": "coinbase_spot"},
+            "captured_paper_session_owner_inventory_scope_invalid",
+        ),
+    ],
+)
+def test_captured_paper_inventory_validator_rejects_route_or_scope_drift(
+    row_overrides,
+    scope_overrides,
+    reason,
+):
+    row_values = {
+        "id": 41,
+        "symbol": "ACTU",
+        "execution_family": "alpaca_spot",
+    }
+    row_values.update(row_overrides)
+    row = SimpleNamespace(
+        **row_values,
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_owner": _captured_paper_owner_marker(
+                session_id=41,
+                symbol="ACTU",
+            ),
+        },
+    )
+    scope = {
+        "expected_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+        "expected_runtime_generation": _CAPTURED_PAPER_GENERATION,
+        "expected_execution_family": "alpaca_spot",
+    }
+    scope.update(scope_overrides)
+
+    with pytest.raises(
+        dispatch_mod.CapturedPaperRuntimeUnavailableError,
+        match=reason,
+    ):
+        dispatch_mod.validate_captured_paper_session_owner_inventory(
+            row,
+            **scope,
+        )
+
+
+def test_captured_paper_tracker_rejects_entire_foreign_runnable_inventory(
+    monkeypatch,
+):
+    account_id = _CAPTURED_PAPER_ACCOUNT_ID
+    generation = _CAPTURED_PAPER_GENERATION
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=account_id,
+        runtime_generation=generation,
+    )
+    tracker = loop_mod._LiveSessionTracker(scope)
+    exact = SimpleNamespace(
+        id=1,
+        symbol="ACTU",
+        state="live_trailing",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": account_id,
+            "captured_paper_runtime_generation": generation,
+            "captured_paper_session_owner": _captured_paper_owner_marker(
+                session_id=1,
+                symbol="ACTU",
+            ),
+        },
+    )
+    foreign = SimpleNamespace(
+        id=2,
+        symbol="BTC-USD",
+        state="live_trailing",
+        execution_family="coinbase_spot",
+        risk_snapshot_json={},
+    )
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def all(self):
+            return [exact, foreign]
+
+    class _Db:
+        def query(self, _model):
+            return _Query()
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(loop_mod, "SessionLocal", _Db)
+    tracker.set_owner_generation(1, clear=True)
+
+    assert tracker.refresh(expected_generation=1) is False
+    assert tracker.count() == 0
+    assert tracker.scope_is_healthy() is False
+
+
+def test_captured_paper_tracker_ignores_distinct_preowner_state(monkeypatch):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    tracker = loop_mod._LiveSessionTracker(scope)
+    preowner = SimpleNamespace(
+        id=40,
+        symbol="PREP",
+        state="captured_paper_preowner",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "schema_version": "chili.captured-paper-preowner-risk-snapshot.v1",
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_preowner": {
+                "schema_version": "chili.captured-paper-session-preowner.v1",
+            },
+        },
+    )
+    owned = SimpleNamespace(
+        id=41,
+        symbol="ACTU",
+        state="live_trailing",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_owner": _captured_paper_owner_marker(
+                session_id=41,
+                symbol="ACTU",
+            ),
+        },
+    )
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def all(self):
+            # Defense-in-depth: a real SQL query excludes PREOWNER because it
+            # is outside LIVE_RUNNER_RUNNABLE_STATES.  Even if a query/mock
+            # returns it, the dedicated tracker never aliases it to OWNER.
+            return [preowner, owned]
+
+    class _Db:
+        def query(self, _model):
+            return _Query()
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(loop_mod, "SessionLocal", _Db)
+    tracker.set_owner_generation(1, clear=True)
+
+    assert tracker.refresh(expected_generation=1) is True
+    assert tracker.scope_is_healthy() is True
+    assert tracker.get_sessions_for_symbol("PREP") == []
+    assert [
+        row["session_id"] for row in tracker.get_sessions_for_symbol("ACTU")
+    ] == [41]
+
+
+def test_captured_paper_tracker_rejects_runnable_preowner_without_final_owner(
+    monkeypatch,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    tracker = loop_mod._LiveSessionTracker(scope)
+    invalid = SimpleNamespace(
+        id=40,
+        symbol="PREP",
+        state="live_pending_entry",
+        execution_family="alpaca_spot",
+        risk_snapshot_json={
+            "schema_version": "chili.captured-paper-preowner-risk-snapshot.v1",
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "captured_paper_session_preowner": {
+                "schema_version": "chili.captured-paper-session-preowner.v1",
+            },
+        },
+    )
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def all(self):
+            return [invalid]
+
+    class _Db:
+        def query(self, _model):
+            return _Query()
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(loop_mod, "SessionLocal", _Db)
+    tracker.set_owner_generation(1, clear=True)
+
+    assert tracker.refresh(expected_generation=1) is False
+    assert tracker.count() == 0
+    assert tracker.scope_is_healthy() is False
+
+
+def test_captured_paper_loop_tick_uses_strict_dispatch_only(monkeypatch):
+    account_id = "d7cc580c-2b8f-432f-b771-1cecfb3fe87a"
+    generation = "f6ef5ba0-5b91-49bf-a2f5-e71e8e270eb3"
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=account_id,
+        runtime_generation=generation,
+    )
+    loop = LiveRunnerLoop(captured_paper_scope=scope)
+    lifecycle = SimpleNamespace(
+        commits=0,
+        rollbacks=0,
+        closes=0,
+        transaction_active=False,
+    )
+
+    def begin():
+        lifecycle.transaction_active = True
+
+    def commit():
+        lifecycle.commits += 1
+        lifecycle.transaction_active = False
+
+    def rollback():
+        lifecycle.rollbacks += 1
+        lifecycle.transaction_active = False
+
+    db = SimpleNamespace(
+        begin=begin,
+        in_transaction=lambda: lifecycle.transaction_active,
+        commit=commit,
+        rollback=rollback,
+        close=lambda: setattr(lifecycle, "closes", lifecycle.closes + 1),
+    )
+    calls = []
+    monkeypatch.setattr(loop_mod, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        loop_mod,
+        "dispatch_live_runner_tick",
+        lambda *_args, **_kwargs: pytest.fail("ordinary dispatcher is forbidden"),
+    )
+    monkeypatch.setattr(
+        loop_mod,
+        "dispatch_captured_paper_live_runner_tick",
+        lambda owned_db, session_id, **kwargs: calls.append(
+            (owned_db, session_id, kwargs)
+        ),
+    )
+
+    loop._tick_session(41)
+
+    assert calls == [
+        (
+            db,
+            41,
+            {
+                "expected_account_id": account_id,
+                "expected_runtime_generation": generation,
+                "expected_execution_family": "alpaca_spot",
+            },
+        )
+    ]
+    assert lifecycle.commits == 1
+    assert lifecycle.closes == 1
+
+
+def test_expired_initial_release_refreshes_tracker_after_commit(monkeypatch):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    loop = LiveRunnerLoop(captured_paper_scope=scope)
+    loop._running = True
+    loop._generation = 7
+    loop._stop_event = loop_mod.threading.Event()
+    lifecycle = SimpleNamespace(commits=0, rollbacks=0, closes=0)
+    db = SimpleNamespace(
+        commit=lambda: setattr(lifecycle, "commits", lifecycle.commits + 1),
+        rollback=lambda: setattr(lifecycle, "rollbacks", lifecycle.rollbacks + 1),
+        close=lambda: setattr(lifecycle, "closes", lifecycle.closes + 1),
+    )
+    refreshes = []
+    monkeypatch.setattr(loop_mod, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        loop_mod,
+        "dispatch_captured_paper_live_runner_tick",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "reason": "captured_paper_initial_authority_expired_released",
+            "refresh_session_inventory": True,
+            "opportunity_consumed": False,
+            "risk_reserved": False,
+            "outbox_created": False,
+            "order_posted": False,
+            "broker_order_post_calls": 0,
+        },
+    )
+    monkeypatch.setattr(
+        loop._tracker,
+        "refresh",
+        lambda **kwargs: refreshes.append(kwargs) or True,
+    )
+
+    loop._tick_session(41)
+
+    assert lifecycle.commits == 1
+    assert lifecycle.closes == 1
+    assert refreshes == [{"expected_generation": 7}]
+
+
+def test_captured_paper_iqfeed_event_refuses_legacy_symbol_admission(monkeypatch):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id="d7cc580c-2b8f-432f-b771-1cecfb3fe87a",
+        runtime_generation="f6ef5ba0-5b91-49bf-a2f5-e71e8e270eb3",
+    )
+    loop = LiveRunnerLoop(captured_paper_scope=scope)
+    monkeypatch.setattr(
+        loop_mod,
+        "SessionLocal",
+        lambda: pytest.fail("legacy captured PAPER admission opened the database"),
+    )
+
+    result = loop._admit_iqfeed_symbol(
+        "ACTU",
+        {"source": "iqfeed_l1"},
+        expected_generation=1,
+    )
+
+    assert result == {
+        "ok": False,
+        "admitted": False,
+        "skipped": "captured_paper_sealed_symbol_admission_unavailable",
+        "symbol": "ACTU",
+        "opportunity_consumed": False,
+        "risk_reserved": False,
+        "order_posted": False,
+        "broker_order_post_calls": 0,
+    }
+
+
+@pytest.mark.parametrize("admitter", [None, object()])
+def test_captured_paper_start_rejects_missing_or_noncallable_admitter(
+    monkeypatch,
+    admitter,
+):
+    monkeypatch.setattr(loop_mod, "_loop", None)
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_autopilot_price_bus_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_scheduler_enabled",
+        False,
+    )
+
+    assert (
+        loop_mod.start_captured_paper_live_runner_loop(
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            runtime_generation=_CAPTURED_PAPER_GENERATION,
+            captured_paper_symbol_admitter=admitter,
+        )
+        is False
+    )
+    assert loop_mod._loop is None
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "listener_disabled",
+        "bridge_env_missing",
+        "bridge_notify_disabled",
+        "channel_mismatch",
+        "uppercase_channel",
+        "bad_build",
+        "stale_v2_build",
+    ],
+)
+def test_captured_paper_start_refuses_invalid_iqfeed_admission_contract(
+    monkeypatch,
+    case,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_enabled",
+        case != "listener_disabled",
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_channel",
+        (
+            "consumer_channel"
+            if case == "channel_mismatch"
+            else ("Momentum_Iqfeed_L1" if case == "uppercase_channel" else "momentum_iqfeed_l1")
+        ),
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_iqfeed_l1_authoritative_bridge_build",
+        (
+            "unreviewed"
+            if case == "bad_build"
+            else (
+                "iqfeed-l1-quote-provenance-v2+sha256:0123456789abcdef"
+                if case == "stale_v2_build"
+                else _IQFEED_PIN
+            )
+        ),
+        raising=False,
+    )
+    if case == "bridge_env_missing":
+        monkeypatch.delenv("IQFEED_NOTIFY_ENABLED", raising=False)
+        monkeypatch.delenv("IQFEED_NOTIFY_CHANNEL", raising=False)
+    else:
+        monkeypatch.setenv(
+            "IQFEED_NOTIFY_ENABLED",
+            "0" if case == "bridge_notify_disabled" else "1",
+        )
+        monkeypatch.setenv(
+            "IQFEED_NOTIFY_CHANNEL",
+            "Momentum_Iqfeed_L1" if case == "uppercase_channel" else "momentum_iqfeed_l1",
+        )
+    fence_calls = []
+    monkeypatch.setattr(
+        loop,
+        "_acquire_owner_fence",
+        lambda: fence_calls.append("fence") or True,
+    )
+
+    assert loop.start() is False
+    assert fence_calls == []
+    assert loop._running is False
+    assert loop._generation == 0
+
+
+def _install_captured_paper_start_fakes(monkeypatch, loop):
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_channel",
+        "momentum_iqfeed_l1",
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_iqfeed_l1_authoritative_bridge_build",
+        _IQFEED_PIN,
+        raising=False,
+    )
+    monkeypatch.setenv("IQFEED_NOTIFY_ENABLED", "1")
+    monkeypatch.setenv("IQFEED_NOTIFY_CHANNEL", "momentum_iqfeed_l1")
+
+    def _acquire():
+        loop._owner_fence_connection = object()
+        return True
+
+    def _release():
+        loop._owner_fence_connection = None
+        loop._owner_fence_generation = None
+
+    monkeypatch.setattr(loop, "_acquire_owner_fence", _acquire)
+    monkeypatch.setattr(loop, "_owner_fence_is_held", lambda: True)
+    monkeypatch.setattr(loop, "_release_owner_fence", _release)
+    monkeypatch.setattr(loop._tracker, "refresh", lambda **_kwargs: True)
+    monkeypatch.setattr(loop._tracker, "get_all_symbols", lambda: set())
+    monkeypatch.setattr(loop._tracker, "count", lambda: 0)
+    monkeypatch.setattr(loop, "_subscribe_active_symbols", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        loop,
+        "_record_lane_health_heartbeat",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        loop,
+        "_refresh_loop",
+        lambda _generation, stop_event: stop_event.wait(),
+    )
+
+
+def test_captured_paper_start_waits_for_generation_owned_notify_listener(
+    monkeypatch,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {"ok": True},
+    )
+    _install_captured_paper_start_fakes(monkeypatch, loop)
+    release_listener = loop_mod.threading.Event()
+
+    def _notify(generation, stop_event):
+        loop._mark_iqfeed_notify_listener_ready(generation)
+        while loop._generation_active(generation, stop_event):
+            if release_listener.wait(0.01):
+                return
+
+    monkeypatch.setattr(loop, "_iqfeed_notify_loop", _notify)
+
+    try:
+        assert loop.start() is True
+        assert loop.admission_owner_ready() is True
+        assert loop._notify_thread_generation == loop._generation
+        release_listener.set()
+        loop._notify_thread.join(timeout=2.0)
+        assert not loop._notify_thread.is_alive()
+        assert loop.admission_owner_ready() is False
+    finally:
+        loop.stop()
+
+
+def test_captured_paper_listener_startup_failure_rolls_back_owner(monkeypatch):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {"ok": True},
+    )
+    _install_captured_paper_start_fakes(monkeypatch, loop)
+
+    def _notify(generation, _stop_event):
+        loop._mark_iqfeed_notify_listener_failed(generation)
+
+    monkeypatch.setattr(loop, "_iqfeed_notify_loop", _notify)
+
+    with pytest.raises(
+        RuntimeError,
+        match="IQFeed notify listener failed startup",
+    ):
+        loop.start()
+
+    assert loop._running is False
+    assert loop._owner_fence_connection is None
+    assert loop._notify_thread is None
+    assert loop._notify_thread_generation is None
+    assert loop.admission_owner_ready() is False
+
+
+def test_captured_paper_admission_runs_under_exact_generation_and_refreshes(
+    monkeypatch,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    calls = []
+    loop = None
+
+    def admitter(*, symbol, payload):
+        calls.append(
+            {
+                "symbol": symbol,
+                "payload": payload,
+                "inflight": list(loop._iqfeed_admission_inflight.values()),
+            }
+        )
+        return {
+            "ok": True,
+            "admitted": True,
+            "session_id": 41,
+            "symbol": symbol,
+        }
+
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=admitter,
+    )
+    loop._running = True
+    loop._generation = 7
+    refreshes = []
+    monkeypatch.setattr(
+        loop._tracker,
+        "refresh",
+        lambda **kwargs: refreshes.append(kwargs) or True,
+    )
+    payload = {"source": "iqfeed_l1", "message_type": "Q"}
+
+    assert (
+        loop._admit_iqfeed_symbol(
+            "ACTU",
+            payload,
+            expected_generation=6,
+        )
+        is None
+    )
+    assert calls == []
+
+    result = loop._admit_iqfeed_symbol(
+        "ACTU",
+        payload,
+        expected_generation=7,
+    )
+
+    assert result == {
+        "ok": True,
+        "admitted": True,
+        "session_id": 41,
+        "symbol": "ACTU",
+    }
+    assert calls == [
+        {
+            "symbol": "ACTU",
+            "payload": payload,
+            "inflight": [(7, "ACTU")],
+        }
+    ]
+    assert refreshes == [{"expected_generation": 7}]
+    assert loop._iqfeed_admission_inflight == {}
+
+
+def test_ordinary_loop_cannot_install_captured_paper_admitter():
+    with pytest.raises(
+        ValueError,
+        match="ordinary live loop cannot install captured PAPER admission",
+    ):
+        LiveRunnerLoop(captured_paper_symbol_admitter=lambda **_kwargs: {})
+
+
+def test_captured_paper_singleton_retry_requires_exact_admitter_identity(
+    monkeypatch,
+):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    admitter = lambda **_kwargs: {"ok": True}
+    selected = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=admitter,
+    )
+    starts = []
+    monkeypatch.setattr(selected, "start", lambda: starts.append("start") or True)
+    monkeypatch.setattr(loop_mod, "_loop", selected)
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_autopilot_price_bus_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_scheduler_enabled",
+        False,
+    )
+
+    assert (
+        loop_mod.start_captured_paper_live_runner_loop(
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            runtime_generation=_CAPTURED_PAPER_GENERATION,
+            captured_paper_symbol_admitter=admitter,
+        )
+        is True
+    )
+    assert (
+        loop_mod.start_captured_paper_live_runner_loop(
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            runtime_generation=_CAPTURED_PAPER_GENERATION,
+            captured_paper_symbol_admitter=(
+                lambda **_kwargs: {"ok": True}
+            ),
+        )
+        is False
+    )
+    assert starts == ["start"]
+
+
 def test_iqfeed_listener_registration_cannot_spoof_lane_health(monkeypatch):
     loop = LiveRunnerLoop()
     loop._running = True
@@ -775,6 +1679,102 @@ def test_iqfeed_listener_registration_cannot_spoof_lane_health(monkeypatch):
     # LISTEN registration alone proves neither tracker refresh nor price-bus exit
     # ownership, so it cannot keep the owner-health signal green.
     assert heartbeats == []
+
+
+def test_captured_paper_listener_is_not_ready_during_reconnect_gap(monkeypatch):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_notify_channel",
+        "momentum_iqfeed_l1",
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_iqfeed_l1_authoritative_bridge_build",
+        _IQFEED_PIN,
+        raising=False,
+    )
+    monkeypatch.setenv("IQFEED_NOTIFY_ENABLED", "1")
+    monkeypatch.setenv("IQFEED_NOTIFY_CHANNEL", "momentum_iqfeed_l1")
+
+    class _Cursor:
+        def execute(self, _sql):
+            return None
+
+    class _Connection:
+        notifies = []
+
+        def set_session(self, **_kwargs):
+            return None
+
+        def cursor(self):
+            return _Cursor()
+
+        def close(self):
+            return None
+
+    connections = iter((_Connection(), _Connection()))
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "psycopg2",
+        SimpleNamespace(connect=lambda _url: next(connections)),
+    )
+
+    observations = []
+
+    class _StopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, _timeout=None):
+            observations.append(
+                (
+                    "reconnect_gap",
+                    loop._iqfeed_notify_listener_alive_for_generation(1, self),
+                )
+            )
+            return False
+
+    stop_event = _StopEvent()
+    loop._running = True
+    loop._generation = 1
+    loop._stop_event = stop_event
+    loop._notify_thread_generation = 1
+    loop._notify_startup_event = loop_mod.threading.Event()
+    loop._notify_thread = loop_mod.threading.current_thread()
+    select_calls = {"count": 0}
+
+    def _disconnect_then_quiesce(_read, _write, _errors, _timeout):
+        select_calls["count"] += 1
+        observations.append(
+            (
+                "before_disconnect" if select_calls["count"] == 1 else "reconnected",
+                loop._iqfeed_notify_listener_alive_for_generation(1, stop_event),
+            )
+        )
+        if select_calls["count"] == 1:
+            raise RuntimeError("simulated LISTEN disconnect")
+        loop._running = False
+        return [], [], []
+
+    monkeypatch.setattr(loop_mod.select, "select", _disconnect_then_quiesce)
+
+    loop._iqfeed_notify_loop(1, stop_event)
+
+    assert observations == [
+        ("before_disconnect", True),
+        ("reconnect_gap", False),
+        ("reconnected", True),
+    ]
+    assert loop._notify_ready_generation is None
+    assert loop._notify_failed_generation == 1
 
 
 def test_successful_generation_owned_refresh_records_lane_health(monkeypatch):

@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+from copy import deepcopy
 import hashlib
 import json
 import logging
 import math
+import threading
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Literal, Optional, Protocol
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from sqlalchemy.orm.attributes import flag_modified
 
 from ....config import settings
@@ -73,6 +76,8 @@ from .alpaca_orphan_claims import (
     prepare_deadman_close_handoff_committed,
     finalize_deadman_close_handoff_request_committed,
     reserve_alpaca_entry_risk_committed,
+    certify_alpaca_owned_entry_posture_committed,
+    release_entry_and_adaptive_reservation_pre_post_committed,
     release_entry_claim_pre_post_committed,
     release_owner_transport_pre_post_committed,
     read_action_claim,
@@ -88,6 +93,44 @@ from .alpaca_orphan_claims import (
     retire_deadman_handoff_for_fractional_day_close_committed,
     update_action_claim_phase_committed,
 )
+from .adaptive_risk_policy import AdaptiveRiskContractError
+from .captured_paper_selection import (
+    captured_paper_candidate_generation_sha256,
+    captured_paper_observation_context_active,
+    captured_paper_observation_generation_sha256,
+    captured_paper_selection_context_active,
+    captured_paper_selection_required,
+    resolve_captured_paper_observation,
+    resolve_captured_paper_selection,
+)
+from .captured_paper_entry_intent import CapturedPaperPostCommitRequest
+from .adaptive_risk_reservation import (
+    AdaptiveReservationError,
+    AdaptiveRiskExposureQuarantined,
+    AdaptiveRiskReservationStore,
+    DurableOrderLifecycleEvidence,
+    DurableSubmitAttemptEvidence,
+    load_adaptive_risk_reservation_request,
+)
+from .adaptive_risk_runtime_contract import (
+    load_and_verify_adaptive_risk_reservation_claim,
+)
+from .alpaca_fill_activity import (
+    AlpacaFillActivityError,
+    capture_verified_alpaca_paper_order_fills,
+)
+from .alpaca_cycle_settlement import (
+    AlpacaCycleSettlementIntegrityError,
+    settle_flat_alpaca_paper_cycle,
+)
+from .alpaca_paper_identity import alpaca_paper_account_identity_sha256
+from .adaptive_risk_request_builder import (
+    AdaptiveRiskBuilderError,
+    BuiltAdaptiveRiskRequest,
+    build_adaptive_risk_request,
+    resolve_detector_setup_family,
+    runtime_adaptive_risk_capture_material,
+)
 from ..decision_ledger import (
     finalize_packet_after_simulated_exit,
     mark_packet_executed,
@@ -96,6 +139,10 @@ from ..decision_ledger import (
 )
 from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
+from .replay_errors import (
+    ReplayInputContractError,
+    ReplayOhlcvInputUnavailableError,
+)
 from .risk_policy import (
     RISK_SNAPSHOT_KEY,
     compute_risk_first_quantity,
@@ -187,6 +234,30 @@ from .hold_signals import (
 _log = logging.getLogger(__name__)
 
 KEY_LIVE_EXEC = "momentum_live_execution"
+KEY_ADAPTIVE_RISK_RESERVATION_REQUEST = "adaptive_risk_reservation_request"
+KEY_ADAPTIVE_ALPACA_LIFECYCLE = "adaptive_risk_alpaca_lifecycle"
+_ADAPTIVE_ALPACA_LIFECYCLE_SCHEMA = "chili.adaptive-risk-alpaca-lifecycle.v1"
+
+
+class _FirstDipOwnedDecisionSkipAdditive(RuntimeError):
+    """Internal control-flow sentinel; never crosses the runner boundary."""
+
+
+def _guard_first_dip_owned_decision_from_additives(
+    owned_result: tuple[bool, str, dict[str, Any]] | None,
+) -> None:
+    """Stop the additive ladder when a classified first dip owns this tick.
+
+    The caller catches the private sentinel at the detector-ladder boundary and
+    then restores ``owned_result``.  Keeping this as executable control flow at
+    the *start* of the additive section prevents a newly appended detector from
+    accidentally bypassing a negative or unavailable typed receipt merely
+    because its author forgot another per-detector ownership condition.
+    """
+
+    if owned_result is not None:
+        raise _FirstDipOwnedDecisionSkipAdditive
+
 
 AdapterFactory = Callable[[], Any]
 
@@ -254,12 +325,88 @@ def _utcnow_aware() -> datetime:
     return _utcnow().replace(tzinfo=timezone.utc)
 
 
+def _replay_l2_as_of_or_none() -> datetime | None:
+    """Historical L2 boundary in replay; preserve the live ring path in production."""
+
+    return _SIM_NOW.get()
+
+
 def _now_in_tz(zone: Any) -> datetime:
     """'now' projected into ``zone`` (e.g. ET), derived from the clock chokepoint so the sim
     clock governs the ET wall-clock window checks too. ``zone`` is a ``ZoneInfo``/tzinfo. Prod
     path is byte-identical to ``datetime.now(zone)``: with no sim clock the converted instant
     is the real wall clock in ``zone``; under replay it is the sim instant projected there."""
     return _utcnow().replace(tzinfo=timezone.utc).astimezone(zone)
+
+
+@dataclass
+class DecisionRuntimeState:
+    """Bounded process-local inputs that can otherwise leak between replay runs.
+
+    Production deliberately uses one process singleton to preserve the existing warmed
+    behavior.  ReplayV3 binds a fresh instance around an entire run so within-run state
+    persists while independent runs cannot seed each other.  This is containment only:
+    warmed-state certification still requires captured state roots/read receipts.
+    """
+
+    daily_ctx_cache: dict[str, Any] = field(default_factory=dict)
+    frontside_dist: list[tuple[float, float]] = field(default_factory=list)
+    a4_rescore_last: dict[str, float] = field(default_factory=dict)
+    clock_domain: Literal["production_monotonic", "replay_utc"] = (
+        "production_monotonic"
+    )
+
+
+_PROCESS_DECISION_RUNTIME_STATE = DecisionRuntimeState()
+_BOUND_DECISION_RUNTIME_STATE: contextvars.ContextVar[
+    DecisionRuntimeState | None
+] = contextvars.ContextVar("_chili_decision_runtime_state", default=None)
+
+
+def _current_decision_runtime_state() -> DecisionRuntimeState:
+    return _BOUND_DECISION_RUNTIME_STATE.get() or _PROCESS_DECISION_RUNTIME_STATE
+
+
+@contextlib.contextmanager
+def decision_runtime_state(state: DecisionRuntimeState) -> Iterator[None]:
+    """Bind ``state`` for one replay run and restore the prior state on every exit."""
+
+    token = _BOUND_DECISION_RUNTIME_STATE.set(state)
+    try:
+        yield
+    finally:
+        _BOUND_DECISION_RUNTIME_STATE.reset(token)
+
+
+def _decision_runtime_clock_seconds(*, explicit: float | None = None) -> float:
+    """Return the clock for TTL/rate-limit state in the active runtime domain."""
+
+    if explicit is not None:
+        return float(explicit)
+    state = _current_decision_runtime_state()
+    if state.clock_domain == "replay_utc":
+        return float(_utcnow_aware().timestamp())
+    import time as _time
+
+    return float(_time.monotonic())
+
+
+def _schedule_entry_fsm_continuation(session_id: int) -> bool:
+    """Request one post-commit event-loop tick for a mechanical entry transition.
+
+    When the event loop is not the configured owner (including offline ReplayV3
+    and legacy scheduler tests), this is a no-op.  The next invocation still
+    re-runs the full state-specific freshness, eligibility, risk, broker-owner,
+    and order-idempotency checks; this helper never performs or authorizes an
+    order itself.
+    """
+
+    try:
+        from .live_runner_loop import schedule_live_runner_entry_continuation
+
+        return bool(schedule_live_runner_entry_continuation(int(session_id)))
+    except Exception:
+        return False
 
 
 # ── REPLAY v3 P1 — RECORDED-OHLCV PROVIDER SEAM (the one heavy NETWORK read) ──────
@@ -281,6 +428,52 @@ _REPLAY_OHLCV_PROVIDER: contextvars.ContextVar[Optional[Callable[..., Any]]] = (
 )
 
 
+class LiveOhlcvCaptureSink(Protocol):
+    """Observe an OHLCV result already returned to the real FSM; never fetch."""
+
+    def on_ohlcv_result(
+        self,
+        *,
+        ticker: str,
+        interval: str,
+        period: str,
+        requested_at: datetime,
+        returned_at: datetime,
+        allow_provider_fallback: bool,
+        frame: Any,
+    ) -> bool: ...
+
+    def on_ohlcv_failure(
+        self,
+        *,
+        ticker: str,
+        interval: str,
+        period: str,
+        requested_at: datetime,
+        failed_at: datetime,
+        allow_provider_fallback: bool,
+        error: BaseException,
+    ) -> bool: ...
+
+
+_LIVE_OHLCV_CAPTURE_SINK: contextvars.ContextVar[
+    Optional[LiveOhlcvCaptureSink]
+] = contextvars.ContextVar("_chili_live_ohlcv_capture_sink", default=None)
+
+
+@contextlib.contextmanager
+def live_ohlcv_capture_sink(
+    sink: Optional[LiveOhlcvCaptureSink],
+) -> Iterator[None]:
+    """Install one observe-only OHLCV capture sink for a bounded FSM scope."""
+
+    token = _LIVE_OHLCV_CAPTURE_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _LIVE_OHLCV_CAPTURE_SINK.reset(token)
+
+
 def _replay_aware_fetch_ohlcv_df(
     ticker: str, interval: str = "1d", period: str = "6mo"
 ) -> Any:
@@ -296,10 +489,73 @@ def _replay_aware_fetch_ohlcv_df(
     serving bars as-of the sim clock (``_utcnow()``)."""
     provider = _REPLAY_OHLCV_PROVIDER.get()
     if provider is not None:
-        return provider(ticker, interval=interval, period=period)
+        try:
+            return provider(ticker, interval=interval, period=period)
+        except ReplayInputContractError:
+            raise
+        except Exception as exc:
+            raise ReplayOhlcvInputUnavailableError(
+                "sealed_replay_ohlcv_provider_rejected_exact_call"
+            ) from exc
     from ..market_data import fetch_ohlcv_df as _real_fetch_ohlcv_df
 
-    return _real_fetch_ohlcv_df(ticker, interval=interval, period=period)
+    sink = _LIVE_OHLCV_CAPTURE_SINK.get()
+    requested_at = datetime.now(timezone.utc)
+    try:
+        result = _real_fetch_ohlcv_df(
+            ticker, interval=interval, period=period
+        )
+    except Exception as exc:
+        failed_at = datetime.now(timezone.utc)
+        if sink is not None:
+            try:
+                sink.on_ohlcv_failure(
+                    ticker=ticker,
+                    interval=interval,
+                    period=period,
+                    requested_at=requested_at,
+                    failed_at=failed_at,
+                    allow_provider_fallback=bool(
+                        getattr(
+                            settings,
+                            "market_data_allow_provider_fallback",
+                            True,
+                        )
+                    ),
+                    error=exc,
+                )
+            except Exception as capture_exc:
+                raise ReplayOhlcvInputUnavailableError(
+                    "captured_ohlcv_failure_gap_unavailable"
+                ) from capture_exc
+        raise
+    if sink is not None:
+        returned_at = datetime.now(timezone.utc)
+        try:
+            accepted = sink.on_ohlcv_result(
+                ticker=ticker,
+                interval=interval,
+                period=period,
+                requested_at=requested_at,
+                returned_at=returned_at,
+                allow_provider_fallback=bool(
+                    getattr(
+                        settings,
+                        "market_data_allow_provider_fallback",
+                        True,
+                    )
+                ),
+                frame=result,
+            )
+        except Exception as exc:
+            raise ReplayOhlcvInputUnavailableError(
+                "captured_ohlcv_result_receipt_unavailable"
+            ) from exc
+        if accepted is not True:
+            raise ReplayOhlcvInputUnavailableError(
+                "captured_ohlcv_result_receipt_unavailable"
+            )
+    return result
 
 
 def set_replay_ohlcv_provider(
@@ -636,6 +892,1491 @@ def _frozen_alpaca_account_id(sess: Any) -> str | None:
     return account_id or None
 
 
+def _adaptive_risk_store_for_session(sess: Any) -> AdaptiveRiskReservationStore:
+    """Resolve the independent reservation store from the owning ORM session."""
+
+    owner = object_session(sess)
+    if owner is None:
+        raise AdaptiveRiskContractError(
+            "adaptive Alpaca reservation requires an attached session"
+        )
+    bind = owner.get_bind()
+    engine = getattr(bind, "engine", bind)
+    return AdaptiveRiskReservationStore(engine)
+
+
+def _adaptive_alpaca_connection_generation(sess: Any) -> str:
+    """Stable, restart-safe identity for the confirmed paper arm generation."""
+
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    marker = snapshot.get("confirmed_arm_generation")
+    if not isinstance(marker, dict):
+        raise AdaptiveRiskContractError("confirmed Alpaca arm generation is missing")
+    body = {
+        "account_scope": _frozen_alpaca_account_scope(sess),
+        "account_id": _frozen_alpaca_account_id(sess),
+        "session_id": int(getattr(sess, "id")),
+        "marker": marker,
+    }
+    encoded = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return "alpaca-arm:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _adaptive_alpaca_request_payload_from_claim(
+    claim: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    claim = claim if isinstance(claim, dict) else {}
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    role_metadata = metadata.get("role_metadata")
+    role_metadata = role_metadata if isinstance(role_metadata, dict) else {}
+    payload = role_metadata.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    if not isinstance(payload, dict):
+        payload = metadata.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _adaptive_alpaca_binding_terminal(binding: Any) -> bool:
+    return bool(
+        isinstance(binding, dict)
+        and str(binding.get("state") or "").strip().lower()
+        in {"closed", "released"}
+    )
+
+
+def _adaptive_alpaca_quarantine_blocker(state: Any) -> dict[str, Any] | None:
+    if str(getattr(state, "state", "") or "").strip().lower() != (
+        "exposure_quarantined"
+    ):
+        return None
+    return {
+        "reason": "adaptive_risk_exposure_quarantined",
+        "reservation_id": str(getattr(state, "reservation_id", "") or ""),
+        "contradiction_source_state": str(
+            getattr(state, "lifecycle_contradiction_source_state", "") or ""
+        ),
+        "contradiction_evidence_sha256": str(
+            getattr(state, "lifecycle_contradiction_evidence_sha256", "") or ""
+        ),
+        "cumulative_filled_quantity_shares": int(
+            getattr(state, "cumulative_filled_quantity_shares", 0) or 0
+        ),
+        "open_quantity_shares": int(
+            getattr(state, "open_quantity_shares", 0) or 0
+        ),
+        "pending_structural_risk_usd": str(
+            getattr(state, "pending_structural_risk_usd", 0) or 0
+        ),
+        "open_structural_risk_usd": str(
+            getattr(state, "open_structural_risk_usd", 0) or 0
+        ),
+        "reconciliation_required": True,
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+
+
+def _adaptive_alpaca_apply_quarantine_blocker(
+    le: dict[str, Any],
+    *,
+    state: Any,
+) -> bool:
+    blocker = _adaptive_alpaca_quarantine_blocker(state)
+    if blocker is None:
+        le.pop("adaptive_risk_alpaca_lifecycle_blocker", None)
+        return False
+    le["adaptive_risk_alpaca_lifecycle_blocker"] = blocker
+    return True
+
+
+def _ensure_adaptive_alpaca_reservation(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    request_payload: dict[str, Any],
+    expected_quantity: int | None = None,
+) -> dict[str, Any]:
+    """Strictly load/replay one request and bind its durable reservation.
+
+    ``reserve`` is idempotent by account/CID/request hash, so this same helper is
+    used both at the literal POST boundary and after a process restart.
+    """
+
+    try:
+        request = load_adaptive_risk_reservation_request(request_payload)
+        frozen_scope = _frozen_alpaca_account_scope(sess)
+        frozen_account_id = _frozen_alpaca_account_id(sess)
+        frozen_identity_sha = alpaca_paper_account_identity_sha256(
+            frozen_account_id
+        )
+        if not (
+            request.inputs.execution_surface == "alpaca_paper"
+            and request.inputs.execution_family == "alpaca_spot"
+            and request.inputs.venue == "alpaca"
+            and request.inputs.broker_environment == "paper"
+            and request.account_scope == frozen_scope
+            and request.account_snapshot.account_scope == frozen_scope
+            and request.inputs.account_identity_sha256 == frozen_identity_sha
+            and request.account_snapshot.account_identity_sha256
+            == frozen_identity_sha
+            and request.inputs.symbol == str(getattr(sess, "symbol", "")).upper()
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive Alpaca reservation identity mismatch"
+            )
+        store = _adaptive_risk_store_for_session(sess)
+        decision = store.reserve(request)
+        if not decision.admission_accepted or decision.reservation_id is None:
+            return {
+                "ok": False,
+                "error": "adaptive_risk_reservation_rejected",
+                "rejection_reasons": list(decision.rejection_reasons),
+            }
+        if expected_quantity is not None and int(decision.quantity_shares) != int(
+            expected_quantity
+        ):
+            state = store.read_state(decision.reservation_id)
+            if state.state == "exposure_quarantined":
+                _adaptive_alpaca_apply_quarantine_blocker(le, state=state)
+                _commit_le(sess, le)
+                return {
+                    "ok": False,
+                    "error": "adaptive_risk_exposure_quarantined",
+                    "exposure_quarantined": True,
+                    "adaptive_risk_reconciliation_required": True,
+                }
+            if state.state == "reserved":
+                store.release_zero_fill(
+                    decision.reservation_id,
+                    reason="pre_post_release",
+                )
+            return {
+                "ok": False,
+                "error": "adaptive_risk_committed_quantity_mismatch",
+                "resolved_quantity_shares": int(decision.quantity_shares),
+                "expected_quantity_shares": int(expected_quantity),
+            }
+        state = store.read_state(decision.reservation_id)
+        binding = {
+            "schema_version": _ADAPTIVE_ALPACA_LIFECYCLE_SCHEMA,
+            "reservation_id": str(decision.reservation_id),
+            "request_sha256": request.request_sha256,
+            "decision_packet_sha256": decision.decision_packet_sha256,
+            "account_scope": request.account_scope,
+            "account_identity_sha256": request.inputs.account_identity_sha256,
+            "client_order_id": request.client_order_id,
+            "connection_generation": _adaptive_alpaca_connection_generation(sess),
+            "state": state.state,
+            "planned_quantity_shares": state.planned_quantity_shares,
+            "cumulative_filled_quantity_shares": (
+                state.cumulative_filled_quantity_shares
+            ),
+            "open_quantity_shares": state.open_quantity_shares,
+            "broker_order_id": state.broker_order_id,
+            "opportunity_status": state.opportunity_status,
+            "updated_at_utc": _utcnow_aware().isoformat(),
+        }
+        le[KEY_ADAPTIVE_RISK_RESERVATION_REQUEST] = request.to_payload()
+        le[KEY_ADAPTIVE_ALPACA_LIFECYCLE] = binding
+        exposure_quarantined = _adaptive_alpaca_apply_quarantine_blocker(
+            le,
+            state=state,
+        )
+        _commit_le(sess, le)
+        return {
+            "ok": True,
+            "store": store,
+            "request": request,
+            "decision": decision,
+            "state": state,
+            "binding": binding,
+            "exposure_quarantined": exposure_quarantined,
+            "adaptive_risk_reconciliation_required": exposure_quarantined,
+        }
+    except AdaptiveRiskExposureQuarantined as exc:
+        blocker = dict(exc.provenance)
+        blocker["reconciliation_required"] = True
+        blocker["recorded_at_utc"] = _utcnow().isoformat()
+        le["adaptive_risk_alpaca_lifecycle_blocker"] = blocker
+        _commit_le(sess, le)
+        return {
+            "ok": False,
+            "error": exc.reason,
+            "exposure_quarantined": True,
+            "adaptive_risk_reconciliation_required": True,
+            "quarantined_exposures": list(exc.quarantined_exposures),
+        }
+    except (AdaptiveRiskContractError, AdaptiveReservationError, TypeError, ValueError) as exc:
+        le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+            "reason": "adaptive_risk_reservation_unavailable",
+            "error_type": type(exc).__name__,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        return {
+            "ok": False,
+            "error": "adaptive_risk_reservation_unavailable",
+            "error_type": type(exc).__name__,
+        }
+
+
+def _adaptive_alpaca_refresh_binding(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    state: Any,
+) -> None:
+    binding = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    binding = dict(binding) if isinstance(binding, dict) else {}
+    binding.update(
+        {
+            "schema_version": _ADAPTIVE_ALPACA_LIFECYCLE_SCHEMA,
+            "reservation_id": str(state.reservation_id),
+            "decision_packet_sha256": state.decision_packet_sha256,
+            "state": state.state,
+            "planned_quantity_shares": state.planned_quantity_shares,
+            "cumulative_filled_quantity_shares": (
+                state.cumulative_filled_quantity_shares
+            ),
+            "open_quantity_shares": state.open_quantity_shares,
+            "broker_order_id": state.broker_order_id,
+            "opportunity_status": state.opportunity_status,
+            "updated_at_utc": _utcnow_aware().isoformat(),
+        }
+    )
+    le[KEY_ADAPTIVE_ALPACA_LIFECYCLE] = binding
+    _adaptive_alpaca_apply_quarantine_blocker(le, state=state)
+    _commit_le(sess, le)
+
+
+def _adaptive_alpaca_order_fact(
+    order: Any,
+    *,
+    event_kind: str,
+    evidence_status: str,
+    cumulative_fill: int,
+    sess: Any,
+    request: Any,
+) -> DurableOrderLifecycleEvidence:
+    now = _utcnow_aware()
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    order_payload = {
+        "schema_version": "chili.alpaca-rest-order-observation.v1",
+        "received_at": now.isoformat(),
+        "event_kind": event_kind,
+        "order_id": str(getattr(order, "order_id", "") or ""),
+        "client_order_id": str(
+            getattr(order, "client_order_id", "") or ""
+        ),
+        "symbol": str(getattr(order, "product_id", "") or "").upper(),
+        "side": str(getattr(order, "side", "") or "").lower(),
+        "status": str(getattr(order, "status", "") or "").lower(),
+        "alpaca_status": str(raw.get("alpaca_status") or "").lower(),
+        "filled_size": cumulative_fill,
+        "average_filled_price": getattr(order, "average_filled_price", None),
+        "qty": raw.get("qty"),
+    }
+    content = json.dumps(
+        order_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    content_sha = hashlib.sha256(content).hexdigest()
+    oid = order_payload["order_id"]
+    return DurableOrderLifecycleEvidence(
+        event_kind=event_kind,
+        durability_kind="authoritative_broker_event",
+        provider_event_id=f"alpaca-rest:{event_kind}:{content_sha}",
+        broker_source="alpaca",
+        connection_generation=_adaptive_alpaca_connection_generation(sess),
+        account_scope=request.account_scope,
+        execution_family="alpaca_spot",
+        broker_environment="paper",
+        account_identity_sha256=request.inputs.account_identity_sha256,
+        client_order_id=request.client_order_id,
+        broker_order_id=oid,
+        observed_at=now,
+        available_at=now,
+        event_content_sha256=content_sha,
+        cumulative_filled_quantity=cumulative_fill,
+        source_record_table="alpaca_rest_order_observations",
+        source_record_id=f"{oid}:{content_sha}",
+        order_status=evidence_status,
+    )
+
+
+def _adaptive_alpaca_integer_fill(order: Any) -> int:
+    value = float(getattr(order, "filled_size", 0.0) or 0.0)
+    rounded = int(round(value))
+    if not math.isfinite(value) or value < 0.0 or abs(value - rounded) > 1e-8:
+        raise AdaptiveRiskContractError(
+            "Alpaca equity cumulative fill must be a non-negative integer"
+        )
+    return rounded
+
+
+def _capture_adaptive_alpaca_order_fills(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    adapter: Any,
+    reservation_id: uuid.UUID,
+    order: Any,
+    expected_exit_client_order_id: str | None = None,
+) -> dict[str, Any]:
+    """Append one exact PAPER order's activities without changing lifecycle.
+
+    Capture availability never suppresses a confirmed fill/cancel/reject state
+    transition.  It is instead made explicit as settlement-pending; account
+    admission already fails closed while a flat cycle lacks its settlement.
+    """
+
+    owner = object_session(sess)
+    oid = str(getattr(order, "order_id", "") or "").strip()
+    if owner is None or not oid:
+        result = dict(le.get("alpaca_cycle_settlement_pending") or {})
+        result.update(
+            {
+                "ok": False,
+                "reason": "alpaca_fill_capture_context_unavailable",
+                "order_id": oid or None,
+                "recorded_at_utc": _utcnow_aware().isoformat(),
+            }
+        )
+        le["alpaca_cycle_settlement_pending"] = result
+        _commit_le(sess, le)
+        return result
+    try:
+        # A complete provider batch is one capture unit. If any activity
+        # conflicts, roll back only this capture savepoint before retaining the
+        # lifecycle's explicit settlement-pending marker; never commit a
+        # prefix of a supposedly complete batch.
+        with owner.begin_nested():
+            captured = capture_verified_alpaca_paper_order_fills(
+                owner,
+                adapter=adapter,
+                reservation_id=reservation_id,
+                provider_order_id=oid,
+                expected_exit_client_order_id=expected_exit_client_order_id,
+            )
+        result = {
+            "ok": True,
+            "order_id": oid,
+            "observed_count": captured.observed_count,
+            "created_count": captured.created_count,
+            "event_sha256s": list(captured.event_sha256s),
+        }
+        return result
+    except (AlpacaFillActivityError, TypeError, ValueError) as exc:
+        pending = dict(le.get("alpaca_cycle_settlement_pending") or {})
+        pending.update(
+            {
+                "ok": False,
+                "reason": "alpaca_fill_activity_capture_pending",
+                "error_type": type(exc).__name__,
+                "capture_order_id": oid,
+                "capture_exit_client_order_id": expected_exit_client_order_id,
+                "recorded_at_utc": _utcnow_aware().isoformat(),
+            }
+        )
+        le["alpaca_cycle_settlement_pending"] = pending
+        _commit_le(sess, le)
+        return pending
+
+
+def _settle_adaptive_alpaca_cycle_if_complete(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    reservation_id: uuid.UUID,
+) -> dict[str, Any]:
+    owner = object_session(sess)
+    if owner is None:
+        return {"ok": False, "reason": "alpaca_settlement_session_unavailable"}
+    try:
+        with owner.begin_nested():
+            settled = settle_flat_alpaca_paper_cycle(
+                owner, reservation_id=reservation_id
+            )
+        le.pop("alpaca_cycle_settlement_pending", None)
+        le["alpaca_cycle_settlement"] = {
+            "settlement_sha256": settled.row.settlement_sha256,
+            "terminal_sequence": int(settled.row.terminal_sequence),
+            "net_realized_pnl_usd": str(settled.row.net_realized_pnl_usd),
+            "created": settled.created,
+            "settled_at_utc": settled.row.closed_available_at.isoformat(),
+        }
+        _commit_le(sess, le)
+        return {"ok": True, "settlement": settled}
+    except (AlpacaCycleSettlementIntegrityError, TypeError, ValueError) as exc:
+        pending = dict(le.get("alpaca_cycle_settlement_pending") or {})
+        pending.update(
+            {
+                "ok": False,
+                "reason": "alpaca_cycle_settlement_pending",
+                "error_type": type(exc).__name__,
+                "recorded_at_utc": _utcnow_aware().isoformat(),
+            }
+        )
+        le["alpaca_cycle_settlement_pending"] = pending
+        _commit_le(sess, le)
+        return pending
+
+
+def _sync_adaptive_alpaca_order_lifecycle(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    order: Any,
+    claim: dict[str, Any] | None = None,
+    adapter: Any | None = None,
+) -> dict[str, Any]:
+    """Apply one exact Alpaca order observation monotonically and idempotently."""
+
+    payload = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    if not isinstance(payload, dict):
+        payload = _adaptive_alpaca_request_payload_from_claim(claim)
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "adaptive_risk_reservation_request_missing"}
+    try:
+        request = load_adaptive_risk_reservation_request(payload)
+        oid = str(getattr(order, "order_id", "") or "").strip()
+        cid = str(getattr(order, "client_order_id", "") or "").strip()
+        symbol = str(getattr(order, "product_id", "") or "").strip().upper()
+        if not (
+            oid
+            and cid == request.client_order_id
+            and symbol == request.inputs.symbol
+            and str(getattr(order, "side", "") or "").strip().lower() == "buy"
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive Alpaca order observation identity mismatch"
+            )
+        expected_quantity = None
+        if isinstance(claim, dict):
+            metadata = claim.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            order_request = metadata.get("order_request")
+            order_request = order_request if isinstance(order_request, dict) else {}
+            expected_raw = order_request.get("base_size")
+            if expected_raw is not None:
+                expected_quantity = int(float(expected_raw))
+        ensured = _ensure_adaptive_alpaca_reservation(
+            sess,
+            le,
+            request_payload=payload,
+            expected_quantity=expected_quantity,
+        )
+        if not ensured.get("ok"):
+            return ensured
+        store = ensured["store"]
+        state = ensured["state"]
+        reservation_id = state.reservation_id
+        cumulative = _adaptive_alpaca_integer_fill(order)
+        normalized = str(getattr(order, "status", "") or "").strip().lower()
+        raw = getattr(order, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
+        raw_status = str(raw.get("alpaca_status") or normalized).strip().lower()
+        is_terminal_zero = cumulative == 0 and normalized in {
+            "rejected",
+            "canceled",
+            "cancelled",
+            "expired",
+        }
+        is_terminal_partial = cumulative > 0 and normalized in {
+            "canceled",
+            "cancelled",
+            "expired",
+        }
+        is_working = normalized in {"open", "accepted", "new", "working"}
+        is_filled = normalized == "filled" or raw_status == "filled"
+
+        if cumulative > state.cumulative_filled_quantity_shares:
+            fill_status = "filled" if is_filled else "partially_filled"
+            state = store.apply_cumulative_fill(
+                reservation_id,
+                evidence=_adaptive_alpaca_order_fact(
+                    order,
+                    event_kind="cumulative_fill",
+                    evidence_status=fill_status,
+                    cumulative_fill=cumulative,
+                    sess=sess,
+                    request=request,
+                ),
+            )
+        elif cumulative < state.cumulative_filled_quantity_shares:
+            raise AdaptiveRiskContractError(
+                "Alpaca cumulative fill regressed below durable truth"
+            )
+
+        if is_terminal_partial and float(state.pending_structural_risk_usd) > 0.0:
+            state = store.finalize_filled_entry_remainder(
+                reservation_id,
+                evidence=_adaptive_alpaca_order_fact(
+                    order,
+                    event_kind="filled_entry_terminal",
+                    evidence_status=(
+                        "canceled" if normalized == "cancelled" else normalized
+                    ),
+                    cumulative_fill=cumulative,
+                    sess=sess,
+                    request=request,
+                ),
+            )
+        elif is_terminal_zero and state.state != "released":
+            release_reason = {
+                "rejected": "broker_rejected",
+                "canceled": "broker_canceled",
+                "cancelled": "broker_canceled",
+                "expired": "broker_expired",
+            }[normalized]
+            state = store.release_zero_fill(
+                reservation_id,
+                reason=release_reason,
+                evidence=_adaptive_alpaca_order_fact(
+                    order,
+                    event_kind="terminal_zero_fill",
+                    evidence_status=(
+                        "canceled" if normalized == "cancelled" else normalized
+                    ),
+                    cumulative_fill=0,
+                    sess=sess,
+                    request=request,
+                ),
+            )
+        elif cumulative == 0 and is_working and state.state in {
+            "reserved",
+            "submit_indeterminate",
+        }:
+            state = store.mark_submitted(
+                reservation_id,
+                evidence=_adaptive_alpaca_order_fact(
+                    order,
+                    event_kind="order_accepted",
+                    evidence_status="accepted",
+                    cumulative_fill=0,
+                    sess=sess,
+                    request=request,
+                ),
+            )
+        elif is_filled and cumulative < state.planned_quantity_shares:
+            raise AdaptiveRiskContractError(
+                "terminal filled order is below the reserved quantity"
+            )
+        _adaptive_alpaca_refresh_binding(sess, le, state=state)
+        fill_capture: dict[str, Any] | None = None
+        if cumulative > 0 and adapter is not None:
+            fill_capture = _capture_adaptive_alpaca_order_fills(
+                sess,
+                le,
+                adapter=adapter,
+                reservation_id=reservation_id,
+                order=order,
+            )
+        exposure_quarantined = state.state == "exposure_quarantined"
+        return {
+            "ok": True,
+            "state": state,
+            "request": request,
+            "fill_capture": fill_capture,
+            "exposure_quarantined": exposure_quarantined,
+            "adaptive_risk_reconciliation_required": exposure_quarantined,
+        }
+    except (AdaptiveRiskContractError, AdaptiveReservationError, TypeError, ValueError) as exc:
+        state = locals().get("state")
+        if not _adaptive_alpaca_apply_quarantine_blocker(le, state=state):
+            le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+                "reason": "adaptive_risk_order_lifecycle_conflict",
+                "error_type": type(exc).__name__,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+        _commit_le(sess, le)
+        return {
+            "ok": False,
+            "error": "adaptive_risk_order_lifecycle_conflict",
+            "error_type": type(exc).__name__,
+        }
+
+
+def _mark_adaptive_alpaca_submit_indeterminate(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    reason: str,
+    broker_order_id: str | None = None,
+) -> bool:
+    payload = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    binding = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    if not isinstance(payload, dict) or not isinstance(binding, dict):
+        return False
+    try:
+        request = load_adaptive_risk_reservation_request(payload)
+        store = _adaptive_risk_store_for_session(sess)
+        reservation_id = uuid.UUID(str(binding["reservation_id"]))
+        now = _utcnow_aware()
+        body = {
+            "schema_version": "chili.alpaca-submit-attempt.v1",
+            "received_at": now.isoformat(),
+            "reason": str(reason),
+            "client_order_id": request.client_order_id,
+            "broker_order_id": broker_order_id,
+        }
+        digest = hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        state = store.mark_submit_indeterminate(
+            reservation_id,
+            reason=str(reason),
+            evidence=DurableSubmitAttemptEvidence(
+                attempt_event_id=f"alpaca-submit:{digest}",
+                broker_source="alpaca",
+                connection_generation=_adaptive_alpaca_connection_generation(sess),
+                account_scope=request.account_scope,
+                execution_family="alpaca_spot",
+                broker_environment="paper",
+                account_identity_sha256=request.inputs.account_identity_sha256,
+                client_order_id=request.client_order_id,
+                broker_order_id=(str(broker_order_id) if broker_order_id else None),
+                observed_at=now,
+                available_at=now,
+                event_content_sha256=digest,
+                source_record_table="alpaca_order_submit_attempts",
+                source_record_id=digest,
+            ),
+        )
+        _adaptive_alpaca_refresh_binding(sess, le, state=state)
+        return True
+    except (AdaptiveRiskContractError, AdaptiveReservationError, KeyError, ValueError):
+        state = locals().get("state")
+        if not _adaptive_alpaca_apply_quarantine_blocker(le, state=state):
+            le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+                "reason": "adaptive_risk_submit_indeterminate_persist_failed",
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+        _commit_le(sess, le)
+        return False
+
+
+def _release_adaptive_alpaca_before_http(sess: Any, le: dict[str, Any]) -> bool:
+    binding = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    if not isinstance(binding, dict):
+        return False
+    try:
+        store = _adaptive_risk_store_for_session(sess)
+        reservation_id = uuid.UUID(str(binding["reservation_id"]))
+        state = store.read_state(reservation_id)
+        if state.state != "released":
+            state = store.release_zero_fill(
+                reservation_id,
+                reason="pre_post_release",
+            )
+        _adaptive_alpaca_refresh_binding(sess, le, state=state)
+        return state.state == "released"
+    except (AdaptiveRiskContractError, AdaptiveReservationError, KeyError, ValueError):
+        state = locals().get("state")
+        if not _adaptive_alpaca_apply_quarantine_blocker(le, state=state):
+            le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+                "reason": "adaptive_risk_pre_post_release_failed",
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+        _commit_le(sess, le)
+        return False
+
+
+def _capture_owned_adaptive_alpaca_exit_fills(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    adapter: Any,
+    reservation_id: uuid.UUID,
+    exit_order: Any,
+) -> dict[str, Any]:
+    """Capture one confirmed exit only after its durable owner is proven."""
+
+    marker = dict(le.get("alpaca_cycle_settlement_pending") or {})
+    exit_oid = str(getattr(exit_order, "order_id", "") or "").strip()
+    exit_cid = str(getattr(exit_order, "client_order_id", "") or "").strip()
+    resolved = le.get("alpaca_last_resolved_exit_owner_transport")
+    resolved = dict(resolved) if isinstance(resolved, dict) else {}
+    resolved_owner = bool(
+        exit_oid
+        and exit_cid
+        and str(resolved.get("broker_order_id") or "").strip() == exit_oid
+        and str(resolved.get("client_order_id") or "").strip() == exit_cid
+    )
+    close_only, close_only_error = _validated_alpaca_close_only_marker(sess)
+    close_only_owner = bool(
+        close_only_error is None
+        and close_only is not None
+        and str(le.get("exit_order_id") or "").strip() == exit_oid
+        and str(le.get("exit_client_order_id") or "").strip() == exit_cid
+    )
+    if not (resolved_owner or close_only_owner):
+        marker.update(
+            {
+                "ok": False,
+                "reason": "alpaca_exit_fill_owner_unproven",
+                "recorded_at_utc": _utcnow_aware().isoformat(),
+            }
+        )
+        le["alpaca_cycle_settlement_pending"] = marker
+        _commit_le(sess, le)
+        return marker
+    try:
+        _retain_adaptive_alpaca_exit_fill_owner(
+            le,
+            reservation_id=reservation_id,
+            provider_order_id=exit_oid,
+            provider_client_order_id=exit_cid,
+            owner_authority=(
+                "resolved_owner_transport"
+                if resolved_owner
+                else "validated_close_only_marker"
+            ),
+        )
+    except (AdaptiveRiskContractError, KeyError, TypeError, ValueError) as exc:
+        marker.update(
+            {
+                "ok": False,
+                "reason": "alpaca_exit_fill_owner_ledger_conflict",
+                "error_type": type(exc).__name__,
+                "recorded_at_utc": _utcnow_aware().isoformat(),
+            }
+        )
+        le["alpaca_cycle_settlement_pending"] = marker
+        _commit_le(sess, le)
+        return marker
+    marker.update(
+        {
+            "exit_order_id": exit_oid,
+            "exit_client_order_id": exit_cid,
+            "exit_owner_authority": (
+                "resolved_owner_transport"
+                if resolved_owner
+                else "validated_close_only_marker"
+            ),
+        }
+    )
+    le["alpaca_cycle_settlement_pending"] = marker
+    _commit_le(sess, le)
+    return _capture_adaptive_alpaca_order_fills(
+        sess,
+        le,
+        adapter=adapter,
+        reservation_id=reservation_id,
+        order=exit_order,
+        expected_exit_client_order_id=exit_cid,
+    )
+
+
+def _adaptive_alpaca_exit_fill_owners(
+    le: dict[str, Any],
+    *,
+    reservation_id: uuid.UUID,
+) -> list[dict[str, Any]]:
+    """Verify the durable session-local inventory of exact exit owners."""
+
+    payload = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    if not isinstance(payload, dict):
+        raise AdaptiveRiskContractError(
+            "adaptive Alpaca exit owner inventory lacks request binding"
+        )
+    request = load_adaptive_risk_reservation_request(payload)
+    raw = le.get("alpaca_cycle_exit_fill_owners")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise AdaptiveRiskContractError(
+            "adaptive Alpaca exit owner inventory is malformed"
+        )
+    expected_sequence = 1
+    seen_oids: set[str] = set()
+    seen_cids: set[str] = set()
+    verified: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise AdaptiveRiskContractError(
+                "adaptive Alpaca exit owner entry is malformed"
+            )
+        body = {
+            "schema_version": item.get("schema_version"),
+            "owner_sequence": item.get("owner_sequence"),
+            "reservation_id": item.get("reservation_id"),
+            "account_scope": item.get("account_scope"),
+            "account_identity_sha256": item.get("account_identity_sha256"),
+            "execution_family": item.get("execution_family"),
+            "order_role": item.get("order_role"),
+            "provider_order_id": item.get("provider_order_id"),
+            "provider_client_order_id": item.get("provider_client_order_id"),
+            "owner_authority": item.get("owner_authority"),
+        }
+        canonical = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        expected_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        oid = str(body["provider_order_id"] or "").strip()
+        cid = str(body["provider_client_order_id"] or "").strip()
+        if not (
+            body["schema_version"]
+            == "chili.alpaca-paper-exit-fill-owner.v1"
+            and body["owner_sequence"] == expected_sequence
+            and body["reservation_id"] == str(reservation_id)
+            and body["account_scope"] == request.account_scope == "alpaca:paper"
+            and body["account_identity_sha256"]
+            == request.inputs.account_identity_sha256
+            and body["execution_family"] == "alpaca_spot"
+            and body["order_role"] == "exit"
+            and body["owner_authority"]
+            in {"resolved_owner_transport", "validated_close_only_marker"}
+            and oid
+            and cid
+            and oid not in seen_oids
+            and cid not in seen_cids
+            and item.get("binding_sha256") == expected_sha
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive Alpaca exit owner inventory binding changed"
+            )
+        seen_oids.add(oid)
+        seen_cids.add(cid)
+        verified.append({**body, "binding_sha256": expected_sha})
+        expected_sequence += 1
+    return verified
+
+
+def _retain_adaptive_alpaca_exit_fill_owner(
+    le: dict[str, Any],
+    *,
+    reservation_id: uuid.UUID,
+    provider_order_id: str,
+    provider_client_order_id: str,
+    owner_authority: str,
+) -> dict[str, Any]:
+    """Append one already-validated exact OID/CID owner idempotently."""
+
+    owners = _adaptive_alpaca_exit_fill_owners(
+        le, reservation_id=reservation_id
+    )
+    oid = str(provider_order_id or "").strip()
+    cid = str(provider_client_order_id or "").strip()
+    for existing in owners:
+        if (
+            existing["provider_order_id"] == oid
+            or existing["provider_client_order_id"] == cid
+        ):
+            if not (
+                existing["provider_order_id"] == oid
+                and existing["provider_client_order_id"] == cid
+                and existing["owner_authority"] == owner_authority
+            ):
+                raise AdaptiveRiskContractError(
+                    "adaptive Alpaca exit owner identity was reused"
+                )
+            return existing
+    request = load_adaptive_risk_reservation_request(
+        le[KEY_ADAPTIVE_RISK_RESERVATION_REQUEST]
+    )
+    authority = str(owner_authority or "").strip()
+    if not (
+        oid
+        and cid
+        and request.account_scope == "alpaca:paper"
+        and request.inputs.execution_family == "alpaca_spot"
+        and authority
+        in {"resolved_owner_transport", "validated_close_only_marker"}
+    ):
+        raise AdaptiveRiskContractError(
+            "adaptive Alpaca exit owner binding is incomplete"
+        )
+    body = {
+        "schema_version": "chili.alpaca-paper-exit-fill-owner.v1",
+        "owner_sequence": len(owners) + 1,
+        "reservation_id": str(reservation_id),
+        "account_scope": request.account_scope,
+        "account_identity_sha256": request.inputs.account_identity_sha256,
+        "execution_family": request.inputs.execution_family,
+        "order_role": "exit",
+        "provider_order_id": oid,
+        "provider_client_order_id": cid,
+        "owner_authority": authority,
+    }
+    canonical = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    retained = {
+        **body,
+        "binding_sha256": hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest(),
+    }
+    # Re-verify the new complete inventory before exposing it to a later retry.
+    le["alpaca_cycle_exit_fill_owners"] = [*owners, retained]
+    _adaptive_alpaca_exit_fill_owners(le, reservation_id=reservation_id)
+    return retained
+
+
+def _capture_and_settle_flat_adaptive_alpaca_cycle(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    adapter: Any,
+    reservation_id: uuid.UUID,
+    entry_order_id: str,
+    exit_order: Any | None = None,
+) -> dict[str, Any]:
+    """Backfill exact entry/final-exit activities, then settle if complete."""
+
+    marker = dict(le.get("alpaca_cycle_settlement_pending") or {})
+    if exit_order is None:
+        exit_oid = str(marker.get("exit_order_id") or "").strip()
+        exit_cid = str(marker.get("exit_client_order_id") or "").strip()
+        if exit_oid and exit_cid:
+            try:
+                exit_order, _meta = adapter.get_order(exit_oid)
+            except Exception:
+                exit_order = None
+        if not (
+            exit_order is not None
+            and str(getattr(exit_order, "order_id", "") or "").strip()
+            == exit_oid
+            and str(getattr(exit_order, "client_order_id", "") or "").strip()
+            == exit_cid
+        ):
+            marker.update(
+                {
+                    "ok": False,
+                    "reason": "alpaca_exit_fill_order_unavailable",
+                    "recorded_at_utc": _utcnow_aware().isoformat(),
+                }
+            )
+            le["alpaca_cycle_settlement_pending"] = marker
+            _commit_le(sess, le)
+            return marker
+
+    try:
+        entry_order, _entry_meta = adapter.get_order(str(entry_order_id))
+    except Exception:
+        entry_order = None
+    if entry_order is None:
+        marker.update(
+            {
+                "ok": False,
+                "reason": "alpaca_entry_fill_order_unavailable",
+                "recorded_at_utc": _utcnow_aware().isoformat(),
+            }
+        )
+        le["alpaca_cycle_settlement_pending"] = marker
+        _commit_le(sess, le)
+        return marker
+    entry_capture = _capture_adaptive_alpaca_order_fills(
+        sess,
+        le,
+        adapter=adapter,
+        reservation_id=reservation_id,
+        order=entry_order,
+    )
+    if not entry_capture.get("ok"):
+        return entry_capture
+    exit_capture = _capture_owned_adaptive_alpaca_exit_fills(
+        sess,
+        le,
+        adapter=adapter,
+        reservation_id=reservation_id,
+        exit_order=exit_order,
+    )
+    if not exit_capture.get("ok"):
+        return exit_capture
+    # A cycle may scale out through several independently owned orders.  A
+    # transient activity-publication lag on an earlier partial must not strand
+    # the later flat cycle forever.  Re-read every hash-bound OID/CID owner;
+    # absence/unreadability remains pending and is never inferred terminal.
+    try:
+        owners = _adaptive_alpaca_exit_fill_owners(
+            le, reservation_id=reservation_id
+        )
+    except (AdaptiveRiskContractError, KeyError, TypeError, ValueError) as exc:
+        marker = dict(le.get("alpaca_cycle_settlement_pending") or {})
+        marker.update(
+            {
+                "ok": False,
+                "reason": "alpaca_exit_fill_owner_ledger_conflict",
+                "error_type": type(exc).__name__,
+                "recorded_at_utc": _utcnow_aware().isoformat(),
+            }
+        )
+        le["alpaca_cycle_settlement_pending"] = marker
+        _commit_le(sess, le)
+        return marker
+    for retained_owner in owners:
+        retained_oid = str(retained_owner["provider_order_id"])
+        retained_cid = str(retained_owner["provider_client_order_id"])
+        if (
+            str(getattr(exit_order, "order_id", "") or "").strip()
+            == retained_oid
+            and str(getattr(exit_order, "client_order_id", "") or "").strip()
+            == retained_cid
+        ):
+            retained_order = exit_order
+        else:
+            try:
+                retained_order, _retained_meta = adapter.get_order(retained_oid)
+            except Exception:
+                retained_order = None
+        if not (
+            retained_order is not None
+            and str(getattr(retained_order, "order_id", "") or "").strip()
+            == retained_oid
+            and str(
+                getattr(retained_order, "client_order_id", "") or ""
+            ).strip()
+            == retained_cid
+        ):
+            marker = dict(le.get("alpaca_cycle_settlement_pending") or {})
+            marker.update(
+                {
+                    "ok": False,
+                    "reason": "alpaca_owned_exit_fill_order_unavailable",
+                    "unavailable_owned_exit_order_id": retained_oid,
+                    "unavailable_owned_exit_client_order_id": retained_cid,
+                    "recorded_at_utc": _utcnow_aware().isoformat(),
+                }
+            )
+            le["alpaca_cycle_settlement_pending"] = marker
+            _commit_le(sess, le)
+            return marker
+        retry_capture = _capture_adaptive_alpaca_order_fills(
+            sess,
+            le,
+            adapter=adapter,
+            reservation_id=reservation_id,
+            order=retained_order,
+            expected_exit_client_order_id=retained_cid,
+        )
+        if not retry_capture.get("ok"):
+            return retry_capture
+    return _settle_adaptive_alpaca_cycle_if_complete(
+        sess, le, reservation_id=reservation_id
+    )
+
+
+def _sync_adaptive_alpaca_position_lifecycle(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    adapter: Any,
+    expected_remaining: float | None = None,
+    exit_order: Any | None = None,
+) -> dict[str, Any]:
+    """Apply an authoritative Alpaca position reduction/flat observation."""
+
+    payload = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    binding = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    if not isinstance(payload, dict) or not isinstance(binding, dict):
+        return {"ok": False, "error": "adaptive_risk_position_binding_missing"}
+    try:
+        request = load_adaptive_risk_reservation_request(payload)
+        store = _adaptive_risk_store_for_session(sess)
+        reservation_id = uuid.UUID(str(binding["reservation_id"]))
+        state = store.read_state(reservation_id)
+        if state.state in {"released", "closed"}:
+            _adaptive_alpaca_refresh_binding(sess, le, state=state)
+            return {"ok": True, "state": state}
+        if state.state == "flat_pending_settlement":
+            settlement = _capture_and_settle_flat_adaptive_alpaca_cycle(
+                sess,
+                le,
+                adapter=adapter,
+                reservation_id=reservation_id,
+                entry_order_id=str(state.broker_order_id or ""),
+                exit_order=exit_order,
+            )
+            owner = object_session(sess)
+            if settlement.get("ok") and owner is not None:
+                state = store.read_state(reservation_id, session=owner)
+                _adaptive_alpaca_refresh_binding(sess, le, state=state)
+            return {
+                "ok": bool(settlement.get("ok")),
+                "state": state,
+                "settlement": settlement,
+                "error": (
+                    None
+                    if settlement.get("ok")
+                    else settlement.get("reason")
+                    or "alpaca_cycle_settlement_pending"
+                ),
+            }
+        quantity_reader = getattr(adapter, "get_position_quantity", None)
+        if not callable(quantity_reader):
+            raise AdaptiveRiskContractError("strict Alpaca position read unavailable")
+        remaining_raw = quantity_reader(str(getattr(sess, "symbol", "")))
+        if remaining_raw is None:
+            raise AdaptiveRiskContractError("Alpaca position truth is unreadable")
+        remaining_float = float(remaining_raw)
+        remaining = int(round(remaining_float))
+        if (
+            not math.isfinite(remaining_float)
+            or remaining_float < 0.0
+            or abs(remaining_float - remaining) > 1e-8
+        ):
+            raise AdaptiveRiskContractError(
+                "Alpaca equity remaining position must be an integer"
+            )
+        if expected_remaining is not None and not math.isclose(
+            remaining_float,
+            float(expected_remaining),
+            rel_tol=1e-12,
+            abs_tol=1e-8,
+        ):
+            raise AdaptiveRiskContractError(
+                "Alpaca position reread differs from exit reconciliation"
+            )
+        if remaining > state.open_quantity_shares:
+            raise AdaptiveRiskContractError(
+                "broker position exceeds adaptive owned open quantity"
+            )
+        if remaining == state.open_quantity_shares:
+            _adaptive_alpaca_refresh_binding(sess, le, state=state)
+            exposure_quarantined = state.state == "exposure_quarantined"
+            return {
+                "ok": True,
+                "state": state,
+                "exposure_quarantined": exposure_quarantined,
+                "adaptive_risk_reconciliation_required": exposure_quarantined,
+            }
+        if float(state.pending_structural_risk_usd) > 0.0:
+            raise AdaptiveRiskContractError(
+                "entry remainder must terminalize before position lifecycle"
+            )
+        now = _utcnow_aware()
+        body = {
+            "schema_version": "chili.alpaca-rest-position-observation.v1",
+            "received_at": now.isoformat(),
+            "symbol": request.inputs.symbol,
+            "remaining_quantity": remaining,
+            "entry_broker_order_id": state.broker_order_id,
+            "entry_cumulative_filled_quantity": (
+                state.cumulative_filled_quantity_shares
+            ),
+        }
+        digest = hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        evidence = DurableOrderLifecycleEvidence(
+            event_kind="position_flat" if remaining == 0 else "position_reduced",
+            durability_kind="authoritative_broker_event",
+            provider_event_id=(
+                f"alpaca-position:{'flat' if remaining == 0 else 'reduced'}:{digest}"
+            ),
+            broker_source="alpaca",
+            connection_generation=_adaptive_alpaca_connection_generation(sess),
+            account_scope=request.account_scope,
+            execution_family="alpaca_spot",
+            broker_environment="paper",
+            account_identity_sha256=request.inputs.account_identity_sha256,
+            client_order_id=request.client_order_id,
+            broker_order_id=str(state.broker_order_id or ""),
+            observed_at=now,
+            available_at=now,
+            event_content_sha256=digest,
+            cumulative_filled_quantity=state.cumulative_filled_quantity_shares,
+            remaining_open_quantity=remaining,
+            source_record_table="alpaca_rest_position_observations",
+            source_record_id=digest,
+            order_status="flat" if remaining == 0 else "partially_exited",
+        )
+        if remaining == 0:
+            state = store.close_open_exposure(
+                reservation_id,
+                evidence=evidence,
+            )
+        else:
+            state = store.reduce_open_exposure(
+                reservation_id,
+                evidence=evidence,
+            )
+        _adaptive_alpaca_refresh_binding(sess, le, state=state)
+        settlement: dict[str, Any] | None = None
+        exit_capture: dict[str, Any] | None = None
+        if exit_order is not None:
+            exit_capture = _capture_owned_adaptive_alpaca_exit_fills(
+                sess,
+                le,
+                adapter=adapter,
+                reservation_id=reservation_id,
+                exit_order=exit_order,
+            )
+        if remaining == 0 and state.state == "flat_pending_settlement":
+            # The flat helper deliberately retries the final exact order, so a
+            # transient account-activity lag above cannot be mistaken for a
+            # complete cycle.
+            settlement = _capture_and_settle_flat_adaptive_alpaca_cycle(
+                sess,
+                le,
+                adapter=adapter,
+                reservation_id=reservation_id,
+                entry_order_id=str(state.broker_order_id or ""),
+                exit_order=exit_order,
+            )
+            owner = object_session(sess)
+            if settlement.get("ok") and owner is not None:
+                state = store.read_state(reservation_id, session=owner)
+                _adaptive_alpaca_refresh_binding(sess, le, state=state)
+        exposure_quarantined = state.state == "exposure_quarantined"
+        return {
+            "ok": True,
+            "state": state,
+            "exit_fill_capture": exit_capture,
+            "settlement": settlement,
+            "settlement_pending": bool(
+                (exit_capture is not None and not exit_capture.get("ok"))
+                or (settlement is not None and not settlement.get("ok"))
+            ),
+            "exposure_quarantined": exposure_quarantined,
+            "adaptive_risk_reconciliation_required": exposure_quarantined,
+        }
+    except (
+        AdaptiveRiskContractError,
+        AdaptiveReservationError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        state = locals().get("state")
+        if not _adaptive_alpaca_apply_quarantine_blocker(le, state=state):
+            le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+                "reason": "adaptive_risk_position_lifecycle_conflict",
+                "error_type": type(exc).__name__,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+        _commit_le(sess, le)
+        return {
+            "ok": False,
+            "error": "adaptive_risk_position_lifecycle_conflict",
+            "error_type": type(exc).__name__,
+        }
+
+
+def _first_dip_detector_audit_for_final(
+    sess: Any,
+    request: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Validate persisted detector identity as a veto-only consistency record.
+
+    This JSON can never authorize admission.  A fresh private
+    ``pre_reservation`` receipt is still mandatory below; the persisted record
+    only prevents a final receipt for another policy/surface/opportunity from
+    being applied to this candidate.
+    """
+
+    try:
+        from .first_dip_tape_decision import FIRST_DIP_TAPE_PURPOSE_DETECTOR
+        from .first_dip_tape_policy import FirstDipTapePolicy
+
+        snapshot = getattr(sess, "risk_snapshot_json", None)
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        live_exec = snapshot.get(KEY_LIVE_EXEC)
+        live_exec = live_exec if isinstance(live_exec, dict) else {}
+        debug = live_exec.get("entry_trigger_debug")
+        if not isinstance(debug, dict):
+            return False, {"reason": "first_dip_detector_audit_missing"}
+        if (
+            str(debug.get("front_side_via") or "").strip().lower()
+            != "first_dip_day_leg"
+            or debug.get("first_dip_tape_confirmed") is not True
+            or debug.get("first_dip_tape_run_bound") is not True
+        ):
+            return False, {"reason": "first_dip_detector_audit_not_positive"}
+        opportunity = request.opportunity_key
+        if opportunity is None or not hasattr(opportunity, "to_payload"):
+            return False, {"reason": "first_dip_detector_opportunity_missing"}
+        expected_opportunity = opportunity.to_payload()
+        if debug.get("opportunity_key") != expected_opportunity:
+            return False, {"reason": "first_dip_detector_opportunity_mismatch"}
+
+        policy_raw = debug.get("first_dip_tape_policy")
+        if not isinstance(policy_raw, dict):
+            return False, {"reason": "first_dip_detector_policy_missing"}
+        policy = FirstDipTapePolicy.from_dict(policy_raw)
+        if debug.get("first_dip_tape_policy_sha256") != policy.policy_sha256:
+            return False, {"reason": "first_dip_detector_policy_hash_mismatch"}
+
+        receipt = debug.get("first_dip_tape_decision_receipt")
+        if not isinstance(receipt, dict):
+            return False, {"reason": "first_dip_detector_receipt_audit_missing"}
+        binding_sha256 = str(receipt.get("binding_sha256") or "").strip().lower()
+        if (
+            receipt.get("purpose") != FIRST_DIP_TAPE_PURPOSE_DETECTOR
+            or receipt.get("run_bound") is not True
+            or receipt.get("reservation_authority") is not False
+            or receipt.get("order_authority") is not False
+            or len(binding_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in binding_sha256)
+            or debug.get("first_dip_tape_decision_receipt_binding_sha256")
+            != binding_sha256
+        ):
+            return False, {"reason": "first_dip_detector_receipt_audit_invalid"}
+        surface = str(receipt.get("authority_source") or "").strip()
+        if surface not in {"sealed_replay", "captured_db_paper"}:
+            return False, {"reason": "first_dip_detector_surface_invalid"}
+        tape = debug.get("first_dip_tape")
+        if not isinstance(tape, dict) or (
+            tape.get("status") != "valid_positive"
+            or tape.get("confirmed") is not True
+            or tape.get("reason") != "first_dip_tape_confirmed"
+            or tape.get("evaluation_sha256")
+            != debug.get("first_dip_tape_evaluation_sha256")
+        ):
+            return False, {"reason": "first_dip_detector_evaluation_invalid"}
+        return True, {
+            "_typed_policy": policy,
+            "policy_sha256": policy.policy_sha256,
+            "authority_source": surface,
+            "opportunity_key_sha256": opportunity.key_sha256,
+            "detector_receipt_binding_sha256": binding_sha256,
+        }
+    except (TypeError, ValueError, AdaptiveRiskContractError):
+        return False, {"reason": "first_dip_detector_audit_invalid"}
+
+
+def _final_first_dip_adaptive_confirmation(
+    sess: Any,
+    request_payload: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Re-verify one process-local typed first-dip receipt before reservation.
+
+    Serialized detector debug and ``tape_confirms_hold`` remain non-authority.
+    The only positive path consumes the exact detector-accepted receipt while
+    its private sealed/captured authority is still installed around this FSM
+    decision, and independently matches the adaptive request to that run,
+    generation, decision clock, symbol, and capture-prefix root.
+    """
+
+    try:
+        from .first_dip_tape_decision import (
+            FirstDipTapeDecisionProviderError,
+            _resolve_first_dip_final_admission_with_active_provider,
+        )
+
+        request = load_adaptive_risk_reservation_request(request_payload)
+        if request.setup_family != "first_dip_reclaim":
+            return True, {"not_applicable": True}
+        capture = request.inputs.evidence.get("capture_prefix")
+        if object_session(sess) is None or capture is None:
+            return False, {"reason": "first_dip_final_capture_evidence_missing"}
+        detector_ok, detector_audit = _first_dip_detector_audit_for_final(
+            sess,
+            request,
+        )
+        if not detector_ok:
+            return False, {
+                **detector_audit,
+                "diagnostic_tape_is_order_authority": False,
+            }
+        request_surface = str(
+            request.inputs.execution_surface or ""
+        ).strip().lower()
+        detector_surface = str(
+            detector_audit.get("authority_source") or ""
+        ).strip()
+        # A sealed replay intentionally rebuilds the exact recorded
+        # ``alpaca_paper`` request; changing that serialized field would destroy
+        # policy parity.  Its private detector receipt, not a payload flag,
+        # selects the sealed final authority.  Native DB-paper and explicitly
+        # sealed diagnostic requests remain restricted to their own surface.
+        if request_surface == "alpaca_paper" and detector_surface in {
+            "captured_db_paper",
+            "sealed_replay",
+        }:
+            expected_surface = detector_surface
+        elif request_surface in {"db_paper", "captured_db_paper"}:
+            expected_surface = (
+                "captured_db_paper"
+                if detector_surface == "captured_db_paper"
+                else None
+            )
+        elif request_surface == "sealed_replay":
+            expected_surface = (
+                "sealed_replay"
+                if detector_surface == "sealed_replay"
+                else None
+            )
+        else:
+            expected_surface = None
+        if expected_surface is None:
+            return False, {
+                "reason": "first_dip_final_execution_surface_invalid",
+                "diagnostic_tape_is_order_authority": False,
+            }
+        final_boundary_available_at = _utcnow_aware()
+        final = _resolve_first_dip_final_admission_with_active_provider(
+            adaptive_request=request,
+            detector_policy=detector_audit["_typed_policy"],
+            symbol=request.inputs.symbol,
+            adaptive_decision_at=request.inputs.as_of,
+            run_id=request.inputs.replay_or_paper_run_id,
+            generation=request.inputs.generation,
+            adaptive_decision_id=request.inputs.decision_id,
+            adaptive_input_prefix_root_sha256=(
+                request.inputs.capture_prefix_root_sha256
+            ),
+            adaptive_request_sha256=request.request_sha256,
+            opportunity_key_sha256=request.opportunity_key.key_sha256,
+            final_boundary_available_at=final_boundary_available_at,
+            expected_execution_surface=expected_surface,
+            detector_policy_sha256=str(detector_audit["policy_sha256"]),
+            detector_authority_source=str(
+                detector_audit["authority_source"]
+            ),
+            detector_receipt_binding_sha256=str(
+                detector_audit["detector_receipt_binding_sha256"]
+            ),
+            detector_opportunity_key_sha256=str(
+                detector_audit["opportunity_key_sha256"]
+            ),
+        )
+        evidence = {
+            **final.to_audit_dict(),
+            "checked_at_utc": _utcnow_aware().isoformat(),
+            "capture_prefix_content_sha256": capture.content_sha256,
+            "capture_provider_generation": capture.provider_generation,
+            "detector_opportunity_key_sha256": detector_audit[
+                "opportunity_key_sha256"
+            ],
+            "detector_receipt_binding_sha256": detector_audit[
+                "detector_receipt_binding_sha256"
+            ],
+            "diagnostic_tape_is_order_authority": False,
+        }
+        if final.admitted is not True:
+            return False, evidence
+        return True, evidence
+    except FirstDipTapeDecisionProviderError as exc:
+        return False, {
+            "reason": "first_dip_final_typed_capture_receipt_unavailable",
+            "error_type": type(exc).__name__,
+            "diagnostic_tape_is_order_authority": False,
+        }
+    except (AdaptiveRiskContractError, TypeError, ValueError):
+        return False, {"reason": "first_dip_final_capture_evidence_invalid"}
+
+
 def _strict_alpaca_account_identity(
     adapter: Any,
     sess: Any,
@@ -676,6 +2417,10 @@ def _strict_alpaca_account_identity(
     return True, {
         "account_id": frozen,
         "paper": True,
+        "equity": snap.get("equity"),
+        "last_equity": snap.get("last_equity"),
+        "buying_power": snap.get("buying_power"),
+        "status": snap.get("status"),
         "checked_at_utc": _utcnow().isoformat(),
     }
 
@@ -709,7 +2454,7 @@ def _strict_alpaca_clock_truth(
             next_close = next_close.replace(tzinfo=timezone.utc)
         else:
             next_close = next_close.astimezone(timezone.utc)
-        local_now = datetime.now(timezone.utc)
+        local_now = _utcnow_aware()
         clock_age = (local_now - broker_now).total_seconds()
         seconds_to_close = (next_close - broker_now).total_seconds()
         if not (
@@ -756,7 +2501,9 @@ def _strict_alpaca_rth_entry_window(
     try:
         from .market_profile import market_session_now
 
-        local_session = str(market_session_now(str(sess.symbol))).strip().lower()
+        local_session = str(
+            market_session_now(str(sess.symbol), now=_utcnow_aware())
+        ).strip().lower()
     except Exception:
         local_session = "unknown"
     clock, clock_evidence = _strict_alpaca_clock_truth(adapter)
@@ -839,10 +2586,16 @@ def _alpaca_entries_quarantined(sess: Any) -> bool:
     marker = marker if isinstance(marker, dict) else {}
     le = snapshot.get(KEY_LIVE_EXEC)
     le = le if isinstance(le, dict) else {}
+    adaptive_blocker = le.get("adaptive_risk_alpaca_lifecycle_blocker")
+    adaptive_blocker = (
+        adaptive_blocker if isinstance(adaptive_blocker, dict) else {}
+    )
     return bool(
         snapshot.get("entries_quarantined")
         or marker.get("entries_quarantined")
         or le.get("alpaca_entries_quarantined")
+        or adaptive_blocker.get("reason")
+        == "adaptive_risk_exposure_quarantined"
     )
 
 
@@ -895,7 +2648,7 @@ def _claim_lease_elapsed(value: Any) -> bool:
             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
-        return value <= datetime.now(timezone.utc)
+        return value <= _utcnow_aware()
     except Exception:
         return False
 
@@ -937,7 +2690,7 @@ def _fresh_alpaca_broker_daily_loss_admission(
 
     Earlier arm/fill-boundary checks may intentionally share the five-second
     account day-change cache. They are useful preliminary gates, but they cannot
-    authorize a POST: a just-confirmed exit may have crossed the paper $250 stop
+    authorize a POST: a just-confirmed exit may have crossed the configured stop
     after that cached healthy observation. This seam therefore bypasses the
     cache immediately before the durable reservation. Any unavailable/malformed
     observation fails closed without creating a claim or touching order HTTP.
@@ -992,6 +2745,416 @@ def _fresh_alpaca_broker_daily_loss_admission(
             "error": "forced_broker_snapshot_evidence_invalid",
         }
     return True, info
+
+
+_FINAL_ALPACA_BREAKER_SCHEMA = "chili.alpaca-final-breaker-admission.v1"
+_FINAL_ALPACA_BREAKER_PHASES = frozenset({"pre_reservation", "pre_post"})
+_FINAL_ALPACA_BREAKER_SNAPSHOT_KEY = "alpaca_final_breaker_admission"
+
+
+def _final_alpaca_financial_breaker_admission(
+    sess: Any,
+    *,
+    phase: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Re-read every financial halt that can forbid an Alpaca risk increase.
+
+    Watcher/arm checks are useful early declines, but they cannot authorize a
+    later broker mutation.  This helper deliberately recomputes the independent
+    financial breakers from their authoritative sources at the universal order
+    seam.  It is called before the durable reservation and again immediately
+    before transport authority is consumed.
+
+    The broker daily-loss read is the force-refresh/sticky governance path, not
+    the adaptive packet's mark-to-market budget alone.  Any missing DB/broker or
+    malformed breaker truth is a block.  No check here can suppress an exit:
+    callers invoke it only for ``_alpaca_risk_increasing_place``.
+    """
+
+    checked_at_dt = _utcnow_aware()
+    checked_at = checked_at_dt.isoformat()
+    phase_name = str(phase or "").strip().lower()
+    family = normalize_execution_family(getattr(sess, "execution_family", None))
+    evidence: dict[str, Any] = {
+        "schema_version": _FINAL_ALPACA_BREAKER_SCHEMA,
+        "phase": phase_name,
+        "execution_family": family,
+        "checked_at_utc": checked_at,
+        "checks": [],
+    }
+
+    def _block(
+        breaker: str,
+        reason: str,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        result = {
+            **evidence,
+            "allowed": False,
+            "breaker": breaker,
+            "reason": reason,
+        }
+        if detail:
+            result["detail"] = dict(detail)
+        return False, result
+
+    def _append(check_id: str, **detail: Any) -> None:
+        evidence["checks"].append({"id": check_id, **detail})
+
+    if phase_name not in _FINAL_ALPACA_BREAKER_PHASES:
+        return _block(
+            "contract",
+            "alpaca_final_breaker_phase_invalid",
+            detail={"phase": phase_name or None},
+        )
+    if family not in ALPACA_EXECUTION_FAMILIES:
+        return True, {
+            **evidence,
+            "allowed": True,
+            "not_applicable": True,
+            "breaker": None,
+            "reason": None,
+        }
+    try:
+        user_id = int(getattr(sess, "user_id"))
+    except (TypeError, ValueError):
+        return _block("contract", "alpaca_final_breaker_user_unavailable")
+    try:
+        db = object_session(sess)
+    except Exception:
+        db = None
+    if db is None:
+        return _block("contract", "alpaca_final_breaker_db_session_unavailable")
+
+    # True-global/manual/emergency/backstop authority.  A legacy non-backstop
+    # global daily-loss reason remains broker-scoped when the per-broker rollout
+    # is enabled; ``kill_switch_halts_new_entries`` owns that exact distinction.
+    try:
+        from ..governance import (
+            get_kill_switch_status,
+            kill_switch_halts_new_entries,
+        )
+
+        kill_status = dict(get_kill_switch_status() or {})
+        kill_halts = bool(kill_switch_halts_new_entries())
+        kill_detail = {
+            "active": bool(kill_status.get("active")),
+            "halts_new_entries": kill_halts,
+            "reason": str(kill_status.get("reason") or "") or None,
+        }
+        _append("governance_kill_switch", ok=not kill_halts, **kill_detail)
+    except Exception as exc:
+        return _block(
+            "governance_kill_switch",
+            "alpaca_final_kill_switch_truth_unavailable",
+            detail={"error_type": type(exc).__name__},
+        )
+    if kill_halts:
+        return _block(
+            "governance_kill_switch",
+            "governance_kill_switch",
+            detail=kill_detail,
+        )
+
+    # Alpaca paper is never allowed to fall back to the generic/global ledger:
+    # force a fresh equity-minus-last-equity observation and preserve the sticky
+    # all-day broker breach once a real crossing has been observed.
+    broker_ok, broker_info = _fresh_alpaca_broker_daily_loss_admission(sess)
+    broker_info = dict(broker_info or {})
+    broker_detail = {
+        key: broker_info.get(key)
+        for key in (
+            "family",
+            "reason",
+            "realized",
+            "cap",
+            "limit",
+            "source",
+            "data_source",
+            "sticky",
+            "transient",
+            "broker_snapshot_cache_bypassed",
+        )
+        if key in broker_info
+    }
+    _append("global_daily_loss_cap", ok=bool(broker_ok), **broker_detail)
+    if not broker_ok:
+        return _block(
+            "global_daily_loss_cap",
+            str(broker_info.get("reason") or "alpaca_broker_daily_loss_blocked"),
+            detail=broker_detail,
+        )
+
+    try:
+        from .risk_evaluator import (
+            _daily_realized_pnl,
+            evaluate_green_to_red_halt,
+            evaluate_profit_giveback_halt,
+        )
+        from .risk_policy import equity_relative_daily_loss_cap
+
+        configured_fallback = float(
+            getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 0.0)
+            or 0.0
+        )
+        local_cap = float(
+            equity_relative_daily_loss_cap(configured_fallback, family)
+        )
+        local_pnl = float(
+            _daily_realized_pnl(
+                db,
+                user_id,
+                execution_family=family,
+                as_of_utc=checked_at_dt,
+            )
+        )
+        configured_fraction = float(
+            getattr(
+                settings,
+                "chili_momentum_risk_daily_loss_fraction_of_equity",
+                0.0,
+            )
+            or 0.0
+        )
+        if not (
+            math.isfinite(local_cap)
+            and local_cap > 0.0
+            and math.isfinite(local_pnl)
+            and math.isfinite(configured_fraction)
+            and configured_fraction > 0.0
+        ):
+            raise ValueError("adaptive local daily-loss truth unavailable")
+        local_ok = local_pnl > -local_cap
+        local_detail = {
+            "daily_pnl_usd": local_pnl,
+            "max_daily_loss_usd": local_cap,
+            "daily_risk_fraction_of_equity": configured_fraction,
+            "cap_authority": "equity_relative_daily_loss_cap",
+        }
+        _append("daily_loss_cap", ok=local_ok, **local_detail)
+    except Exception as exc:
+        return _block(
+            "daily_loss_cap",
+            "alpaca_final_local_daily_loss_truth_unavailable",
+            detail={"error_type": type(exc).__name__},
+        )
+    if not local_ok:
+        return _block(
+            "daily_loss_cap",
+            "daily_loss_cap",
+            detail=local_detail,
+        )
+
+    try:
+        giveback = dict(
+            evaluate_profit_giveback_halt(
+                db,
+                user_id=user_id,
+                execution_family=family,
+                as_of_utc=checked_at_dt,
+            )
+            or {}
+        )
+        if not isinstance(giveback.get("halted"), bool):
+            raise ValueError("profit giveback truth malformed")
+        giveback_ok = not giveback["halted"]
+        _append("profit_giveback", ok=giveback_ok, **giveback)
+    except Exception as exc:
+        return _block(
+            "profit_giveback",
+            "alpaca_final_profit_giveback_truth_unavailable",
+            detail={"error_type": type(exc).__name__},
+        )
+    if not giveback_ok:
+        return _block(
+            "profit_giveback",
+            "profit_giveback",
+            detail=giveback,
+        )
+
+    try:
+        green_to_red = dict(
+            evaluate_green_to_red_halt(
+                db,
+                user_id=user_id,
+                execution_family=family,
+                as_of_utc=checked_at_dt,
+            )
+            or {}
+        )
+        if not isinstance(green_to_red.get("halted"), bool):
+            raise ValueError("green-to-red truth malformed")
+        green_to_red_ok = not green_to_red["halted"]
+        _append("green_to_red", ok=green_to_red_ok, **green_to_red)
+    except Exception as exc:
+        return _block(
+            "green_to_red",
+            "alpaca_final_green_to_red_truth_unavailable",
+            detail={"error_type": type(exc).__name__},
+        )
+    if not green_to_red_ok:
+        return _block(
+            "green_to_red",
+            "green_to_red",
+            detail=green_to_red,
+        )
+
+    try:
+        from ..portfolio_risk import check_portfolio_drawdown_breaker
+
+        drawdown_tripped, drawdown_reason = check_portfolio_drawdown_breaker(
+            db,
+            user_id,
+        )
+        drawdown_tripped = bool(drawdown_tripped)
+        drawdown_detail = {
+            "tripped": drawdown_tripped,
+            "reason": str(drawdown_reason or "") or None,
+        }
+        _append(
+            "portfolio_dd_breaker",
+            ok=not drawdown_tripped,
+            **drawdown_detail,
+        )
+    except Exception as exc:
+        return _block(
+            "portfolio_dd_breaker",
+            "alpaca_final_portfolio_drawdown_truth_unavailable",
+            detail={"error_type": type(exc).__name__},
+        )
+    if drawdown_tripped:
+        return _block(
+            "portfolio_dd_breaker",
+            "portfolio_dd_breaker",
+            detail=drawdown_detail,
+        )
+
+    return True, {
+        **evidence,
+        "allowed": True,
+        "breaker": None,
+        "reason": None,
+    }
+
+
+def _record_final_alpaca_breaker_admission(
+    sess: Any,
+    evidence: dict[str, Any],
+) -> None:
+    """Persist both successful and blocked final-breaker generations."""
+
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = dict(snapshot) if isinstance(snapshot, dict) else {}
+    live_exec = snapshot.get(KEY_LIVE_EXEC)
+    live_exec = dict(live_exec) if isinstance(live_exec, dict) else {}
+    history = live_exec.get(_FINAL_ALPACA_BREAKER_SNAPSHOT_KEY)
+    history = dict(history) if isinstance(history, dict) else {}
+    phase = str(evidence.get("phase") or "unknown")
+    history[phase] = dict(evidence)
+    live_exec[_FINAL_ALPACA_BREAKER_SNAPSHOT_KEY] = history
+    _commit_le(sess, live_exec)
+
+
+def _adaptive_alpaca_daily_risk_admission(
+    request_payload: dict[str, Any],
+    account_identity: dict[str, Any],
+    *,
+    require_captured_economics: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Evaluate the packet's equity-fraction daily budget from one account read.
+
+    This deliberately does not call the legacy governance dollar cap.  Before
+    reservation the broker economics must match the immutable captured source;
+    after reservation benign mark movement is allowed unless it exhausts the
+    same adaptive daily budget that the shared resolver records.
+    """
+
+    try:
+        request = load_adaptive_risk_reservation_request(request_payload)
+        equity = float(account_identity.get("equity"))
+        last_equity = float(account_identity.get("last_equity"))
+        buying_power = float(account_identity.get("buying_power"))
+        if not all(
+            math.isfinite(value) and value >= 0.0
+            for value in (equity, last_equity, buying_power)
+        ) or equity <= 0.0:
+            raise ValueError("account economics unavailable")
+        broker_day_change = equity - last_equity
+        captured_match = bool(
+            math.isclose(
+                equity,
+                float(request.inputs.equity_usd),
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+            and math.isclose(
+                buying_power,
+                float(request.inputs.buying_power_usd),
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+            and math.isclose(
+                broker_day_change,
+                float(request.inputs.broker_day_change_usd),
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+        )
+        daily_budget = equity * float(
+            request.policy.daily_risk_fraction_of_equity
+        )
+        gap_reserve = equity * float(
+            request.policy.daily_gap_reserve_fraction_of_equity
+        )
+        authoritative_drawdown = max(
+            0.0,
+            -broker_day_change,
+            -float(request.inputs.local_realized_pnl_usd),
+        )
+        available_before_open_and_pending = max(
+            0.0,
+            daily_budget - authoritative_drawdown - gap_reserve,
+        )
+        evidence = {
+            "policy_sha256": request.policy.policy_sha256,
+            "account_snapshot_sha256": request.account_snapshot.snapshot_sha256,
+            "daily_risk_fraction_of_equity": float(
+                request.policy.daily_risk_fraction_of_equity
+            ),
+            "daily_gap_reserve_fraction_of_equity": float(
+                request.policy.daily_gap_reserve_fraction_of_equity
+            ),
+            "equity_usd": equity,
+            "buying_power_usd": buying_power,
+            "broker_day_change_usd": broker_day_change,
+            "authoritative_drawdown_usd": authoritative_drawdown,
+            "daily_risk_budget_usd": daily_budget,
+            "daily_gap_reserve_usd": gap_reserve,
+            "available_before_open_and_pending_usd": (
+                available_before_open_and_pending
+            ),
+            "captured_economics_match": captured_match,
+            "checked_at_utc": _utcnow_aware().isoformat(),
+        }
+        if require_captured_economics and not captured_match:
+            return False, {
+                **evidence,
+                "reason": "adaptive_risk_fresh_source_refresh_required",
+                "refresh_required": True,
+            }
+        if available_before_open_and_pending <= 0.0:
+            return False, {
+                **evidence,
+                "reason": "adaptive_risk_daily_budget_exhausted",
+                "refresh_required": False,
+            }
+        return True, evidence
+    except (AdaptiveRiskContractError, TypeError, ValueError):
+        return False, {
+            "reason": "adaptive_risk_daily_account_truth_unavailable",
+            "refresh_required": False,
+        }
 
 
 def _prepare_alpaca_place_claim(
@@ -1070,6 +3233,91 @@ def _prepare_alpaca_place_claim(
                 "client_order_id": cid,
                 "canonical_limit_price": canonical_limit,
             }
+    adaptive_packet = (role_metadata or {}).get("adaptive_risk_decision_packet")
+    adaptive_claim_payload = (role_metadata or {}).get(
+        "adaptive_risk_reservation_claim"
+    )
+    adaptive_request_payload = (role_metadata or {}).get(
+        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+    )
+    adaptive_pair_present = (
+        adaptive_packet is not None
+        or adaptive_claim_payload is not None
+        or adaptive_request_payload is not None
+    )
+    if not adaptive_pair_present:
+        return None, cid, {
+            "ok": False,
+            "error": "builder_missing_capture_binding",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+        }
+    if adaptive_pair_present:
+        if not isinstance(adaptive_packet, dict) or not isinstance(
+            adaptive_claim_payload, dict
+        ) or not isinstance(adaptive_request_payload, dict):
+            return None, cid, {
+                "ok": False,
+                "error": "adaptive_risk_request_packet_claim_incomplete",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+            }
+        try:
+            adaptive_claim = load_and_verify_adaptive_risk_reservation_claim(
+                adaptive_packet,
+                adaptive_claim_payload,
+            )
+            adaptive_request = load_adaptive_risk_reservation_request(
+                adaptive_request_payload
+            )
+        except AdaptiveRiskContractError:
+            return None, cid, {
+                "ok": False,
+                "error": "adaptive_risk_packet_claim_invalid",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+            }
+        if (
+            adaptive_claim.claim_id != cid
+            or adaptive_claim.symbol
+            != str(getattr(sess, "symbol", "") or kwargs.get("product_id") or "")
+            .strip()
+            .upper()
+            or adaptive_claim.execution_surface != "alpaca_paper"
+            or adaptive_claim.execution_family != "alpaca_spot"
+            or adaptive_claim.venue != "alpaca"
+            or adaptive_claim.broker_environment != "paper"
+            or adaptive_claim.side != "long"
+            or adaptive_claim.quantity_shares <= 0
+            or adaptive_request.client_order_id != cid
+            or adaptive_request.account_scope != account_scope
+            or adaptive_request.inputs.symbol != adaptive_claim.symbol
+            or adaptive_request.inputs.execution_surface != "alpaca_paper"
+            or adaptive_request.inputs.execution_family != "alpaca_spot"
+            or adaptive_request.inputs.venue != "alpaca"
+            or adaptive_request.inputs.broker_environment != "paper"
+            or not math.isclose(
+                float(adaptive_request.entry_limit_price),
+                float(canonical_limit),
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+        ):
+            return None, cid, {
+                "ok": False,
+                "error": "adaptive_risk_order_request_mismatch",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": cid,
+            }
+        # The strict shared resolver owns quantity.  Rewrite the still-local
+        # request before its immutable order_request/CID generation is frozen;
+        # this removes the legacy dollar-sized quantity from the adaptive path
+        # without weakening the literal POST-boundary comparison below.
+        kwargs["base_size"] = _fmt_base_size(float(adaptive_claim.quantity_shares))
     try:
         qty = float(kwargs.get("base_size"))
         limit_price = float(kwargs.get("limit_price"))
@@ -1154,6 +3402,7 @@ def _prepare_alpaca_place_claim(
         acquired.get("created")
         or acquired.get("replaced")
         or acquired.get("client_order_id_bound")
+        or acquired.get("pre_transport_generation_rebound")
     )
     claim_metadata = claim.get("metadata")
     claim_metadata = claim_metadata if isinstance(claim_metadata, dict) else {}
@@ -1165,11 +3414,102 @@ def _prepare_alpaca_place_claim(
     claim["_no_transport_proven"] = exact_creator_generation
     claim["_post_bind_token"] = post_bind_token if exact_creator_generation else None
     snap["alpaca_symbol_claim_token"] = claim["claim_token"]
+    if isinstance(adaptive_packet, dict) and isinstance(
+        adaptive_claim_payload, dict
+    ):
+        live_exec = snap.get(KEY_LIVE_EXEC)
+        live_exec = dict(live_exec) if isinstance(live_exec, dict) else {}
+        live_exec["adaptive_risk_decision_packet"] = dict(adaptive_packet)
+        live_exec["adaptive_risk_reservation_claim"] = dict(
+            adaptive_claim_payload
+        )
+        live_exec[KEY_ADAPTIVE_RISK_RESERVATION_REQUEST] = dict(
+            adaptive_request_payload
+        )
+        snap[KEY_LIVE_EXEC] = live_exec
     sess.risk_snapshot_json = snap
     try:
         flag_modified(sess, "risk_snapshot_json")
     except Exception:
         pass
+
+    live_exec = snap.get(KEY_LIVE_EXEC)
+    live_exec = dict(live_exec) if isinstance(live_exec, dict) else {}
+    adaptive_binding = _ensure_adaptive_alpaca_reservation(
+        sess,
+        live_exec,
+        request_payload=dict(adaptive_request_payload),
+        expected_quantity=int(adaptive_claim.quantity_shares),
+    )
+    if not adaptive_binding.get("ok"):
+        legacy_released = False
+        if exact_creator_generation:
+            legacy_released = bool(
+                release_entry_claim_pre_post_committed(
+                    symbol=claim["symbol"],
+                    claim_token=claim["claim_token"],
+                    owner_session_id=int(sess.id),
+                    client_order_id=cid,
+                    post_bind_token=post_bind_token,
+                    account_scope=claim["account_scope"],
+                    alpaca_account_id=account_id,
+                    reason="adaptive_risk_reservation_failed",
+                )
+            )
+        return claim, cid, {
+            "ok": False,
+            "error": adaptive_binding.get("error")
+            or "adaptive_risk_reservation_unavailable",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+            "entry_claim_pre_post_released": legacy_released,
+            "rejection_reasons": adaptive_binding.get("rejection_reasons"),
+        }
+    if adaptive_binding.get("exposure_quarantined"):
+        return claim, cid, {
+            "ok": False,
+            "error": "adaptive_risk_exposure_quarantined",
+            "deferred": True,
+            "pre_place_blocked": True,
+            "client_order_id": cid,
+            "entry_claim_pre_post_released": False,
+            "adaptive_risk_reconciliation_required": True,
+            "exposure_quarantined": True,
+        }
+    claim["_adaptive_reservation_id"] = str(
+        adaptive_binding["decision"].reservation_id
+    )
+    claim["_adaptive_request_sha256"] = adaptive_binding[
+        "request"
+    ].request_sha256
+    update_action_claim_phase_committed(
+        symbol=claim["symbol"],
+        claim_token=claim["claim_token"],
+        phase=ALPACA_CLAIMED,
+        client_order_id=cid,
+        broker_order_id=claim.get("broker_order_id"),
+        metadata={
+            "adaptive_risk_lifecycle_binding": {
+                "schema_version": _ADAPTIVE_ALPACA_LIFECYCLE_SCHEMA,
+                "reservation_id": claim["_adaptive_reservation_id"],
+                "request_sha256": claim["_adaptive_request_sha256"],
+                "decision_packet_sha256": adaptive_binding[
+                    "decision"
+                ].decision_packet_sha256,
+                "account_scope": adaptive_binding["request"].account_scope,
+                "account_identity_sha256": adaptive_binding[
+                    "request"
+                ].inputs.account_identity_sha256,
+                "client_order_id": adaptive_binding["request"].client_order_id,
+                "connection_generation": adaptive_binding["binding"][
+                    "connection_generation"
+                ],
+                "owner_session_id": int(sess.id),
+            }
+        },
+        account_scope=claim["account_scope"],
+    )
 
     if not exact_creator_generation:
         strict_state, known = _strict_client_order_id_truth(adapter, cid)
@@ -1184,6 +3524,21 @@ def _prepare_alpaca_place_claim(
                 }
             known_oid = str(getattr(known, "order_id", "") or "")
             if known_oid:
+                sync = _sync_adaptive_alpaca_order_lifecycle(
+                    sess,
+                    live_exec,
+                    order=known,
+                    claim=claim,
+                    adapter=adapter,
+                )
+                if not sync.get("ok"):
+                    return claim, cid, {
+                        "ok": False,
+                        "error": sync.get("error"),
+                        "deferred": True,
+                        "pre_place_blocked": True,
+                        "client_order_id": cid,
+                    }
                 update_action_claim_phase_committed(
                     symbol=claim["symbol"],
                     claim_token=claim["claim_token"],
@@ -1249,6 +3604,13 @@ _ALPACA_ROLE_METADATA_KEYS = frozenset({
     "entry_expected_move_bps",
     "entry_want_qty",
     "entry_decision_packet_id",
+    "adaptive_risk_builder_audit",
+    "adaptive_risk_builder_source_sha256",
+    "adaptive_risk_decision_packet",
+    "adaptive_risk_reservation_claim",
+    KEY_ADAPTIVE_RISK_RESERVATION_REQUEST,
+    KEY_ADAPTIVE_ALPACA_LIFECYCLE,
+    "adaptive_risk_alpaca_lifecycle_blocker",
     "entry_final_bbo",
     "entry_spread_risk_gate",
     "entry_spread_bps_at_decision",
@@ -1999,6 +4361,35 @@ def _recover_owner_alpaca_entry_claim(
         flag_modified(sess, "risk_snapshot_json")
     except Exception:
         pass
+    adaptive_request_payload = _adaptive_alpaca_request_payload_from_claim(claim)
+    if not isinstance(adaptive_request_payload, dict):
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "reason": "adaptive_risk_reservation_request_missing",
+        }
+    claim_request = _alpaca_claim_order_request(claim, sess, product_id)
+    try:
+        expected_adaptive_quantity = int(float(claim_request.get("base_size")))
+    except (TypeError, ValueError):
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "reason": "adaptive_risk_claim_quantity_invalid",
+        }
+    adaptive_recovered = _ensure_adaptive_alpaca_reservation(
+        sess,
+        le,
+        request_payload=adaptive_request_payload,
+        expected_quantity=expected_adaptive_quantity,
+    )
+    if not adaptive_recovered.get("ok"):
+        return {
+            "active": True,
+            "block_new_entries": True,
+            "reason": adaptive_recovered.get("error")
+            or "adaptive_risk_reservation_recovery_failed",
+        }
     retained = le.get("alpaca_entry_claim_resolution_pending")
     retained = retained if isinstance(retained, dict) else {}
     if retained.get("retain_until_broker_flat") is True:
@@ -2076,6 +4467,13 @@ def _recover_owner_alpaca_entry_claim(
             }
             _commit_le(sess, le)
             return {"active": True, "block_new_entries": True, "reason": "identity_mismatch"}
+        adaptive_lifecycle = _sync_adaptive_alpaca_order_lifecycle(
+            sess,
+            le,
+            order=order,
+            claim=claim,
+            adapter=adapter,
+        )
         oid = str(getattr(order, "order_id", "") or "")
         update_action_claim_phase_committed(
             symbol=claim["symbol"],
@@ -2134,6 +4532,13 @@ def _recover_owner_alpaca_entry_claim(
             if reread is None or not _alpaca_claim_order_matches(reread, claim, request):
                 return {"active": True, "block_new_entries": True, "reason": "cancel_reread_unknown"}
             order = reread
+            adaptive_lifecycle = _sync_adaptive_alpaca_order_lifecycle(
+                sess,
+                le,
+                order=order,
+                claim=claim,
+                adapter=adapter,
+            )
         if role in {"primary", "repeg"}:
             if _order_open(order):
                 # Do not let missing risk/viability terminalize the session while
@@ -2158,6 +4563,13 @@ def _recover_owner_alpaca_entry_claim(
                 and recovered_status in _ORDER_TERMINAL_STATUSES
                 and recovered_filled <= 1e-12
             ):
+                if not adaptive_lifecycle.get("ok"):
+                    return {
+                        "active": True,
+                        "block_new_entries": True,
+                        "reason": adaptive_lifecycle.get("error")
+                        or "adaptive_risk_terminal_reconcile_failed",
+                    }
                 _mark_entry_order_resolved(le, oid, "void")
                 le.pop("entry_order_id", None)
                 le.pop("entry_client_order_id", None)
@@ -2200,6 +4612,9 @@ def _recover_owner_alpaca_entry_claim(
                         if adopted else "recovered_entry_fill_adoption_pending"
                     ),
                     "order_role": role,
+                    "adaptive_risk_lifecycle_ok": bool(
+                        adaptive_lifecycle.get("ok")
+                    ),
                 }
             if not _transition_recovered_primary_to_pending(db, sess):
                 return {"active": True, "block_new_entries": True, "reason": "owner_state_not_attachable"}
@@ -2300,7 +4715,7 @@ def _final_alpaca_execution_bbo_check(
         return False, dict(evidence or {"reason": "alpaca_final_bbo_unreadable"})
     tick_meta = getattr(tick, "freshness", None)
     try:
-        age = float(tick_meta.age_seconds())
+        age = float(tick_meta.age_seconds(now=_utcnow_aware()))
         bid = float(tick.bid)
         ask = float(tick.ask)
         if not math.isfinite(age) or age > max_age:
@@ -2435,8 +4850,8 @@ def _strict_alpaca_empty_entry_posture(
         orders, orders_meta = list_open_orders(strict=True)
         if not isinstance(positions, list) or not isinstance(orders, list):
             return False, {"reason": "alpaca_account_posture_unreadable"}
-        position_age = float(positions_meta.age_seconds())
-        order_age = float(orders_meta.age_seconds())
+        position_age = float(positions_meta.age_seconds(now=_utcnow_aware()))
+        order_age = float(orders_meta.age_seconds(now=_utcnow_aware()))
         if not all(
             math.isfinite(age) and 0.0 <= age <= max_age
             for age in (position_age, order_age)
@@ -2475,6 +4890,57 @@ def _strict_alpaca_empty_entry_posture(
     }
 
 
+def _strict_alpaca_owned_entry_posture(
+    adapter: Any,
+    sess: Any,
+    *,
+    max_age_seconds: float = 2.0,
+) -> tuple[bool, dict[str, Any]]:
+    """Permit non-flat paper posture only when every exposure is CHILI-owned."""
+
+    try:
+        max_age = float(max_age_seconds)
+        if not math.isfinite(max_age) or max_age <= 0.0:
+            raise ValueError("invalid max age")
+        list_positions = getattr(adapter, "list_positions", None)
+        list_open_orders = getattr(adapter, "list_open_orders", None)
+        if not callable(list_positions) or not callable(list_open_orders):
+            raise AttributeError("strict account posture capability missing")
+        positions, positions_meta = list_positions()
+        orders, orders_meta = list_open_orders(strict=True)
+        if not isinstance(positions, list) or not isinstance(orders, list):
+            return False, {"reason": "alpaca_account_posture_unreadable"}
+        position_age = float(positions_meta.age_seconds(now=_utcnow_aware()))
+        order_age = float(orders_meta.age_seconds(now=_utcnow_aware()))
+        if not all(
+            math.isfinite(age) and 0.0 <= age <= max_age
+            for age in (position_age, order_age)
+        ):
+            return False, {
+                "reason": "alpaca_account_posture_stale",
+                "positions_age_seconds": position_age,
+                "open_orders_age_seconds": order_age,
+                "max_age_seconds": max_age,
+            }
+    except Exception:
+        return False, {"reason": "alpaca_account_posture_unreadable"}
+    certified = certify_alpaca_owned_entry_posture_committed(
+        broker_positions=positions,
+        broker_orders=orders,
+        account_scope=str(_frozen_alpaca_account_scope(sess) or ""),
+        alpaca_account_id=str(_frozen_alpaca_account_id(sess) or ""),
+    )
+    certified = dict(certified or {})
+    certified.update(
+        {
+            "positions_age_seconds": position_age,
+            "open_orders_age_seconds": order_age,
+            "max_age_seconds": max_age,
+        }
+    )
+    return bool(certified.get("ok")), certified
+
+
 def _governed_place(
     adapter,
     place_fn,
@@ -2500,6 +4966,47 @@ def _governed_place(
     from .rail_governor import acquire_rail, note_rail_outcome
 
     _alpaca_instruction = _alpaca_place_instruction_kind(sess, kwargs)
+    _alpaca_risk_increasing = _alpaca_risk_increasing_place(sess, kwargs)
+    # The registered captured-PAPER runtime has a separate typed
+    # selection->admission->outbox transport path.  No legacy primary, repeg,
+    # anticipation, pyramid, micro, pullback, or flag order may inherit an old
+    # packet and place through this helper while that runtime owns the tick.
+    # Exit/protection orders are exposure-decreasing and remain reachable.
+    if _alpaca_risk_increasing and captured_paper_selection_required(
+        execution_family=getattr(sess, "execution_family", None)
+    ):
+        return {
+            "ok": False,
+            "error": (
+                "captured_paper_legacy_exposure_increase_coverage_unavailable"
+            ),
+            "coverage_status": "COVERAGE_UNAVAILABLE",
+            "paper_start_parity_blocker": (
+                "typed_repeg_or_scaling_admission_required"
+            ),
+            "deferred": True,
+            "pre_place_blocked": True,
+            "opportunity_consumed": False,
+            "risk_reserved": False,
+            "order_posted": False,
+            "client_order_id": kwargs.get("client_order_id"),
+        }
+    _adaptive_risk_pair = bool(
+        isinstance(
+            (alpaca_role_metadata or {}).get("adaptive_risk_decision_packet"),
+            dict,
+        )
+        and isinstance(
+            (alpaca_role_metadata or {}).get("adaptive_risk_reservation_claim"),
+            dict,
+        )
+        and isinstance(
+            (alpaca_role_metadata or {}).get(
+                KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+            ),
+            dict,
+        )
+    )
     if _alpaca_instruction in {
         "invalid",
         "invalid_entry_tif",
@@ -2552,7 +5059,7 @@ def _governed_place(
             "pre_place_blocked": True,
             "client_order_id": kwargs.get("client_order_id"),
         }
-    if _alpaca_risk_increasing_place(sess, kwargs):
+    if _alpaca_risk_increasing:
         side = str(kwargs.get("side") or "").strip().lower()
         intent = str(kwargs.get("position_intent") or "").strip().lower()
         if side == "sell" or intent == "sell_to_open":
@@ -2563,7 +5070,26 @@ def _governed_place(
                 "pre_place_blocked": True,
                 "client_order_id": kwargs.get("client_order_id"),
             }
-    if _alpaca_risk_increasing_place(sess, kwargs) and _alpaca_entries_quarantined(sess):
+        # Universal paper-Alpaca exposure-increase choke point.  Primary entries,
+        # anticipation remainders, pyramids, reclaim adds, micro adds, flag adds,
+        # and orphan/adopted increases all cross this wrapper.  Until an add path
+        # builds its own fresh CID-bound packet against the aggregate 3-D ledger,
+        # it is explicitly unavailable; it may never inherit primary economics or
+        # fall back to legacy sizing.  SELL-to-close/protection does not satisfy
+        # `_alpaca_risk_increasing_place` and remains untouched.
+        if not _adaptive_risk_pair:
+            return {
+                "ok": False,
+                "error": "builder_missing_capture_binding",
+                "adaptive_risk_path": "exposure_increase_pair_required",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+        # The triplet is reloaded canonically and then independently reserved at
+        # the final boundary below.  A caller-supplied "ready" boolean is never
+        # consulted; only the committed reservation ID can cross transport.
+    if _alpaca_risk_increasing and _alpaca_entries_quarantined(sess):
         return {
             "ok": False,
             "error": "alpaca_close_only_entries_quarantined",
@@ -2611,7 +5137,9 @@ def _governed_place(
     # a stale-price submit.
     if execution_bbo_freshness is not None:
         try:
-            _bbo_age_s = float(execution_bbo_freshness.age_seconds())
+            _bbo_age_s = float(
+                execution_bbo_freshness.age_seconds(now=_utcnow_aware())
+            )
             _bbo_max_age_s = float(execution_bbo_max_age_seconds)
             if (
                 not math.isfinite(_bbo_age_s)
@@ -2642,16 +5170,55 @@ def _governed_place(
     _alpaca_final_freshness = None
     _alpaca_final_max_age = None
     _alpaca_account_equity = None
+    _alpaca_pre_http_release_detail: dict[str, Any] | None = None
 
     def _release_bound_entry_before_http(reason: str) -> bool:
+        nonlocal _alpaca_pre_http_release_detail
         if _alpaca_claim is None:
+            _alpaca_pre_http_release_detail = {
+                "confirmed": True,
+                "not_required": True,
+                "reason": reason,
+            }
             return True
         binder = str(_alpaca_claim.get("_post_bind_token") or "").strip()
         account_id = _frozen_alpaca_account_id(sess)
         if not binder or not account_id:
+            _alpaca_pre_http_release_detail = {
+                "confirmed": False,
+                "adaptive_released": False,
+                "legacy_released": False,
+                "reason": reason,
+                "release_blocker": (
+                    "post_bind_token_missing" if not binder else "account_id_missing"
+                ),
+            }
             return False
-        return bool(
-            release_entry_claim_pre_post_committed(
+        snapshot = getattr(sess, "risk_snapshot_json", None)
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        live_exec = snapshot.get(KEY_LIVE_EXEC)
+        live_exec = live_exec if isinstance(live_exec, dict) else {}
+        adaptive_binding = live_exec.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+        adaptive_binding = (
+            adaptive_binding if isinstance(adaptive_binding, dict) else {}
+        )
+        reservation_id = str(
+            _alpaca_claim.get("_adaptive_reservation_id")
+            or adaptive_binding.get("reservation_id")
+            or ""
+        ).strip()
+        if not reservation_id:
+            _alpaca_pre_http_release_detail = {
+                "confirmed": False,
+                "adaptive_released": False,
+                "legacy_released": False,
+                "reason": reason,
+                "release_blocker": "adaptive_reservation_binding_missing",
+            }
+            return False
+        coordinated = dict(
+            release_entry_and_adaptive_reservation_pre_post_committed(
+                reservation_id=reservation_id,
                 symbol=_alpaca_claim["symbol"],
                 claim_token=_alpaca_claim["claim_token"],
                 owner_session_id=int(sess.id),
@@ -2662,6 +5229,27 @@ def _governed_place(
                 reason=reason,
             )
         )
+        state = coordinated.pop("state", None)
+        confirmed = bool(
+            coordinated.get("ok")
+            and coordinated.get("confirmed")
+            and coordinated.get("adaptive_released")
+            and coordinated.get("legacy_released")
+            and state is not None
+        )
+        if confirmed:
+            try:
+                _adaptive_alpaca_refresh_binding(sess, live_exec, state=state)
+                coordinated["snapshot_refreshed"] = True
+            except Exception as exc:
+                # The two durable ledgers are already atomically released.  A
+                # stale local projection must be reconciled, but cannot revive
+                # POST authority or make the release untrue.
+                coordinated["snapshot_refreshed"] = False
+                coordinated["snapshot_refresh_error"] = type(exc).__name__
+        coordinated["confirmed"] = confirmed
+        _alpaca_pre_http_release_detail = coordinated
+        return confirmed
 
     if _alpaca_risk_increasing_place(sess, kwargs):
         _account_identity_ok, _account_identity = _strict_alpaca_account_identity(
@@ -2678,6 +5266,45 @@ def _governed_place(
                 "client_order_id": kwargs.get("client_order_id"),
                 "alpaca_account_identity": _account_identity,
             }
+        try:
+            _adaptive_packet_at_boundary = dict(
+                (alpaca_role_metadata or {})["adaptive_risk_decision_packet"]
+            )
+            _adaptive_claim_at_boundary = load_and_verify_adaptive_risk_reservation_claim(
+                _adaptive_packet_at_boundary,
+                (alpaca_role_metadata or {})["adaptive_risk_reservation_claim"],
+            )
+            _adaptive_inputs_at_boundary = _adaptive_packet_at_boundary[
+                "input_snapshot"
+            ]
+            _observed_account_id = str(_account_identity.get("account_id") or "")
+            _observed_account_identity_sha = (
+                alpaca_paper_account_identity_sha256(_observed_account_id)
+            )
+            _observed_equity = float(_account_identity.get("equity"))
+            _observed_buying_power = float(_account_identity.get("buying_power"))
+            _packet_equity = float(_adaptive_inputs_at_boundary["equity_usd"])
+            _packet_buying_power = float(
+                _adaptive_inputs_at_boundary["buying_power_usd"]
+            )
+            if not (
+                _observed_account_identity_sha
+                == _adaptive_claim_at_boundary.account_identity_sha256
+                and math.isfinite(_observed_equity)
+                and math.isfinite(_observed_buying_power)
+            ):
+                raise AdaptiveRiskContractError(
+                    "adaptive account generation changed before reservation"
+                )
+            _alpaca_account_equity = _observed_equity
+        except (AdaptiveRiskContractError, KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "adaptive_risk_account_snapshot_mismatch",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
         _rth_ok, _rth_evidence = _strict_alpaca_rth_entry_window(adapter, sess)
         if not _rth_ok:
             return {
@@ -2689,21 +5316,13 @@ def _governed_place(
                 "client_order_id": kwargs.get("client_order_id"),
                 "alpaca_entry_window": _rth_evidence,
             }
-        # Account equity is fetched before the literal execution quote and before
-        # the short reservation transaction. No DB/account lock crosses network I/O.
-        try:
-            from .risk_policy import _account_equity_usd
-
-            _alpaca_account_equity = _account_equity_usd(
-                normalize_execution_family(getattr(sess, "execution_family", None)),
-                apply_margin_multiple=False,
-                prefer_equity=True,
-            )
-        except Exception:
-            _alpaca_account_equity = None
+        # The exact fresh adapter snapshot above owns account equity/BP.  Do not
+        # replace it with the legacy cache or a different broker generation.
         if execution_bbo_freshness is not None:
             try:
-                _approved_age = float(execution_bbo_freshness.age_seconds())
+                _approved_age = float(
+                    execution_bbo_freshness.age_seconds(now=_utcnow_aware())
+                )
                 _approved_max = min(
                     2.0,
                     max(0.0, float(execution_bbo_max_age_seconds)),
@@ -2743,7 +5362,15 @@ def _governed_place(
             }
         _alpaca_final_freshness = _final_bbo_meta.pop("_execution_freshness", None)
         _alpaca_final_max_age = _final_bbo_meta.get("max_age_seconds")
-        _broker_flat, _broker_posture = _strict_alpaca_empty_entry_posture(adapter)
+        if _adaptive_risk_pair:
+            _broker_flat, _broker_posture = _strict_alpaca_owned_entry_posture(
+                adapter,
+                sess,
+            )
+        else:
+            _broker_flat, _broker_posture = _strict_alpaca_empty_entry_posture(
+                adapter
+            )
         if not _broker_flat:
             return {
                 "ok": False,
@@ -2753,27 +5380,83 @@ def _governed_place(
                 "client_order_id": kwargs.get("client_order_id"),
                 "broker_account_posture": _broker_posture,
             }
-        # Literal financial admission: the arm/fill-boundary checks may have
-        # reused a healthy five-second account cache. Force a new broker-equity
-        # snapshot now, after all potentially slow quote/posture work and before
-        # the durable risk reservation or order POST. Any uncertainty is zero
-        # reservation + zero transport.
-        _daily_loss_ok, _daily_loss_admission = (
-            _fresh_alpaca_broker_daily_loss_admission(sess)
+        # Literal financial admission uses the exact adaptive equity-fraction
+        # policy and one fresh Alpaca account generation.  Legacy dollar caps do
+        # not participate in this path.
+        _risk_account_ok, _risk_account_identity = (
+            _strict_alpaca_account_identity(adapter, sess)
         )
-        if not _daily_loss_ok:
-            _daily_loss_error = (
-                "alpaca_broker_daily_loss_snapshot_unavailable"
-                if _daily_loss_admission.get("transient")
-                else "alpaca_broker_daily_loss_limit_breached"
-            )
+        if not _risk_account_ok:
             return {
                 "ok": False,
-                "error": _daily_loss_error,
+                "error": _risk_account_identity.get("reason")
+                or "adaptive_risk_daily_account_truth_unavailable",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+            }
+        _daily_loss_ok, _daily_loss_admission = (
+            _adaptive_alpaca_daily_risk_admission(
+                dict(
+                    (alpaca_role_metadata or {})[
+                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                    ]
+                ),
+                _risk_account_identity,
+                require_captured_economics=True,
+            )
+        )
+        if not _daily_loss_ok:
+            return {
+                "ok": False,
+                "error": _daily_loss_admission.get("reason")
+                or "adaptive_risk_daily_account_truth_unavailable",
                 "deferred": True,
                 "pre_place_blocked": True,
                 "client_order_id": kwargs.get("client_order_id"),
                 "broker_daily_loss_admission": dict(_daily_loss_admission),
+            }
+        _alpaca_account_equity = float(_risk_account_identity["equity"])
+        _first_dip_ok, _first_dip_evidence = (
+            _final_first_dip_adaptive_confirmation(
+                sess,
+                dict(
+                    (alpaca_role_metadata or {})[
+                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                    ]
+                ),
+            )
+        )
+        if not _first_dip_ok:
+            return {
+                "ok": False,
+                "error": _first_dip_evidence.get("reason")
+                or "first_dip_final_tape_not_confirmed",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+                "first_dip_final_confirmation": _first_dip_evidence,
+            }
+        _pre_breaker_ok, _pre_breaker_admission = (
+            _final_alpaca_financial_breaker_admission(
+                sess,
+                phase="pre_reservation",
+            )
+        )
+        _record_final_alpaca_breaker_admission(
+            sess,
+            _pre_breaker_admission,
+        )
+        if not _pre_breaker_ok:
+            return {
+                "ok": False,
+                "error": _pre_breaker_admission.get("reason")
+                or "alpaca_final_breaker_blocked",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": kwargs.get("client_order_id"),
+                "financial_breaker_admission": dict(_pre_breaker_admission),
+                "reservation_created": False,
             }
         _role_metadata = {
             **dict(alpaca_role_metadata or {}),
@@ -2782,6 +5465,10 @@ def _governed_place(
             "final_execution_bbo": dict(_final_bbo_meta),
             "broker_account_posture": dict(_broker_posture),
             "broker_daily_loss_admission": dict(_daily_loss_admission),
+            "first_dip_final_confirmation": dict(_first_dip_evidence),
+            "financial_breaker_admission_pre_reservation": dict(
+                _pre_breaker_admission
+            ),
         }
         _alpaca_claim, _alpaca_cid, _claim_early_result = _prepare_alpaca_place_claim(
             adapter,
@@ -2814,6 +5501,31 @@ def _governed_place(
                 "alpaca_account_identity": _literal_account_identity,
                 "entry_claim_pre_post_released": _released,
             }
+        _literal_daily_ok, _literal_daily = (
+            _adaptive_alpaca_daily_risk_admission(
+                dict(
+                    (alpaca_role_metadata or {})[
+                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                    ]
+                ),
+                _literal_account_identity,
+                require_captured_economics=False,
+            )
+        )
+        if not _literal_daily_ok:
+            _released = _release_bound_entry_before_http(
+                "adaptive_daily_budget_changed_pre_post"
+            )
+            return {
+                "ok": False,
+                "error": _literal_daily.get("reason")
+                or "adaptive_risk_daily_account_truth_unavailable",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "broker_daily_loss_admission": dict(_literal_daily),
+                "entry_claim_pre_post_released": _released,
+            }
         _literal_rth_ok, _literal_rth = _strict_alpaca_rth_entry_window(
             adapter,
             sess,
@@ -2833,7 +5545,9 @@ def _governed_place(
                 "entry_claim_pre_post_released": _released,
             }
         try:
-            _literal_age = float(_alpaca_final_freshness.age_seconds())
+            _literal_age = float(
+                _alpaca_final_freshness.age_seconds(now=_utcnow_aware())
+            )
             _literal_max = float(_alpaca_final_max_age)
         except Exception:
             _literal_age = float("inf")
@@ -2856,9 +5570,15 @@ def _governed_place(
         # across broker I/O.  Re-read account-wide exposure at the literal POST
         # seam so a manual position/order created after the preliminary posture
         # cannot be stacked by this entry.
-        _literal_flat, _literal_posture = _strict_alpaca_empty_entry_posture(
-            adapter
-        )
+        if _adaptive_risk_pair:
+            _literal_flat, _literal_posture = _strict_alpaca_owned_entry_posture(
+                adapter,
+                sess,
+            )
+        else:
+            _literal_flat, _literal_posture = _strict_alpaca_empty_entry_posture(
+                adapter
+            )
         if not _literal_flat:
             _released = _release_bound_entry_before_http(
                 "alpaca_account_posture_changed_pre_post"
@@ -2873,30 +5593,7 @@ def _governed_place(
                 "broker_account_posture": _literal_posture,
                 "entry_claim_pre_post_released": _released,
             }
-        # Force a second broker-equity delta after reservation.  A loss from a
-        # concurrent/manual fill may have crossed the paper cap since the first
-        # admission and must retire this exact no-HTTP generation.
-        _literal_daily_ok, _literal_daily = (
-            _fresh_alpaca_broker_daily_loss_admission(sess)
-        )
-        if not _literal_daily_ok:
-            _released = _release_bound_entry_before_http(
-                "alpaca_daily_loss_changed_pre_post"
-            )
-            return {
-                "ok": False,
-                "error": (
-                    "alpaca_broker_daily_loss_snapshot_unavailable"
-                    if _literal_daily.get("transient")
-                    else "alpaca_broker_daily_loss_limit_breached"
-                ),
-                "deferred": True,
-                "pre_place_blocked": True,
-                "client_order_id": _alpaca_cid,
-                "broker_daily_loss_admission": dict(_literal_daily),
-                "entry_claim_pre_post_released": _released,
-            }
-        # Fence the posture/daily-loss reads to the same UUID that authorized the
+        # Fence the posture/daily-risk reads to the same UUID that authorized the
         # reservation.  Credential rotation during either read is unreadable
         # truth, never permission to POST against a different paper account.
         _final_account_ok, _final_account_identity = (
@@ -2922,6 +5619,29 @@ def _governed_place(
                 "alpaca_account_identity": _final_account_identity,
                 "entry_claim_pre_post_released": _released,
             }
+        _final_daily_ok, _final_daily = _adaptive_alpaca_daily_risk_admission(
+            dict(
+                (alpaca_role_metadata or {})[
+                    KEY_ADAPTIVE_RISK_RESERVATION_REQUEST
+                ]
+            ),
+            _final_account_identity,
+            require_captured_economics=False,
+        )
+        if not _final_daily_ok:
+            _released = _release_bound_entry_before_http(
+                "adaptive_daily_budget_changed_during_pre_post_truth"
+            )
+            return {
+                "ok": False,
+                "error": _final_daily.get("reason")
+                or "adaptive_risk_daily_account_truth_unavailable",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "broker_daily_loss_admission": dict(_final_daily),
+                "entry_claim_pre_post_released": _released,
+            }
         if not _alpaca_frozen_entry_request_matches_transport(
             _alpaca_claim,
             kwargs,
@@ -2937,11 +5657,41 @@ def _governed_place(
                 "client_order_id": _alpaca_cid,
                 "entry_claim_pre_post_released": _released,
             }
+        _post_breaker_ok, _post_breaker_admission = (
+            _final_alpaca_financial_breaker_admission(
+                sess,
+                phase="pre_post",
+            )
+        )
+        _record_final_alpaca_breaker_admission(
+            sess,
+            _post_breaker_admission,
+        )
+        if not _post_breaker_ok:
+            _released = _release_bound_entry_before_http(
+                "alpaca_final_breaker_changed_pre_post"
+            )
+            return {
+                "ok": False,
+                "error": _post_breaker_admission.get("reason")
+                or "alpaca_final_breaker_blocked",
+                "deferred": True,
+                "pre_place_blocked": True,
+                "client_order_id": _alpaca_cid,
+                "financial_breaker_admission": dict(_post_breaker_admission),
+                "entry_claim_pre_post_released": _released,
+                "entry_claim_pre_post_release": dict(
+                    _alpaca_pre_http_release_detail or {}
+                ),
+                "transport_started": False,
+            }
         # The posture, daily-loss, and final UUID reads above are network calls
         # and can themselves age the approved quote.  Recompute its age as the
         # last non-database gate immediately before consuming POST authority.
         try:
-            _post_seam_bbo_age = float(_alpaca_final_freshness.age_seconds())
+            _post_seam_bbo_age = float(
+                _alpaca_final_freshness.age_seconds(now=_utcnow_aware())
+            )
             _post_seam_bbo_max = float(_alpaca_final_max_age)
         except Exception:
             _post_seam_bbo_age = float("inf")
@@ -2978,18 +5728,36 @@ def _governed_place(
                 alpaca_account_id=account_id,
             )
         ):
+            _released = _release_bound_entry_before_http(
+                "alpaca_entry_transport_start_fence_not_committed"
+            )
             return {
                 "ok": False,
                 "error": "alpaca_entry_transport_start_fence_failed",
                 "deferred": True,
                 "pre_place_blocked": True,
                 "client_order_id": _alpaca_cid,
+                "entry_claim_pre_post_released": _released,
+                "entry_claim_pre_post_release": dict(
+                    _alpaca_pre_http_release_detail or {}
+                ),
+                "transport_started": False,
+                "adaptive_risk_reconciliation_required": not _released,
             }
     _t0 = _time.monotonic()
     try:
         out = place_fn(**kwargs)
     except Exception as exc:
         if _alpaca_claim is not None:
+            snapshot = getattr(sess, "risk_snapshot_json", None)
+            snapshot = snapshot if isinstance(snapshot, dict) else {}
+            live_exec = snapshot.get(KEY_LIVE_EXEC)
+            live_exec = live_exec if isinstance(live_exec, dict) else {}
+            _mark_adaptive_alpaca_submit_indeterminate(
+                sess,
+                live_exec,
+                reason=f"transport_exception:{type(exc).__name__}",
+            )
             update_action_claim_phase_committed(
                 symbol=_alpaca_claim["symbol"],
                 claim_token=_alpaca_claim["claim_token"],
@@ -3006,6 +5774,10 @@ def _governed_place(
     note_rail_outcome(settings, out, lane_key=_rail_lane_key(sess))
     if _alpaca_claim is not None:
         _oid = str((out or {}).get("order_id") or "") if isinstance(out, dict) else ""
+        snapshot = getattr(sess, "risk_snapshot_json", None)
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        live_exec = snapshot.get(KEY_LIVE_EXEC)
+        live_exec = live_exec if isinstance(live_exec, dict) else {}
         if isinstance(out, dict) and out.get("ok") and _oid:
             update_action_claim_phase_committed(
                 symbol=_alpaca_claim["symbol"],
@@ -3016,6 +5788,39 @@ def _governed_place(
                 metadata={"submit_status": out.get("status")},
                 account_scope=_alpaca_claim["account_scope"],
             )
+            truth, submitted_order = _strict_broker_order_id_truth(adapter, _oid)
+            if (
+                truth == "found"
+                and submitted_order is not None
+                and _alpaca_claim_order_matches(
+                    submitted_order,
+                    _alpaca_claim,
+                    dict(_alpaca_claim.get("_frozen_order_request") or {}),
+                )
+            ):
+                lifecycle = _sync_adaptive_alpaca_order_lifecycle(
+                    sess,
+                    live_exec,
+                    order=submitted_order,
+                    claim=_alpaca_claim,
+                    adapter=adapter,
+                )
+                if not lifecycle.get("ok"):
+                    out["adaptive_risk_reconciliation_required"] = True
+                    out["adaptive_risk_lifecycle_error"] = lifecycle.get("error")
+                elif lifecycle.get("exposure_quarantined"):
+                    out["adaptive_risk_reconciliation_required"] = True
+                    out["adaptive_risk_lifecycle_error"] = (
+                        "adaptive_risk_exposure_quarantined"
+                    )
+            else:
+                _mark_adaptive_alpaca_submit_indeterminate(
+                    sess,
+                    live_exec,
+                    reason="accepted_submit_exact_order_reread_unavailable",
+                    broker_order_id=_oid,
+                )
+                out["adaptive_risk_reconciliation_required"] = True
         else:
             # Preserve the adapter/downstream reconciliation contract.  A failed
             # or indeterminate return may still represent an accepted order, but a
@@ -3052,6 +5857,18 @@ def _governed_place(
                     },
                     account_scope=_alpaca_claim["account_scope"],
                 )
+            _mark_adaptive_alpaca_submit_indeterminate(
+                sess,
+                live_exec,
+                reason=(
+                    str((out or {}).get("submit_outcome") or "submit_result_unresolved")
+                    if isinstance(out, dict)
+                    else "submit_result_unresolved"
+                ),
+                broker_order_id=(_oid or None),
+            )
+            if isinstance(out, dict):
+                out["adaptive_risk_reconciliation_required"] = True
     # DIAG (2026-07-06): surface the ACTUAL broker place-call RTT into the result dict so
     # the live_entry_submitted event (which carries "result": res) records it. This splits
     # the pending->submitted latency into CHILI-code-time vs the REAL RH agentic place-call
@@ -3071,7 +5888,7 @@ def _governed_place(
 # in this in-process cache (hard max size + per-day key = its TTL — a new trading day
 # evicts the prior entry). The daily bars are fetched at most ONCE per symbol per day
 # across the whole process, never on the tick path. docs/DESIGN/MOMENTUM_LANE.md
-_DAILY_CTX_CACHE: dict[str, Any] = {}
+_DAILY_CTX_CACHE = _PROCESS_DECISION_RUNTIME_STATE.daily_ctx_cache
 _DAILY_CTX_CACHE_MAX = 512
 
 
@@ -3083,10 +5900,11 @@ def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
     path then degrades to daily-blind — never blocked). Equities only (the caller gates
     out crypto)."""
     try:
+        cache = _current_decision_runtime_state().daily_ctx_cache
         _day = _utcnow().strftime("%Y%m%d")
         _key = f"{str(symbol).upper()}|{_day}"
-        if _key in _DAILY_CTX_CACHE:
-            return _DAILY_CTX_CACHE[_key]
+        if _key in cache:
+            return cache[_key]
         _dc_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
         from .daily_levels import compute_daily_context as _dc_compute
 
@@ -3095,10 +5913,10 @@ def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
         _px = float(price) if (price is not None and price > 0) else None
         _ctx = _dc_compute(_df, lookback=_lb, price=_px, entry_context=True)
         # bound the cache: drop the oldest-day entries when it grows past the cap.
-        if len(_DAILY_CTX_CACHE) >= _DAILY_CTX_CACHE_MAX:
-            for _k in sorted(_DAILY_CTX_CACHE.keys())[: max(1, _DAILY_CTX_CACHE_MAX // 4)]:
-                _DAILY_CTX_CACHE.pop(_k, None)
-        _DAILY_CTX_CACHE[_key] = _ctx
+        if len(cache) >= _DAILY_CTX_CACHE_MAX:
+            for _k in sorted(cache.keys())[: max(1, _DAILY_CTX_CACHE_MAX // 4)]:
+                cache.pop(_k, None)
+        cache[_key] = _ctx
         return _ctx
     except Exception:
         return None
@@ -3115,6 +5933,7 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
         from sqlalchemy import text as _sql
 
         _fam = str(setup_family) if setup_family is not None else None
+        _as_of_utc = _utcnow()
         # MFE-SAMPLE EPOCH (2026-07-09): samples recorded before the exit-chain repair
         # measured a BROKEN system (winners cut at +0.2R -> pool p60 degenerated to ~0,
         # observed pctl_r=0.0). Excluding them keeps the data-derived target from
@@ -3134,17 +5953,23 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
                 _sql(
                     "SELECT payload_json FROM trading_automation_events "
                     "WHERE event_type='momentum_mfe_realized' AND ts >= :epoch "
+                    "AND ts <= :as_of_utc "
                     "ORDER BY id DESC LIMIT :lim"
                 ),
-                {"lim": int(max(1, min(2000, limit * 4))), "epoch": _epoch},
+                {
+                    "lim": int(max(1, min(2000, limit * 4))),
+                    "epoch": _epoch,
+                    "as_of_utc": _as_of_utc,
+                },
             ).fetchall()
         else:
             rows = db.execute(
                 _sql(
                     "SELECT payload_json FROM trading_automation_events "
-                    "WHERE event_type='momentum_mfe_realized' ORDER BY id DESC LIMIT :lim"
+                    "WHERE event_type='momentum_mfe_realized' AND ts <= :as_of_utc "
+                    "ORDER BY id DESC LIMIT :lim"
                 ),
-                {"lim": int(max(1, min(2000, limit * 4)))},
+                {"lim": int(max(1, min(2000, limit * 4))), "as_of_utc": _as_of_utc},
             ).fetchall()
         out: list[float] = []
         for (pj,) in rows:
@@ -3184,7 +6009,7 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
 #   * Cost     : O(window) append + one sorted-slice quantile; no fetch, never blocks.
 #   * size_floor stays the ONE documented SAFETY-FLOOR (not derived here) — the irreducible
 #     base the no-magic rule explicitly permits.
-_FRONTSIDE_DIST: "list[tuple[float, float]]" = []  # (monotonic_ts, strength)
+_FRONTSIDE_DIST = _PROCESS_DECISION_RUNTIME_STATE.frontside_dist
 _FRONTSIDE_DIST_MAX = 256          # hard max samples (the cache size cap)
 _FRONTSIDE_DIST_TTL_S = 30 * 60.0  # 30 min per-sample TTL (the regime window)
 _FRONTSIDE_DIST_MIN_K = 30         # warm-up floor before the ramp adapts
@@ -3197,21 +6022,20 @@ def _frontside_dist_note(strength: float, *, now: float | None = None) -> None:
     are dropped (the score is [0,1] by construction). Fail-silent (a cache hiccup must
     never touch the entry path)."""
     try:
-        import time as _time
-
+        dist = _current_decision_runtime_state().frontside_dist
         s = float(strength)
         if not math.isfinite(s):
             return
-        _now = float(now) if now is not None else _time.monotonic()
-        _FRONTSIDE_DIST.append((_now, s))
+        _now = _decision_runtime_clock_seconds(explicit=now)
+        dist.append((_now, s))
         # TTL eviction: drop samples older than the regime window.
         _cut = _now - _FRONTSIDE_DIST_TTL_S
-        if _FRONTSIDE_DIST and _FRONTSIDE_DIST[0][0] < _cut:
-            _kept = [t for t in _FRONTSIDE_DIST if t[0] >= _cut]
-            _FRONTSIDE_DIST[:] = _kept
+        if dist and dist[0][0] < _cut:
+            _kept = [t for t in dist if t[0] >= _cut]
+            dist[:] = _kept
         # Hard max-size eviction: keep the most-recent _FRONTSIDE_DIST_MAX.
-        if len(_FRONTSIDE_DIST) > _FRONTSIDE_DIST_MAX:
-            del _FRONTSIDE_DIST[: len(_FRONTSIDE_DIST) - _FRONTSIDE_DIST_MAX]
+        if len(dist) > _FRONTSIDE_DIST_MAX:
+            del dist[: len(dist) - _FRONTSIDE_DIST_MAX]
     except Exception:
         return
 
@@ -3226,12 +6050,12 @@ def _frontside_adaptive_thresholds(
     TTL filter + a single sorted-slice quantile (``statistics.quantiles``). Fail-CLOSED
     to ``None`` (⇒ base) on any error — adapting must never throw onto the entry path."""
     try:
-        import time as _time
         import statistics as _stats
 
-        _now = float(now) if now is not None else _time.monotonic()
+        dist = _current_decision_runtime_state().frontside_dist
+        _now = _decision_runtime_clock_seconds(explicit=now)
         _cut = _now - _FRONTSIDE_DIST_TTL_S
-        fresh = [s for (t, s) in _FRONTSIDE_DIST if t >= _cut and math.isfinite(s)]
+        fresh = [s for (t, s) in dist if t >= _cut and math.isfinite(s)]
         if len(fresh) < _FRONTSIDE_DIST_MIN_K:
             return None
         # statistics.quantiles(n=100) -> 99 cut points; index i is the (i+1)-th percentile.
@@ -3303,6 +6127,69 @@ def _commit_le(sess: TradingAutomationSession, le: dict[str, Any]) -> None:
         # sess may be a lightweight test double (SimpleNamespace) with no ORM
         # instance state; the dirty-flag only matters for real mapped sessions.
         pass
+
+
+def _refresh_adaptive_alpaca_lifecycle_from_session(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+) -> bool:
+    """Merge only the reservation seam's newer lifecycle projection.
+
+    The primary-entry frame and ``_prepare_alpaca_place_claim`` intentionally
+    use separate JSON dictionaries.  The latter commits the durable adaptive
+    binding and may advance it again after POST.  Refresh these protected keys
+    before the outer frame performs its normal post-place write, otherwise that
+    stale write can erase the lifecycle projection or its quarantine blocker.
+
+    This is deliberately not a global ``_commit_le`` merge: unrelated execution
+    state keeps the caller's existing ordering and mutation semantics.
+    """
+
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    fresh = snapshot.get(KEY_LIVE_EXEC)
+    fresh = fresh if isinstance(fresh, dict) else {}
+    fresh_binding = fresh.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    fresh_request = fresh.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    if not isinstance(fresh_binding, dict) or not isinstance(fresh_request, dict):
+        return False
+    try:
+        captured = load_adaptive_risk_reservation_request(fresh_request)
+    except (AdaptiveRiskContractError, TypeError, ValueError):
+        return False
+    if not (
+        str(fresh_binding.get("request_sha256") or "")
+        == captured.request_sha256
+        and str(fresh_binding.get("client_order_id") or "")
+        == captured.client_order_id
+        and str(fresh_binding.get("account_scope") or "")
+        == captured.account_scope
+    ):
+        return False
+    prior_request = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    if isinstance(prior_request, dict):
+        try:
+            prior = load_adaptive_risk_reservation_request(prior_request)
+        except (AdaptiveRiskContractError, TypeError, ValueError):
+            return False
+        if prior.request_sha256 != captured.request_sha256:
+            return False
+
+    for key in (
+        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST,
+        KEY_ADAPTIVE_ALPACA_LIFECYCLE,
+        "adaptive_risk_decision_packet",
+        "adaptive_risk_reservation_claim",
+    ):
+        value = fresh.get(key)
+        if isinstance(value, dict):
+            le[key] = deepcopy(value)
+    blocker = fresh.get("adaptive_risk_alpaca_lifecycle_blocker")
+    if isinstance(blocker, dict):
+        le["adaptive_risk_alpaca_lifecycle_blocker"] = deepcopy(blocker)
+    else:
+        le.pop("adaptive_risk_alpaca_lifecycle_blocker", None)
+    return True
 
 
 def _emit(
@@ -3936,7 +6823,7 @@ def _owner_transport_lease_expired(transport: dict[str, Any]) -> bool:
         )
         if expiry.tzinfo is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
-        return expiry <= datetime.now(timezone.utc)
+        return expiry <= _utcnow_aware()
     except Exception:
         return False
 
@@ -6312,6 +9199,7 @@ def _ensure_alpaca_deadman_stop(
                     fill_price=avg_fill,
                     reason="deadman_stop",
                     slip_bps=float(le.get("entry_slip_bps_ref") or 0.0),
+                    adapter=adapter,
                 )
                 db.flush()
                 return {
@@ -7642,7 +10530,9 @@ def _submit_live_market_exit(
         try:
             from .market_profile import market_session_now as _alpaca_exit_session_now
 
-            alpaca_equity_session = _alpaca_exit_session_now(sess.symbol)
+            alpaca_equity_session = _alpaca_exit_session_now(
+                sess.symbol, now=_utcnow_aware()
+            )
         except Exception:
             alpaca_equity_session = None
         if alpaca_equity_session == "closed":
@@ -7735,7 +10625,9 @@ def _submit_live_market_exit(
         try:
             from .market_profile import market_session_now
 
-            _exit_extended = market_session_now(sess.symbol) != "regular"
+            _exit_extended = (
+                market_session_now(sess.symbol, now=_utcnow_aware()) != "regular"
+            )
         except Exception:
             _exit_extended = False
     elif _exit_family in ALPACA_EXECUTION_FAMILIES:
@@ -7764,7 +10656,9 @@ def _submit_live_market_exit(
         try:
             if exit_execution_bbo_freshness is None or exit_execution_bbo_max_age is None:
                 raise ValueError("missing execution freshness")
-            age_seconds = float(exit_execution_bbo_freshness.age_seconds())
+            age_seconds = float(
+                exit_execution_bbo_freshness.age_seconds(now=_utcnow_aware())
+            )
             if not math.isfinite(age_seconds):
                 raise ValueError("non-finite execution freshness")
         except Exception:
@@ -10568,7 +13462,7 @@ def _retry_cap_exact_open_orders_truth(
     if open_orders is None or not isinstance(freshness, FreshnessMeta):
         return False, "open_order_truth_unreadable", []
     try:
-        if not is_fresh_enough(freshness):
+        if not is_fresh_enough(freshness, now=_utcnow_aware()):
             return False, "open_order_truth_stale", []
         return True, "ok", list(open_orders)
     except Exception:
@@ -11714,6 +14608,24 @@ def _poll_live_exit_fill(
                 "why": "alpaca_full_exit_broker_flat_unproven",
                 "order_status": no.status,
             }
+        if (
+            alpaca_family
+            and isinstance(le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE), dict)
+        ):
+            adaptive_position = _sync_adaptive_alpaca_position_lifecycle(
+                sess,
+                le,
+                adapter=adapter,
+                expected_remaining=broker_remaining,
+                exit_order=no,
+            )
+            if not adaptive_position.get("ok"):
+                return {
+                    "filled": False,
+                    "pending": True,
+                    "why": adaptive_position.get("error"),
+                    "order_status": no.status,
+                }
         retained_guard = le.get("alpaca_entry_claim_resolution_pending")
         if (
             isinstance(retained_guard, dict)
@@ -11793,6 +14705,24 @@ def _poll_live_exit_fill(
                 "why": owner_error,
                 "order_status": no.status,
             }
+        if (
+            alpaca_family
+            and isinstance(le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE), dict)
+        ):
+            adaptive_position = _sync_adaptive_alpaca_position_lifecycle(
+                sess,
+                le,
+                adapter=adapter,
+                expected_remaining=broker_remaining,
+                exit_order=no,
+            )
+            if not adaptive_position.get("ok"):
+                return {
+                    "filled": False,
+                    "pending": True,
+                    "why": adaptive_position.get("error"),
+                    "order_status": no.status,
+                }
         le["last_exit_fee_usd"] = _order_total_fees_usd(no)
         le["last_exit_broker_truth"] = {
             "broker_order_id": str(oid) if oid else None,
@@ -12072,7 +15002,30 @@ def _complete_confirmed_live_exit(
     reason: str,
     slip_bps: float,
     sell_result: dict[str, Any] | None = None,
+    adapter: Any | None = None,
 ) -> float:
+    if (
+        normalize_execution_family(sess.execution_family)
+        in ALPACA_EXECUTION_FAMILIES
+        and isinstance(le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE), dict)
+    ):
+        if adapter is None:
+            raise AdaptiveRiskContractError(
+                "adaptive Alpaca flat completion requires broker position truth"
+            )
+        adaptive_position = _sync_adaptive_alpaca_position_lifecycle(
+            sess,
+            le,
+            adapter=adapter,
+            expected_remaining=0.0,
+        )
+        if not adaptive_position.get("ok"):
+            raise AdaptiveRiskContractError(
+                str(
+                    adaptive_position.get("error")
+                    or "adaptive Alpaca flat lifecycle failed"
+                )
+            )
     pnl_gross = (float(fill_price) - float(entry_price)) * float(quantity)
     notional_basis = abs(float(entry_price) * float(quantity))
     # Fee truth (2026-06-13): net the broker-reported commissions out of the
@@ -12580,7 +15533,9 @@ def _place_scale_out_limit(
         try:
             from .market_profile import market_session_now
 
-            _ext = market_session_now(sess.symbol) != "regular"
+            _ext = market_session_now(
+                sess.symbol, now=_utcnow_aware()
+            ) != "regular"
         except Exception:
             _ext = False
         cid = f"chili_ml_sol_{sess.id}_{uuid.uuid4().hex[:12]}"
@@ -13219,7 +16174,7 @@ def _only_held_eligibility_flicker_block(ev: dict[str, Any]) -> bool:
 
 # A4: per-symbol last-rescore monotonic timestamps (rate-limit to the adaptive tape cadence).
 # Hard-capped dict (CLAUDE.md: caches need a max size); on overflow the whole map clears (cheap).
-_A4_RESCORE_LAST: dict[str, float] = {}
+_A4_RESCORE_LAST = _PROCESS_DECISION_RUNTIME_STATE.a4_rescore_last
 _A4_RESCORE_MAX = 4096
 
 
@@ -13250,42 +16205,77 @@ def _maybe_rescore_eligibility_block(
         sym = str(sess.symbol or "").strip().upper()
         if not sym or sym.endswith("-USD"):
             return False  # equity lane only (the tape-delta feeder is equity tape)
+        decision_now = _utcnow()
         # Running-up continuation (the existing ross_event predicate): signed OFI level>0 AND
         # slope>=0. None/False (thin/falling tape) => do NOT re-score (fail-closed, block stands).
-        if _live_forward_momentum(db, sess, as_of=_utcnow()) is not True:
+        if _live_forward_momentum(db, sess, as_of=decision_now) is not True:
             return False
         # Adaptive per-symbol rate-limit = clamp(p50 tape inter-row gap, floor, 15).
-        import time as _time
-
-        now_mono = _time.monotonic()
+        rescore_last = _current_decision_runtime_state().a4_rescore_last
+        now_mono = _decision_runtime_clock_seconds()
         try:
             from .nbbo_tape import tape_inter_row_gap_p50_seconds
 
-            _p50 = tape_inter_row_gap_p50_seconds(db, now_utc=_utcnow())
+            _p50 = tape_inter_row_gap_p50_seconds(db, now_utc=decision_now)
         except Exception:
             _p50 = None
         _floor = float(getattr(settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0)
         _floor = max(1.0, _floor)
         cadence = _floor if _p50 is None else min(15.0, max(_floor, float(_p50)))
-        _last = _A4_RESCORE_LAST.get(sym)
+        _last = rescore_last.get(sym)
         if _last is not None and (now_mono - _last) < cadence:
             return False  # arrived sooner than the adaptive cadence — self-throttle (block stands)
-        if len(_A4_RESCORE_LAST) >= _A4_RESCORE_MAX:
-            _A4_RESCORE_LAST.clear()
-        _A4_RESCORE_LAST[sym] = now_mono
+        if len(rescore_last) >= _A4_RESCORE_MAX:
+            rescore_last.clear()
+        rescore_last[sym] = now_mono
         # Re-score via the SAME single-symbol path the tape-delta feeder uses (freshness_ts=now
         # is stamped inside run_momentum_neural_tick). Own commit; idempotent (symbol,variant)
         # upsert downstream. FAIL-CLOSED: any error => the block stands.
-        from .pipeline import run_momentum_neural_tick
-
-        run_momentum_neural_tick(db, meta={"tickers": [sym], "ross_signals": {sym: {"ticker": sym, "direction": "long"}}})
         try:
+            from .pipeline import run_momentum_neural_tick
+
+            tick_result = run_momentum_neural_tick(
+                db,
+                meta={
+                    "tickers": [sym],
+                    "ross_signals": {sym: {"ticker": sym, "direction": "long"}},
+                },
+                decision_as_of_utc=decision_now,
+            )
+            if not isinstance(tick_result, dict) or not bool(tick_result.get("ok")):
+                raise RuntimeError("eligibility rescore pipeline did not complete")
+            if tick_result.get("persistence_ok") is not True:
+                raise RuntimeError("eligibility rescore viability persistence failed")
             db.commit()
+        except ReplayInputContractError:
+            try:
+                db.rollback()
+            finally:
+                if rescore_last.get(sym) == now_mono:
+                    rescore_last.pop(sym, None)
+            raise
         except Exception:
-            db.rollback()
+            try:
+                db.rollback()
+            finally:
+                if rescore_last.get(sym) == now_mono:
+                    rescore_last.pop(sym, None)
             return False
-        _emit(db, sess, "eligibility_block_rescored", {"symbol": sym, "cadence_s": round(cadence, 2)})
+        try:
+            _emit(
+                db,
+                sess,
+                "eligibility_block_rescored",
+                {"symbol": sym, "cadence_s": round(cadence, 2)},
+            )
+        except Exception:
+            _log.debug(
+                "[momentum_live] A4 eligibility rescore event write skipped",
+                exc_info=True,
+            )
         return True
+    except ReplayInputContractError:
+        raise
     except Exception:
         _log.debug("[momentum_live] A4 eligibility-block re-score skipped", exc_info=True)
         return False
@@ -13575,6 +16565,401 @@ def _entry_client_order_id(
     return f"chili_ml_e_{session_id}_{_corr[:8]}_{_suffix}"[:120]
 
 
+def _adaptive_entry_setup_family(le: dict[str, Any], symbol: Any) -> str:
+    """Recover the detector's pure setup key without mutating opportunity state."""
+
+    debug = le.get("entry_trigger_debug")
+    debug = debug if isinstance(debug, dict) else {}
+    reason = str(le.get("entry_trigger_reason") or "primary_entry").strip().lower()
+    normalized = "_".join(part for part in reason.replace(":", "_").split() if part)
+    return resolve_detector_setup_family(
+        debug,
+        fallback_setup_family=normalized or "primary_entry",
+        expected_symbol=symbol,
+    )
+
+
+def _persist_entry_trigger_identity(
+    le: dict[str, Any], *, reason: Any, debug: Any
+) -> None:
+    """Replace the prior detector identity with a plain per-decision snapshot."""
+
+    le["entry_trigger_reason"] = str(reason or "")
+    le["entry_trigger_debug"] = deepcopy(debug) if isinstance(debug, dict) else {}
+
+
+def _captured_paper_db_value(value: Any) -> Any:
+    """Canonical JSON-safe value for the exact locked DB decision receipt."""
+
+    if isinstance(value, datetime):
+        aware = (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
+        return aware.isoformat()
+    if isinstance(value, dict):
+        return {
+            str(key): _captured_paper_db_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_captured_paper_db_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _captured_paper_sha256(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _captured_paper_db_value(payload),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _captured_paper_observation_db_material(
+    db: Any,
+    sess: Any,
+) -> dict[str, Any]:
+    """Hash every mutable DB input used before the WATCHING detector fires."""
+
+    from .captured_paper_production_material import (
+        CapturedPaperProductionMaterialUnavailable,
+    )
+
+    snapshot = sess.risk_snapshot_json
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    arm_marker = snapshot.get("confirmed_arm_generation")
+    if not isinstance(arm_marker, dict) or not arm_marker:
+        raise CapturedPaperProductionMaterialUnavailable(
+            "observation_confirmed_arm_unavailable"
+        )
+    via = (
+        db.query(MomentumSymbolViability)
+        .populate_existing()
+        .filter(
+            MomentumSymbolViability.symbol == sess.symbol,
+            MomentumSymbolViability.variant_id == int(sess.variant_id),
+        )
+        .one_or_none()
+    )
+    if via is None:
+        raise CapturedPaperProductionMaterialUnavailable(
+            "observation_viability_unavailable"
+        )
+    variant = variant_for_id(db, int(sess.variant_id))
+    if variant is None:
+        raise CapturedPaperProductionMaterialUnavailable(
+            "observation_variant_policy_unavailable"
+        )
+    viability_payload = {
+        column.name: _captured_paper_db_value(getattr(via, column.name))
+        for column in via.__table__.columns
+    }
+    variant_payload = {
+        "id": int(getattr(variant, "id", 0) or 0),
+        "family": str(getattr(variant, "family", "") or ""),
+        "normalized_params": normalize_strategy_params(
+            getattr(variant, "params_json", None) or {},
+            family_id=getattr(variant, "family", None),
+        ),
+    }
+    return {
+        "risk_snapshot": deepcopy(snapshot),
+        "viability_payload": viability_payload,
+        "variant_payload": variant_payload,
+        "confirmed_arm_marker": deepcopy(arm_marker),
+        "risk_snapshot_sha256": _captured_paper_sha256(snapshot),
+        "viability_payload_sha256": _captured_paper_sha256(viability_payload),
+        "variant_payload_sha256": _captured_paper_sha256(variant_payload),
+        "confirmed_arm_marker_sha256": _captured_paper_sha256(arm_marker),
+    }
+
+
+def read_captured_paper_durable_candidate(
+    db: Any,
+    request: Any,
+) -> Any:
+    """Read one watcher/candidate generation without provider/BBO/broker I/O.
+
+    The production material factory rolls this read transaction back before it
+    starts any external capture.  The returned generation contains only fields
+    recomputed again at the final selection hook.
+    """
+
+    from .captured_paper_dispatcher import CapturedPaperDispatchRequest
+    from .captured_paper_production_material import (
+        CapturedPaperDurableCandidateSnapshot,
+        CapturedPaperDurableObservationSnapshot,
+        CapturedPaperProductionMaterialUnavailable,
+    )
+
+    if type(request) is not CapturedPaperDispatchRequest:
+        raise CapturedPaperProductionMaterialUnavailable(
+            "candidate_dispatch_request_unavailable"
+        )
+    request.verify()
+
+    def aware(value: Any) -> datetime:
+        if not isinstance(value, datetime):
+            raise CapturedPaperProductionMaterialUnavailable(
+                "captured_paper_durable_clock_unavailable"
+            )
+        return (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
+
+    sess = (
+        db.query(TradingAutomationSession)
+        .populate_existing()
+        .filter(TradingAutomationSession.id == request.session_id)
+        .one_or_none()
+    )
+    if sess is None:
+        raise CapturedPaperProductionMaterialUnavailable(
+            "candidate_session_unavailable"
+        )
+    state = str(sess.state or "").strip().lower()
+    if (
+        str(sess.symbol or "").strip().upper() != request.symbol
+        or normalize_execution_family(sess.execution_family)
+        != request.execution_family
+        or state
+        not in {
+            STATE_QUEUED_LIVE,
+            STATE_WATCHING_LIVE,
+            STATE_LIVE_ENTRY_CANDIDATE,
+            STATE_LIVE_PENDING_ENTRY,
+        }
+    ):
+        raise CapturedPaperProductionMaterialUnavailable(
+            "candidate_route_or_state_unavailable"
+        )
+    snapshot = sess.risk_snapshot_json
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    le = snapshot.get(KEY_LIVE_EXEC)
+    le = le if isinstance(le, dict) else {}
+    if (
+        le.get("entry_submitted")
+        or isinstance(le.get("position"), dict)
+        or le.get("entry_order_id")
+        or _unresolved_entry_order_ids(le)
+    ):
+        raise CapturedPaperProductionMaterialUnavailable(
+            "candidate_already_exposed_or_unresolved"
+        )
+    if state in {STATE_QUEUED_LIVE, STATE_WATCHING_LIVE}:
+        material = _captured_paper_observation_db_material(db, sess)
+        material_hashes = {
+            name: material[name]
+            for name in (
+                "risk_snapshot_sha256",
+                "viability_payload_sha256",
+                "variant_payload_sha256",
+                "confirmed_arm_marker_sha256",
+            )
+        }
+        generation_sha256 = captured_paper_observation_generation_sha256(
+            session_id=sess.id,
+            symbol=sess.symbol,
+            execution_family=sess.execution_family,
+            state=state,
+            correlation_id=sess.correlation_id,
+            variant_id=sess.variant_id,
+            session_updated_at=aware(sess.updated_at),
+            **material_hashes,
+        )
+        return CapturedPaperDurableObservationSnapshot(
+            dispatch_provenance_sha256=request.provenance_sha256,
+            session_id=sess.id,
+            symbol=sess.symbol,
+            execution_family=sess.execution_family,
+            state=state,
+            correlation_id=sess.correlation_id,
+            variant_id=sess.variant_id,
+            session_updated_at=aware(sess.updated_at),
+            observation_generation_sha256=generation_sha256,
+            **material,
+        )
+    via = (
+        db.query(MomentumSymbolViability)
+        .populate_existing()
+        .filter(
+            MomentumSymbolViability.symbol == sess.symbol,
+            MomentumSymbolViability.variant_id == int(sess.variant_id),
+        )
+        .one_or_none()
+    )
+    # This boundary snapshots facts; it must not independently decide the
+    # strategy.  The shared FSM intentionally owns recency-grace handling for a
+    # transient ``live_eligible`` flicker.  Rejecting false here created a
+    # capture-only PAPER throttle that ReplayV3/the live candidate policy did
+    # not share.  The final locked selection re-reads this exact row and applies
+    # the common policy before any post-commit request can escape.
+    if via is None:
+        raise CapturedPaperProductionMaterialUnavailable(
+            "candidate_viability_unavailable"
+        )
+    viability_payload = {
+        column.name: _captured_paper_db_value(getattr(via, column.name))
+        for column in via.__table__.columns
+    }
+    viability_payload_sha256 = _captured_paper_sha256(viability_payload)
+    execution_readiness = viability_payload.get("execution_readiness_json")
+    if not isinstance(execution_readiness, dict) or not execution_readiness:
+        raise CapturedPaperProductionMaterialUnavailable(
+            "candidate_execution_readiness_unavailable"
+        )
+    execution_readiness_sha256 = _captured_paper_sha256(execution_readiness)
+    trigger_debug = le.get("entry_trigger_debug")
+    trigger_debug = trigger_debug if isinstance(trigger_debug, dict) else {}
+    arm_marker = snapshot.get("confirmed_arm_generation")
+    arm_marker = arm_marker if isinstance(arm_marker, dict) else {}
+    place_n = int(le.get("entry_place_count", 0) or 0) + 1
+    cid = _entry_client_order_id(
+        session_id=sess.id,
+        correlation_id=sess.correlation_id,
+        trade_cycles=int(le.get("trade_cycles") or 0),
+        stopout_cycles=int(le.get("stopout_cycles") or 0),
+        place_n=place_n,
+    )
+    setup_family = _adaptive_entry_setup_family(le, sess.symbol)
+    generation_sha256 = captured_paper_candidate_generation_sha256(
+        session_id=sess.id,
+        symbol=sess.symbol,
+        execution_family=sess.execution_family,
+        entry_place_count=place_n,
+        client_order_id=cid,
+        setup_family=setup_family,
+        structural_stop_price=le.get("structural_stop_price"),
+        trigger_reason=le.get("entry_trigger_reason"),
+        trigger_debug=trigger_debug,
+        confirmed_arm_marker=arm_marker,
+        viability_updated_at=aware(via.updated_at),
+        viability_score=via.viability_score,
+        viability_payload_sha256=viability_payload_sha256,
+        execution_readiness_sha256=execution_readiness_sha256,
+    )
+
+    return CapturedPaperDurableCandidateSnapshot(
+        dispatch_provenance_sha256=request.provenance_sha256,
+        session_id=sess.id,
+        symbol=sess.symbol,
+        execution_family=sess.execution_family,
+        state=sess.state,
+        correlation_id=sess.correlation_id,
+        variant_id=sess.variant_id,
+        session_updated_at=aware(sess.updated_at),
+        viability_updated_at=aware(via.updated_at),
+        viability_score=via.viability_score,
+        viability_payload=viability_payload,
+        viability_payload_sha256=viability_payload_sha256,
+        execution_readiness_sha256=execution_readiness_sha256,
+        entry_place_count=place_n,
+        client_order_id=cid,
+        setup_family=setup_family,
+        structural_stop_price=le.get("structural_stop_price"),
+        trigger_reason=le.get("entry_trigger_reason"),
+        trigger_debug=trigger_debug,
+        confirmed_arm_marker=arm_marker,
+        session_snapshot_sha256=generation_sha256,
+    )
+
+
+def _build_adaptive_alpaca_primary_before_legacy_sizing(
+    sess: Any,
+    le: dict[str, Any],
+    *,
+    execution_family: str,
+    bid: float,
+    ask: float,
+) -> tuple[BuiltAdaptiveRiskRequest | None, int | None, str | None]:
+    """Build Alpaca primary economics before legacy allocation/sizing executes."""
+
+    if normalize_execution_family(execution_family) not in ALPACA_EXECUTION_FAMILIES:
+        return None, None, None
+    if normalize_execution_family(execution_family) != "alpaca_spot" or not _le_side_long(le):
+        raise AdaptiveRiskBuilderError("adaptive_risk_long_alpaca_spot_only")
+    place_n = int(le.get("entry_place_count", 0) or 0) + 1
+    cid = _entry_client_order_id(
+        session_id=sess.id,
+        correlation_id=sess.correlation_id,
+        trade_cycles=int(le.get("trade_cycles") or 0),
+        stopout_cycles=int(le.get("stopout_cycles") or 0),
+        place_n=place_n,
+    )
+    setup_family = _adaptive_entry_setup_family(le, sess.symbol)
+    first_dip_opportunity = None
+    if setup_family == "first_dip_reclaim":
+        entry_debug = le.get("entry_trigger_debug")
+        entry_debug = entry_debug if isinstance(entry_debug, dict) else {}
+        raw_opportunity = entry_debug.get("opportunity_key")
+        if not isinstance(raw_opportunity, dict):
+            raise AdaptiveRiskBuilderError(
+                "adaptive_risk_builder_boundary_mismatch",
+                "first_dip_opportunity_key_missing",
+            )
+        first_dip_opportunity = dict(raw_opportunity)
+    structural_stop = float(le.get("structural_stop_price"))
+    if not (
+        math.isfinite(structural_stop)
+        and 0.0 < structural_stop < float(ask)
+    ):
+        raise AdaptiveRiskBuilderError("adaptive_risk_structural_stop_missing")
+    capture_material = runtime_adaptive_risk_capture_material(
+        execution_surface="alpaca_paper",
+        execution_family="alpaca_spot",
+        venue="alpaca",
+        broker_environment="paper",
+        symbol=sess.symbol,
+        # A recycled entry receives a fresh deterministic CID.  The durable
+        # reservation store enforces one immutable decision_id per account, so
+        # binding it to the CID prevents a prior cycle from aliasing this one.
+        decision_id=cid,
+        setup_family=setup_family,
+    )
+    source = capture_material.source
+    if not (
+        math.isclose(
+            float(source.inputs.bid), float(bid), rel_tol=1e-12, abs_tol=1e-9
+        )
+        and math.isclose(
+            float(source.inputs.ask), float(ask), rel_tol=1e-12, abs_tol=1e-9
+        )
+        and math.isclose(
+            float(source.inputs.structural_stop),
+            structural_stop,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        )
+    ):
+        raise AdaptiveRiskBuilderError(
+            "adaptive_risk_builder_boundary_mismatch",
+            "executable_bbo_or_structural_stop",
+        )
+    entry_limit = float(quantize_alpaca_equity_limit_price(float(ask), "buy"))
+    built = build_adaptive_risk_request(
+        source,
+        client_order_id=cid,
+        entry_limit_price=entry_limit,
+        opportunity_key=first_dip_opportunity,
+        active_capture_attestation=(
+            capture_material.active_capture_attestation
+        ),
+        sealed_replay_attestation=(
+            capture_material.sealed_replay_attestation
+        ),
+    )
+    return built, place_n, cid
+
+
 def _is_dup_reference_reject(error: str | None) -> bool:
     """True when a place reject is the broker's duplicate-Reference-ID 409.
 
@@ -13723,11 +17108,13 @@ def _final_entry_bbo(
     if tick_meta is None or not hasattr(tick_meta, "age_seconds"):
         return None, {"ok": False, "reason": "execution_bbo_time_missing", "source": source}
     try:
-        age_candidates = [float(tick_meta.age_seconds())]
+        age_candidates = [float(tick_meta.age_seconds(now=_utcnow_aware()))]
         if tuple_meta is not None and tuple_meta is not tick_meta:
             if not hasattr(tuple_meta, "age_seconds"):
                 raise ValueError("tuple execution BBO freshness is invalid")
-            age_candidates.append(float(tuple_meta.age_seconds()))
+            age_candidates.append(
+                float(tuple_meta.age_seconds(now=_utcnow_aware()))
+            )
         age_s = max(age_candidates)
         if not math.isfinite(age_s):
             raise ValueError("execution BBO age is non-finite")
@@ -13746,6 +17133,10 @@ def _final_entry_bbo(
         "tape_row_id": raw.get("tape_row_id"),
         "provider_event_at_utc": raw.get("provider_event_at_utc"),
         "received_at_utc": raw.get("received_at_utc"),
+        "available_at_utc": raw.get("available_at_utc"),
+        "capture_event_sha256": raw.get("capture_event_sha256"),
+        "capture_content_sha256": raw.get("capture_content_sha256"),
+        "capture_sequence": raw.get("capture_sequence"),
         "timestamp_basis": raw.get("timestamp_basis"),
         "age_seconds": round(age_s, 6),
         "max_age_seconds": float(max_age_seconds),
@@ -14160,7 +17551,7 @@ def _midday_viability_bump() -> float:
 
 
 def _effective_entry_viability_min(
-    flat_min: float, symbol: str | None, *, now: datetime | None = None
+    flat_min: float, symbol: str | None, *, now: datetime
 ) -> tuple[float, bool, float]:
     """Effective entry-viability bar at the WATCHING_LIVE advance, applying the midday
     de-weight. Returns ``(eff_min, in_lull, bump)``.
@@ -14175,6 +17566,8 @@ def _effective_entry_viability_min(
         return float(flat_min), False, 0.0
     from .market_profile import in_midday_lull
 
+    if now is None:
+        return float(flat_min), False, bump
     if not in_midday_lull(symbol, now=now):
         return float(flat_min), False, bump
     return min(0.95, float(flat_min) + bump), True, bump
@@ -14212,12 +17605,80 @@ _INTERVAL_SECONDS: dict[str, float] = {
 }
 
 
-_DAY_PNL_CACHE: dict[str, float] = {"at": 0.0, "v": 0.0}
+_EXIT_DECISION_CACHE_MAX_USERS = 256
+_EXIT_DECISION_CACHE_LOCK = threading.RLock()
+_EXIT_DECISION_CACHE_GENERATION = 0
+_DAY_PNL_CACHE: dict[tuple[int, str, str], dict[str, Any]] = {}
+_SCALP_HOLD_CACHE: dict[tuple[int, str, str], dict[str, Any]] = {}
 
-_SCALP_HOLD_CACHE: dict[str, Any] = {"at": 0.0, "v": None}
+
+def _exit_decision_cache_key(
+    user_id: int,
+    *,
+    execution_family: str | None,
+    mode: str,
+) -> tuple[int, str, str]:
+    family = (
+        normalize_execution_family(execution_family)
+        if execution_family
+        else "*"
+    )
+    return int(user_id), family, str(mode or "live").strip().lower()
 
 
-def _recent_scalp_median_hold_s(db: Session, user_id: int) -> "float | None":
+def _next_exit_cache_generation() -> int:
+    global _EXIT_DECISION_CACHE_GENERATION
+    with _EXIT_DECISION_CACHE_LOCK:
+        _EXIT_DECISION_CACHE_GENERATION += 1
+        return _EXIT_DECISION_CACHE_GENERATION
+
+
+def _bounded_exit_cache_put(
+    cache: dict[tuple[int, str, str], dict[str, Any]],
+    *,
+    user_id: int,
+    execution_family: str | None = None,
+    mode: str = "live",
+    at: float,
+    generation: int,
+    value: Any,
+) -> None:
+    """Store one per-user live cache value with a hard process bound."""
+
+    try:
+        key = _exit_decision_cache_key(
+            user_id,
+            execution_family=execution_family,
+            mode=mode,
+        )
+        with _EXIT_DECISION_CACHE_LOCK:
+            current = cache.get(key)
+            if current is not None and int(current.get("generation", -1)) > int(generation):
+                # A slower older-generation query completed after a newer one.
+                return
+            while key not in cache and len(cache) >= _EXIT_DECISION_CACHE_MAX_USERS:
+                oldest = min(
+                    cache,
+                    key=lambda existing: float(cache[existing].get("at", 0.0)),
+                )
+                cache.pop(oldest, None)
+            cache[key] = {
+                "at": float(at),
+                "generation": int(generation),
+                "v": value,
+            }
+    except Exception:
+        # Cache maintenance must never abort position management.
+        return
+
+
+def _recent_scalp_median_hold_s(
+    db: Session,
+    user_id: int,
+    *,
+    execution_family: str | None = None,
+    mode: str = "live",
+) -> "float | None":
     """LIVE-derived holding horizon for the vol-norm trail (LEVER 2A): the MEDIAN
     realized hold (seconds) of this user's recent CLOSED momentum scalps. Read from
     ``momentum_automation_outcomes.hold_seconds`` over the last N closed sessions —
@@ -14225,47 +17686,110 @@ def _recent_scalp_median_hold_s(db: Session, user_id: int) -> "float | None":
     Returns None on no history (caller falls back to this session's own elapsed hold)."""
     import time as _time
 
-    if _time.monotonic() - float(_SCALP_HOLD_CACHE["at"]) < 300.0:
-        return _SCALP_HOLD_CACHE["v"]
+    replay_bound = _SIM_NOW.get() is not None
+    cache_generation: float | None = None
+    cache_sequence: int | None = None
+    cache_key = _exit_decision_cache_key(
+        user_id,
+        execution_family=execution_family,
+        mode=mode,
+    )
+    if not replay_bound:
+        now_mono = _time.monotonic()
+        cache_generation = now_mono
+        cache_sequence = _next_exit_cache_generation()
+        with _EXIT_DECISION_CACHE_LOCK:
+            cached = _SCALP_HOLD_CACHE.get(cache_key)
+            if cached is not None and now_mono - float(cached.get("at", 0.0)) < 300.0:
+                return cached.get("v")
     v: "float | None" = None
     try:
         from sqlalchemy import text as _sql
 
-        rows = db.execute(
-            _sql(
-                "SELECT hold_seconds FROM momentum_automation_outcomes "
-                "WHERE user_id = :u AND hold_seconds IS NOT NULL AND hold_seconds > 0 "
-                "ORDER BY terminal_at DESC LIMIT 50"
-            ),
-            {"u": int(user_id)},
-        ).fetchall()
+        frontier_utc = _utcnow()
+        sql = (
+            "SELECT hold_seconds FROM momentum_automation_outcomes "
+            "WHERE user_id = :u AND mode = :mode "
+            "AND hold_seconds IS NOT NULL AND hold_seconds > 0 "
+            "AND terminal_at <= :as_of_utc "
+        )
+        params: dict[str, Any] = {
+            "u": int(user_id),
+            "mode": str(mode or "live").strip().lower(),
+            "as_of_utc": frontier_utc,
+        }
+        if execution_family:
+            sql += "AND execution_family = :execution_family "
+            params["execution_family"] = normalize_execution_family(execution_family)
+        sql += "ORDER BY terminal_at DESC, id DESC LIMIT 50"
+        rows = db.execute(_sql(sql), params).fetchall()
         vals = sorted(float(r[0]) for r in rows if r[0] is not None)
         if vals:
             n = len(vals)
             v = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
     except Exception:
         v = None
-    _SCALP_HOLD_CACHE["at"] = _time.monotonic()
-    _SCALP_HOLD_CACHE["v"] = v
+    if not replay_bound:
+        _bounded_exit_cache_put(
+            _SCALP_HOLD_CACHE,
+            user_id=int(user_id),
+            execution_family=execution_family,
+            mode=mode,
+            at=float(cache_generation),
+            generation=int(cache_sequence),
+            value=v,
+        )
     return v
 
 
-def _day_realized_usd_cached(db: Session, user_id: int) -> float:
+def _day_realized_usd_cached(
+    db: Session,
+    user_id: int,
+    *,
+    execution_family: str | None = None,
+    mode: str = "live",
+) -> float:
     """Today's GLOBAL realized PnL (ET), 60s-cached — the cushion input for the
     adaptive trail. Fail-safe 0.0 (= tightest patience) on any error."""
     import time as _time
 
-    if _time.monotonic() - _DAY_PNL_CACHE["at"] < 60.0:
-        return _DAY_PNL_CACHE["v"]
+    replay_bound = _SIM_NOW.get() is not None
+    cache_generation: float | None = None
+    cache_sequence: int | None = None
+    cache_key = _exit_decision_cache_key(
+        user_id,
+        execution_family=execution_family,
+        mode=mode,
+    )
+    if not replay_bound:
+        now_mono = _time.monotonic()
+        cache_generation = now_mono
+        cache_sequence = _next_exit_cache_generation()
+        with _EXIT_DECISION_CACHE_LOCK:
+            cached = _DAY_PNL_CACHE.get(cache_key)
+            if cached is not None and now_mono - float(cached.get("at", 0.0)) < 60.0:
+                return float(cached.get("v", 0.0))
     v = 0.0
     try:
         from ..governance import global_realized_pnl_today_et
 
-        v = float(global_realized_pnl_today_et(db, user_id)["total_usd"])
+        v = float(
+            global_realized_pnl_today_et(
+                db, user_id, as_of_utc=_utcnow_aware()
+            )["total_usd"]
+        )
     except Exception:
         v = 0.0
-    _DAY_PNL_CACHE["at"] = _time.monotonic()
-    _DAY_PNL_CACHE["v"] = v
+    if not replay_bound:
+        _bounded_exit_cache_put(
+            _DAY_PNL_CACHE,
+            user_id=int(user_id),
+            execution_family=execution_family,
+            mode=mode,
+            at=float(cache_generation),
+            generation=int(cache_sequence),
+            value=v,
+        )
     return v
 
 
@@ -14275,7 +17799,7 @@ def _entry_interval_seconds() -> float:
 
 
 def _opening_bell_suppresses_fresh_trigger(
-    symbol: str, le: dict, *, has_position: bool, now: datetime | None = None,
+    symbol: str, le: dict, *, has_position: bool, now: datetime,
     armed_at: datetime | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """HVM101 edge (A) — opening-bell suppression of FRESH triggers.
@@ -14309,6 +17833,8 @@ def _opening_bell_suppresses_fresh_trigger(
     sym = str(symbol or "").upper()
     if sym.endswith("-USD"):
         return False, debug  # crypto: 24/7, no opening bell
+    if now is None:
+        return False, {"reason": "now_missing"}
     if has_position:
         return False, debug  # holding already — management, never a fresh trigger
     try:
@@ -14480,17 +18006,26 @@ def _micro_bar_df_from_session(db, symbol: str, *, bar_seconds: int, lookback_mi
     # gates' documented fail-OPEN path), never a fabricated 0.0 and never a failed build.
     trade_rows = None
     try:
-        _trows = db.execute(
-            _text(
-                "SELECT to_timestamp(floor(extract(epoch FROM observed_at) / :bs) * :bs) "
-                "       AT TIME ZONE 'utc' AS bucket, SUM(size) AS vol "
-                "FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at >= :since AND observed_at <= :now "
-                "AND size > 0 "
-                "GROUP BY 1 ORDER BY 1"
-            ),
-            {"s": str(symbol).upper(), "since": since, "now": _mb_now, "bs": int(bar_seconds)},
-        ).fetchall()
+        # Host-bridge tables are optional app-side.  Keep any schema/read error
+        # inside a SAVEPOINT so the documented NaN-volume degradation cannot
+        # poison the surrounding live-FSM transaction.
+        with db.begin_nested():
+            _trows = db.execute(
+                _text(
+                    "SELECT to_timestamp(floor(extract(epoch FROM observed_at) / :bs) * :bs) "
+                    "       AT TIME ZONE 'utc' AS bucket, SUM(size) AS vol "
+                    "FROM iqfeed_trade_ticks "
+                    "WHERE symbol = :s AND observed_at >= :since AND observed_at <= :now "
+                    "AND size > 0 "
+                    "GROUP BY 1 ORDER BY 1"
+                ),
+                {
+                    "s": str(symbol).upper(),
+                    "since": since,
+                    "now": _mb_now,
+                    "bs": int(bar_seconds),
+                },
+            ).fetchall()
         if _trows:
             trade_rows = [(r[0], float(r[1])) for r in _trows]
     except Exception:
@@ -14756,10 +18291,16 @@ def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
         return 0.0
 
 
-_BREAK_RESOLUTION_CACHE: dict[str, Any] = {"at": 0.0, "v": None}
+_BREAK_RESOLUTION_CACHE: dict[tuple[int, str, str], dict[str, Any]] = {}
 
 
-def _smart_hold_time_floor_s(db: Session, user_id: int) -> "float | None":
+def _smart_hold_time_floor_s(
+    db: Session,
+    user_id: int,
+    *,
+    execution_family: str | None = None,
+    mode: str = "live",
+) -> "float | None":
     """GAP-A adaptive TIME-FLOOR (seconds): the q(time_floor_q) of this user's recent
     break-resolution times = the realized holds of recent CLOSED momentum scalps (the
     same ``momentum_automation_outcomes.hold_seconds`` source as the vol-norm horizon).
@@ -14769,29 +18310,60 @@ def _smart_hold_time_floor_s(db: Session, user_id: int) -> "float | None":
     300s-cached. Reuses the percentile primitive from hold_signals."""
     import time as _time
 
-    if _time.monotonic() - float(_BREAK_RESOLUTION_CACHE["at"]) < 300.0:
-        return _BREAK_RESOLUTION_CACHE["v"]
+    replay_bound = _SIM_NOW.get() is not None
+    cache_generation: float | None = None
+    cache_sequence: int | None = None
+    cache_key = _exit_decision_cache_key(
+        user_id,
+        execution_family=execution_family,
+        mode=mode,
+    )
+    if not replay_bound:
+        now_mono = _time.monotonic()
+        cache_generation = now_mono
+        cache_sequence = _next_exit_cache_generation()
+        with _EXIT_DECISION_CACHE_LOCK:
+            cached = _BREAK_RESOLUTION_CACHE.get(cache_key)
+            if cached is not None and now_mono - float(cached.get("at", 0.0)) < 300.0:
+                return cached.get("v")
     v: "float | None" = None
     try:
         from sqlalchemy import text as _sql
 
         min_n = int(getattr(settings, "chili_momentum_smart_hold_time_floor_min_samples", 5) or 5)
         q = float(getattr(settings, "chili_momentum_smart_hold_time_floor_q", 0.25) or 0.25)
-        rows = db.execute(
-            _sql(
-                "SELECT hold_seconds FROM momentum_automation_outcomes "
-                "WHERE user_id = :u AND hold_seconds IS NOT NULL AND hold_seconds > 0 "
-                "ORDER BY terminal_at DESC LIMIT 50"
-            ),
-            {"u": int(user_id)},
-        ).fetchall()
+        frontier_utc = _utcnow()
+        sql = (
+            "SELECT hold_seconds FROM momentum_automation_outcomes "
+            "WHERE user_id = :u AND mode = :mode "
+            "AND hold_seconds IS NOT NULL AND hold_seconds > 0 "
+            "AND terminal_at <= :as_of_utc "
+        )
+        params: dict[str, Any] = {
+            "u": int(user_id),
+            "mode": str(mode or "live").strip().lower(),
+            "as_of_utc": frontier_utc,
+        }
+        if execution_family:
+            sql += "AND execution_family = :execution_family "
+            params["execution_family"] = normalize_execution_family(execution_family)
+        sql += "ORDER BY terminal_at DESC, id DESC LIMIT 50"
+        rows = db.execute(_sql(sql), params).fetchall()
         vals = [float(r[0]) for r in rows if r[0] is not None]
         if len(vals) >= max(1, min_n):
             v = _percentile(vals, q)
     except Exception:
         v = None
-    _BREAK_RESOLUTION_CACHE["at"] = _time.monotonic()
-    _BREAK_RESOLUTION_CACHE["v"] = v
+    if not replay_bound:
+        _bounded_exit_cache_put(
+            _BREAK_RESOLUTION_CACHE,
+            user_id=int(user_id),
+            execution_family=execution_family,
+            mode=mode,
+            at=float(cache_generation),
+            generation=int(cache_sequence),
+            value=v,
+        )
     return v
 
 
@@ -14820,14 +18392,19 @@ def _smart_hold_breach_volume(
         # byte-identical live (both are wall UTC), sim-correct in replay — and the
         # <= :now AS-OF bound keeps a preloaded replay tape from leaking the future.
         _vw_now = _utcnow()
-        rows = db.execute(
-            _sql(
-                "SELECT size, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                "observed_at > :since AND observed_at <= :now "
-                "ORDER BY observed_at ASC"
-            ),
-            {"s": s, "since": _vw_now - timedelta(seconds=w * 10.0), "now": _vw_now},
-        ).fetchall()
+        with db.begin_nested():
+            rows = db.execute(
+                _sql(
+                    "SELECT size, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                    "observed_at > :since AND observed_at <= :now "
+                    "ORDER BY observed_at ASC"
+                ),
+                {
+                    "s": s,
+                    "since": _vw_now - timedelta(seconds=w * 10.0),
+                    "now": _vw_now,
+                },
+            ).fetchall()
     except Exception:
         return None, None
     if not rows:
@@ -15161,7 +18738,9 @@ def _adaptive_quote_max_age_seconds(db: Any, symbol: str, base_max_age: float) -
         try:
             from .market_profile import market_session_now
 
-            if market_session_now(symbol) in ("premarket", "afterhours"):
+            if market_session_now(
+                symbol, now=_utcnow_aware()
+            ) in ("premarket", "afterhours"):
                 _ext_ceil = float(
                     getattr(settings, "chili_momentum_ext_hours_quote_ceiling_seconds", 300.0) or 300.0
                 )
@@ -15178,13 +18757,18 @@ def _adaptive_quote_max_age_seconds(db: Any, symbol: str, base_max_age: float) -
         # byte-identical live, sim-correct in replay; the <= :now AS-OF bound keeps a
         # preloaded replay tape from counting future prints.
         _sq_now = _utcnow()
-        n = db.execute(
-            _text(
-                "SELECT count(*) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at > :since AND observed_at <= :now"
-            ),
-            {"s": symbol, "since": _sq_now - timedelta(seconds=window), "now": _sq_now},
-        ).scalar() or 0
+        with db.begin_nested():
+            n = db.execute(
+                _text(
+                    "SELECT count(*) FROM iqfeed_trade_ticks "
+                    "WHERE symbol = :s AND observed_at > :since AND observed_at <= :now"
+                ),
+                {
+                    "s": symbol,
+                    "since": _sq_now - timedelta(seconds=window),
+                    "now": _sq_now,
+                },
+            ).scalar() or 0
         if int(n) <= 0:
             return floor  # not actively trading -> conservative (halted/quiet stays stale)
         avg_interval = window / float(int(n))
@@ -15273,12 +18857,12 @@ def _quote_quality_block(
     # into whichever verdict (block or pass) the re-validated quote produces. Always bound
     # (no local-shadow UnboundLocalError class).
     _refetched_meta: dict[str, Any] | None = None
-    if meta is not None and not is_fresh_enough(meta):
+    if meta is not None and not is_fresh_enough(meta, now=_utcnow_aware()):
         # The venue's FIXED base window flagged stale — re-check against the name's
         # cadence-scaled window. PURELY ADDITIVE: only ever WIDENS (can un-block a
         # slow-but-live name trading at its normal pace), never newly-blocks. A halted
         # name (no recent ticks) keeps the conservative floor and stays stale.
-        _age = float(meta.age_seconds())
+        _age = float(meta.age_seconds(now=_utcnow_aware()))
         _max_age = float(getattr(meta, "max_age_seconds", 0.0) or 0.0)
         if symbol and db is not None:
             try:
@@ -15305,11 +18889,18 @@ def _quote_quality_block(
                     _rf_meta = getattr(_rf_tick, "freshness", None)
                     # The refetched quote must itself be fresh (it was just read, so it is) —
                     # if for any reason it is NOT, fall through to the original stale block.
-                    if _rf_meta is None or is_fresh_enough(_rf_meta):
+                    if _rf_meta is None or is_fresh_enough(
+                        _rf_meta, now=_utcnow_aware()
+                    ):
                         _refetched_meta = {
                             "refetch_source": _rf_source,
                             "refetch_age_seconds": round(
-                                float(_rf_meta.age_seconds()) if _rf_meta is not None else 0.0, 4
+                                float(
+                                    _rf_meta.age_seconds(now=_utcnow_aware())
+                                )
+                                if _rf_meta is not None
+                                else 0.0,
+                                4,
                             ),
                             "primary_age_seconds": round(_age, 4),
                             "primary_max_age_seconds": round(_max_age, 2),
@@ -15727,6 +19318,12 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "alpaca_exit_applied_fill_watermarks",
     "alpaca_active_exit_owner_transport",
     "alpaca_last_resolved_exit_owner_transport",
+    KEY_ADAPTIVE_RISK_RESERVATION_REQUEST,
+    KEY_ADAPTIVE_ALPACA_LIFECYCLE,
+    "adaptive_risk_alpaca_lifecycle_blocker",
+    "alpaca_cycle_exit_fill_owners",
+    "alpaca_cycle_settlement_pending",
+    "alpaca_cycle_settlement",
     # ── scale-out / runner ladder ──
     "scale_limit_order_id",
     "scale_limit_px",
@@ -15803,7 +19400,6 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "max_loss_circuit_floor_price",
     "prev_signed_tape_accel",
     "last_bailout_trigger",
-    "benched_backside_hod",
     # ── halt-entry markers tied to the closed position (NOT the symbol-level halt
     #    CHAIN counters halt_chain_up_count / halt_down_consecutive_count, which track
     #    the SYMBOL's resume sequence across watcher cycles and are kept) ──
@@ -15829,6 +19425,11 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_hl5m_val",
     "g4_vwap5m_val",
 )
+# Deliberately NOT reset on trade recycle: ``benched_backside_hod`` and
+# ``benched_backside_session_date_et`` describe the symbol's session phase,
+# not the position that just closed.  Clearing them after a stop re-armed the
+# same dead move on the next MACD/VWAP pivot.  The watching path clears both on
+# the first tick of a new ET session.
 # DELIBERATELY KEPT (NOT in the reset set): post_exit_excursion_pending. It is the deferred
 # shake-out-learning marker for the trade that JUST closed; a separate horizon job
 # (post_exit_excursion.run_post_exit_excursion_pass, ~30min horizon) labels it AFTER the exit
@@ -15883,6 +19484,40 @@ STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
 )
 
 
+def _scope_backside_bench_to_et_session(
+    le: dict,
+    *,
+    session_date_et: str,
+) -> tuple[float | None, bool]:
+    """Return the current-session bench anchor and clear a stale-day marker.
+
+    The sticky backside latch is symbol/session state and survives a trade
+    recycle, but it must not become a permanent multi-day ban.  Legacy markers
+    created before the date key existed are adopted into the current session on
+    first read so a mid-session rollout cannot silently remove a valid bench.
+    Returns ``(anchor, reset_for_new_session)`` and mutates only the two marker
+    keys in ``le``.
+    """
+
+    day = str(session_date_et or "").strip()
+    anchor = _float_or_none(le.get("benched_backside_hod"))
+    stored_day = str(le.get("benched_backside_session_date_et") or "").strip()
+    if anchor is None:
+        le.pop("benched_backside_hod", None)
+        le.pop("benched_backside_session_date_et", None)
+        return None, False
+    if not day:
+        return anchor, False
+    if not stored_day:
+        le["benched_backside_session_date_et"] = day
+        return anchor, False
+    if stored_day != day:
+        le.pop("benched_backside_hod", None)
+        le.pop("benched_backside_session_date_et", None)
+        return None, True
+    return anchor, False
+
+
 def _reset_entry_state_on_recycle(le: dict) -> list[str]:
     """Pop every per-trade entry/position lifecycle key so the recycled watcher starts
     CLEAN (no entry order for the late-fill sweep / pre-submit poll to re-adopt). Returns
@@ -15917,10 +19552,31 @@ def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
         # that never comes left 612sh unmanaged at a generic -29% bracket.
         # Best-effort cancel the open remainder (single clip), then adopt.
         if _order_open(no) and float(no.filled_size or 0.0) > 0.0:
-            try:
-                adapter.cancel_order(str(oid))
-            except Exception:
-                logger.debug("[momentum_live] open-with-fills remainder cancel failed", exc_info=True)
+            if normalize_execution_family(
+                sess.execution_family
+            ) in ALPACA_EXECUTION_FAMILIES:
+                exact_cancel = _cancel_exact_owned_alpaca_entry_order(
+                    db,
+                    sess,
+                    adapter,
+                    le=le,
+                    broker_order_id=str(oid),
+                    pre_order=no,
+                )
+                if exact_cancel.get("order") is not None:
+                    no = exact_cancel["order"]
+                if not exact_cancel.get("ok"):
+                    le["adaptive_risk_alpaca_cancel_pending"] = {
+                        "reason": exact_cancel.get("reason"),
+                        "broker_order_id": str(oid),
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
+            else:
+                try:
+                    adapter.cancel_order(str(oid))
+                except Exception:
+                    logger.debug("[momentum_live] open-with-fills remainder cancel failed", exc_info=True)
         if _order_done_for_entry(no) or float(no.filled_size or 0.0) > 0.0:
             # LATE FILL — re-point the session at the real order and let the
             # hardened pending-entry fill-handler adopt it (position + stop/target).
@@ -15940,6 +19596,7 @@ def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
             if sess.state == STATE_LIVE_ENTRY_CANDIDATE:
                 _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
             db.flush()
+            _schedule_entry_fsm_continuation(sess.id)
             return True
         if not _order_open(no):
             # terminal with zero fill (cancelled/expired/rejected clean) — safe to
@@ -16117,7 +19774,7 @@ def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
             if (
                 isinstance(pos, dict)
                 and float(pos.get("quantity") or 0) > 0
-                and _is_overnight_now(sess.symbol)
+                and _is_overnight_now(sess.symbol, now=_utcnow_aware())
             ):
                 _ovn_stale = float(getattr(settings, "chili_momentum_overnight_max_stale_sec", 0.0) or 0.0)
                 _ticks_thresh = _halt_stale_ticks_threshold()
@@ -16240,7 +19897,7 @@ def _register_print_recency_halt_check(db, sess, le: dict, tick: Any = None) -> 
         try:
             from .market_profile import is_data_session_now as _is_data_session_now
 
-            if not _is_data_session_now(sym):
+            if not _is_data_session_now(sym, now=_utcnow_aware()):
                 return
         except Exception:
             return
@@ -17202,6 +20859,103 @@ def _strict_broker_order_id_truth(
     return "unknown", None
 
 
+def _cancel_exact_owned_alpaca_entry_order(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    broker_order_id: str,
+    pre_order: Any | None = None,
+) -> dict[str, Any]:
+    """Cancel only the exact committed CHILI entry and reread its terminal truth."""
+
+    account_scope = _frozen_alpaca_account_scope(sess)
+    if account_scope is None:
+        return {"ok": False, "reason": "alpaca_account_scope_unfrozen"}
+    readable, claim = read_action_claim(
+        db,
+        symbol=str(sess.symbol),
+        account_scope=account_scope,
+    )
+    oid = str(broker_order_id or "").strip()
+    if not (
+        readable
+        and isinstance(claim, dict)
+        and claim.get("action") == "entry"
+        and claim.get("owner_session_id") == int(sess.id)
+        # A CID-bound permit with no durably bound broker OID is insufficient
+        # authority for a generic cancel-by-OID mutation.  Recovery must first
+        # prove and persist the exact CID/OID pair.
+        and str(claim.get("broker_order_id") or "").strip() == oid
+        and str(claim.get("client_order_id") or "").strip()
+    ):
+        return {"ok": False, "reason": "alpaca_exact_entry_owner_unproven"}
+    request = _alpaca_claim_order_request(claim, sess, str(sess.symbol))
+    order = pre_order
+    if order is None:
+        truth, order = _strict_broker_order_id_truth(adapter, oid)
+        if truth != "found":
+            return {"ok": False, "reason": "alpaca_entry_precancel_truth_unknown"}
+    if not _alpaca_claim_order_matches(order, claim, request):
+        return {"ok": False, "reason": "alpaca_entry_precancel_identity_mismatch"}
+    account_ok, account_evidence = _strict_alpaca_account_identity(adapter, sess)
+    if not account_ok:
+        return {
+            "ok": False,
+            "reason": account_evidence.get("reason")
+            or "alpaca_account_identity_changed_pre_cancel",
+        }
+    try:
+        cancel_result = adapter.cancel_order(oid)
+    except Exception as exc:
+        cancel_result = {"ok": False, "error": type(exc).__name__}
+    post_account_ok, post_account_evidence = _strict_alpaca_account_identity(
+        adapter,
+        sess,
+    )
+    if not post_account_ok:
+        return {
+            "ok": False,
+            "reason": post_account_evidence.get("reason")
+            or "alpaca_account_identity_changed_post_cancel",
+            "cancel_result": cancel_result,
+        }
+    truth, post = _strict_broker_order_id_truth(adapter, oid)
+    if (
+        truth != "found"
+        or post is None
+        or not _alpaca_claim_order_matches(post, claim, request)
+    ):
+        return {
+            "ok": False,
+            "reason": "alpaca_entry_postcancel_truth_unknown",
+            "cancel_result": cancel_result,
+        }
+    lifecycle = _sync_adaptive_alpaca_order_lifecycle(
+        sess,
+        le,
+        order=post,
+        claim=claim,
+        adapter=adapter,
+    )
+    if not lifecycle.get("ok"):
+        return {
+            "ok": False,
+            "reason": lifecycle.get("error"),
+            "cancel_result": cancel_result,
+            "order": post,
+        }
+    terminal = not _order_open(post)
+    return {
+        "ok": terminal,
+        "pending": not terminal,
+        "reason": None if terminal else "alpaca_entry_cancel_terminal_unconfirmed",
+        "cancel_result": cancel_result,
+        "order": post,
+    }
+
+
 def _prior_absent_emergency_attempt_truth(
     adapter: Any,
     authority: dict[str, Any],
@@ -17498,13 +21252,14 @@ def tick_live_session(
     session_id: int,
     *,
     adapter_factory: Optional[AdapterFactory] = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | CapturedPaperPostCommitRequest:
     if not settings.chili_momentum_live_runner_enabled:
         return {"ok": True, "skipped": "live_runner_disabled"}
 
     try:
         sess = (
             db.query(TradingAutomationSession)
+            .populate_existing()
             .filter(
                 TradingAutomationSession.id == int(session_id),
                 TradingAutomationSession.mode == "live",
@@ -17516,6 +21271,28 @@ def tick_live_session(
         return {"ok": True, "skipped": "concurrent_tick"}
     if sess is None:
         return {"ok": False, "error": "not_found"}
+    # A content-addressed owner marker turns this row into an isolated Alpaca
+    # PAPER route.  Revalidate it immediately after the session ``FOR UPDATE``
+    # and before *any* event, state, adapter, account, or broker side effect.
+    # The exact runtime request and its installed selection/observation context
+    # live in dispatcher-owned ContextVars, so a scheduler/API/foreign process
+    # cannot reproduce the capability by calling this bare function.
+    try:
+        from .captured_paper_dispatcher import (
+            CapturedPaperDispatchError,
+            revalidate_captured_paper_session_owner,
+        )
+
+        revalidate_captured_paper_session_owner(sess)
+    except CapturedPaperDispatchError as exc:
+        return {
+            "ok": True,
+            "blocked": True,
+            "reason": exc.reason,
+            "broker_calls": 0,
+            "session_mutations": 0,
+            "order_posted": False,
+        }
     _operator_paused = is_operator_paused(sess.risk_snapshot_json)
     ef = normalize_execution_family(sess.execution_family)
     if not momentum_runner_supports_execution_family(ef):
@@ -17567,6 +21344,94 @@ def tick_live_session(
             "ok": True,
             "blocked": True,
             "reason": "kill_switch",
+            "broker_calls": 0,
+        }
+    # A registered captured PAPER runtime is never permitted to call this bare
+    # runner and silently inherit the legacy Alpaca entry path.  The runtime
+    # must first install its exact typed selection context.  Check before
+    # adapter construction, broker reads, trigger counters, deterministic CID
+    # generation, legacy sizing, or any `_governed_place` call.  Held exposure
+    # is deliberately excluded so a missing selection capability cannot block
+    # an already-owned exit/reconciliation path.
+    _captured_selection_active = captured_paper_selection_context_active(
+        execution_family=ef
+    )
+    _captured_observation_resolution = None
+    if (
+        getattr(sess, "state", None) in {STATE_QUEUED_LIVE, STATE_WATCHING_LIVE}
+        and captured_paper_observation_context_active(execution_family=ef)
+    ):
+        try:
+            _observation_db_material = _captured_paper_observation_db_material(
+                db, sess
+            )
+            _observation_db_hashes = {
+                name: _observation_db_material[name]
+                for name in (
+                    "risk_snapshot_sha256",
+                    "viability_payload_sha256",
+                    "variant_payload_sha256",
+                    "confirmed_arm_marker_sha256",
+                )
+            }
+            _captured_observation_resolution = (
+                resolve_captured_paper_observation(
+                    session_id=sess.id,
+                    symbol=sess.symbol,
+                    execution_family=ef,
+                    state=sess.state,
+                    correlation_id=sess.correlation_id,
+                    variant_id=sess.variant_id,
+                    session_updated_at=(
+                        sess.updated_at.replace(tzinfo=timezone.utc)
+                        if isinstance(sess.updated_at, datetime)
+                        and sess.updated_at.tzinfo is None
+                        else sess.updated_at
+                    ),
+                    decision_at=_utcnow_aware(),
+                    **_observation_db_hashes,
+                )
+            )
+        except Exception:
+            _captured_observation_resolution = None
+    _captured_observation_permitted = bool(
+        _captured_observation_resolution is not None
+        and _captured_observation_resolution.active
+        and _captured_observation_resolution.permitted
+    )
+    if (
+        getattr(sess, "state", None) in _PRE_ENTRY_DECLINE_STATES
+        and captured_paper_selection_required(execution_family=ef)
+        and not _captured_selection_active
+        and not _captured_observation_permitted
+    ):
+        _captured_missing_reason = (
+            _captured_observation_resolution.reason
+            if _captured_observation_resolution is not None
+            and _captured_observation_resolution.reason
+            else "captured_paper_selection_context_missing"
+        )
+        if getattr(sess, "state", None) == STATE_LIVE_ENTRY_CANDIDATE:
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+        _emit(
+            db,
+            sess,
+            "live_entry_captured_paper_selection_deferred",
+            {
+                "reason": _captured_missing_reason,
+                "opportunity_consumed": False,
+                "risk_reserved": False,
+                "order_posted": False,
+                "broker_calls": 0,
+            },
+        )
+        db.flush()
+        return {
+            "ok": True,
+            "session_id": sess.id,
+            "state": sess.state,
+            "deferred": True,
+            "reason": _captured_missing_reason,
             "broker_calls": 0,
         }
     try:
@@ -17933,19 +21798,41 @@ def tick_live_session(
             and str(entry_terminal_marker.get("order_id") or "") == entry_oid
         )
         if entry_oid and not entry_terminal_same_order:
-            try:
-                cancel_result = adapter.cancel_order(entry_oid)
-            except Exception as exc:
-                cancel_result = {"ok": False, "error": type(exc).__name__}
+            exact_entry_cancel = None
+            if normalize_execution_family(
+                sess.execution_family
+            ) in ALPACA_EXECUTION_FAMILIES:
+                exact_entry_cancel = _cancel_exact_owned_alpaca_entry_order(
+                    db,
+                    sess,
+                    adapter,
+                    le=le,
+                    broker_order_id=entry_oid,
+                )
+                cancel_result = exact_entry_cancel.get("cancel_result") or {
+                    "ok": False,
+                    "error": exact_entry_cancel.get("reason"),
+                }
+            else:
+                try:
+                    cancel_result = adapter.cancel_order(entry_oid)
+                except Exception as exc:
+                    cancel_result = {"ok": False, "error": type(exc).__name__}
             _emit(db, sess, "live_order_cancelled", {
                 "order_id": entry_oid,
                 "raw": cancel_result,
                 "reason": flatten_reason,
             })
-            try:
-                entry_order, _ = adapter.get_order(entry_oid)
-            except Exception:
-                entry_order = None
+            if (
+                isinstance(exact_entry_cancel, dict)
+                and exact_entry_cancel.get("order") is not None
+            ):
+                entry_order = exact_entry_cancel["order"]
+            else:
+                try:
+                    entry_order, _ = adapter.get_order(entry_oid)
+                except Exception:
+                    entry_order = None
             if entry_order is None and le.get("entry_client_order_id") and hasattr(
                 adapter, "get_order_by_client_order_id"
             ):
@@ -18827,6 +22714,7 @@ def tick_live_session(
                     reason=flatten_reason,
                     slip_bps=float(le.get("entry_slip_bps_ref") or 6.0),
                     sell_result=sr,
+                    adapter=adapter,
                 )
                 authority["applied_filled_size"] = cumulative_filled
             else:
@@ -19312,6 +23200,7 @@ def tick_live_session(
 
     via = (
         db.query(MomentumSymbolViability)
+        .populate_existing()
         .filter(
             MomentumSymbolViability.symbol == sess.symbol,
             MomentumSymbolViability.variant_id == int(sess.variant_id),
@@ -19539,7 +23428,37 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
         if sess.state == STATE_LIVE_PENDING_ENTRY and le.get("entry_order_id") and not le.get("position"):
-            adapter.cancel_order(str(le["entry_order_id"]))
+            if normalize_execution_family(
+                sess.execution_family
+            ) in ALPACA_EXECUTION_FAMILIES:
+                exact_cancel = _cancel_exact_owned_alpaca_entry_order(
+                    db,
+                    sess,
+                    adapter,
+                    le=le,
+                    broker_order_id=str(le["entry_order_id"]),
+                )
+                post = exact_cancel.get("order")
+                if post is not None and float(
+                    getattr(post, "filled_size", 0.0) or 0.0
+                ) > 0.0:
+                    db.flush()
+                    return {
+                        "ok": True,
+                        "blocked": True,
+                        "pending": "risk_block_cancel_raced_fill_adopt",
+                        "risk_evaluation": ev,
+                    }
+                if not exact_cancel.get("ok"):
+                    db.flush()
+                    return {
+                        "ok": False,
+                        "blocked": True,
+                        "pending": exact_cancel.get("reason"),
+                        "risk_evaluation": ev,
+                    }
+            else:
+                adapter.cancel_order(str(le["entry_order_id"]))
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
@@ -19632,7 +23551,9 @@ def tick_live_session(
         # flatten. OFF => no-op (byte-identical). Fail-open (helper returns not-blocked on error).
         if bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
             _ntr_blocked, _ntr_reason = hard_no_trade_regime(
-                sess.execution_family, symbol=sess.symbol
+                sess.execution_family,
+                symbol=sess.symbol,
+                now=_utcnow_aware(),
             )
             if _ntr_blocked:
                 _emit(db, sess, "live_entry_wait_no_trade_regime", {"reason": _ntr_reason})
@@ -19644,7 +23565,9 @@ def tick_live_session(
         # not a ban); ENTRY-side only; crypto exempt; clamped to the 0.95 schema ceiling.
         # OFF / bump<=0 => _flat_min unchanged => _score_ok byte-identical, no emit, no import.
         _flat_min = float(params["entry_viability_min"])
-        _eff_min, _midday_lull, _midday_bump = _effective_entry_viability_min(_flat_min, sess.symbol)
+        _eff_min, _midday_lull, _midday_bump = _effective_entry_viability_min(
+            _flat_min, sess.symbol, now=_utcnow_aware()
+        )
         # MACRO RUN-R BREAKER (project_profitability_levers L2.1): when the lane's recent
         # realized-R turns negative AND worse than its own baseline (a no-follow-through
         # regime), SOFT-raise the entry bar so fewer marginal setups arm; RELATIVE so it
@@ -19697,9 +23620,18 @@ def tick_live_session(
         # R7 (WAVE-4 ITEM-2b) — per-detector reject map, always defined (the emit reads it
         # even on the _score_ok=False path). Populated as the trigger ladder runs below.
         _reject_map: dict[str, Any] = {}
+        # A classified first-dip decision owns this tick. Its typed receipt may
+        # approve or veto that decision, but a generic/additive detector must not
+        # overwrite a missing, stale, or mismatched receipt and reach admission.
+        _first_dip_owned_result: tuple[bool, str, dict[str, Any]] | None = None
         if _score_ok:
             try:
-                from .entry_gates import momentum_pullback_trigger, momentum_volume_confirmation
+                from .entry_gates import (
+                    _FIRST_DIP_FRONT_SIDE_VIA,
+                    flush_dip_buy_confirmation,
+                    momentum_pullback_trigger,
+                    momentum_volume_confirmation,
+                )
                 fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
                 _mode = str(getattr(settings, "chili_momentum_entry_trigger_mode", "hybrid") or "hybrid").lower()
@@ -19734,6 +23666,7 @@ def tick_live_session(
                                     _trigger_ok, _trigger_reason, _pb_debug = halt_resume_dip_trigger(
                                         _df_pb, entry_interval=_interval,
                                         halt_resumed_at_utc=_resumed_at,
+                                        now=_utcnow_aware(),
                                         halt_level=_float_or_none(le.get("halt_level")),
                                     )
                                     # R7 (ITEM-2a): PRESERVE the resume-dip reject reason before
@@ -19782,23 +23715,71 @@ def tick_live_session(
                                         _df_trig, _iv_trig = _df_micro, "15s"
                                     elif _micro_meta and isinstance(_pb_debug, dict):
                                         _pb_debug.update(_micro_meta)
-                                _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
-                                    _df_trig, entry_interval=_iv_trig, live_price=_live_px,
-                                    symbol=sess.symbol, db=db,
+                                # Classify a possible first-dip before the generic
+                                # pullback gets priority. Non-first-dip flushes remain
+                                # the ordinary fallback below.
+                                _trigger_decision_at = _utcnow_aware()
+                                _trigger_l2_as_of = _replay_l2_as_of_or_none()
+                                from .first_dip_tape_decision import (
+                                    current_first_dip_tape_authority_surface,
                                 )
-                                # R7 (ITEM-2b): record the pullback-break detector's own reject.
-                                if not _trigger_ok:
-                                    _reject_map["momentum_pullback"] = _trigger_reason
+
+                                _first_dip_evidence_surface = (
+                                    current_first_dip_tape_authority_surface()
+                                )
+                                _fd_ok, _fd_reason, _fd_debug = flush_dip_buy_confirmation(
+                                    _df_trig,
+                                    entry_interval=_iv_trig,
+                                    live_price=_live_px,
+                                    symbol=sess.symbol,
+                                    now=_trigger_decision_at,
+                                    db=db,
+                                    l2_as_of=_trigger_l2_as_of,
+                                    first_dip_execution_surface=(
+                                        _first_dip_evidence_surface
+                                    ),
+                                )
+                                _fd_is_first_dip = (
+                                    isinstance(_fd_debug, dict)
+                                    and _fd_debug.get("front_side_via")
+                                    == _FIRST_DIP_FRONT_SIDE_VIA
+                                )
+                                if _fd_is_first_dip:
+                                    _first_dip_owned_result = (
+                                        bool(_fd_ok),
+                                        str(_fd_reason),
+                                        dict(_fd_debug),
+                                    )
+                                    _trigger_ok, _trigger_reason, _pb_debug = (
+                                        _first_dip_owned_result
+                                    )
+                                    if not _trigger_ok:
+                                        _reject_map["first_dip_reclaim"] = _trigger_reason
+                                else:
+                                    _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
+                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
+                                        symbol=sess.symbol,
+                                        now=_trigger_decision_at,
+                                        db=db,
+                                        l2_as_of=_trigger_l2_as_of,
+                                    )
+                                    # R7 (ITEM-2b): record the pullback-break detector's own reject.
+                                    if not _trigger_ok:
+                                        _reject_map["momentum_pullback"] = _trigger_reason
                                 # R7 (ITEM-2a): the pullback re-run above is UNCONDITIONAL after a
                                 # resume-dip reject and clobbers _trigger_reason. Restore the
                                 # resume-dip reject as the primary reason UNLESS the pullback
                                 # produced a DIFFERENT actionable result (a fire, or a tick-armed
                                 # wait the event loop can act on). Pure decision -> testable helper.
-                                _trigger_reason = _preserve_resume_dip_reason(
-                                    trigger_ok=_trigger_ok,
-                                    pullback_reason=_trigger_reason,
-                                    resume_dip_reject=_resume_dip_reject,
-                                )
+                                if _first_dip_owned_result is None:
+                                    _trigger_reason = _preserve_resume_dip_reason(
+                                        trigger_ok=_trigger_ok,
+                                        pullback_reason=_trigger_reason,
+                                        resume_dip_reject=_resume_dip_reject,
+                                    )
+                            _guard_first_dip_owned_decision_from_additives(
+                                _first_dip_owned_result
+                            )
                             # HVM101 (C): two ADDITIVE entry triggers wired into the SAME
                             # ladder (flag-gated INSIDE each detector). Each returns the
                             # shared (ok, reason, debug) shape with pullback_low /
@@ -19807,14 +23788,11 @@ def tick_live_session(
                             # unchanged. Only run when nothing earlier fired (the pullback
                             # break owns the tape first); each is a no-op + byte-identical
                             # when its own kill-switch flag is OFF.
-                            if not _trigger_ok:
+                            if not _trigger_ok and _first_dip_owned_result is None:
                                 try:
-                                    from .entry_gates import flush_dip_buy_confirmation
-
-                                    _fd_ok, _fd_reason, _fd_debug = flush_dip_buy_confirmation(
-                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
-                                        symbol=sess.symbol, now=None,
-                                    )
+                                    # Reuse the classification read above. Calling the
+                                    # receipt provider twice could cross a watermark or
+                                    # generation boundary on one decision tick.
                                     if _fd_ok:
                                         _trigger_ok, _trigger_reason, _pb_debug = _fd_ok, _fd_reason, _fd_debug
                                         # GAP 5 BIG-BUYER-ON-BID starter (Warrior re-audit):
@@ -19828,7 +23806,9 @@ def tick_live_session(
                                         # behavior change). docs/DESIGN/MOMENTUM_LANE.md
                                         try:
                                             _bbp = _l2_big_buyer_bid_starter(
-                                                sess.symbol, db=db, l2_as_of=None,
+                                                sess.symbol,
+                                                db=db,
+                                                l2_as_of=_replay_l2_as_of_or_none(),
                                                 price=_live_px,
                                                 atr_pct=(
                                                     _fd_debug.get("atr_pct")
@@ -19843,7 +23823,10 @@ def tick_live_session(
                                         _reject_map["flush_dip_buy"] = _fd_reason
                                 except Exception:
                                     pass
-                            if not _trigger_ok:
+                            if (
+                                not _trigger_ok
+                                and _first_dip_owned_result is None
+                            ):
                                 try:
                                     from .entry_gates import TICK_ARMED_WAIT_REASONS, vwap_reclaim_confirmation
 
@@ -19874,7 +23857,10 @@ def tick_live_session(
                             # pullback_high under the IDENTICAL keys, so the structural-stop +
                             # bailout machinery below is reused unchanged. No-op + byte-
                             # identical when its kill-switch flag is OFF.
-                            if not _trigger_ok:
+                            if (
+                                not _trigger_ok
+                                and _first_dip_owned_result is None
+                            ):
                                 try:
                                     from .entry_gates import wick_reclaim_confirmation
 
@@ -19893,13 +23879,19 @@ def tick_live_session(
                             # returns the shared (ok, reason, debug) with pullback_low/high under
                             # the IDENTICAL keys. No-op + byte-identical when its kill-switch is
                             # OFF. docs/DESIGN/MOMENTUM_LANE.md
-                            if not _trigger_ok:
+                            if (
+                                not _trigger_ok
+                                and _first_dip_owned_result is None
+                            ):
                                 try:
                                     from .entry_gates import micro_pullback_primary_confirmation
 
                                     _mp_ok, _mp_reason, _mp_debug = micro_pullback_primary_confirmation(
                                         _df_trig, entry_interval=_iv_trig, live_price=_live_px,
-                                        symbol=sess.symbol, db=db,
+                                        symbol=sess.symbol,
+                                        now=_utcnow_aware(),
+                                        db=db,
+                                        l2_as_of=_replay_l2_as_of_or_none(),
                                     )
                                     if _mp_ok:
                                         _trigger_ok, _trigger_reason, _pb_debug = _mp_ok, _mp_reason, _mp_debug
@@ -19954,7 +23946,11 @@ def tick_live_session(
                                     try:
                                         _hb_ok, _hb_reason, _hb_dbg = hod_break_confirmation(
                                             _df_trig, entry_interval=_iv_trig, flat_top=_ft,
-                                            live_price=_live_px, symbol=sess.symbol, db=db,
+                                            live_price=_live_px,
+                                            symbol=sess.symbol,
+                                            now=_utcnow_aware(),
+                                            db=db,
+                                            l2_as_of=_replay_l2_as_of_or_none(),
                                         )
                                     except Exception:
                                         _hb_ok, _hb_reason, _hb_dbg = False, "hod_break_error", {}
@@ -19984,7 +23980,11 @@ def tick_live_session(
 
                                     _bsk_ok, _bsk_reason, _bsk_dbg = blue_sky_break_confirmation(
                                         _df_trig, entry_interval=_iv_trig, daily_ctx=_daily_ctx,
-                                        live_price=_live_px, symbol=sess.symbol, db=db,
+                                        live_price=_live_px,
+                                        symbol=sess.symbol,
+                                        now=_utcnow_aware(),
+                                        db=db,
+                                        l2_as_of=_replay_l2_as_of_or_none(),
                                     )
                                     if _bsk_ok:
                                         _breakouts.append((_bsk_ok, _bsk_reason, _bsk_dbg))
@@ -20027,7 +24027,11 @@ def tick_live_session(
                                         try:
                                             _bc_ok, _bc_reason, _bc_dbg = _bc_fn(
                                                 _df_trig, entry_interval=_iv_trig,
-                                                live_price=_live_px, symbol=sess.symbol, db=db,
+                                                live_price=_live_px,
+                                                symbol=sess.symbol,
+                                                now=_utcnow_aware(),
+                                                db=db,
+                                                l2_as_of=_replay_l2_as_of_or_none(),
                                             )
                                         except Exception:
                                             _bc_ok, _bc_reason, _bc_dbg = False, "batch_c_error", {}
@@ -20087,10 +24091,9 @@ def tick_live_session(
                                         ma_vwap_pullback_confirmation,
                                     ):
                                         try:
-                                            # now=None -> the live real clock (the runner
-                                            # is live-only; the session-window read uses the
-                                            # DST-correct market-profile open helper).
-                                            # l2_as_of=None = the LIVE default (newest
+                                            # The decision clock is explicit; production
+                                            # keeps its live newest-book default while replay
+                                            # receives the simulated as-of boundary. The
                                             # book snapshot; read_ladder_distribution emits
                                             # the original SQL). Threaded EXPLICITLY so the
                                             # _l2_entry_veto inside each Batch-D gate
@@ -20100,11 +24103,13 @@ def tick_live_session(
                                             # veto fires for these too. PRESERVES fail-open:
                                             # no L2 data ⇒ _NULL read ⇒ veto returns None ⇒
                                             # unchanged. Byte-identical (the gate already
-                                            # defaults l2_as_of=None).
+                                            # uses the exact replay boundary when installed).
                                             _bd_ok, _bd_reason, _bd_dbg = _bd_fn(
                                                 _df_trig, entry_interval=_iv_trig,
                                                 live_price=_live_px, symbol=sess.symbol,
-                                                now=None, db=db, l2_as_of=None,
+                                                now=_utcnow_aware(),
+                                                db=db,
+                                                l2_as_of=_replay_l2_as_of_or_none(),
                                             )
                                         except Exception:
                                             _bd_ok, _bd_reason, _bd_dbg = False, "batch_d_error", {}
@@ -20138,15 +24143,18 @@ def tick_live_session(
                                 try:
                                     from .entry_gates import bull_flag_confirmation
 
-                                    # l2_as_of=None = the LIVE default (newest book snapshot).
+                                    # Live keeps the newest-book default; replay passes its
+                                    # simulated as-of boundary.
                                     # Threaded EXPLICITLY so the _l2_entry_veto inside
                                     # bull_flag_confirmation reads the live book like the other
                                     # gates. PRESERVES fail-open (no L2 data ⇒ None ⇒ unchanged);
-                                    # byte-identical (the gate already defaults l2_as_of=None).
+                                    # byte-identical when no replay clock is installed.
                                     _bf_ok, _bf_reason, _bf_dbg = bull_flag_confirmation(
                                         _df_trig, entry_interval=_iv_trig,
                                         live_price=_live_px, symbol=sess.symbol,
-                                        now=None, db=db, l2_as_of=None,
+                                        now=_utcnow_aware(),
+                                        db=db,
+                                        l2_as_of=_replay_l2_as_of_or_none(),
                                     )
                                     if _bf_ok:
                                         _breakouts.append((_bf_ok, _bf_reason, _bf_dbg))
@@ -20173,8 +24181,8 @@ def tick_live_session(
                                 # _hod_extension_ok + _detect_back_side + front_side_state +
                                 # _l2_entry_veto) and returns the shared (ok, reason, debug) with
                                 # pullback_low/high under the IDENTICAL keys, so the structural-stop
-                                # + bailout machinery below is reused unchanged. l2_as_of=None = the
-                                # LIVE default. docs/DESIGN/MOMENTUM_LANE.md
+                                # + bailout machinery below is reused unchanged. Replay uses
+                                # its simulated L2 boundary; live keeps the ring default.
                                 try:
                                     from .entry_gates import absorption_snap_entry, wedge_break_entry
 
@@ -20183,7 +24191,9 @@ def tick_live_session(
                                             _wa_ok, _wa_reason, _wa_dbg = _wa_fn(
                                                 _df_trig, entry_interval=_iv_trig,
                                                 live_price=_live_px, symbol=sess.symbol,
-                                                now=None, db=db, l2_as_of=None,
+                                                now=_utcnow_aware(),
+                                                db=db,
+                                                l2_as_of=_replay_l2_as_of_or_none(),
                                             )
                                         except Exception:
                                             _wa_ok, _wa_reason, _wa_dbg = False, "wedge_absorption_error", {}
@@ -20218,14 +24228,17 @@ def tick_live_session(
                                 # is ON it joins the SAME candidate set the setup-selector arbitrates,
                                 # which returns a SINGLE choice (no double-fire). Flag-gated INSIDE
                                 # the detector (default OFF -> disabled before any compute, byte-
-                                # identical). l2_as_of=None = the LIVE default. docs/DESIGN/MOMENTUM_LANE.md
+                                # identical). Replay uses its simulated L2 boundary; live
+                                # keeps the newest-book default. docs/DESIGN/MOMENTUM_LANE.md
                                 try:
                                     from .entry_gates import false_break_reclaim_confirmation
 
                                     _fbr_ok, _fbr_reason, _fbr_dbg = false_break_reclaim_confirmation(
                                         _df_trig, entry_interval=_iv_trig,
                                         live_price=_live_px, symbol=sess.symbol,
-                                        now=None, db=db, l2_as_of=None,
+                                        now=_utcnow_aware(),
+                                        db=db,
+                                        l2_as_of=_replay_l2_as_of_or_none(),
                                     )
                                     if _fbr_ok:
                                         _breakouts.append((_fbr_ok, _fbr_reason, _fbr_dbg))
@@ -20273,7 +24286,9 @@ def tick_live_session(
                                             _sd_ok, _sd_reason, _sd_dbg = _sd_fn(
                                                 _df_trig, entry_interval=_iv_trig,
                                                 live_price=_live_px, symbol=sess.symbol,
-                                                now=None, db=db, l2_as_of=None,
+                                                now=_utcnow_aware(),
+                                                db=db,
+                                                l2_as_of=_replay_l2_as_of_or_none(),
                                             )
                                         except Exception:
                                             _sd_ok, _sd_reason, _sd_dbg = False, "scalp_dip_error", {}
@@ -20312,7 +24327,18 @@ def tick_live_session(
                                 pass
                     except Exception:
                         _trigger_ok = False
-                if not _trigger_ok and _mode != "pullback_break":
+                if _first_dip_owned_result is not None:
+                    # Restore the classified decision after every additive
+                    # detector/selector. A later setup cannot turn its receipt
+                    # veto into an order on the same tick.
+                    _trigger_ok, _trigger_reason, _pb_debug = (
+                        _first_dip_owned_result
+                    )
+                if (
+                    not _trigger_ok
+                    and _mode != "pullback_break"
+                    and _first_dip_owned_result is None
+                ):
                     _df = _entry_df  # reuse the adaptive-spread 15m candles if present
                     if _df is None:
                         _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
@@ -20350,14 +24376,35 @@ def tick_live_session(
                         _bench_px = float(tick.ask or tick.mid or 0) or None
                 except Exception:
                     _bench_px = None
+                from zoneinfo import ZoneInfo as _BenchZone
+
+                _bench_session_date_et = _now_in_tz(
+                    _BenchZone("America/New_York")
+                ).date().isoformat()
+                _bench_scope_before = le.get("benched_backside_session_date_et")
+                _bench_anchor, _bench_new_session_reset = (
+                    _scope_backside_bench_to_et_session(
+                        le,
+                        session_date_et=_bench_session_date_et,
+                    )
+                )
+                if _bench_new_session_reset:
+                    _commit_le(sess, le)
+                    _emit(db, sess, "live_entry_backside_bench_session_reset", {
+                        "session_date_et": _bench_session_date_et,
+                    })
+                elif _bench_anchor is not None and not _bench_scope_before:
+                    # Adopt a pre-date-key marker during a mid-session rollout.
+                    _commit_le(sess, le)
                 _benched, _bench_reason, _bench_hod_out, _bench_dbg = evaluate_sticky_backside_bench(
                     _bench_df,
-                    benched_at_hod=_float_or_none(le.get("benched_backside_hod")),
+                    benched_at_hod=_bench_anchor,
                     live_price=_bench_px,
                 )
-                _prev_benched = le.get("benched_backside_hod") is not None
+                _prev_benched = _bench_anchor is not None
                 if _benched:
                     le["benched_backside_hod"] = float(_bench_hod_out) if _bench_hod_out is not None else le.get("benched_backside_hod")
+                    le["benched_backside_session_date_et"] = _bench_session_date_et
                     if not _prev_benched:
                         # WAVE-4 ITEM-5(b): PERSIST the bench marker the instant it latches — a
                         # missing commit on the MARKER MUTATION was the permanent-ban hardener
@@ -20382,6 +24429,7 @@ def tick_live_session(
                     # reclaim CROSS-from-below cleared the bench -> drop the marker so the name
                     # can be armed/entered again on a fresh leg.
                     le.pop("benched_backside_hod", None)
+                    le.pop("benched_backside_session_date_et", None)
                     # WAVE-4 ITEM-5(b): _commit_le IMMEDIATELY after the pop — the missing commit
                     # is exactly what hardens a permanent ban (the marker survives a restart if the
                     # drop is never persisted). MUST ship with the VWAP-reclaim un-bench (a).
@@ -20495,6 +24543,7 @@ def tick_live_session(
             try:
                 _ob_suppress, _ob_dbg = _opening_bell_suppresses_fresh_trigger(
                     sess.symbol, le, has_position=isinstance(le.get("position"), dict),
+                    now=_utcnow_aware(),
                     armed_at=getattr(sess, "started_at", None),
                 )
             except Exception:
@@ -20880,7 +24929,7 @@ def tick_live_session(
         try:
             from .market_profile import is_tradeable_now
 
-            _mkt_open = bool(is_tradeable_now(sess.symbol))
+            _mkt_open = bool(is_tradeable_now(sess.symbol, now=_utcnow_aware()))
         except Exception:
             _mkt_open = True
         try:
@@ -20971,11 +25020,15 @@ def tick_live_session(
                 le["entry_l2_snapshot"] = _l2
             else:
                 le.pop("entry_l2_snapshot", None)
-            # Persist the FIRED trigger reason so the entry-sizing path (which runs on a
-            # LATER tick in LIVE_ENTRY_CANDIDATE, where the local _trigger_reason is no
-            # longer in scope) can thread it into the adaptive spread-cost veto for the
-            # RECLAIM carve-out (derate-only + permissive R base for dip/VWAP-reclaims).
-            le["entry_trigger_reason"] = _trigger_reason
+            # Persist the FIRED trigger identity so the entry-sizing path (which runs on a
+            # LATER tick in LIVE_ENTRY_CANDIDATE, where the local detector result is no
+            # longer in scope) can recover the exact setup family and opportunity key.
+            # Replace the debug payload on every fire: retaining an earlier decision's
+            # first-dip certificate would mislabel a later generic entry.  The plain dict
+            # copy also prevents a detector-owned mutable mapping from becoming state.
+            _persist_entry_trigger_identity(
+                le, reason=_trigger_reason, debug=_pb_debug
+            )
             # Stamp above-VWAP for the no-halt vertical-chase knife guard (read on a LATER
             # FIX-B escalation tick where the trigger debug is out of scope). The gate
             # already computed it; absent ⇒ None ⇒ the no-halt deep budget fails closed.
@@ -21091,7 +25144,14 @@ def tick_live_session(
                                 le["entry_l2_snapshot"] = _l2
                             else:
                                 le.pop("entry_l2_snapshot", None)
-                            le["entry_trigger_reason"] = "tape_confirmed_hold"
+                            # This legacy tape helper is diagnostic only; do not retain a
+                            # prior first-dip opportunity key or promote its mutable tape
+                            # result into adaptive order authority.
+                            _persist_entry_trigger_identity(
+                                le,
+                                reason="tape_confirmed_hold",
+                                debug=_th_sdbg,
+                            )
                             le.pop("watch_break_level", None)
                             # above-VWAP for the no-halt vertical-chase knife guard (see the
                             # break path); absent ⇒ the no-halt deep budget fails closed.
@@ -21117,6 +25177,7 @@ def tick_live_session(
                     _tape_hold_fired = False  # fail-safe: any error -> fall back to break-wait
             if _tape_hold_fired:
                 db.flush()
+                _schedule_entry_fsm_continuation(sess.id)
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
             # ── FIX 1: MOMENTUM-CONTINUATION ENTRY (additive new-high fire) ─────────────
             # The break trigger above is WAITING because every existing trigger needs a
@@ -21221,7 +25282,9 @@ def tick_live_session(
                         # (2) NEW HIGH + (4) not parabolic + (5) not backside (inside).
                         _mc_ok, _mc_reason, _mc_dbg = momentum_continuation_trigger(
                             _mc_df, live_price=_mc_px, entry_interval=_mc_iv,
-                            symbol=sess.symbol, db=db, l2_as_of=None,
+                            symbol=sess.symbol,
+                            db=db,
+                            l2_as_of=_replay_l2_as_of_or_none(),
                         )
                         try:
                             logger.info(
@@ -21264,7 +25327,11 @@ def tick_live_session(
                                     le["entry_l2_snapshot"] = _l2
                                 else:
                                     le.pop("entry_l2_snapshot", None)
-                                le["entry_trigger_reason"] = "momentum_continuation"
+                                _persist_entry_trigger_identity(
+                                    le,
+                                    reason="momentum_continuation",
+                                    debug=_mc_dbg,
+                                )
                                 le.pop("watch_break_level", None)
                                 # above-VWAP for the no-halt vertical-chase knife guard (see
                                 # the break path); absent ⇒ the no-halt deep budget fails closed.
@@ -21294,6 +25361,7 @@ def tick_live_session(
                     _continuation_fired = False  # fail-safe: any error -> fall back to break-wait
             if _continuation_fired:
                 db.flush()
+                _schedule_entry_fsm_continuation(sess.id)
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
             # Stash the level we're WAITING to break so the event loop can dispatch
             # a tick-speed re-evaluation the instant a live tick crosses it (the
@@ -21326,6 +25394,8 @@ def tick_live_session(
                 "flat_min": _flat_min, "eff_min": _eff_min, "bump": _midday_bump,
             })
         db.flush()
+        if sess.state == STATE_LIVE_ENTRY_CANDIDATE:
+            _schedule_entry_fsm_continuation(sess.id)
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_ENTRY_CANDIDATE:
@@ -21341,6 +25411,8 @@ def tick_live_session(
             # entries-per-session / time-to-fill analytics (BATL post-mortem).
             _emit(db, sess, "live_entry_pending_place", {"note": "pending_place"})
         db.flush()
+        if sess.state == STATE_LIVE_PENDING_ENTRY:
+            _schedule_entry_fsm_continuation(sess.id)
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_PENDING_ENTRY:
@@ -21405,6 +25477,17 @@ def tick_live_session(
             _recovered_oid = _bind_recovered_entry_order(
                 le, _recovered, client_order_id=_reconcile_cid
             )
+            _recovered_lifecycle = _sync_adaptive_alpaca_order_lifecycle(
+                sess,
+                le,
+                order=_recovered,
+                adapter=adapter,
+            )
+            if not _recovered_lifecycle.get("ok"):
+                le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+                    "reason": _recovered_lifecycle.get("error"),
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
             _commit_le(sess, le)
             _emit(db, sess, "live_entry_client_id_recovered", {
                 "client_order_id": le.get("entry_client_order_id") or _reconcile_cid,
@@ -21428,6 +25511,21 @@ def tick_live_session(
             no, _ = _fast_ack_poll_entry(
                 adapter, le["entry_order_id"], sess=sess, interval_window_s=_fp_window_s,
             )
+            if no is not None and normalize_execution_family(
+                sess.execution_family
+            ) in ALPACA_EXECUTION_FAMILIES:
+                _pending_entry_lifecycle = _sync_adaptive_alpaca_order_lifecycle(
+                    sess,
+                    le,
+                    order=no,
+                    adapter=adapter,
+                )
+                if not _pending_entry_lifecycle.get("ok"):
+                    le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+                        "reason": _pending_entry_lifecycle.get("error"),
+                        "recorded_at_utc": _utcnow().isoformat(),
+                    }
+                    _commit_le(sess, le)
             # OPEN-WITH-FILLS (2026-06-11 INDP): RH can hold an order in state
             # "open" with shares ALREADY filled (a silently-failed cancel + a
             # later fill). Those shares are OURS the moment they exist — adopt
@@ -21435,10 +25533,31 @@ def tick_live_session(
             # remainder first (single clip; extra post-adoption fills reconcile
             # via broker-sync against broker truth).
             if no and _order_open(no) and float(no.filled_size or 0.0) > 0.0:
-                try:
-                    adapter.cancel_order(str(le["entry_order_id"]))
-                except Exception:
-                    _log.debug("[momentum_live] remainder cancel failed", exc_info=True)
+                if normalize_execution_family(
+                    sess.execution_family
+                ) in ALPACA_EXECUTION_FAMILIES:
+                    exact_cancel = _cancel_exact_owned_alpaca_entry_order(
+                        db,
+                        sess,
+                        adapter,
+                        le=le,
+                        broker_order_id=str(le["entry_order_id"]),
+                        pre_order=no,
+                    )
+                    if exact_cancel.get("order") is not None:
+                        no = exact_cancel["order"]
+                    if not exact_cancel.get("ok"):
+                        le["adaptive_risk_alpaca_cancel_pending"] = {
+                            "reason": exact_cancel.get("reason"),
+                            "broker_order_id": str(le["entry_order_id"]),
+                            "recorded_at_utc": _utcnow().isoformat(),
+                        }
+                        _commit_le(sess, le)
+                else:
+                    try:
+                        adapter.cancel_order(str(le["entry_order_id"]))
+                    except Exception:
+                        _log.debug("[momentum_live] remainder cancel failed", exc_info=True)
                 _emit(db, sess, "entry_open_with_fills_adopting", {
                     "order_id": str(le["entry_order_id"]),
                     "filled_size": float(no.filled_size or 0.0),
@@ -21732,8 +25851,13 @@ def tick_live_session(
                             liq_mult=float(le.get("entry_liq_mult") or 1.0),
                             fire_ts=_utcnow(), entry_fidelity="live",
                             trigger_debug=(le.get("entry_trigger_debug") if isinstance(le.get("entry_trigger_debug"), dict) else None),
-                            session_df=_cap_df, l2_db=db, l2_as_of=None,
-                            macro=macro_regime_features(),
+                            session_df=_cap_df,
+                            l2_db=db,
+                            l2_as_of=_replay_l2_as_of_or_none(),
+                            macro=macro_regime_features(
+                                now_ts=_utcnow().timestamp(),
+                                fetcher=_replay_aware_fetch_ohlcv_df,
+                            ),
                         )
                         if _ef:
                             le["entry_features"] = _ef
@@ -21759,6 +25883,8 @@ def tick_live_session(
                             except Exception:
                                 pass
                             _commit_le(sess, le)
+                    except ReplayInputContractError:
+                        raise
                     except Exception as _fe:
                         # SURFACE the capture failure (was a silent _log.debug) as a queryable
                         # event so the ROOT cause of the empty feature vector is diagnosable in
@@ -21859,7 +25985,8 @@ def tick_live_session(
                             and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
                             and int(le.get("entry_repeg_count", 0) or 0)
                                 < int(getattr(settings, "chili_momentum_entry_max_repegs", 3) or 0)
-                            and _pfr is not None and is_fresh_enough(_pfr)
+                            and _pfr is not None
+                            and is_fresh_enough(_pfr, now=_utcnow_aware())
                         ):
                             # Confirm the cross is actually reachable within the cumulative
                             # budget BEFORE committing to a cancel — if the ask already ran
@@ -21968,7 +26095,12 @@ def tick_live_session(
                                 "fix": "B",
                                 "equity": _fixb_eligible_equity,
                                 "repeg_count": int(le.get("entry_repeg_count", 0) or 0),
-                                "fresh": bool(_pfr is not None and is_fresh_enough(_pfr)),
+                                "fresh": bool(
+                                    _pfr is not None
+                                    and is_fresh_enough(
+                                        _pfr, now=_utcnow_aware()
+                                    )
+                                ),
                                 "bid": _pbid, "ask": _pask, "limit": _lim_px or None,
                             })
                         if _cancel_why is not None:
@@ -21997,7 +26129,22 @@ def tick_live_session(
                                     "ok": True, "session_id": sess.id,
                                     "state": sess.state, "pending": "ack_timeout_filled_adopt",
                                 }
-                            adapter.cancel_order(str(le["entry_order_id"]))
+                            _exact_ack_cancel = None
+                            if normalize_execution_family(
+                                sess.execution_family
+                            ) in ALPACA_EXECUTION_FAMILIES:
+                                _exact_ack_cancel = (
+                                    _cancel_exact_owned_alpaca_entry_order(
+                                        db,
+                                        sess,
+                                        adapter,
+                                        le=le,
+                                        broker_order_id=str(le["entry_order_id"]),
+                                        pre_order=_fresh,
+                                    )
+                                )
+                            else:
+                                adapter.cancel_order(str(le["entry_order_id"]))
                             # The CANCEL ITSELF can lose the race on a slow small-cap: the
                             # order can fill before/despite the cancel landing. Re-fetch ONCE
                             # MORE after cancelling and ADOPT a filled order — including a
@@ -22007,7 +26154,28 @@ def tick_live_session(
                             # session PENDING so the fill-handler above adopts it next tick.
                             # [SDOT 2026-06-10: 56sh / $1,608 filled while the ack-timeout
                             # cancel raced -> orphaned, operator had to exit it by hand.]
-                            _post, _ = _governed_get_order(adapter, le["entry_order_id"], sess=sess)
+                            if (
+                                isinstance(_exact_ack_cancel, dict)
+                                and _exact_ack_cancel.get("order") is not None
+                            ):
+                                _post = _exact_ack_cancel["order"]
+                            else:
+                                _post, _ = _governed_get_order(
+                                    adapter, le["entry_order_id"], sess=sess
+                                )
+                            if (
+                                isinstance(_exact_ack_cancel, dict)
+                                and not _exact_ack_cancel.get("ok")
+                                and _exact_ack_cancel.get("order") is None
+                            ):
+                                db.flush()
+                                return {
+                                    "ok": False,
+                                    "session_id": sess.id,
+                                    "state": sess.state,
+                                    "pending": _exact_ack_cancel.get("reason")
+                                    or "alpaca_exact_cancel_unproven",
+                                }
                             if _post and _order_done_for_entry(_post):
                                 db.flush()
                                 return {
@@ -22099,7 +26267,10 @@ def tick_live_session(
                                 and _rp_is_equity
                                 and _rp_n < _rp_max
                                 and _rp_ask and _rp_ask > 0
-                                and _rp_fr is not None and is_fresh_enough(_rp_fr)
+                                and _rp_fr is not None
+                                and is_fresh_enough(
+                                    _rp_fr, now=_utcnow_aware()
+                                )
                             ):
                                 _rp_new = _entry_repeg_price(
                                     original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
@@ -22155,16 +26326,50 @@ def tick_live_session(
                                 # this block is skipped -> byte-identical to the legacy
                                 # one-repeg-per-tick path.
                                 if _rp_did:
-                                    try:
-                                        adapter.cancel_order(str(_rp_old_eid))
-                                    except Exception:
-                                        _log.debug(
-                                            "[momentum_s4] inline repeg pre-place cancel failed oid=%s",
-                                            _rp_old_eid, exc_info=True,
+                                    _rp_exact_cancel = None
+                                    if normalize_execution_family(
+                                        sess.execution_family
+                                    ) in ALPACA_EXECUTION_FAMILIES:
+                                        _rp_exact_cancel = (
+                                            _cancel_exact_owned_alpaca_entry_order(
+                                                db,
+                                                sess,
+                                                adapter,
+                                                le=le,
+                                                broker_order_id=str(_rp_old_eid),
+                                            )
                                         )
-                                    _rp_post, _ = _governed_get_order(
-                                        adapter, _rp_old_eid, sess=sess
-                                    )
+                                    else:
+                                        try:
+                                            adapter.cancel_order(str(_rp_old_eid))
+                                        except Exception:
+                                            _log.debug(
+                                                "[momentum_s4] inline repeg pre-place cancel failed oid=%s",
+                                                _rp_old_eid, exc_info=True,
+                                            )
+                                    if (
+                                        isinstance(_rp_exact_cancel, dict)
+                                        and _rp_exact_cancel.get("order") is not None
+                                    ):
+                                        _rp_post = _rp_exact_cancel["order"]
+                                    else:
+                                        _rp_post, _ = _governed_get_order(
+                                            adapter, _rp_old_eid, sess=sess
+                                        )
+                                    if (
+                                        isinstance(_rp_exact_cancel, dict)
+                                        and not _rp_exact_cancel.get("ok")
+                                        and _rp_exact_cancel.get("order") is None
+                                    ):
+                                        _commit_le(sess, le)
+                                        db.flush()
+                                        return {
+                                            "ok": False,
+                                            "session_id": sess.id,
+                                            "state": sess.state,
+                                            "pending": _rp_exact_cancel.get("reason")
+                                            or "alpaca_exact_repeg_cancel_unproven",
+                                        }
                                     if _rp_post and (
                                         _order_done_for_entry(_rp_post)
                                         or float(getattr(_rp_post, "filled_size", 0) or 0.0) > 0.0
@@ -22630,6 +26835,258 @@ def tick_live_session(
         except (TypeError, ValueError):
             slip_ref = spread_bps_live / 2.0
 
+        # Captured Alpaca PAPER phase zero: setup selection remains the live
+        # FSM's job, but a same-process capture owner may bind the exact route,
+        # decision clock, executable BBO, structural stop, trigger evidence,
+        # confirmed arm, and deterministic CID/place generation.  A verified
+        # match returns the typed phase-two request *before* legacy allocation,
+        # magic-dollar sizing, durable claims/reservations, or any order path.
+        # With no active context (the ordinary production shape), this entire
+        # block is skipped so every existing execution family is unchanged.
+        if captured_paper_selection_required(execution_family=ef):
+            _captured_context_active = captured_paper_selection_context_active(
+                execution_family=ef
+            )
+            try:
+                if not _captured_context_active:
+                    raise RuntimeError(
+                        "captured_paper_selection_context_missing"
+                    )
+                # The material factory intentionally closed its initial DB read
+                # before provider capture.  Re-read both mutable generations
+                # under the final session lock after flushing this tick; never
+                # trust SQLAlchemy's identity-map copy from the initial query.
+                db.flush()
+                db.refresh(sess, with_for_update=True)
+                via = (
+                    db.query(MomentumSymbolViability)
+                    .populate_existing()
+                    .filter(
+                        MomentumSymbolViability.symbol == sess.symbol,
+                        MomentumSymbolViability.variant_id
+                        == int(sess.variant_id),
+                    )
+                    .with_for_update(nowait=True)
+                    .one_or_none()
+                )
+                if via is None:
+                    raise RuntimeError(
+                        "captured_paper_final_viability_unavailable"
+                    )
+                _captured_snapshot = (
+                    sess.risk_snapshot_json
+                    if isinstance(sess.risk_snapshot_json, dict)
+                    else {}
+                )
+                le = _live_exec(_captured_snapshot)
+                _captured_place_n = int(
+                    le.get("entry_place_count", 0) or 0
+                ) + 1
+                _captured_cid = _entry_client_order_id(
+                    session_id=sess.id,
+                    correlation_id=sess.correlation_id,
+                    trade_cycles=int(le.get("trade_cycles") or 0),
+                    stopout_cycles=int(le.get("stopout_cycles") or 0),
+                    place_n=_captured_place_n,
+                )
+                _captured_setup_family = _adaptive_entry_setup_family(
+                    le, sess.symbol
+                )
+                _captured_arm_marker = _captured_snapshot.get(
+                    "confirmed_arm_generation"
+                )
+                _captured_debug = le.get("entry_trigger_debug")
+                _captured_viability_payload = {
+                        column.name: _captured_paper_db_value(
+                            getattr(via, column.name)
+                        )
+                        for column in via.__table__.columns
+                    }
+                _captured_viability_payload_sha256 = _captured_paper_sha256(
+                    _captured_viability_payload
+                )
+                _captured_execution_readiness = (
+                    _captured_viability_payload.get("execution_readiness_json")
+                )
+                if not isinstance(_captured_execution_readiness, dict) or not (
+                    _captured_execution_readiness
+                ):
+                    raise RuntimeError(
+                        "captured_paper_final_execution_readiness_unavailable"
+                    )
+                _captured_execution_readiness_sha256 = _captured_paper_sha256(
+                    _captured_execution_readiness
+                )
+                _captured_candidate_generation_sha256 = (
+                    captured_paper_candidate_generation_sha256(
+                        session_id=sess.id,
+                        symbol=sess.symbol,
+                        execution_family=ef,
+                        entry_place_count=_captured_place_n,
+                        client_order_id=_captured_cid,
+                        setup_family=_captured_setup_family,
+                        structural_stop_price=le.get("structural_stop_price"),
+                        trigger_reason=le.get("entry_trigger_reason"),
+                        trigger_debug=(
+                            _captured_debug
+                            if isinstance(_captured_debug, dict)
+                            else {}
+                        ),
+                        confirmed_arm_marker=(
+                            _captured_arm_marker
+                            if isinstance(_captured_arm_marker, dict)
+                            else {}
+                        ),
+                        viability_updated_at=(
+                            via.updated_at.replace(tzinfo=timezone.utc)
+                            if isinstance(via.updated_at, datetime)
+                            and via.updated_at.tzinfo is None
+                            else via.updated_at
+                        ),
+                        viability_score=via.viability_score,
+                        viability_payload_sha256=(
+                            _captured_viability_payload_sha256
+                        ),
+                        execution_readiness_sha256=(
+                            _captured_execution_readiness_sha256
+                        ),
+                    )
+                )
+                _captured_resolution = resolve_captured_paper_selection(
+                    session_id=sess.id,
+                    symbol=sess.symbol,
+                    execution_family=ef,
+                    decision_at=_utcnow_aware(),
+                    bid=float(bid),
+                    ask=float(ask),
+                    structural_stop_price=le.get("structural_stop_price"),
+                    entry_limit_ceiling_price=quantize_alpaca_equity_limit_price(
+                        float(ask), "buy"
+                    ),
+                    entry_place_count=_captured_place_n,
+                    client_order_id=_captured_cid,
+                    setup_family=_captured_setup_family,
+                    trigger_reason=le.get("entry_trigger_reason"),
+                    trigger_debug=(
+                        _captured_debug
+                        if isinstance(_captured_debug, dict)
+                        else {}
+                    ),
+                    confirmed_arm_marker=(
+                        _captured_arm_marker
+                        if isinstance(_captured_arm_marker, dict)
+                        else {}
+                    ),
+                    candidate_generation_sha256=(
+                        _captured_candidate_generation_sha256
+                    ),
+                    viability_updated_at=(
+                        via.updated_at.replace(tzinfo=timezone.utc)
+                        if isinstance(via.updated_at, datetime)
+                        and via.updated_at.tzinfo is None
+                        else via.updated_at
+                    ),
+                    viability_score=via.viability_score,
+                    viability_payload_sha256=(
+                        _captured_viability_payload_sha256
+                    ),
+                    execution_readiness_sha256=(
+                        _captured_execution_readiness_sha256
+                    ),
+                )
+            except (AdaptiveRiskBuilderError, RuntimeError, TypeError, ValueError) as exc:
+                _captured_resolution = None
+            if (
+                _captured_resolution is not None
+                and _captured_resolution.request is not None
+            ):
+                return _captured_resolution.request
+            _captured_reason = (
+                _captured_resolution.reason
+                if _captured_resolution is not None
+                else (
+                    "captured_paper_selection_context_missing"
+                    if not _captured_context_active
+                    else "captured_paper_selection_evidence_invalid"
+                )
+            )
+            _emit(
+                db,
+                sess,
+                "live_entry_captured_paper_selection_deferred",
+                {
+                    "reason": _captured_reason,
+                    "opportunity_consumed": False,
+                    "risk_reserved": False,
+                    "order_posted": False,
+                },
+            )
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "deferred": True,
+                "reason": _captured_reason,
+            }
+
+        _adaptive_primary_build: BuiltAdaptiveRiskRequest | None = None
+        _adaptive_entry_place_n: int | None = None
+        _adaptive_entry_cid: str | None = None
+        try:
+            (
+                _adaptive_primary_build,
+                _adaptive_entry_place_n,
+                _adaptive_entry_cid,
+            ) = _build_adaptive_alpaca_primary_before_legacy_sizing(
+                sess,
+                le,
+                execution_family=ef,
+                bid=float(bid),
+                ask=float(ask),
+            )
+            if _adaptive_primary_build is not None:
+                le["adaptive_risk_builder_audit"] = (
+                    _adaptive_primary_build.audit_payload()
+                )
+                le["adaptive_risk_decision_packet"] = dict(
+                    _adaptive_primary_build.decision_packet
+                )
+                le["adaptive_risk_reservation_claim"] = (
+                    _adaptive_primary_build.reservation_claim.to_payload()
+                )
+                le[KEY_ADAPTIVE_RISK_RESERVATION_REQUEST] = (
+                    _adaptive_primary_build.request.to_payload()
+                )
+                le["adaptive_risk_builder_source_sha256"] = (
+                    _adaptive_primary_build.source_sha256
+                )
+                _commit_le(sess, le)
+        except (AdaptiveRiskBuilderError, TypeError, ValueError) as exc:
+            _builder_reason = getattr(
+                exc, "reason", "adaptive_risk_builder_source_invalid"
+            )
+            le["adaptive_risk_builder_blocker"] = {
+                "reason": _builder_reason,
+                "at_utc": _utcnow().isoformat(),
+            }
+            _commit_le(sess, le)
+            _emit(
+                db,
+                sess,
+                "live_entry_adaptive_risk_blocked",
+                {"reason": _builder_reason},
+            )
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "skipped": _builder_reason,
+            }
+
         decision_packet_id = None
         _perf_size_mult = 1.0  # FIX-16: default 1.0 when the decision ledger path is disabled
         if bool(getattr(settings, "brain_enable_decision_ledger", True)):
@@ -22645,8 +27102,45 @@ def tick_live_session(
                 execution_mode="live",
                 regime_snapshot=regime_live,
             )
-            if not dec.get("proceed"):
-                alloc = dec.get("allocation") or {}
+            alloc = dec.get("allocation") or {}
+            try:
+                _adaptive_legacy_audit_only = bool(
+                    _adaptive_primary_build is not None
+                    and int(_adaptive_primary_build.resolution.quantity_shares) > 0
+                )
+            except (AttributeError, TypeError, ValueError):
+                _adaptive_legacy_audit_only = False
+            if _adaptive_legacy_audit_only:
+                le["legacy_pre_admission_audit"] = {
+                    "decision_packet_id": dec.get("packet_id"),
+                    "legacy_proceed": bool(dec.get("proceed")),
+                    "legacy_abstain_reason_code": alloc.get(
+                        "abstain_reason_code"
+                    ),
+                    "legacy_abstain_reason_text": alloc.get(
+                        "abstain_reason_text"
+                    ),
+                    "legacy_max_notional_policy_usd": float(max_notional),
+                    "suppression_authority": False,
+                    "economic_sizing_authority": "adaptive_risk_policy",
+                }
+                if not dec.get("proceed"):
+                    _emit(
+                        db,
+                        sess,
+                        "live_legacy_abstain_observed",
+                        {
+                            "packet_id": dec.get("packet_id"),
+                            "reason": alloc.get("abstain_reason_code"),
+                            "detail": alloc.get("abstain_reason_text"),
+                            "suppression_authority": False,
+                        },
+                    )
+                decision_packet_id = dec.get("packet_id")
+                # The legacy allocator is selection/audit evidence only after a
+                # valid capture-bound adaptive quantity exists.  Adaptive risk owns
+                # all economic sizing and the downstream operational safety gates.
+            elif not dec.get("proceed"):
                 _emit(
                     db,
                     sess,
@@ -22660,16 +27154,17 @@ def tick_live_session(
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "abstained": True}
-            decision_packet_id = dec.get("packet_id")
-            max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
-            # FIX-16 (B3): in pure-liquidity-cap mode the allocator surfaces the variant-
-            # performance multiplier (DOWN-only [0.3,1.0]) here instead of folding it into the
-            # notional ceiling. Apply it ONCE to the per-trade RISK BUDGET below (under the same
-            # base*3.0 clamp). Legacy mode surfaces 1.0 => no double-apply (byte-identical).
-            try:
-                _perf_size_mult = float((dec.get("allocation") or {}).get("performance_size_mult", 1.0) or 1.0)
-            except (TypeError, ValueError):
-                _perf_size_mult = 1.0
+            else:
+                decision_packet_id = dec.get("packet_id")
+                max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
+                # FIX-16 (B3): in pure-liquidity-cap mode the allocator surfaces the variant-
+                # performance multiplier (DOWN-only [0.3,1.0]) here instead of folding it into the
+                # notional ceiling. Apply it ONCE to the per-trade RISK BUDGET below (under the same
+                # base*3.0 clamp). Legacy mode surfaces 1.0 => no double-apply (byte-identical).
+                try:
+                    _perf_size_mult = float((dec.get("allocation") or {}).get("performance_size_mult", 1.0) or 1.0)
+                except (TypeError, ValueError):
+                    _perf_size_mult = 1.0
         if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
             _emit(db, sess, "live_error", {"reason": "decision_packet_required_missing"})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
@@ -22691,6 +27186,10 @@ def tick_live_session(
         inc = prod.base_increment if prod else (1.0 if _equity_share_default else None)
         mn = prod.base_min_size if prod else (1.0 if _equity_share_default else None)
         guarded_ask = ask * _adaptive_notional_guard_multiplier(expected_move_bps=_expected_move_bps)
+        if _adaptive_primary_build is not None:
+            # The capture-bound executable ask owns adaptive economics.  A later
+            # BBO generation change is deferred before POST rather than chased.
+            guarded_ask = float(_adaptive_primary_build.request.inputs.ask)
         if normalize_execution_family(ef) in ALPACA_EXECUTION_FAMILIES:
             # Risk-first sizing must use the exact BUY tick Alpaca can execute.
             # Deferring this ceiling-round until the adapter under-reserves loss
@@ -22860,7 +27359,7 @@ def tick_live_session(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
         _alpaca_hard_loss_cap = alpaca_paper_hard_loss_cap_usd(ef)
-        if _alpaca_hard_loss_cap is not None:
+        if _alpaca_hard_loss_cap is not None and _adaptive_primary_build is None:
             _base_max_loss = min(
                 float(_base_max_loss),
                 float(_alpaca_hard_loss_cap),
@@ -22873,11 +27372,12 @@ def tick_live_session(
         if (
             getattr(settings, "chili_momentum_overnight_trading_enabled", False)
             and not str(sess.symbol or "").upper().endswith("-USD")
+            and _adaptive_primary_build is None
         ):
             try:
                 from .market_profile import is_overnight_now as _is_overnight_now
 
-                if _is_overnight_now(sess.symbol):
+                if _is_overnight_now(sess.symbol, now=_utcnow_aware()):
                     _ovn_floor = float(getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0)
                     _ovn_irreducible = 50.0
                     _ovn_pct = float(getattr(settings, "chili_momentum_overnight_max_loss_pct_bp", 0.5) or 0.0)
@@ -22956,7 +27456,11 @@ def tick_live_session(
             try:
                 from .market_profile import schedule_window_now
 
-                _win = schedule_window_now()
+                # Replay v3 must evaluate the same simulated instant as the
+                # surrounding FSM.  In production ``_utcnow_aware()`` is the
+                # wall clock, so making the dependency explicit is behavior
+                # preserving there and removes a wall-clock leak in replay.
+                _win = schedule_window_now(now=_utcnow_aware())
                 _sched_mult = {
                     "hot": 1.5, "midday": 0.5, "late": 0.0, "afterhours": 0.0,
                 }.get(_win, 0.0)
@@ -22982,7 +27486,7 @@ def tick_live_session(
             try:
                 from .market_profile import is_overnight_now as _is_overnight_now2
 
-                if _is_overnight_now2(sess.symbol):
+                if _is_overnight_now2(sess.symbol, now=_utcnow_aware()):
                     _overnight_mult = float(
                         getattr(settings, "chili_momentum_overnight_size_fraction", 0.5) or 1.0
                     )
@@ -23034,13 +27538,21 @@ def tick_live_session(
                         stop_atr_pct_eff=float(_eff_atr_pct or 0.0), mid=float(guarded_ask),
                         dollar_vol=None, liq_mult=1.0, fire_ts=_utcnow(), entry_fidelity="live",
                         trigger_debug=(le.get("entry_trigger_debug") if isinstance(le.get("entry_trigger_debug"), dict) else None),
-                        session_df=None, l2_db=db, l2_as_of=None, macro=macro_regime_features())
+                        session_df=None,
+                        l2_db=db,
+                        l2_as_of=_replay_l2_as_of_or_none(),
+                        macro=macro_regime_features(
+                            now_ts=_utcnow().timestamp(),
+                            fetcher=_replay_aware_fetch_ohlcv_df,
+                        ))
                     _mm = size_multiplier(_mm_feats or {}, _mm_model,
                                           floor=float(getattr(settings, "chili_momentum_meta_label_min_size", 0.4)))
                     if 0.0 < _mm < 1.0:
                         _meta_mult = _mm
                         le["meta_label_derate"] = {"mult": round(_mm, 4),
                                                    "conf": round(float(_mm_model.get("confidence") or 0.0), 4)}
+            except ReplayInputContractError:
+                raise
             except Exception:
                 _meta_mult = 1.0
         # WIN-CYCLE FATIGUE YELLOW down-size (Batch E(2), ENTRIES ONLY): once today's clean-win
@@ -23050,12 +27562,17 @@ def tick_live_session(
         # levers under the same 3x clamp. This is the ENTRY-fill sizing path; it physically
         # cannot reach an exit. OFF / green / fail-open => 1.0 (byte-identical). Replay applies
         # the SAME multiplier from the SAME helper => parity. docs/DESIGN/MOMENTUM_LANE.md
+        _entry_sizing_as_of = _utcnow()
         _fatigue_mult = 1.0
         if bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
             try:
                 from .auto_arm import win_cycle_yellow_size_multiplier
 
-                _fatigue_mult, _fatigue_meta = win_cycle_yellow_size_multiplier(db, execution_family=ef)
+                _fatigue_mult, _fatigue_meta = win_cycle_yellow_size_multiplier(
+                    db,
+                    execution_family=ef,
+                    as_of_utc=_entry_sizing_as_of,
+                )
                 if _fatigue_mult < 1.0:
                     le["win_cycle_fatigue"] = _fatigue_meta
             except Exception:
@@ -23073,7 +27590,10 @@ def tick_live_session(
                 from .auto_arm import per_symbol_fatigue_size_multiplier
 
                 _sym_fatigue_mult, _sym_fatigue_meta = per_symbol_fatigue_size_multiplier(
-                    db, sess.symbol, execution_family=ef
+                    db,
+                    sess.symbol,
+                    execution_family=ef,
+                    as_of_utc=_entry_sizing_as_of,
                 )
                 if _sym_fatigue_mult < 1.0:
                     le["per_symbol_fatigue"] = _sym_fatigue_meta
@@ -23185,7 +27705,9 @@ def tick_live_session(
             try:
                 from .auto_arm import prime_window_size_multiplier
 
-                _prime_window_mult, _pw_meta = prime_window_size_multiplier()
+                _prime_window_mult, _pw_meta = prime_window_size_multiplier(
+                    now=_entry_sizing_as_of
+                )
                 if _prime_window_mult > 1.0:
                     le["prime_window_size"] = _pw_meta
             except Exception:
@@ -23778,33 +28300,71 @@ def tick_live_session(
                 pass  # fail-open: a spread-cost gate failure must never block a fill
         # Literal pre-sizing backstop.  No later multiplier, paper full-size floor,
         # or stale watcher snapshot may restore Alpaca paper risk above $50.
-        if _alpaca_hard_loss_cap is not None:
+        if _alpaca_hard_loss_cap is not None and _adaptive_primary_build is None:
             _eff_max_loss = min(
                 float(_eff_max_loss),
                 float(_alpaca_hard_loss_cap),
             )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
-        le["entry_resize_basis"] = {
-            "max_loss_usd": _eff_max_loss,
-            "atr_pct": float(_eff_atr_pct),
-            "stop_atr_mult": float(_stop_atr_mult),
-            "base_increment": float(inc) if inc else 1.0,
-            "base_min_size": float(mn) if mn else 1.0,
-        }
-        _rf_qty, _rf_meta = compute_risk_first_quantity(
-            entry_price=guarded_ask,
-            atr_pct=_eff_atr_pct,
-            max_loss_usd=_eff_max_loss,
-            max_notional_ceiling_usd=max_notional,
-            base_increment=inc,
-            base_min_size=mn,
-            stop_atr_mult=_stop_atr_mult,
-        )
+        if _adaptive_primary_build is not None:
+            _rf_qty = int(_adaptive_primary_build.resolution.quantity_shares)
+            _rf_meta = {
+                "model": "adaptive_risk_shared_resolver",
+                "source_sha256": _adaptive_primary_build.source_sha256,
+                "decision_packet_sha256": (
+                    _adaptive_primary_build.resolution.decision_packet_sha256
+                ),
+                "economic_resolution_sha256": (
+                    _adaptive_primary_build.resolution.economic_resolution_sha256
+                ),
+                "stop_distance": (
+                    float(_adaptive_primary_build.resolution.risk_per_share_usd)
+                ),
+                "planned_structural_risk_usd": float(
+                    _adaptive_primary_build.resolution.planned_structural_risk_usd
+                ),
+                "planned_notional_usd": float(
+                    _adaptive_primary_build.resolution.planned_notional_usd
+                ),
+                "planned_buying_power_impact_usd": float(
+                    _adaptive_primary_build.resolution.planned_buying_power_impact_usd
+                ),
+            }
+            le["entry_resize_basis"] = {
+                "model": "adaptive_risk_shared_resolver",
+                "resizing_permitted": False,
+                "reason": "new_bbo_requires_new_capture_bound_decision",
+            }
+        else:
+            le["entry_resize_basis"] = {
+                "max_loss_usd": _eff_max_loss,
+                "atr_pct": float(_eff_atr_pct),
+                "stop_atr_mult": float(_stop_atr_mult),
+                "base_increment": float(inc) if inc else 1.0,
+                "base_min_size": float(mn) if mn else 1.0,
+            }
+            _rf_qty, _rf_meta = compute_risk_first_quantity(
+                entry_price=guarded_ask,
+                atr_pct=_eff_atr_pct,
+                max_loss_usd=_eff_max_loss,
+                max_notional_ceiling_usd=max_notional,
+                base_increment=inc,
+                base_min_size=mn,
+                stop_atr_mult=_stop_atr_mult,
+            )
         if _rf_qty and _rf_qty > 0:
             qty = _rf_qty
             le["entry_sizing"] = _rf_meta
-            try:
+            if _adaptive_primary_build is not None:
+                max_notional = float(
+                    _adaptive_primary_build.resolution.planned_notional_usd
+                )
+                le["entry_reservation_stop_price"] = float(
+                    _adaptive_primary_build.request.inputs.structural_stop
+                )
+            else:
+              try:
                 _sized_stop_distance = float((_rf_meta or {}).get("stop_distance"))
                 _model_stop = (
                     float(guarded_ask) - _sized_stop_distance
@@ -23824,7 +28384,7 @@ def tick_live_session(
                 if not math.isfinite(_reservation_stop) or _reservation_stop <= 0.0:
                     raise ValueError("reservation stop invalid")
                 le["entry_reservation_stop_price"] = float(_reservation_stop)
-            except Exception:
+              except Exception:
                 if ef in ALPACA_EXECUTION_FAMILIES:
                     _safe_transition(db, sess, STATE_WATCHING_LIVE)
                     db.flush()
@@ -23905,7 +28465,10 @@ def tick_live_session(
                 le.pop("anticipation_remainder_qty", None)
                 le.pop("anticipation_armed", None)
         estimated_guarded_notional = qty * guarded_ask
-        if estimated_guarded_notional > max_notional + 1e-9:
+        if (
+            _adaptive_primary_build is None
+            and estimated_guarded_notional > max_notional + 1e-9
+        ):
             _emit(
                 db,
                 sess,
@@ -24018,27 +28581,51 @@ def tick_live_session(
         # double-submit of the SAME attempt is guarded by the FSM transition to
         # pending_entry + the late-fill-sweep (tracked order_id). Counter persists via the
         # _commit_le after the place. Format/length byte-identical (robin_stocks ignores ref_id).
-        _entry_place_n = int(le.get("entry_place_count", 0) or 0) + 1
+        _entry_place_n = (
+            int(_adaptive_entry_place_n)
+            if _adaptive_entry_place_n is not None
+            else int(le.get("entry_place_count", 0) or 0) + 1
+        )
         le["entry_place_count"] = _entry_place_n
         # Fold the PERSISTENT recycle counters (trade_cycles/stopout_cycles, kept across a
         # recycle) into the seed so a #1-lever re-entry after a stop-out cannot collide with
         # the first entry's cid (CTNT sid 9763 409 'Reference ID must be unique', 2026-06-29):
         # entry_place_count is RESET on recycle, so place_n=1 alone repeats. Same-attempt
         # retry (same cycle + same place_n) still reuses the SAME cid (idempotent).
-        cid = _entry_client_order_id(
+        cid = _adaptive_entry_cid or _entry_client_order_id(
             session_id=sess.id,
             correlation_id=sess.correlation_id,
             trade_cycles=int(le.get("trade_cycles") or 0),
             stopout_cycles=int(le.get("stopout_cycles") or 0),
             place_n=_entry_place_n,
         )
+        if (
+            _adaptive_primary_build is not None
+            and cid != _adaptive_primary_build.reservation_claim.claim_id
+        ):
+            _emit(
+                db,
+                sess,
+                "live_entry_adaptive_risk_blocked",
+                {"reason": "adaptive_risk_builder_cid_generation_mismatch"},
+            )
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "skipped": "adaptive_risk_builder_cid_generation_mismatch",
+            }
         # Pre-market / after-hours entries must be flagged so the venue routes them
         # (Alpaca: limit + DAY tif + extended_hours; RH: extended_hours_override). In
         # the regular session this is False and the order stays a plain marketable GTC.
         try:
             from .market_profile import market_session_now
 
-            _entry_extended = market_session_now(sess.symbol) != "regular"
+            _entry_extended = (
+                market_session_now(sess.symbol, now=_utcnow_aware()) != "regular"
+            )
         except Exception:
             _entry_extended = False
         le["entry_session_extended"] = bool(_entry_extended)
@@ -24054,7 +28641,7 @@ def tick_live_session(
 
             _entry_overnight = bool(
                 getattr(settings, "chili_momentum_overnight_trading_enabled", False)
-            ) and is_overnight_now(sess.symbol)
+            ) and is_overnight_now(sess.symbol, now=_utcnow_aware())
         except Exception:
             _entry_overnight = False
         le["entry_session_overnight"] = bool(_entry_overnight)
@@ -24115,7 +28702,10 @@ def tick_live_session(
         # db.commit() (event loop :247 / batch :891), so a hung worker cannot wedge
         # the lane (the auto_trader.py:1963 orphan-lock lesson). Flag OFF ⇒ this
         # entire block is a no-op — legacy single-cap path, parity-tested.
-        if getattr(settings, "chili_momentum_decouple_watching_enabled", False):
+        if (
+            getattr(settings, "chili_momentum_decouple_watching_enabled", False)
+            and _adaptive_primary_build is None
+        ):
             from sqlalchemy import text as _sql_text
 
             from .risk_evaluator import (
@@ -24667,7 +29257,13 @@ def tick_live_session(
         # price). FAIL-OPEN: any None / thin / stale ⇒ confirm. KILL-SWITCH OFF ⇒ _l2_entry_confirm
         # returns ("confirm", ...) BEFORE any I/O ⇒ byte-identical (no extra DB read). Held /
         # position states never reach here, so a defer can NEVER block an exit/stop/flatten.
-        _l2c_decision, _l2c_dbg = _l2_entry_confirm(sess.symbol, db=db, le=le, settings=settings)
+        _l2c_decision, _l2c_dbg = _l2_entry_confirm(
+            sess.symbol,
+            db=db,
+            le=le,
+            settings=settings,
+            l2_as_of=_replay_l2_as_of_or_none(),
+        )
         if _l2c_decision == "defer":
             _log.info(
                 "[momentum_neural] entry L2-CONFIRM DEFER %s: accel=%s tick_rate=%s ofi=%s — re-watching for tape confirmation",
@@ -24738,6 +29334,59 @@ def tick_live_session(
             _final_bid = float(_final_tick.bid)
             _final_ask = float(_final_tick.ask)
             _final_mid = float(_final_tick.mid)
+            _adaptive_bbo_generation_ok = True
+            if _adaptive_primary_build is not None:
+                _adaptive_bbo_evidence = (
+                    _adaptive_primary_build.request.inputs.evidence.get("bbo")
+                )
+                _adaptive_expected_bbo_sha = str(
+                    getattr(_adaptive_bbo_evidence, "content_sha256", "") or ""
+                ).strip().lower()
+                _adaptive_actual_bbo_sha = str(
+                    _final_bbo.get("capture_content_sha256") or ""
+                ).strip().lower()
+                _adaptive_bbo_generation_ok = bool(
+                    _adaptive_expected_bbo_sha
+                    and _adaptive_actual_bbo_sha == _adaptive_expected_bbo_sha
+                    and _final_bbo.get("capture_sequence") is not None
+                    and _final_bbo.get("available_at_utc")
+                    and math.isclose(
+                        _final_bid,
+                        float(_adaptive_primary_build.request.inputs.bid),
+                        rel_tol=1e-12,
+                        abs_tol=1e-9,
+                    )
+                    and math.isclose(
+                        _final_ask,
+                        float(_adaptive_primary_build.request.inputs.ask),
+                        rel_tol=1e-12,
+                        abs_tol=1e-9,
+                    )
+                )
+            if _adaptive_primary_build is not None and not _adaptive_bbo_generation_ok:
+                _final_bbo["ok"] = False
+                _final_bbo["reason"] = (
+                    "adaptive_risk_bbo_generation_changed"
+                    if _adaptive_actual_bbo_sha
+                    else "builder_final_bbo_capture_identity_unavailable"
+                )
+                _final_bbo["expected_capture_content_sha256"] = (
+                    _adaptive_expected_bbo_sha
+                )
+                _final_bbo["builder_source_sha256"] = (
+                    _adaptive_primary_build.source_sha256
+                )
+                le["entry_final_bbo"] = _final_bbo
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_deferred_final_bbo", _final_bbo)
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "skipped": _final_bbo["reason"],
+                }
             # Do not turn a delayed refetch into a chase. A marketable long limit
             # may use price improvement below the planned ceiling, but it cannot
             # raise that ceiling after all earlier risk/extension checks ran.
@@ -24794,13 +29443,28 @@ def tick_live_session(
                     0.25,
                 )
             )
-            _spread_ok, _spread_gate = _entry_spread_risk_decision(
-                bid=_final_bid,
-                ask=_final_ask,
-                quantity=_spread_full_qty,
-                stop_distance=_spread_stop_dist,
-                max_fraction=_max_spread_fraction,
-            )
+            if _adaptive_primary_build is not None:
+                _spread_ok = True
+                _spread_gate = {
+                    "reason": "owned_by_adaptive_risk_shared_resolver",
+                    "spread_reserve_multiple": float(
+                        _adaptive_primary_build.request.policy.spread_reserve_multiple
+                    ),
+                    "risk_per_share_usd": float(
+                        _adaptive_primary_build.resolution.risk_per_share_usd
+                    ),
+                    "decision_packet_sha256": (
+                        _adaptive_primary_build.resolution.decision_packet_sha256
+                    ),
+                }
+            else:
+                _spread_ok, _spread_gate = _entry_spread_risk_decision(
+                    bid=_final_bid,
+                    ask=_final_ask,
+                    quantity=_spread_full_qty,
+                    stop_distance=_spread_stop_dist,
+                    max_fraction=_max_spread_fraction,
+                )
             _spread_gate.update({
                 "source": _final_bbo.get("source"),
                 "tape_row_id": _final_bbo.get("tape_row_id"),
@@ -24865,6 +29529,9 @@ def tick_live_session(
                         "entry_l2_snapshot",
                         "entry_features",
                         "entry_regime_snapshot_json",
+                        "adaptive_risk_decision_packet",
+                        "adaptive_risk_reservation_claim",
+                        KEY_ADAPTIVE_RISK_RESERVATION_REQUEST,
                     )
                     if le.get(key) is not None
                 },
@@ -24874,6 +29541,25 @@ def tick_live_session(
             execution_bbo_max_age_seconds=_entry_execution_bbo_max_age,
             **_entry_kwargs,
         )
+        _adaptive_lifecycle_refreshed = (
+            _refresh_adaptive_alpaca_lifecycle_from_session(sess, le)
+        )
+        if (
+            _adaptive_primary_build is not None
+            and not res.get("pre_place_blocked")
+            and not res.get("deferred")
+            and not _adaptive_lifecycle_refreshed
+        ):
+            le["adaptive_risk_alpaca_lifecycle_blocker"] = {
+                "reason": "adaptive_risk_post_place_lifecycle_refresh_unavailable",
+                "client_order_id": res.get("client_order_id") or cid,
+                "reconciliation_required": True,
+                "recorded_at_utc": _utcnow().isoformat(),
+            }
+            res["adaptive_risk_reconciliation_required"] = True
+            res["adaptive_risk_lifecycle_error"] = (
+                "adaptive_risk_post_place_lifecycle_refresh_unavailable"
+            )
         # The final BBO was fresh when fetched but expired before the instruction
         # crossed the adapter seam. No broker call happened; preserve that truth and
         # re-watch instead of mislabelling it as a governor defer/reject.
@@ -25067,7 +29753,9 @@ def tick_live_session(
                 # Pass the broker's rejection text so the 24h-eligibility negative cache can
                 # self-heal on an "untradable for 24 hour trading" reject (TIER-2 backstop).
                 _write_entry_reject_cooldown(
-                    str(sess.symbol or "").upper(), reason=str(res.get("error") or "")
+                    str(sess.symbol or "").upper(),
+                    now=_utcnow(),
+                    reason=str(res.get("error") or ""),
                 )
             except Exception:
                 pass
@@ -25086,7 +29774,10 @@ def tick_live_session(
                     )
 
                     if is_agentic_unauthorized_reject(str(res.get("error") or "")):
-                        _record_agentic_non_tradeable(str(sess.symbol or "").upper())
+                        _record_agentic_non_tradeable(
+                            str(sess.symbol or "").upper(),
+                            now=_utcnow(),
+                        )
             except Exception:
                 pass
             _safe_transition(db, sess, STATE_LIVE_ERROR)
@@ -25286,6 +29977,7 @@ def tick_live_session(
                             fill_price=float(poll["fill_price"]),
                             reason=str(pending_exit_reason),
                             slip_bps=slip_live,
+                            adapter=adapter,
                         )
             elif poll.get("partial"):
                 applied_quantity = (
@@ -27055,7 +31747,12 @@ def tick_live_session(
                     _k = _k * _sq_widen_sh
                     le["squeeze_fuel_hold_widen"] = {"factor": round(_sq_widen_sh, 4), "k": round(_k, 5)}
                 if _sh_rv is not None and _sh_rv.get("rv_step") is not None:
-                    _sh_hold = _recent_scalp_median_hold_s(db, int(sess.user_id))
+                    _sh_hold = _recent_scalp_median_hold_s(
+                        db,
+                        int(sess.user_id),
+                        execution_family=sess.execution_family,
+                        mode=sess.mode,
+                    )
                     if _sh_hold is None or _sh_hold <= 0:
                         _sh_hold = max(2.0 * _bar_secs, float(held or 0.0))
                     _band_frac = smart_hold_band_frac(
@@ -27078,7 +31775,12 @@ def tick_live_session(
                 _ofi_slope = _sh_fs.get("ofi_slope") if _sh_fs else None
                 _tick_rate = _sh_fs.get("tick_rate") if _sh_fs else None
                 # ── adaptive time-floor (q25 of recent break-resolution times) ──
-                _tfloor_s = _smart_hold_time_floor_s(db, int(sess.user_id))
+                _tfloor_s = _smart_hold_time_floor_s(
+                    db,
+                    int(sess.user_id),
+                    execution_family=sess.execution_family,
+                    mode=sess.mode,
+                )
                 if _tfloor_s is None or _tfloor_s <= 0:
                     _tfloor_s = 2.0 * _bar_secs
                 # ── volume-confirmed breach (the name's own recent per-window dist) ──
@@ -27413,6 +32115,7 @@ def tick_live_session(
                 reason="bailout",
                 slip_bps=slip_live,
                 sell_result=sr,
+                adapter=adapter,
             )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -27532,6 +32235,7 @@ def tick_live_session(
                 fill_price=float(poll["fill_price"]),
                 reason="max_hold",
                 slip_bps=slip_live,
+                adapter=adapter,
             )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -27953,7 +32657,12 @@ def tick_live_session(
                 entry_price=avg,
                 atr_pct=_atr_pct_trail,
                 stop_atr_mult=_sm,
-                day_realized_usd=_day_realized_usd_cached(db, int(sess.user_id)),
+                day_realized_usd=_day_realized_usd_cached(
+                    db,
+                    int(sess.user_id),
+                    execution_family=sess.execution_family,
+                    mode=sess.mode,
+                ),
                 position_risk_usd=(avg * max(0.003, _atr_pct_trail * _sm)) * _q0,
                 breakeven_floor=_be_floor,
                 current_stop=stop_px,
@@ -28017,7 +32726,12 @@ def tick_live_session(
                                 pass
                         # Live-derived holding horizon: median realized hold of recent scalps,
                         # falling back to this session's own elapsed hold (no magic horizon).
-                        _hold_s = _recent_scalp_median_hold_s(db, int(sess.user_id))
+                        _hold_s = _recent_scalp_median_hold_s(
+                            db,
+                            int(sess.user_id),
+                            execution_family=sess.execution_family,
+                            mode=sess.mode,
+                        )
                         if _hold_s is None or _hold_s <= 0:
                             _hold_s = max(30.0, float(held or 0.0))
                         # Vol floor: reuse the frozen entry vol-floored ATR width (the same
@@ -28529,7 +33243,11 @@ def tick_live_session(
                             _cooldown = _utcnow() < datetime.fromisoformat(_cd_raw)
                     except Exception:
                         _cooldown = False
-                    _ladder = read_ladder_distribution(sess.symbol, db=db)
+                    _ladder = read_ladder_distribution(
+                        sess.symbol,
+                        db=db,
+                        as_of=_replay_l2_as_of_or_none(),
+                    )
                     # ── CADENCE CLASS (drives the SLOW_CHOPPER loosening below) ──
                     # Fully flag-gated + fail-open: any error / OFF flag ⇒ _cad_loosen
                     # stays False ⇒ the ladder is BYTE-IDENTICAL to today. All inputs
@@ -28728,7 +33446,12 @@ def tick_live_session(
                                 try:
                                     from .market_profile import market_session_now
 
-                                    _ll_ext = market_session_now(sess.symbol) != "regular"
+                                    _ll_ext = (
+                                        market_session_now(
+                                            sess.symbol, now=_utcnow_aware()
+                                        )
+                                        != "regular"
+                                    )
                                 except Exception:
                                     _ll_ext = False
                                 _ll_kwargs["time_in_force"] = "gfd"
@@ -28847,7 +33570,10 @@ def tick_live_session(
                         )[:120]
                         try:
                             from .market_profile import market_session_now as _ant_sess_now
-                            _ant_ext = _ant_sess_now(sess.symbol) != "regular"
+                            _ant_ext = (
+                                _ant_sess_now(sess.symbol, now=_utcnow_aware())
+                                != "regular"
+                            )
                         except Exception:
                             _ant_ext = False
                         _ant_res = _governed_place(
@@ -29042,7 +33768,9 @@ def tick_live_session(
                         _lull = False
                         try:
                             from .market_profile import in_midday_lull as _pyr_lull
-                            _lull = bool(_pyr_lull(sess.symbol))
+                            _lull = bool(
+                                _pyr_lull(sess.symbol, now=_utcnow_aware())
+                            )
                         except Exception:
                             _lull = False
                         # ICEBERG / HIDDEN-SELLER probe (Ross SS101 #038) — EQUITY-ONLY,
@@ -29065,7 +33793,10 @@ def tick_live_session(
                                 # Anchored on _utcnow() (the replay-aware chokepoint)
                                 # with an <= bound: live-identical, replay-honest.
                                 _ice_now = _utcnow()
-                                _ice_rows = db.execute(
+                                from .optional_db_read import optional_fetchall
+
+                                _ice_rows = optional_fetchall(
+                                    db,
                                     _ice_sql(
                                         "SELECT ask_top, ask_top_size "
                                         "FROM iqfeed_depth_snapshots "
@@ -29078,7 +33809,7 @@ def tick_live_session(
                                         "since": _ice_now - timedelta(seconds=_ice_win),
                                         "now": _ice_now,
                                     },
-                                ).fetchall()
+                                )
                                 _ice_series = [
                                     (float(r[0]), float(r[1]))
                                     for r in _ice_rows
@@ -29397,7 +34128,12 @@ def tick_live_session(
                                     )[:120]
                                     try:
                                         from .market_profile import market_session_now as _pyr_sess_now
-                                        _pyr_ext = _pyr_sess_now(sess.symbol) != "regular"
+                                        _pyr_ext = (
+                                            _pyr_sess_now(
+                                                sess.symbol, now=_utcnow_aware()
+                                            )
+                                            != "regular"
+                                        )
                                     except Exception:
                                         _pyr_ext = False
                                     _pyr_kwargs = dict(
@@ -29566,14 +34302,13 @@ def tick_live_session(
                                 _mpr_dip = _float_or_none(le.get("micropullback_pending_dip_low"))
                                 if _mpr_dip is not None and _mpr_dip > 0:
                                     le["micropullback_last_shelf"] = _mpr_dip
-                                from datetime import timezone as _tz_m
                                 _cool_s = max(
                                     float(getattr(settings, "chili_momentum_micropullback_reentry_cooldown_seconds", 30.0) or 30.0),
                                     2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
                                 )
                                 le["micropullback_reentry_cooldown_until_utc"] = (
-                                    datetime.now(_tz_m.utc) + timedelta(seconds=_cool_s)
-                                ).replace(tzinfo=None).isoformat()
+                                    _utcnow() + timedelta(seconds=_cool_s)
+                                ).isoformat()
                                 le.pop("micropullback_reentry_order_id", None)
                                 le.pop("micropullback_reentry_limit_px", None)
                                 le.pop("micropullback_reentry_pending_R0", None)
@@ -29634,7 +34369,7 @@ def tick_live_session(
                             _cool_raw = le.get("micropullback_reentry_cooldown_until_utc")
                             if _cool_raw:
                                 try:
-                                    _cool_ok = datetime.utcnow() >= datetime.fromisoformat(str(_cool_raw))
+                                    _cool_ok = _utcnow() >= datetime.fromisoformat(str(_cool_raw))
                                 except (TypeError, ValueError):
                                     _cool_ok = True
                             if not _cool_ok:
@@ -29672,7 +34407,11 @@ def tick_live_session(
                                     _lull_m = False
                                     try:
                                         from .market_profile import in_midday_lull as _mpr_lull
-                                        _lull_m = bool(_mpr_lull(sess.symbol))
+                                        _lull_m = bool(
+                                            _mpr_lull(
+                                                sess.symbol, now=_utcnow_aware()
+                                            )
+                                        )
                                     except Exception:
                                         _lull_m = False
                                     # RATCHETING SHELF: max(starter entry, breakout level,
@@ -29824,7 +34563,13 @@ def tick_live_session(
                                                     _mpr_cid = f"chili_ml_mpr_{sess.id}_{_mpr_suffix}"[:120]
                                                     try:
                                                         from .market_profile import market_session_now as _mpr_sess_now
-                                                        _mpr_ext = _mpr_sess_now(sess.symbol) != "regular"
+                                                        _mpr_ext = (
+                                                            _mpr_sess_now(
+                                                                sess.symbol,
+                                                                now=_utcnow_aware(),
+                                                            )
+                                                            != "regular"
+                                                        )
                                                     except Exception:
                                                         _mpr_ext = False
                                                     _mpr_res = _governed_place(
@@ -29962,14 +34707,13 @@ def tick_live_session(
                                 _pba_low = _float_or_none(le.get("pullback_add_pending_low"))
                                 if _pba_low is not None and _pba_low > 0:
                                     le["pullback_add_last_low"] = _pba_low
-                                from datetime import timezone as _tz_p
                                 _cool_s_p = max(
                                     float(getattr(settings, "chili_momentum_pullback_add_cooldown_seconds", 30.0) or 30.0),
                                     2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
                                 )
                                 le["pullback_add_cooldown_until_utc"] = (
-                                    datetime.now(_tz_p.utc) + timedelta(seconds=_cool_s_p)
-                                ).replace(tzinfo=None).isoformat()
+                                    _utcnow() + timedelta(seconds=_cool_s_p)
+                                ).isoformat()
                                 le.pop("pullback_add_order_id", None)
                                 le.pop("pullback_add_limit_px", None)
                                 le.pop("pullback_add_pending_R0", None)
@@ -30037,14 +34781,16 @@ def tick_live_session(
                         _cool_raw_p = le.get("pullback_add_cooldown_until_utc")
                         if _cool_raw_p:
                             try:
-                                _cool_active_p = datetime.utcnow() < datetime.fromisoformat(str(_cool_raw_p))
+                                _cool_active_p = _utcnow() < datetime.fromisoformat(str(_cool_raw_p))
                             except (TypeError, ValueError):
                                 _cool_active_p = False
                         # Anti-Ross midday lull (parity with the pyramid add).
                         _lull_p = False
                         try:
                             from .market_profile import in_midday_lull as _pba_lull
-                            _lull_p = bool(_pba_lull(sess.symbol))
+                            _lull_p = bool(
+                                _pba_lull(sess.symbol, now=_utcnow_aware())
+                            )
                         except Exception:
                             _lull_p = False
                         # SUPPORT zone + higher-low structure on the SESSION-scoped 15s micro-
@@ -30321,7 +35067,12 @@ def tick_live_session(
                                     _pba_cid = f"chili_ml_pba_{sess.id}_{_pba_suffix}"[:120]
                                     try:
                                         from .market_profile import market_session_now as _pba_sess_now
-                                        _pba_ext = _pba_sess_now(sess.symbol) != "regular"
+                                        _pba_ext = (
+                                            _pba_sess_now(
+                                                sess.symbol, now=_utcnow_aware()
+                                            )
+                                            != "regular"
+                                        )
                                     except Exception:
                                         _pba_ext = False
                                     _pba_res = _governed_place(
@@ -30483,14 +35234,13 @@ def tick_live_session(
                                 _fba_high = _float_or_none(le.get("flag_breakout_add_pending_high"))
                                 if _fba_high is not None and _fba_high > 0:
                                     le["flag_breakout_add_last_high"] = _fba_high
-                                from datetime import timezone as _tz_fb
                                 _cool_s_fb = max(
                                     float(getattr(settings, "chili_momentum_flag_breakout_add_cooldown_seconds", 30.0) or 30.0),
                                     2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
                                 )
                                 le["flag_breakout_add_cooldown_until_utc"] = (
-                                    datetime.now(_tz_fb.utc) + timedelta(seconds=_cool_s_fb)
-                                ).replace(tzinfo=None).isoformat()
+                                    _utcnow() + timedelta(seconds=_cool_s_fb)
+                                ).isoformat()
                                 le.pop("flag_breakout_add_order_id", None)
                                 le.pop("flag_breakout_add_limit_px", None)
                                 le.pop("flag_breakout_add_pending_R0", None)
@@ -30560,14 +35310,16 @@ def tick_live_session(
                         _cool_raw_fb = le.get("flag_breakout_add_cooldown_until_utc")
                         if _cool_raw_fb:
                             try:
-                                _cool_active_fb = datetime.utcnow() < datetime.fromisoformat(str(_cool_raw_fb))
+                                _cool_active_fb = _utcnow() < datetime.fromisoformat(str(_cool_raw_fb))
                             except (TypeError, ValueError):
                                 _cool_active_fb = False
                         # Anti-Ross midday lull (parity with the pyramid / dip-add).
                         _lull_fb = False
                         try:
                             from .market_profile import in_midday_lull as _fba_lull
-                            _lull_fb = bool(_fba_lull(sess.symbol))
+                            _lull_fb = bool(
+                                _fba_lull(sess.symbol, now=_utcnow_aware())
+                            )
                         except Exception:
                             _lull_fb = False
                         # FLAG DETECTION on the held position's recent bars — reuse the SAME
@@ -30815,7 +35567,12 @@ def tick_live_session(
                                     _fba_cid = f"chili_ml_fba_{sess.id}_{_fba_suffix}"[:120]
                                     try:
                                         from .market_profile import market_session_now as _fba_sess_now
-                                        _fba_ext = _fba_sess_now(sess.symbol) != "regular"
+                                        _fba_ext = (
+                                            _fba_sess_now(
+                                                sess.symbol, now=_utcnow_aware()
+                                            )
+                                            != "regular"
+                                        )
                                     except Exception:
                                         _fba_ext = False
                                     _fba_res = _governed_place(
@@ -30949,7 +35706,11 @@ def tick_live_session(
                 from .paper_execution import classify_stop_breach
                 from .pipeline import read_ladder_distribution
 
-                _bl = read_ladder_distribution(sess.symbol, db=db)
+                _bl = read_ladder_distribution(
+                    sess.symbol,
+                    db=db,
+                    as_of=_replay_l2_as_of_or_none(),
+                )
                 _bc = classify_stop_breach(
                     ladder=_bl, ofi_threshold=_l2_thr,
                     max_age_s=_l2_max_age, min_snaps=_l2_min_snaps,
@@ -31055,6 +35816,7 @@ def tick_live_session(
                 fill_price=float(poll["fill_price"]),
                 reason=_stop_reason,
                 slip_bps=slip_live,
+                adapter=adapter,
             )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -31235,6 +35997,7 @@ def tick_live_session(
                         fill_price=float(poll["fill_price"]),
                         reason="target",
                         slip_bps=slip_live,
+                        adapter=adapter,
                     )
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -31286,6 +36049,29 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_EXITED:
+        adaptive_binding = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+        if (
+            normalize_execution_family(sess.execution_family)
+            in ALPACA_EXECUTION_FAMILIES
+            and isinstance(adaptive_binding, dict)
+            and not _adaptive_alpaca_binding_terminal(adaptive_binding)
+        ):
+            adaptive_flat = _sync_adaptive_alpaca_position_lifecycle(
+                sess,
+                le,
+                adapter=adapter,
+                expected_remaining=0.0,
+            )
+            if not adaptive_flat.get("ok"):
+                db.flush()
+                return {
+                    "ok": False,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "blocked": True,
+                    "reason": adaptive_flat.get("error")
+                    or "adaptive_risk_flat_reconciliation_pending",
+                }
         cd_sec = policy_int_cap(
             caps,
             "cooldown_after_stopout_seconds",

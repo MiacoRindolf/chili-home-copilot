@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import func, inspect as sa_inspect
@@ -177,6 +177,261 @@ LIMITATIONS_NOTE = (
     "Live runner places real orders only for the implemented execution_family (coinbase_spot today) "
     "when CHILI_MOMENTUM_LIVE_RUNNER_ENABLED — use with care."
 )
+
+_CAPTURED_PAPER_SESSION_OWNER_KEYS = frozenset(
+    {
+        "captured_paper_session_preowner",
+        "captured_paper_session_pending_owner",
+        "captured_paper_session_owner",
+    }
+)
+_CAPTURED_PAPER_ACCOUNT_SCOPE = "alpaca:paper"
+
+
+def _has_captured_paper_session_owner(sess: Any) -> bool:
+    """Treat even a null/partial durable owner value as an ownership fence.
+
+    Marker validation belongs to the isolated captured-PAPER runtime.  Generic
+    operator and scheduler processes must not interpret malformed bytes as an
+    invitation to fall back to the legacy runner.
+    """
+
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    return bool(
+        isinstance(snapshot, dict)
+        and any(key in snapshot for key in _CAPTURED_PAPER_SESSION_OWNER_KEYS)
+    )
+
+
+def _reload_operator_target_for_update(
+    db: Session,
+    *,
+    user_id: int | None,
+    session_id: int,
+) -> TradingAutomationSession | None:
+    query = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.id == int(session_id),
+        TradingAutomationSession.user_id == user_id,
+    )
+    try:
+        query = query.with_for_update()
+    except Exception:
+        pass
+    try:
+        query = query.populate_existing()
+    except Exception:
+        pass
+    return query.one_or_none()
+
+
+def _captured_paper_operator_control(
+    db: Session,
+    *,
+    observed_session: TradingAutomationSession,
+    user_id: int | None,
+    session_id: int,
+    action: str,
+    cancelled_by: str | None = None,
+) -> dict[str, Any] | None:
+    """Serialize generic operator control against the isolated PAPER owner.
+
+    Returns ``None`` only when the preliminary row has no durable owner key.
+    Once that key is observed, every outcome is fail-closed and the caller must
+    not continue into a legacy tick, broker adapter, or terminalizer.
+
+    Exposure-decreasing human controls are represented as durable pause/flatten
+    intent for the isolated service to consume.  This function performs no
+    network I/O and never terminalizes the session.
+    """
+
+    if not _has_captured_paper_session_owner(observed_session):
+        return None
+
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in {"run", "pause", "flatten", "stop", "cancel"}:
+        return {
+            "ok": False,
+            "error": "captured_paper_operator_action_invalid",
+            "broker_calls": 0,
+            "order_posted": False,
+        }
+    if normalized_action == "cancel" and cancelled_by != "operator":
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owned_by_isolated_runtime",
+            "session_id": int(session_id),
+            "broker_calls": 0,
+            "order_posted": False,
+        }
+
+    try:
+        from .adaptive_risk_account_lock import (
+            AccountRiskRowLockStage,
+            CanonicalAccountRiskRowLockGuard,
+            acquire_adaptive_risk_account_locks,
+        )
+
+        acquire_adaptive_risk_account_locks(
+            db,
+            account_scope=_CAPTURED_PAPER_ACCOUNT_SCOPE,
+        )
+        row_guard = CanonicalAccountRiskRowLockGuard()
+        row_guard.observe(
+            AccountRiskRowLockStage.AUTOMATION_SESSION,
+            sort_key=(int(session_id),),
+        )
+        locked_session = _reload_operator_target_for_update(
+            db,
+            user_id=user_id,
+            session_id=int(session_id),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[automation_query] captured PAPER operator control lock unavailable "
+            "session=%s action=%s",
+            session_id,
+            normalized_action,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "error": "captured_paper_operator_control_lock_unavailable",
+            "session_id": int(session_id),
+            "broker_calls": 0,
+            "order_posted": False,
+        }
+
+    if locked_session is None:
+        return {"ok": False, "error": "not_found"}
+    if not _has_captured_paper_session_owner(locked_session):
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owner_changed",
+            "session_id": int(session_id),
+            "broker_calls": 0,
+            "order_posted": False,
+        }
+    if normalized_action == "run":
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owned_by_isolated_runtime",
+            "session_id": int(session_id),
+            "state": locked_session.state,
+            "broker_calls": 0,
+            "order_posted": False,
+        }
+
+    if normalized_action == "pause":
+        if locked_session.state not in PAUSABLE_STATES:
+            return {
+                "ok": False,
+                "error": "not_pausable",
+                "state": locked_session.state,
+            }
+        if is_operator_paused(locked_session.risk_snapshot_json):
+            return {"ok": False, "error": "already_paused"}
+        locked_session.risk_snapshot_json = apply_operator_pause(
+            locked_session.risk_snapshot_json,
+            state=locked_session.state,
+        )
+        locked_session.updated_at = datetime.utcnow()
+        append_trading_automation_event(
+            db,
+            locked_session.id,
+            "session_paused",
+            {"state": locked_session.state, "captured_paper_deferred": True},
+            correlation_id=locked_session.correlation_id,
+            source_node_id="momentum_automation_monitor",
+        )
+        db.flush()
+        return {
+            "ok": True,
+            "session_id": int(locked_session.id),
+            "state": locked_session.state,
+            "pause_info": operator_pause_info(locked_session.risk_snapshot_json),
+            "captured_paper_deferred": True,
+            "broker_calls": 0,
+            "order_posted": False,
+        }
+
+    if normalized_action == "flatten" and locked_session.state not in {
+        STATE_LIVE_ENTERED,
+        STATE_LIVE_SCALING_OUT,
+        STATE_LIVE_TRAILING,
+        STATE_LIVE_BAILOUT,
+    }:
+        return {
+            "ok": False,
+            "error": "not_flattenable",
+            "state": locked_session.state,
+        }
+    if normalized_action == "cancel" and (
+        locked_session.state == STATE_ARCHIVED
+        or locked_session.state in TERMINAL_STATES
+    ):
+        return {
+            "ok": False,
+            "error": "not_cancellable",
+            "state": locked_session.state,
+        }
+    if normalized_action == "stop" and (
+        locked_session.state == STATE_ARCHIVED
+        or locked_session.state in TERMINAL_STATES
+    ):
+        return {
+            "ok": False,
+            "error": "already_terminal",
+            "state": locked_session.state,
+        }
+
+    now = datetime.utcnow()
+    snapshot = dict(locked_session.risk_snapshot_json or {})
+    live_exec = snapshot.get(KEY_LIVE_EXEC)
+    live_exec = dict(live_exec) if isinstance(live_exec, dict) else {}
+    request_kind = (
+        normalized_action if normalized_action in {"stop", "cancel"} else "flatten"
+    )
+    marker_key = f"operator_{request_kind}_reconcile_requested_utc"
+    request_created = not bool(live_exec.get(marker_key))
+    if request_created:
+        live_exec[marker_key] = now.isoformat()
+    live_exec.setdefault("operator_flatten_requested_utc", now.isoformat())
+    live_exec[f"operator_{request_kind}_requested"] = True
+    snapshot[KEY_LIVE_EXEC] = live_exec
+    locked_session.risk_snapshot_json = apply_operator_pause(
+        snapshot,
+        state=locked_session.state,
+    )
+    locked_session.updated_at = now
+    if request_created:
+        append_trading_automation_event(
+            db,
+            locked_session.id,
+            (
+                "operator_flatten_requested"
+                if request_kind == "flatten"
+                else f"operator_{request_kind}_emergency_requested"
+            ),
+            {
+                "state": locked_session.state,
+                "captured_paper_deferred": True,
+                "terminalization_deferred": True,
+            },
+            correlation_id=locked_session.correlation_id,
+            source_node_id="momentum_automation_monitor",
+        )
+    db.flush()
+    return {
+        "ok": True,
+        "pending": "captured_paper_isolated_emergency_service",
+        "terminalization_deferred": True,
+        "request_created": request_created,
+        "session_id": int(locked_session.id),
+        "state": locked_session.state,
+        "captured_paper_deferred": True,
+        "broker_calls": 0,
+        "order_posted": False,
+    }
 
 
 def _rh_venue_unavailable_detail(execution_family: str | None) -> dict[str, Any]:
@@ -2694,10 +2949,8 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
     has tripped (the breaker blocks new arms until the daily window rolls over).
     Read-only and fail-open: a compute error never reports halted.
 
-    ``resets_at_utc`` is the next local-midnight boundary — the SAME ``date.today()``
-    window ``_daily_realized_pnl`` sums over — so the shown reset is exactly when
-    today's realized losses roll out and the breaker clears. Production containers
-    run UTC, so this is 00:00 UTC.
+    ``resets_at_utc`` is the next true ET-midnight boundary from the same replay-aware
+    calendar window ``_daily_realized_pnl`` uses, including 23/25-hour DST days.
     docs/DESIGN/MOMENTUM_LANE.md; see [[project_momentum_lane]].
     """
     status: dict[str, Any] = {
@@ -2710,8 +2963,12 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
         "resets_at_utc": None,
     }
     try:
-        from .risk_evaluator import _daily_realized_pnl, evaluate_profit_giveback_halt
-        from .risk_policy import equity_relative_daily_loss_cap
+        from .risk_evaluator import (
+            _daily_realized_pnl,
+            _normalize_decision_as_of_utc,
+            evaluate_profit_giveback_halt,
+        )
+        from .risk_policy import _et_day_bounds_utc, equity_relative_daily_loss_cap
         from .auto_arm import _lane_execution_family
 
         # Banner basis = the LANE's actual execution family (equity-only -> robinhood_spot),
@@ -2719,15 +2976,21 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
         # capping the equity lane's loss against the tiny Coinbase equity -> a FALSE "HALTED"
         # display even though the real per-broker/global breaker was nowhere near tripped.
         _lane_fam = _lane_execution_family()
+        decision_as_of = _normalize_decision_as_of_utc()
         max_dl = equity_relative_daily_loss_cap(
             float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
             _lane_fam,
         )
-        daily_pnl = _daily_realized_pnl(db, int(user_id))
-        resets_at = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
+        daily_pnl = _daily_realized_pnl(
+            db,
+            int(user_id),
+            execution_family=_lane_fam,
+            as_of_utc=decision_as_of,
+        )
+        _day_start, resets_at = _et_day_bounds_utc(as_of_utc=decision_as_of)
         status["daily_pnl_usd"] = round(float(daily_pnl), 2)
         status["max_daily_loss_usd"] = round(float(max_dl), 2)
-        status["resets_at_utc"] = resets_at.isoformat()
+        status["resets_at_utc"] = resets_at.replace(tzinfo=timezone.utc).isoformat()
         status["halted"] = bool(daily_pnl <= -max_dl)
         if status["halted"]:
             status["halt_reason"] = "daily_loss_cap"
@@ -2736,7 +2999,10 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
             # when a meaningful green day has given back >= the giveback fraction of
             # its peak. Daily-loss cap takes precedence (checked first, more severe).
             gb = evaluate_profit_giveback_halt(
-                db, user_id=int(user_id), execution_family=_lane_fam
+                db,
+                user_id=int(user_id),
+                execution_family=_lane_fam,
+                as_of_utc=decision_as_of,
             )
             status["peak_pnl_usd"] = gb.get("peak_pnl_usd")
             status["giveback_fraction"] = gb.get("giveback_fraction")
@@ -3515,6 +3781,33 @@ def run_automation_session(db: Session, *, user_id: int, session_id: int) -> dic
     if not sess:
         return {"ok": False, "error": "not_found"}
 
+    captured_control = _captured_paper_operator_control(
+        db,
+        observed_session=sess,
+        user_id=user_id,
+        session_id=int(session_id),
+        action="run",
+    )
+    if captured_control is not None:
+        return captured_control
+
+    # Close the absent->owned race before any resume/state mutation.  The bare
+    # runner independently rejects an owned row too, but this lock also prevents
+    # a stale snapshot assignment from erasing a just-bound owner marker.
+    sess = _reload_operator_target_for_update(
+        db,
+        user_id=user_id,
+        session_id=int(session_id),
+    )
+    if sess is None:
+        return {"ok": False, "error": "not_found"}
+    if _has_captured_paper_session_owner(sess):
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owner_raced_operator_control_retry",
+            "session_id": int(session_id),
+        }
+
     # A terminal LIVE row is historical broker identity, not a reusable template.
     # Re-arming must mint a fresh token/claim/session through the live-arm flow.
     if sess.mode == "live" and (
@@ -3609,6 +3902,28 @@ def request_flatten_session(db: Session, *, user_id: int, session_id: int) -> di
     )
     if not sess:
         return {"ok": False, "error": "not_found"}
+    captured_control = _captured_paper_operator_control(
+        db,
+        observed_session=sess,
+        user_id=user_id,
+        session_id=int(session_id),
+        action="flatten",
+    )
+    if captured_control is not None:
+        return captured_control
+    sess = _reload_operator_target_for_update(
+        db,
+        user_id=user_id,
+        session_id=int(session_id),
+    )
+    if sess is None:
+        return {"ok": False, "error": "not_found"}
+    if _has_captured_paper_session_owner(sess):
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owner_raced_operator_control_retry",
+            "session_id": int(session_id),
+        }
     if sess.mode != "live" or sess.state not in (
         "live_entered", "live_scaling_out", "live_trailing", "live_bailout",
     ):
@@ -3660,6 +3975,28 @@ def pause_automation_session(db: Session, *, user_id: int, session_id: int) -> d
     )
     if not sess:
         return {"ok": False, "error": "not_found"}
+    captured_control = _captured_paper_operator_control(
+        db,
+        observed_session=sess,
+        user_id=user_id,
+        session_id=int(session_id),
+        action="pause",
+    )
+    if captured_control is not None:
+        return captured_control
+    sess = _reload_operator_target_for_update(
+        db,
+        user_id=user_id,
+        session_id=int(session_id),
+    )
+    if sess is None:
+        return {"ok": False, "error": "not_found"}
+    if _has_captured_paper_session_owner(sess):
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owner_raced_operator_control_retry",
+            "session_id": int(session_id),
+        }
     if sess.state not in PAUSABLE_STATES:
         return {"ok": False, "error": "not_pausable", "state": sess.state}
     if is_operator_paused(sess.risk_snapshot_json):
@@ -4016,6 +4353,25 @@ def _exact_pre_http_operator_claim(
 def stop_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
     if not _tables_present(db):
         return {"ok": False, "error": "tables_missing"}
+    _observed = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.id == int(session_id),
+            TradingAutomationSession.user_id == user_id,
+        )
+        .one_or_none()
+    )
+    if _observed is None:
+        return {"ok": False, "error": "not_found"}
+    captured_control = _captured_paper_operator_control(
+        db,
+        observed_session=_observed,
+        user_id=user_id,
+        session_id=int(session_id),
+        action="stop",
+    )
+    if captured_control is not None:
+        return captured_control
     _q = (
         db.query(TradingAutomationSession)
         .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
@@ -4031,6 +4387,12 @@ def stop_automation_session(db: Session, *, user_id: int, session_id: int) -> di
     sess = _q.one_or_none()
     if not sess:
         return {"ok": False, "error": "not_found"}
+    if _has_captured_paper_session_owner(sess):
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owner_raced_operator_control_retry",
+            "session_id": int(session_id),
+        }
     if sess.state == STATE_ARCHIVED or sess.state in TERMINAL_STATES:
         return {"ok": False, "error": "already_terminal", "state": sess.state}
     initial_state = sess.state
@@ -4496,6 +4858,27 @@ def cancel_automation_session(
     if not _tables_present(db):
         return {"ok": False, "error": "tables_missing"}
 
+    _observed = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.id == int(session_id),
+            TradingAutomationSession.user_id == user_id,
+        )
+        .one_or_none()
+    )
+    if _observed is None:
+        return {"ok": False, "error": "not_found"}
+    captured_control = _captured_paper_operator_control(
+        db,
+        observed_session=_observed,
+        user_id=user_id,
+        session_id=int(session_id),
+        action="cancel",
+        cancelled_by=cancelled_by,
+    )
+    if captured_control is not None:
+        return captured_control
+
     # momentum-orphan adopt-on-cancel (2026-06-17): SELECT ... FOR UPDATE so the
     # cancel serializes against a concurrent live_runner tick on the same session.
     # Without the row lock, the runner could be re-pointing/adopting the same late
@@ -4518,6 +4901,12 @@ def cancel_automation_session(
     sess = _q.one_or_none()
     if not sess:
         return {"ok": False, "error": "not_found"}
+    if _has_captured_paper_session_owner(sess):
+        return {
+            "ok": False,
+            "error": "captured_paper_session_owner_raced_operator_control_retry",
+            "session_id": int(session_id),
+        }
     if sess.state not in CANCELLABLE_STATES:
         return {"ok": False, "error": "not_cancellable", "state": sess.state}
 

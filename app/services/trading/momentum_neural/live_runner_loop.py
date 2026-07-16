@@ -22,19 +22,36 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import select
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import text
 
 from ....config import settings
 from ....db import SessionLocal, engine
 from ....models.trading import TradingAutomationSession
+from ..execution_family_registry import (
+    EXECUTION_FAMILY_ALPACA_SPOT,
+    normalize_execution_family,
+)
+from .captured_paper_dispatcher import (
+    dispatch_captured_paper_live_runner_tick,
+    dispatch_captured_paper_post_commit,
+    dispatch_live_runner_tick,
+    validate_captured_paper_session_owner_inventory,
+)
+from .captured_paper_entry_intent import CapturedPaperPostCommitRequest
+from .captured_paper_pending_owner import (
+    validate_captured_paper_pending_owner_inventory,
+)
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_LIVE_BAILOUT,
@@ -70,14 +87,17 @@ _IQFEED_AUTHORITY_MAX_AGE_S = 2.0
 _IQFEED_FUTURE_TOLERANCE_S = 1.0
 _IQFEED_DEDUP_RETENTION_S = 5.0
 _IQFEED_BUILD_RE = re.compile(
-    r"^iqfeed-l1-quote-provenance-v2\+sha256:[0-9a-f]{16}$"
+    r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
 )
+_IQFEED_NOTIFY_CHANNEL_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+_IQFEED_DEFAULT_NOTIFY_CHANNEL = "momentum_iqfeed_l1"
 _IQFEED_EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 _LIVE_LOOP_OWNER_INSTANCE_ID = str(uuid.uuid4())
 # Cluster-wide, database-scoped PostgreSQL advisory fence.  Positive int32 values
 # spell ``CHIL`` / ``LOOP`` and intentionally use the two-key advisory namespace.
 _LIVE_LOOP_FENCE_NAMESPACE = 0x4348494C
 _LIVE_LOOP_FENCE_KEY = 0x4C4F4F50
+_CAPTURED_PAPER_PREOWNER_STATE = "captured_paper_preowner"
 
 
 def _utcnow() -> datetime:
@@ -113,13 +133,90 @@ def _strict_equity_symbol(value) -> str | None:
     return symbol
 
 
+@dataclass(frozen=True, slots=True)
+class CapturedPaperLiveRunnerScope:
+    """Exact fake-money session inventory owned by the dedicated service."""
+
+    expected_account_id: str
+    runtime_generation: str
+    execution_family: str = EXECUTION_FAMILY_ALPACA_SPOT
+    account_scope: str = "alpaca:paper"
+
+    def __post_init__(self) -> None:
+        try:
+            account_id = str(uuid.UUID(str(self.expected_account_id or "")))
+            generation = str(uuid.UUID(str(self.runtime_generation or "")))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("captured PAPER live-loop scope UUID is invalid") from exc
+        if (
+            account_id != str(self.expected_account_id or "").strip().lower()
+            or generation != str(self.runtime_generation or "").strip().lower()
+            or self.account_scope != "alpaca:paper"
+            or normalize_execution_family(self.execution_family)
+            != EXECUTION_FAMILY_ALPACA_SPOT
+        ):
+            raise ValueError("captured PAPER live-loop scope is not exact")
+        object.__setattr__(self, "expected_account_id", account_id)
+        object.__setattr__(self, "runtime_generation", generation)
+        object.__setattr__(self, "execution_family", EXECUTION_FAMILY_ALPACA_SPOT)
+
+    def assert_session(self, sess) -> None:
+        snapshot = getattr(sess, "risk_snapshot_json", None)
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        if (
+            snapshot.get("captured_paper_session_owner") is None
+            and snapshot.get("captured_paper_session_pending_owner") is not None
+        ):
+            # The only owner-less runnable row admitted to the isolated
+            # inventory is the exact content-addressed PENDING_OWNER produced
+            # by the atomic initial path.  It remains non-executable until the
+            # runtime installs the final owner under account/claim/session
+            # locks immediately before its first FSM tick.
+            validate_captured_paper_pending_owner_inventory(
+                sess,
+                expected_account_id=self.expected_account_id,
+                expected_runtime_generation=self.runtime_generation,
+                expected_execution_family=self.execution_family,
+            )
+        else:
+            validate_captured_paper_session_owner_inventory(
+                sess,
+                expected_account_id=self.expected_account_id,
+                expected_runtime_generation=self.runtime_generation,
+                expected_execution_family=self.execution_family,
+            )
+        generation_claims: list[str] = []
+        for container in (
+            snapshot,
+            snapshot.get("momentum_live_execution"),
+            snapshot.get("captured_paper_admission"),
+        ):
+            if isinstance(container, dict):
+                claimed = str(
+                    container.get("captured_paper_runtime_generation")
+                    or container.get("runtime_generation")
+                    or ""
+                ).strip()
+                if claimed:
+                    generation_claims.append(claimed)
+        if any(claim != self.runtime_generation for claim in generation_claims):
+            raise RuntimeError(
+                "captured_paper_foreign_runtime_generation_session"
+            )
+
+
 class _LiveSessionTracker:
     """Thread-safe registry of runnable LIVE sessions + their exit thresholds."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        captured_paper_scope: CapturedPaperLiveRunnerScope | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._sessions: dict[int, dict] = {}
         self._owner_generation: int | None = None
+        self._captured_paper_scope = captured_paper_scope
+        self._scope_breach_reason: str | None = None
 
     def set_owner_generation(
         self,
@@ -147,6 +244,15 @@ class _LiveSessionTracker:
             )
             new_map: dict[int, dict] = {}
             for sess in rows:
+                if self._captured_paper_scope is not None:
+                    if str(getattr(sess, "state", "") or "").strip() == (
+                        _CAPTURED_PAPER_PREOWNER_STATE
+                    ):
+                        # The sealed admission foundation is intentionally a
+                        # distinct, non-runnable state with a distinct PREOWNER
+                        # marker.  It must never alias the final durable owner.
+                        continue
+                    self._captured_paper_scope.assert_session(sess)
                 snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
                 le = snap.get(_KEY_LIVE_EXEC) if isinstance(snap.get(_KEY_LIVE_EXEC), dict) else {}
                 pos = le.get("position") if isinstance(le.get("position"), dict) else None
@@ -173,9 +279,20 @@ class _LiveSessionTracker:
                 if self._owner_generation != int(expected_generation):
                     return False
                 self._sessions = new_map
+                self._scope_breach_reason = None
             return True
         except Exception as e:
             _log.warning("[live_loop] session refresh failed: %s", e)
+            if self._captured_paper_scope is not None:
+                # A dedicated service must never continue from a previously
+                # cached inventory after either a foreign session appears or
+                # the current inventory becomes unreadable.
+                with self._lock:
+                    if self._owner_generation == int(expected_generation):
+                        self._sessions = {}
+                        self._scope_breach_reason = str(
+                            e or "captured_paper_session_inventory_unavailable"
+                        )
             return False
         finally:
             try:
@@ -197,12 +314,34 @@ class _LiveSessionTracker:
         with self._lock:
             return len(self._sessions)
 
+    def scope_is_healthy(self) -> bool:
+        with self._lock:
+            return self._scope_breach_reason is None
+
 
 class LiveRunnerLoop:
     """Bridges price-bus ticks to ``tick_live_session`` for exit-speed reaction."""
 
-    def __init__(self) -> None:
-        self._tracker = _LiveSessionTracker()
+    def __init__(
+        self,
+        *,
+        captured_paper_scope: CapturedPaperLiveRunnerScope | None = None,
+        captured_paper_symbol_admitter: (
+            Callable[..., Mapping[str, Any]] | None
+        ) = None,
+    ) -> None:
+        if (
+            captured_paper_scope is not None
+            and type(captured_paper_scope) is not CapturedPaperLiveRunnerScope
+        ):
+            raise ValueError("captured PAPER live-loop scope type is invalid")
+        if captured_paper_scope is None and captured_paper_symbol_admitter is not None:
+            raise ValueError(
+                "ordinary live loop cannot install captured PAPER admission"
+            )
+        self._captured_paper_scope = captured_paper_scope
+        self._captured_paper_symbol_admitter = captured_paper_symbol_admitter
+        self._tracker = _LiveSessionTracker(captured_paper_scope)
         self._running = False
         self._generation = 0
         self._lifecycle_lock = threading.RLock()
@@ -227,6 +366,10 @@ class LiveRunnerLoop:
         # EVENT-DRIVEN ADMISSION (2026-07-09 P1 port): the pg LISTEN consumer thread
         # + fail-closed v2 provenance/generation/dedup watermarks.
         self._notify_thread: threading.Thread | None = None
+        self._notify_thread_generation: int | None = None
+        self._notify_ready_generation: int | None = None
+        self._notify_failed_generation: int | None = None
+        self._notify_startup_event: threading.Event | None = None
         self._iqfeed_provenance_lock = threading.Lock()
         self._iqfeed_inflight_certified: set[tuple] = set()
         self._iqfeed_certified_watermarks: dict[tuple, float] = {}
@@ -258,6 +401,14 @@ class LiveRunnerLoop:
             and (stop_event is None or not stop_event.is_set())
         )
 
+    @property
+    def captured_paper_scope(self) -> CapturedPaperLiveRunnerScope | None:
+        return self._captured_paper_scope
+
+    @property
+    def captured_paper_symbol_admitter(self) -> Callable[..., Mapping[str, Any]] | None:
+        return self._captured_paper_symbol_admitter
+
     def is_running_owner(self) -> bool:
         """True only while this process has one active, initialized generation."""
         with self._lifecycle_lock:
@@ -269,6 +420,7 @@ class LiveRunnerLoop:
                 and self._owner_fence_generation == self._generation
                 and refresher is not None
                 and refresher.is_alive()
+                and self._tracker.scope_is_healthy()
             )
 
     def _acquire_owner_fence(self) -> bool:
@@ -411,6 +563,14 @@ class LiveRunnerLoop:
         with self._lifecycle_lock:
             if not self.is_running_owner():
                 return False
+            if (
+                self._captured_paper_scope is not None
+                and not self._iqfeed_notify_listener_alive_for_generation(
+                    self._generation,
+                    self._stop_event,
+                )
+            ):
+                return False
             return self._owner_fence_is_held()
 
     def _record_lane_health_heartbeat(
@@ -483,6 +643,15 @@ class LiveRunnerLoop:
         with self._lifecycle_lock:
             if self._running:
                 return False
+            if (
+                self._captured_paper_scope is not None
+                and not self._captured_paper_iqfeed_notify_configuration_ready()
+            ):
+                _log.critical(
+                    "[live_loop] refusing captured PAPER start: IQFeed notify "
+                    "admission contract is unavailable"
+                )
+                return False
             # ``ThreadPoolExecutor.shutdown(wait=False)`` cannot cancel a worker
             # already inside a broker/DB tick.  Keep restart fail-closed until that
             # old generation has quiesced; otherwise two generations could own live
@@ -533,17 +702,50 @@ class LiveRunnerLoop:
                     name=f"live-runner-loop-refresh-g{generation}",
                 )
                 self._refresher.start()
-                self._start_iqfeed_notify_listener(generation, stop_event)
+                notify_started = self._start_iqfeed_notify_listener(
+                    generation,
+                    stop_event,
+                )
+                if self._captured_paper_scope is not None and (
+                    not notify_started
+                    or not self._await_iqfeed_notify_listener_ready(
+                        generation,
+                        stop_event,
+                    )
+                ):
+                    raise RuntimeError(
+                        "captured PAPER IQFeed notify listener failed startup"
+                    )
                 if not self._generation_active(generation, stop_event):
                     raise RuntimeError("live-loop generation retired during startup")
                 if not self._owner_fence_is_held():
                     raise RuntimeError("live-loop owner fence lost during startup")
+                if (
+                    self._captured_paper_scope is not None
+                    and not self._iqfeed_notify_listener_alive_for_generation(
+                        generation,
+                        stop_event,
+                    )
+                ):
+                    raise RuntimeError(
+                        "captured PAPER IQFeed notify listener retired during startup"
+                    )
                 if not self._record_lane_health_heartbeat(
                     generation=generation,
                     force=True,
                 ):
                     raise RuntimeError(
                         "initial durable lane-health heartbeat failed"
+                    )
+                if (
+                    self._captured_paper_scope is not None
+                    and not self._iqfeed_notify_listener_alive_for_generation(
+                        generation,
+                        stop_event,
+                    )
+                ):
+                    raise RuntimeError(
+                        "captured PAPER IQFeed notify listener retired during startup"
                     )
             except Exception:
                 # Leave no half-started owner. `stop` is re-entrant under the
@@ -589,6 +791,10 @@ class LiveRunnerLoop:
             pool = self._pool
             self._refresher = None
             self._notify_thread = None
+            self._notify_thread_generation = None
+            self._notify_ready_generation = None
+            self._notify_failed_generation = None
+            self._notify_startup_event = None
             self._pool = None
             self._stop_event = None
             with self._inflight_lock:
@@ -696,6 +902,14 @@ class LiveRunnerLoop:
                 break
             try:
                 if self._tracker.refresh(expected_generation=generation) is not True:
+                    if self._captured_paper_scope is not None:
+                        _log.critical(
+                            "[live_loop] dedicated captured PAPER inventory lost; "
+                            "retiring generation=%d",
+                            generation,
+                        )
+                        self.stop()
+                        break
                     continue
                 if self._subscribe_active_symbols(generation=generation) is not True:
                     continue
@@ -809,6 +1023,7 @@ class LiveRunnerLoop:
             if session_id in self._inflight:
                 if guarantee_after_inflight:
                     self._stop_confirm_redispatch[session_id] = generation
+                    return True
                 return False
             last = self._last_event_tick.get(session_id, 0.0)
             if (
@@ -905,6 +1120,33 @@ class LiveRunnerLoop:
         timer.start()
         return True
 
+    def schedule_entry_continuation(self, session_id: int) -> bool:
+        """Continue a mechanical entry-state transition after this DB tick commits.
+
+        Candidate detection, candidate revalidation, and broker placement remain
+        separate idempotent FSM states, but they must not each wait for a slow
+        scheduler pulse.  When called from the current event worker, the session
+        is still marked in-flight, so ``guarantee_after_inflight`` records one
+        deduplicated follow-up. ``_complete_dispatch`` submits it only after
+        ``_tick_session`` has committed and closed its DB session.  The next state
+        therefore re-reads eligibility, BBO/tape freshness, risk, ownership, and
+        all pre-submit gates exactly as before.
+        """
+
+        generation = getattr(self._worker_context, "generation", None)
+        # Outside this loop's worker there is no guarantee the caller's DB
+        # transaction has committed. Refuse instead of dispatching a parallel
+        # reader against uncommitted candidate/pending state.
+        if generation is None:
+            return False
+        if not self._generation_active(generation):
+            return False
+        return self._dispatch(
+            int(session_id),
+            guarantee_after_inflight=True,
+            expected_generation=generation,
+        )
+
     # ── EVENT-DRIVEN ADMISSION (2026-07-09 P1 port from the concurrency WIP) ─────
     # The <1s tick->admit->arm path: the HOST IQFeed bridge pg_notify's every L1 tick
     # on channel momentum_iqfeed_l1 (producer live for days); this consumer LISTENs,
@@ -917,30 +1159,131 @@ class LiveRunnerLoop:
     # class fixes: JEM +$46k (hours late), CETX +$8.9k (~20min late), SILO (46s move,
     # 95s late). Reconnect-on-error loop; fail-open everywhere.
 
+    def _captured_paper_iqfeed_notify_configuration_ready(self) -> bool:
+        """Return the exact bridge/listener contract for dedicated PAPER only."""
+
+        if self._captured_paper_scope is None:
+            return True
+        if not bool(
+            getattr(
+                settings,
+                "chili_momentum_live_runner_loop_iqfeed_notify_enabled",
+                False,
+            )
+        ):
+            return False
+        channel = str(
+            getattr(
+                settings,
+                "chili_momentum_live_runner_loop_iqfeed_notify_channel",
+                "",
+            )
+            or ""
+        ).strip()
+        bridge_channel = str(
+            os.environ.get("IQFEED_NOTIFY_CHANNEL", "")
+            or ""
+        ).strip()
+        bridge_notify_enabled = str(
+            os.environ.get("IQFEED_NOTIFY_ENABLED", "") or ""
+        ).strip().lower()
+        expected_build = str(
+            getattr(settings, "chili_iqfeed_l1_authoritative_bridge_build", "")
+            or ""
+        ).strip()
+        return bool(
+            bridge_notify_enabled in {"1", "true", "yes", "on"}
+            and _IQFEED_NOTIFY_CHANNEL_RE.fullmatch(channel) is not None
+            and channel == bridge_channel
+            and _IQFEED_BUILD_RE.fullmatch(expected_build) is not None
+        )
+
+    def _mark_iqfeed_notify_listener_ready(self, generation: int) -> None:
+        generation = int(generation)
+        if (
+            self._notify_thread_generation == generation
+            and self._generation_active(generation, self._stop_event)
+        ):
+            self._notify_failed_generation = None
+            self._notify_ready_generation = generation
+            event = self._notify_startup_event
+            if event is not None:
+                event.set()
+
+    def _mark_iqfeed_notify_listener_failed(self, generation: int) -> None:
+        generation = int(generation)
+        if self._notify_thread_generation == generation:
+            self._notify_ready_generation = None
+            self._notify_failed_generation = generation
+            event = self._notify_startup_event
+            if event is not None:
+                event.set()
+
+    def _iqfeed_notify_listener_alive_for_generation(
+        self,
+        generation: int,
+        stop_event: threading.Event | None,
+    ) -> bool:
+        thread = self._notify_thread
+        return bool(
+            self._captured_paper_iqfeed_notify_configuration_ready()
+            and self._generation_active(int(generation), stop_event)
+            and self._notify_thread_generation == int(generation)
+            and self._notify_ready_generation == int(generation)
+            and self._notify_failed_generation != int(generation)
+            and thread is not None
+            and thread.is_alive()
+        )
+
+    def _await_iqfeed_notify_listener_ready(
+        self,
+        generation: int,
+        stop_event: threading.Event,
+    ) -> bool:
+        if self._notify_thread_generation != int(generation):
+            return False
+        event = self._notify_startup_event
+        if event is None or not event.wait(timeout=_THREAD_JOIN_TIMEOUT_S):
+            return False
+        return self._iqfeed_notify_listener_alive_for_generation(
+            int(generation),
+            stop_event,
+        )
+
     def _start_iqfeed_notify_listener(
         self,
         generation: int,
         stop_event: threading.Event,
-    ) -> None:
+    ) -> bool:
         if not bool(getattr(settings, "chili_momentum_live_runner_loop_iqfeed_notify_enabled", True)):
-            return
+            return False
         expected_build = str(
             getattr(settings, "chili_iqfeed_l1_authoritative_bridge_build", "")
             or ""
         ).strip()
         if _IQFEED_BUILD_RE.fullmatch(expected_build) is None:
             _log.critical(
-                "[live_loop] IQFeed notify admission disabled: no exact reviewed v2 "
+                "[live_loop] IQFeed notify admission disabled: no exact reviewed v3 "
                 "bridge build is pinned"
             )
-            return
+            return False
+        self._notify_thread_generation = int(generation)
+        self._notify_ready_generation = None
+        self._notify_failed_generation = None
+        self._notify_startup_event = threading.Event()
         self._notify_thread = threading.Thread(
             target=self._iqfeed_notify_loop,
             args=(generation, stop_event),
             daemon=True,
             name=f"live-runner-iqfeed-listen-g{generation}",
         )
-        self._notify_thread.start()
+        try:
+            self._notify_thread.start()
+        except Exception:
+            self._mark_iqfeed_notify_listener_failed(generation)
+            self._notify_thread = None
+            return False
+        return True
 
     def _iqfeed_notify_loop(
         self,
@@ -954,66 +1297,83 @@ class LiveRunnerLoop:
             or ""
         ).strip()
         if _IQFEED_BUILD_RE.fullmatch(expected_build) is None:
+            self._mark_iqfeed_notify_listener_failed(generation)
             return
         try:
             import psycopg2
         except Exception as exc:
             _log.warning("[live_loop] IQFeed notify disabled; psycopg2 unavailable: %s", exc)
+            self._mark_iqfeed_notify_listener_failed(generation)
             return
 
         channel = str(
             getattr(
                 settings,
                 "chili_momentum_live_runner_loop_iqfeed_notify_channel",
-                "momentum_iqfeed_l1",
+                _IQFEED_DEFAULT_NOTIFY_CHANNEL,
             )
             or ""
         ).strip()
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", channel) is None:
+        if _IQFEED_NOTIFY_CHANNEL_RE.fullmatch(channel) is None:
             _log.critical(
                 "[live_loop] refusing IQFeed LISTEN with invalid channel=%r",
                 channel,
             )
+            self._mark_iqfeed_notify_listener_failed(generation)
             return
         db_url = str(getattr(settings, "database_url", "") or "")
-        while self._generation_active(generation, stop_event):
-            conn = None
-            try:
-                conn = psycopg2.connect(db_url)
-                conn.set_session(autocommit=True)
-                cur = conn.cursor()
-                cur.execute(f"LISTEN {channel};")
-                if not self._generation_active(generation, stop_event):
-                    break
-                _log.info("[live_loop] listening for IQFeed events channel=%s", channel)
-                while self._generation_active(generation, stop_event):
-                    ready, _, _ = select.select([conn], [], [], 1.0)
+        startup_ready = False
+        try:
+            while self._generation_active(generation, stop_event):
+                conn = None
+                try:
+                    conn = psycopg2.connect(db_url)
+                    conn.set_session(autocommit=True)
+                    cur = conn.cursor()
+                    cur.execute(f"LISTEN {channel};")
                     if not self._generation_active(generation, stop_event):
                         break
-                    if not ready:
-                        continue
-                    conn.poll()
-                    while conn.notifies:
-                        notify = conn.notifies.pop(0)
+                    startup_ready = True
+                    self._mark_iqfeed_notify_listener_ready(generation)
+                    _log.info("[live_loop] listening for IQFeed events channel=%s", channel)
+                    while self._generation_active(generation, stop_event):
+                        ready, _, _ = select.select([conn], [], [], 1.0)
                         if not self._generation_active(generation, stop_event):
                             break
-                        self._handle_iqfeed_notify_payload(
-                            notify.payload,
-                            generation=generation,
-                        )
-            except Exception as exc:
-                if self._generation_active(generation, stop_event):
-                    _log.warning("[live_loop] IQFeed notify listener reconnecting after error: %s", exc)
-                    stop_event.wait(1.0)
-            finally:
-                try:
-                    if conn is not None:
-                        conn.close()
-                except Exception:
-                    pass
+                        if not ready:
+                            continue
+                        conn.poll()
+                        while conn.notifies:
+                            notify = conn.notifies.pop(0)
+                            if not self._generation_active(generation, stop_event):
+                                break
+                            self._handle_iqfeed_notify_payload(
+                                notify.payload,
+                                generation=generation,
+                            )
+                except Exception as exc:
+                    if self._generation_active(generation, stop_event):
+                        _log.warning("[live_loop] IQFeed notify listener reconnecting after error: %s", exc)
+                        # A live listener thread is not proof that PostgreSQL is
+                        # still delivering this generation's channel.  Clear
+                        # readiness for the entire reconnect gap and restore it
+                        # only after the replacement connection executes LISTEN.
+                        self._mark_iqfeed_notify_listener_failed(generation)
+                        if self._captured_paper_scope is not None and not startup_ready:
+                            return
+                        stop_event.wait(1.0)
+                finally:
+                    try:
+                        if conn is not None:
+                            conn.close()
+                    except Exception:
+                        pass
+        finally:
+            if self._notify_thread_generation == generation:
+                self._mark_iqfeed_notify_listener_failed(generation)
 
     def _validated_iqfeed_notify(self, payload: str) -> tuple[dict, tuple] | None:
-        """Validate the complete v2 authority tuple before any admission work."""
+        """Validate the complete v3 authority tuple before any admission work."""
 
         def _object_without_duplicate_keys(pairs):
             obj = {}
@@ -1248,6 +1608,56 @@ class LiveRunnerLoop:
         *,
         expected_generation: int,
     ) -> dict | None:
+        if self._captured_paper_scope is not None:
+            admitter = self._captured_paper_symbol_admitter
+            if not callable(admitter):
+                return {
+                    "ok": False,
+                    "admitted": False,
+                    "skipped": (
+                        "captured_paper_sealed_symbol_admission_unavailable"
+                    ),
+                    "symbol": str(symbol or "").strip().upper(),
+                    "opportunity_consumed": False,
+                    "risk_reserved": False,
+                    "order_posted": False,
+                    "broker_order_post_calls": 0,
+                }
+            admission_token = self._begin_iqfeed_admission(
+                expected_generation,
+                symbol,
+            )
+            if admission_token is None:
+                return None
+            try:
+                result = admitter(symbol=symbol, payload=payload)
+                if not isinstance(result, Mapping):
+                    return None
+                result = dict(result)
+                publish_session = bool(
+                    result.get("admitted")
+                    or (
+                        result.get("skipped") == "already_active"
+                        and int(result.get("session_id") or 0) > 0
+                    )
+                )
+                if publish_session:
+                    with self._lifecycle_lock:
+                        if not self._generation_active(expected_generation):
+                            return None
+                        self._tracker.refresh(
+                            expected_generation=expected_generation,
+                        )
+                return result
+            except Exception:
+                _log.debug(
+                    "[live_loop] captured PAPER IQFeed admission failed symbol=%s",
+                    symbol,
+                    exc_info=True,
+                )
+                return None
+            finally:
+                self._finish_iqfeed_admission(admission_token)
         admission_token = self._begin_iqfeed_admission(
             expected_generation,
             symbol,
@@ -1331,22 +1741,70 @@ class LiveRunnerLoop:
 
     def _tick_session(self, session_id: int) -> None:
         db = SessionLocal()
+        phase_one_committed = False
+        completion_request: CapturedPaperPostCommitRequest | None = None
+        refresh_session_inventory = False
         try:
-            from .live_runner import tick_live_session
-
-            tick_live_session(db, session_id)
+            if self._captured_paper_scope is None:
+                result = dispatch_live_runner_tick(db, session_id)
+            else:
+                result = dispatch_captured_paper_live_runner_tick(
+                    db,
+                    session_id,
+                    expected_account_id=(
+                        self._captured_paper_scope.expected_account_id
+                    ),
+                    expected_runtime_generation=(
+                        self._captured_paper_scope.runtime_generation
+                    ),
+                    expected_execution_family=(
+                        self._captured_paper_scope.execution_family
+                    ),
+                )
+            if type(result) is CapturedPaperPostCommitRequest:
+                completion_request = result
+            elif isinstance(result, Mapping):
+                refresh_session_inventory = (
+                    result.get("refresh_session_inventory") is True
+                )
             db.commit()
+            phase_one_committed = True
         except Exception as e:
             _log.debug("[live_loop] event tick session %d failed: %s", session_id, e)
             try:
                 db.rollback()
             except Exception:
                 pass
+        else:
+            if refresh_session_inventory and self._captured_paper_scope is not None:
+                # The recovery transaction atomically ended an expired initial
+                # generation.  Publish that terminal state before the next
+                # exact Q so the symbol can be admitted again without waiting
+                # for the periodic refresh loop.
+                with self._lifecycle_lock:
+                    generation = self._generation
+                    if self._generation_active(generation, self._stop_event):
+                        self._tracker.refresh(expected_generation=generation)
+            if completion_request is not None:
+                try:
+                    dispatch_captured_paper_post_commit(completion_request)
+                except Exception:
+                    # Phase one is durable.  Never describe or attempt a DB
+                    # rollback here; the same content-addressed request must be
+                    # retried/reconciled by its completion owner.
+                    _log.exception(
+                        "[live_loop] captured PAPER post-commit completion failed "
+                        "session=%d phase_one_committed=true retry_required=true",
+                        session_id,
+                    )
         finally:
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            # Preserve the ordinary cleanup path while making it impossible to
+            # imply that a committed captured phase-one write was rolled back.
+            if not phase_one_committed or completion_request is None:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             db.close()
 
 
@@ -1385,7 +1843,86 @@ def start_live_runner_loop() -> bool:
             "are both enabled"
         )
         return False
-    return get_live_runner_loop().start()
+    loop = get_live_runner_loop()
+    if getattr(loop, "captured_paper_scope", None) is not None:
+        _log.critical(
+            "[live_loop] refusing ordinary start through captured PAPER owner"
+        )
+        return False
+    return loop.start()
+
+
+def start_captured_paper_live_runner_loop(
+    *,
+    expected_account_id: str,
+    runtime_generation: str,
+    execution_family: str = EXECUTION_FAMILY_ALPACA_SPOT,
+    captured_paper_symbol_admitter: Callable[..., Mapping[str, Any]] | None = None,
+) -> bool:
+    """Start one strict account/generation/family PAPER-only loop.
+
+    The process singleton is intentionally shared with the ordinary loop: a
+    process cannot own both dispatch modes, and an already-created ordinary
+    loop cannot be silently repurposed into broker-capable PAPER execution.
+    """
+
+    if not settings.chili_autopilot_price_bus_enabled:
+        return False
+    if not getattr(settings, "chili_momentum_live_runner_enabled", False):
+        return False
+    if not bool(
+        getattr(settings, "chili_momentum_live_runner_loop_enabled", False)
+    ):
+        return False
+    if bool(
+        getattr(settings, "chili_momentum_live_runner_scheduler_enabled", False)
+    ):
+        _log.critical(
+            "[live_loop] refusing captured PAPER start: legacy batch driver enabled"
+        )
+        return False
+    if not callable(captured_paper_symbol_admitter):
+        _log.critical(
+            "[live_loop] captured PAPER sealed symbol admission is unavailable"
+        )
+        return False
+    try:
+        scope = CapturedPaperLiveRunnerScope(
+            expected_account_id=expected_account_id,
+            runtime_generation=runtime_generation,
+            execution_family=execution_family,
+        )
+    except ValueError:
+        _log.critical("[live_loop] captured PAPER scope is invalid", exc_info=True)
+        return False
+
+    global _loop
+    with _loop_lock:
+        if _loop is None:
+            try:
+                _loop = LiveRunnerLoop(
+                    captured_paper_scope=scope,
+                    captured_paper_symbol_admitter=(
+                        captured_paper_symbol_admitter
+                    ),
+                )
+            except ValueError:
+                _log.critical(
+                    "[live_loop] captured PAPER symbol admission is invalid",
+                    exc_info=True,
+                )
+                return False
+        elif (
+            _loop.captured_paper_scope != scope
+            or _loop.captured_paper_symbol_admitter
+            is not captured_paper_symbol_admitter
+        ):
+            _log.critical(
+                "[live_loop] refusing captured PAPER start through foreign scope/admission"
+            )
+            return False
+        selected = _loop
+    return selected.start()
 
 
 def stop_live_runner_loop() -> bool:
@@ -1404,8 +1941,39 @@ def is_live_runner_loop_admission_ready() -> bool:
     return bool(_loop is not None and _loop.admission_owner_ready())
 
 
+def is_captured_paper_live_runner_loop_admission_ready(
+    *,
+    expected_account_id: str,
+    runtime_generation: str,
+    execution_family: str = EXECUTION_FAMILY_ALPACA_SPOT,
+) -> bool:
+    """Return health only for the exact dedicated fake-money owner."""
+
+    try:
+        expected = CapturedPaperLiveRunnerScope(
+            expected_account_id=expected_account_id,
+            runtime_generation=runtime_generation,
+            execution_family=execution_family,
+        )
+    except ValueError:
+        return False
+    return bool(
+        _loop is not None
+        and _loop.captured_paper_scope == expected
+        and _loop.admission_owner_ready()
+    )
+
+
 def schedule_live_runner_stop_confirmation(session_id: int) -> bool:
     """Schedule a bounded stop-confirm dispatch only when the live loop is running."""
     if _loop is None:
         return False
     return _loop.schedule_stop_confirmation(int(session_id))
+
+
+def schedule_live_runner_entry_continuation(session_id: int) -> bool:
+    """Queue one post-commit entry FSM continuation when this loop owns live ticks."""
+
+    if _loop is None:
+        return False
+    return _loop.schedule_entry_continuation(int(session_id))

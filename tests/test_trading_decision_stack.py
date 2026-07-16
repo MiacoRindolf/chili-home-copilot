@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -131,6 +131,143 @@ def momentum_user_and_live_session(db):
     db.add(via)
     db.commit()
     return user, sess, via, var
+
+
+def _certify_focused_alpaca_paper_session(monkeypatch, sess, via) -> None:
+    """Mirror the exact frozen paper-account generation used at Alpaca entry."""
+
+    account_id = "acct-governed-place-test"
+    confirmed_at = datetime.now(timezone.utc).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    arm_token = f"focused-arm-{sess.id}"
+    claim_token = f"focused-claim-{sess.id}"
+    monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        account_id,
+        raising=False,
+    )
+    sess.venue = "alpaca"
+    sess.execution_family = "alpaca_spot"
+    sess.symbol = "ACTU"
+    via.symbol = "ACTU"
+    snapshot = dict(sess.risk_snapshot_json or {})
+    live = dict(snapshot.get("momentum_live_execution") or {})
+    live["side_long"] = True
+    snapshot.update(
+        {
+            "asset_class": "equity",
+            "arm_token": arm_token,
+            "expires_at_utc": expires_at,
+            "arm_confirmed_at_utc": confirmed_at,
+            "alpaca_account_scope": "alpaca:paper",
+            "alpaca_account_id": account_id,
+            "alpaca_symbol_claim_token": claim_token,
+            "confirmed_arm_generation": {
+                "version": 1,
+                "session_id": int(sess.id),
+                "arm_token": arm_token,
+                "expires_at_utc": expires_at,
+                "alpaca_symbol_claim_token": claim_token,
+                "alpaca_account_scope": "alpaca:paper",
+                "alpaca_account_id": account_id,
+                "confirmed_at_utc": confirmed_at,
+            },
+            "momentum_live_execution": live,
+        }
+    )
+    sess.risk_snapshot_json = snapshot
+
+
+def test_live_trigger_identity_is_replaced_and_preserves_first_dip_setup() -> None:
+    import app.services.trading.momentum_neural.live_runner as live_runner_mod
+
+    le = {
+        "entry_trigger_reason": "stale",
+        "entry_trigger_debug": {
+            "opportunity_key": {
+                "symbol": "STALE",
+                "setup_family": "first_dip_reclaim",
+            },
+            "first_dip_tape_confirmed": True,
+        },
+    }
+    fired_debug = {
+        "front_side_via": "first_dip_day_leg",
+        "opportunity_key": {
+            "symbol": "ACTU",
+            "trading_date": "2026-07-15",
+            "setup_family": "first_dip_reclaim",
+        },
+        "first_dip_tape_confirmed": True,
+    }
+
+    live_runner_mod._persist_entry_trigger_identity(
+        le, reason="flush_dip_buy", debug=fired_debug
+    )
+
+    assert le["entry_trigger_debug"] == fired_debug
+    assert le["entry_trigger_debug"] is not fired_debug
+    fired_debug["opportunity_key"]["symbol"] = "MUTATED"
+    assert le["entry_trigger_debug"]["opportunity_key"]["symbol"] == "ACTU"
+    assert live_runner_mod._adaptive_entry_setup_family(le, "ACTU") == (
+        "first_dip_reclaim"
+    )
+
+    # A later non-dict detector payload must clear, not retain, the opportunity.
+    live_runner_mod._persist_entry_trigger_identity(
+        le, reason="momentum_continuation", debug=None
+    )
+    assert le["entry_trigger_debug"] == {}
+    assert live_runner_mod._adaptive_entry_setup_family(le, "ACTU") == (
+        "momentum_continuation"
+    )
+
+
+@pytest.mark.parametrize(
+    ("debug", "detail"),
+    (
+        (
+            {"front_side_via": "first_dip_day_leg"},
+            "first_dip_opportunity_key_missing",
+        ),
+        (
+            {
+                "front_side_via": "first_dip_day_leg",
+                "opportunity_key": {
+                    "symbol": "ACTU",
+                    "trading_date": "2026-07-15",
+                    "setup_family": "momentum_pullback",
+                },
+            },
+            "first_dip_marker_opportunity_mismatch",
+        ),
+        (
+            {
+                "opportunity_key": {
+                    "symbol": "ACTU",
+                    "trading_date": "2026-07-15",
+                    "setup_family": "first_dip_reclaim",
+                },
+            },
+            "first_dip_marker_opportunity_mismatch",
+        ),
+    ),
+)
+def test_live_first_dip_marker_and_opportunity_are_bidirectional(
+    debug, detail
+) -> None:
+    import app.services.trading.momentum_neural.live_runner as live_runner_mod
+
+    le = {
+        "entry_trigger_reason": "momentum_pullback",
+        "entry_trigger_debug": debug,
+    }
+    with pytest.raises(live_runner_mod.AdaptiveRiskBuilderError) as exc:
+        live_runner_mod._adaptive_entry_setup_family(le, "ACTU")
+    assert exc.value.reason == "adaptive_risk_builder_boundary_mismatch"
+    assert exc.value.detail == detail
 
 
 def test_allocate_momentum_positive_net_proceeds(db, momentum_user_and_session, monkeypatch):
@@ -1379,6 +1516,282 @@ def test_live_tick_runs_entry_decision_before_place_market_order(db, momentum_us
     out = tick_live_session(db, int(sess.id), adapter_factory=_factory)
     assert out.get("ok") is True
     assert len(decision_calls) == 1
+
+
+def test_live_tick_adaptive_packet_treats_legacy_abstain_as_audit_only(
+    db, momentum_user_and_live_session, monkeypatch
+):
+    """A capture-bound adaptive quantity reaches the next admission boundary."""
+
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
+    monkeypatch.setattr(settings, "brain_decision_packet_required_for_runners", True)
+
+    import app.services.trading.momentum_neural.live_runner as live_runner_mod
+
+    monkeypatch.setattr(
+        live_runner_mod,
+        "runner_boundary_risk_ok",
+        lambda _db, _sess, **kwargs: (True, {}),
+    )
+    monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        live_runner_mod, "_venue_broker_connected", lambda _family: True
+    )
+
+    class _Payload:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_payload(self):
+            return dict(self._payload)
+
+    resolution = SimpleNamespace(quantity_shares=17)
+    request = _Payload({"schema_version": "focused-adaptive-request-v1"})
+    request.inputs = SimpleNamespace(ask=100.05)
+    adaptive_build = SimpleNamespace(
+        resolution=resolution,
+        request=request,
+        reservation_claim=_Payload({"claim_id": "focused-adaptive-claim"}),
+        decision_packet={"schema_version": "focused-adaptive-packet-v1"},
+        source_sha256="a" * 64,
+        audit_payload=lambda: {
+            "schema_version": "focused-adaptive-audit-v1",
+            "quantity_shares": 17,
+        },
+    )
+    monkeypatch.setattr(
+        live_runner_mod,
+        "_build_adaptive_alpaca_primary_before_legacy_sizing",
+        lambda *_args, **_kwargs: (adaptive_build, 1, "focused-adaptive-cid"),
+    )
+    monkeypatch.setattr(
+        live_runner_mod,
+        "run_momentum_entry_decision",
+        lambda *_args, **_kwargs: {
+            "proceed": False,
+            "packet_id": 919,
+            "allocation": {
+                "abstain_reason_code": "legacy_allocator_declined",
+                "abstain_reason_text": "focused regression",
+            },
+        },
+    )
+
+    reached_next_boundary: list[bool] = []
+
+    class _ReachedAdaptiveBoundary(RuntimeError):
+        pass
+
+    def _stop_at_next_boundary(*_args, **_kwargs):
+        reached_next_boundary.append(True)
+        raise _ReachedAdaptiveBoundary
+
+    monkeypatch.setattr(
+        live_runner_mod, "effective_stop_atr_pct", _stop_at_next_boundary
+    )
+
+    fresh = FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc))
+    placed: list[dict] = []
+
+    class _StubAdapter:
+        def bind_account_id(self, account_id: str) -> bool:
+            return account_id == "acct-governed-place-test"
+
+        def is_enabled(self) -> bool:
+            return True
+
+        def get_account_snapshot(self):
+            return {
+                "ok": True,
+                "paper": True,
+                "account_id": "acct-governed-place-test",
+                "equity": 100_000.0,
+                "buying_power": 400_000.0,
+                "status": "ACTIVE",
+            }
+
+        def get_best_bid_ask(self, product_id: str):
+            return (
+                    NormalizedTicker(
+                        product_id=product_id,
+                        bid=99.95,
+                        ask=100.05,
+                        mid=100.0,
+                        freshness=fresh,
+                        raw={
+                            "feed": "iqfeed_l1",
+                            "provider_event_at_utc": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                            "received_at_utc": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                            "timestamp_basis": "provider_quote_event_at",
+                        },
+                    ),
+                fresh,
+            )
+
+        def get_product(self, product_id: str):
+            return (
+                NormalizedProduct(
+                    product_id=product_id,
+                    base_currency="ACTU",
+                    quote_currency="USD",
+                    status="online",
+                    trading_disabled=False,
+                    cancel_only=False,
+                    limit_only=False,
+                    post_only=False,
+                    auction_mode=False,
+                    base_min_size=0.00001,
+                    base_increment=0.00001,
+                ),
+                fresh,
+            )
+
+        def place_market_order(self, **kwargs):
+            placed.append(kwargs)
+            raise AssertionError("external order boundary must not be reached")
+
+        def place_limit_order_gtc(self, **kwargs):
+            placed.append(kwargs)
+            raise AssertionError("external order boundary must not be reached")
+
+    _user, sess, _via, _var = momentum_user_and_live_session
+    _certify_focused_alpaca_paper_session(monkeypatch, sess, _via)
+    db.commit()
+    with pytest.raises(_ReachedAdaptiveBoundary):
+        tick_live_session(db, int(sess.id), adapter_factory=lambda: _StubAdapter())
+
+    assert reached_next_boundary == [True]
+    assert placed == []
+    audit = (sess.risk_snapshot_json or {})["momentum_live_execution"][
+        "legacy_pre_admission_audit"
+    ]
+    assert audit["decision_packet_id"] == 919
+    assert audit["legacy_proceed"] is False
+    assert audit["legacy_abstain_reason_code"] == "legacy_allocator_declined"
+    assert audit["legacy_abstain_reason_text"] == "focused regression"
+    assert audit["legacy_max_notional_policy_usd"] > 0.0
+    assert audit["suppression_authority"] is False
+    assert audit["economic_sizing_authority"] == "adaptive_risk_policy"
+
+
+def test_live_tick_without_adaptive_packet_preserves_legacy_abstain_veto(
+    db, momentum_user_and_live_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
+
+    import app.services.trading.momentum_neural.live_runner as live_runner_mod
+
+    monkeypatch.setattr(
+        live_runner_mod,
+        "runner_boundary_risk_ok",
+        lambda _db, _sess, **kwargs: (True, {}),
+    )
+    monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        live_runner_mod, "_venue_broker_connected", lambda _family: True
+    )
+    monkeypatch.setattr(
+        live_runner_mod,
+        "_build_adaptive_alpaca_primary_before_legacy_sizing",
+        lambda *_args, **_kwargs: (None, None, None),
+    )
+    monkeypatch.setattr(
+        live_runner_mod,
+        "run_momentum_entry_decision",
+        lambda *_args, **_kwargs: {
+            "proceed": False,
+            "packet_id": 920,
+            "allocation": {
+                "abstain_reason_code": "legacy_allocator_declined",
+                "abstain_reason_text": "focused regression",
+            },
+        },
+    )
+
+    fresh = FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc))
+    placed: list[dict] = []
+
+    class _StubAdapter:
+        def bind_account_id(self, account_id: str) -> bool:
+            return account_id == "acct-governed-place-test"
+
+        def is_enabled(self) -> bool:
+            return True
+
+        def get_account_snapshot(self):
+            return {
+                "ok": True,
+                "paper": True,
+                "account_id": "acct-governed-place-test",
+                "equity": 100_000.0,
+                "buying_power": 400_000.0,
+                "status": "ACTIVE",
+            }
+
+        def get_best_bid_ask(self, product_id: str):
+            return (
+                    NormalizedTicker(
+                        product_id=product_id,
+                        bid=99.95,
+                        ask=100.05,
+                        mid=100.0,
+                        freshness=fresh,
+                        raw={
+                            "feed": "iqfeed_l1",
+                            "provider_event_at_utc": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                            "received_at_utc": datetime.now(
+                                timezone.utc
+                            ).isoformat(),
+                            "timestamp_basis": "provider_quote_event_at",
+                        },
+                    ),
+                fresh,
+            )
+
+        def get_product(self, product_id: str):
+            return (
+                NormalizedProduct(
+                    product_id=product_id,
+                    base_currency="ACTU",
+                    quote_currency="USD",
+                    status="online",
+                    trading_disabled=False,
+                    cancel_only=False,
+                    limit_only=False,
+                    post_only=False,
+                    auction_mode=False,
+                    base_min_size=0.00001,
+                    base_increment=0.00001,
+                ),
+                fresh,
+            )
+
+        def place_market_order(self, **kwargs):
+            placed.append(kwargs)
+
+        def place_limit_order_gtc(self, **kwargs):
+            placed.append(kwargs)
+
+    _user, sess, _via, _var = momentum_user_and_live_session
+    _certify_focused_alpaca_paper_session(monkeypatch, sess, _via)
+    db.commit()
+    out = tick_live_session(
+        db, int(sess.id), adapter_factory=lambda: _StubAdapter()
+    )
+
+    assert out.get("abstained") is True
+    assert placed == []
+    assert "legacy_pre_admission_audit" not in (
+        (sess.risk_snapshot_json or {}).get("momentum_live_execution") or {}
+    )
 
 
 def test_live_tick_packet_required_even_when_ledger_disabled(db, momentum_user_and_live_session, monkeypatch):

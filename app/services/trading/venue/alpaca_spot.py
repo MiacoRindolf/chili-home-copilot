@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import itertools
+import json
 import math
 import re
+import secrets
 import threading
 import uuid
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Mapping, Optional
 
 from ....config import settings
 from .protocol import (
@@ -34,15 +38,34 @@ from .protocol import (
     NormalizedProduct,
     NormalizedTicker,
 )
+from ..momentum_neural.alpaca_fill_read_capability import (
+    issue_alpaca_fill_read_capability,
+    register_exact_alpaca_fill_reader,
+)
+from ..momentum_neural.alpaca_bp_census_capability import (
+    issue_alpaca_bp_census_capability,
+    register_exact_alpaca_bp_census_reader,
+)
 
 logger = logging.getLogger(__name__)
+
+_ALPACA_SPOT_BUILD_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+_FILL_READER_PROCESS_NONCE = secrets.token_bytes(32)
+_FILL_READER_GENERATIONS = itertools.count(1)
+_FILL_READER_CAPABILITY_TTL_SECONDS = 60
+_ORDER_SUBMISSION_AUDIT_SCHEMA_VERSION = (
+    "chili.alpaca-paper-order-submission-audit.v1"
+)
+_EMPTY_ORDER_SUBMISSION_CHAIN_SHA256 = hashlib.sha256(
+    b"chili.alpaca-paper-order-submission-audit.v1:empty"
+).hexdigest()
 
 _VENUE = "alpaca"
 _IQFEED_AUTHORITY_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 _IQFEED_AUTHORITY_MAX_AGE_S = 2.0
 _IQFEED_FUTURE_TOLERANCE_S = 1.0
 _IQFEED_BUILD_RE = re.compile(
-    r"^iqfeed-l1-quote-provenance-v2\+sha256:[0-9a-f]{16}$"
+    r"^iqfeed-l1-exact-print-provenance-v3\+sha256:[0-9a-f]{16}$"
 )
 # Alpaca order statuses -> the lowercase vocabulary the runner's _order_done_for_entry /
 # _order_open helpers understand (#550/#551). Working states map to "open" so the fill
@@ -145,12 +168,79 @@ def _f(v: Any) -> Optional[float]:
         return None
 
 
+def _alpaca_status_echo(value: Any) -> str | None:
+    """Preserve a broker status without mapping it into runner vocabulary."""
+
+    raw = getattr(value, "value", value)
+    normalized = str(raw or "").strip().lower()
+    return normalized or None
+
+
+def _alpaca_filled_qty(value: Any) -> Decimal | None:
+    """Return exact nonnegative provider fill truth, or unknown.
+
+    This deliberately does not coerce an absent/malformed value to zero.  A
+    submit response or CID lookup with unreadable cumulative quantity is an
+    indeterminate observation and must be reconciled by the caller.
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        quantity = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return quantity if quantity.is_finite() and quantity >= 0 else None
+
+
+def _whole_share_fill_or_none(value: Decimal | None) -> int | None:
+    if value is None or value != value.to_integral_value():
+        return None
+    return int(value)
+
+
+def _text_echo(value: Any, *, lower: bool = False, upper: bool = False) -> str | None:
+    raw = getattr(value, "value", value)
+    normalized = str(raw or "").strip()
+    if not normalized:
+        return None
+    if lower:
+        return normalized.lower()
+    if upper:
+        return normalized.upper()
+    return normalized
+
+
+def _decimal_echo(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return format(number, "f") if number.is_finite() and number >= 0 else None
+
+
+def _order_type_echo(order: Any) -> str | None:
+    primary = _text_echo(getattr(order, "order_type", None), lower=True)
+    alias = _text_echo(getattr(order, "type", None), lower=True)
+    if primary is not None and alias is not None and primary != alias:
+        return None
+    return primary or alias
+
+
 def _opt_bool(v: Any) -> Optional[bool]:
     """None-preserving bool coercion. Returns None when the field is absent so a
     missing short signal fails CLOSED at the gate (not silently treated as False)."""
     if v is None:
         return None
     return bool(v)
+
+
+def _strict_bool_or_none(v: Any) -> Optional[bool]:
+    """Preserve only broker-native booleans; unreadable safety flags stay unknown."""
+
+    return v if isinstance(v, bool) else None
 
 
 def _norm_status(raw: Any) -> str:
@@ -255,6 +345,22 @@ def _from_alpaca_symbol(sym: str) -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _canonical_evidence(value: Any) -> tuple[str, str]:
+    """Return strict canonical JSON and SHA-256 for broker evidence."""
+
+    try:
+        canonical = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Alpaca fill evidence is not canonical JSON") from exc
+    return canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _fresh(seconds: float | None = None) -> FreshnessMeta:
@@ -406,6 +512,32 @@ class AlpacaSpotAdapter:
 
     def __init__(self) -> None:
         self._bound_account_id: str | None = None
+        self._fill_reader_client_key: tuple[int, str, str] | None = None
+        self._fill_reader_client_object: Any | None = None
+        self._fill_reader_connection_generation: str | None = None
+        # This process-private monotonic chain counts every SDK order-submission
+        # call made through this exact adapter instance.  It deliberately counts
+        # an attempt immediately before transport, including calls that time out
+        # or raise, so a no-order smoke cannot mistake an absent broker row for
+        # proof that no POST was attempted.
+        self._order_submission_audit_lock = threading.Lock()
+        self._order_submission_call_count = 0
+        self._order_submission_chain_sha256 = (
+            _EMPTY_ORDER_SUBMISSION_CHAIN_SHA256
+        )
+        self._order_submission_audit_generation = str(uuid.uuid4())
+
+    @property
+    def bound_account_id(self) -> str | None:
+        """Non-secret UUID frozen onto this adapter generation."""
+
+        return self._bound_account_id
+
+    @property
+    def broker_environment(self) -> str:
+        """Expose the effective posture without exposing credentials."""
+
+        return "paper" if _paper() else "live"
 
     def bind_account_id(self, account_id: str) -> bool:
         """Freeze this adapter instance to one session/account generation."""
@@ -432,6 +564,201 @@ class AlpacaSpotAdapter:
             raise RuntimeError("Alpaca adapter account generation changed")
         return client
 
+    def _exact_fill_reader_connection_generation(self, client: Any) -> str:
+        """Bind one reader generation to the exact cached PAPER SDK client.
+
+        This is intentionally different from the durable arm generation.  The
+        latter proves which strategy/account generation owned the order; this
+        value proves which concrete authenticated REST client produced the
+        observation.  Replacing credentials or the cached client necessarily
+        changes this process-private generation.
+        """
+
+        bound = str(self._bound_account_id or "").strip()
+        if not bound:
+            raise RuntimeError("Alpaca fill reader lacks a frozen PAPER UUID")
+        with _clients_lock:
+            if _clients.get("trading:paper") is not client:
+                raise RuntimeError("Alpaca fill reader client is not the pinned client")
+            observed = str(
+                _clients.get("trading:observed_account_id") or ""
+            ).strip()
+            fingerprint = str(_clients.get("trading:fingerprint") or "").strip()
+        if observed != bound:
+            raise RuntimeError("Alpaca fill reader account generation changed")
+        if re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+            raise RuntimeError("Alpaca fill reader credential generation is unavailable")
+        client_key = (id(client), fingerprint, observed)
+        if (
+            self._fill_reader_client_object is not client
+            or self._fill_reader_client_key != client_key
+        ):
+            ordinal = next(_FILL_READER_GENERATIONS)
+            material = b"\0".join(
+                (
+                    _FILL_READER_PROCESS_NONCE,
+                    str(ordinal).encode("ascii"),
+                    str(id(client)).encode("ascii"),
+                    fingerprint.encode("ascii"),
+                    observed.encode("ascii"),
+                    _ALPACA_SPOT_BUILD_SHA256.encode("ascii"),
+                )
+            )
+            self._fill_reader_client_key = client_key
+            # Retain the concrete object so CPython id reuse cannot collapse a
+            # later authenticated client into this generation.
+            self._fill_reader_client_object = client
+            self._fill_reader_connection_generation = (
+                "alpaca-paper-rest:" + hashlib.sha256(material).hexdigest()
+            )
+        generation = str(self._fill_reader_connection_generation or "").strip()
+        if not generation:
+            raise RuntimeError("Alpaca fill reader connection generation is unavailable")
+        return generation
+
+    def get_paper_connection_generation_receipt(self) -> dict[str, Any]:
+        """Return the exact non-secret PAPER REST generation for runtime binding.
+
+        The durable transport and the split-phase fill reader must use the same
+        adapter instance and authenticated SDK-client generation.  This method
+        exposes that identity without exposing keys and without letting a
+        caller invent an arbitrary generation string.  It performs the normal
+        pinned account read used to construct the client; callers must invoke
+        it only inside the explicitly broker-reading PAPER preflight/runtime.
+        """
+
+        _require_paper_posture()
+        if not _paper() or self.broker_environment != "paper":
+            raise RuntimeError("Alpaca connection receipt is PAPER-only")
+        if (
+            AlpacaSpotAdapter._account_client
+            is not _EXACT_FILL_ACCOUNT_CLIENT_METHOD
+            or AlpacaSpotAdapter._exact_fill_reader_connection_generation
+            is not _EXACT_FILL_CONNECTION_GENERATION_METHOD
+            or AlpacaSpotAdapter.get_paper_connection_generation_receipt
+            is not _EXACT_PAPER_CONNECTION_RECEIPT_METHOD
+        ):
+            raise RuntimeError("Alpaca connection receipt method identity changed")
+        client = AlpacaSpotAdapter._account_client(self)
+        generation = (
+            AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                self, client
+            )
+        )
+        with _clients_lock:
+            observed_account_id = str(
+                _clients.get("trading:observed_account_id") or ""
+            ).strip()
+        bound_account_id = str(self._bound_account_id or "").strip()
+        if (
+            not bound_account_id
+            or observed_account_id != bound_account_id
+            or bound_account_id != _expected_account_id()
+        ):
+            raise RuntimeError("Alpaca connection receipt account identity changed")
+        available_at = _now()
+        receipt = {
+            "schema_version": "chili.alpaca-paper-connection-generation.v1",
+            "broker_environment": "paper",
+            "asset_class": "us_equity",
+            "provider_account_id": observed_account_id,
+            "adapter_connection_generation": generation,
+            "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+            "available_at": available_at.isoformat(),
+        }
+        receipt_json, receipt_sha256 = _canonical_evidence(receipt)
+        return {
+            **receipt,
+            "receipt_canonical_json": receipt_json,
+            "receipt_sha256": receipt_sha256,
+        }
+
+    def _record_order_submission_attempt(
+        self,
+        *,
+        surface: str,
+        symbol: str,
+        side: str,
+        position_intent: str,
+        client_order_id: str,
+        request_type: str,
+    ) -> None:
+        """Advance the exact adapter-local order-transport audit chain.
+
+        No credential, account number, price or quantity is retained.  The
+        deterministic client order id and normalized instruction identity are
+        sufficient to make each attempted SDK call distinct while the chain
+        remains safe to publish in a local readiness receipt.
+        """
+
+        fields = {
+            "surface": str(surface or "").strip(),
+            "symbol": _to_symbol(symbol),
+            "side": str(side or "").strip().lower(),
+            "position_intent": str(position_intent or "").strip().lower(),
+            "client_order_id": str(client_order_id or "").strip(),
+            "request_type": str(request_type or "").strip().lower(),
+        }
+        if not all(fields.values()):
+            raise RuntimeError("Alpaca order-submission audit identity is incomplete")
+        with self._order_submission_audit_lock:
+            sequence = self._order_submission_call_count + 1
+            event = {
+                "schema_version": _ORDER_SUBMISSION_AUDIT_SCHEMA_VERSION,
+                "audit_generation": self._order_submission_audit_generation,
+                "sequence": sequence,
+                "prior_chain_sha256": self._order_submission_chain_sha256,
+                **fields,
+            }
+            _event_json, event_sha256 = _canonical_evidence(event)
+            self._order_submission_call_count = sequence
+            self._order_submission_chain_sha256 = event_sha256
+
+    def get_order_submission_audit_snapshot(self) -> dict[str, Any]:
+        """Return content-addressed evidence for this adapter's POST attempts.
+
+        This is an in-process transport census, not broker inventory truth.  A
+        no-order smoke must bind both this monotonic census and independent
+        read-only broker inventory before and after the service topology run.
+        """
+
+        _require_paper_posture()
+        if (
+            type(self) is not AlpacaSpotAdapter
+            or AlpacaSpotAdapter._record_order_submission_attempt
+            is not _EXACT_ORDER_SUBMISSION_AUDIT_RECORD_METHOD
+            or AlpacaSpotAdapter.get_order_submission_audit_snapshot
+            is not _EXACT_ORDER_SUBMISSION_AUDIT_SNAPSHOT_METHOD
+        ):
+            raise RuntimeError("Alpaca order-submission audit method identity changed")
+        bound = str(self._bound_account_id or "").strip()
+        generation = str(self._fill_reader_connection_generation or "").strip()
+        if (
+            not _paper()
+            or not bound
+            or bound != _expected_account_id()
+            or not generation.startswith("alpaca-paper-rest:")
+        ):
+            raise RuntimeError("Alpaca order-submission audit generation is unbound")
+        with self._order_submission_audit_lock:
+            body = {
+                "schema_version": _ORDER_SUBMISSION_AUDIT_SCHEMA_VERSION,
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": bound,
+                "adapter_connection_generation": generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "audit_generation": self._order_submission_audit_generation,
+                "submission_call_count": self._order_submission_call_count,
+                "submission_chain_sha256": self._order_submission_chain_sha256,
+            }
+        snapshot_json, snapshot_sha256 = _canonical_evidence(body)
+        return {
+            **body,
+            "snapshot_canonical_json": snapshot_json,
+            "snapshot_sha256": snapshot_sha256,
+        }
+
     # ── availability ─────────────────────────────────────────────────────────
     def is_enabled(self) -> bool:
         if not bool(getattr(settings, "chili_alpaca_enabled", False)):
@@ -451,7 +778,7 @@ class AlpacaSpotAdapter:
 
     # ── market data ──────────────────────────────────────────────────────────
     def _iqfeed_l1_quote(self, sym: str, *, max_age_seconds: float | None = None):
-        """Return one exact-build v2 IQFeed BBO or fail into direct Alpaca.
+        """Return one exact-build v3 IQFeed BBO or fail into direct Alpaca.
 
         Most-Recent-Trade-Time is only a causal containment reference, never a
         quote-event timestamp. Both that reference and the local receive clock must
@@ -485,7 +812,7 @@ class AlpacaSpotAdapter:
                     "FROM momentum_nbbo_spread_tape "
                     "WHERE symbol = :s AND source = 'iqfeed_l1' AND mid > 0 "
                     "AND received_at IS NOT NULL "
-                    # observed_at is the provider trade reference for v2 rows. Keep
+                    # observed_at is the provider trade reference for v3 rows. Keep
                     # the read on the existing large-tape index; migration 317 adds
                     # only nullable metadata and never indexes/backfills 54M rows.
                     "ORDER BY observed_at DESC, id DESC LIMIT 1"
@@ -666,17 +993,11 @@ class AlpacaSpotAdapter:
     def get_execution_bbo(self, product_id: str, *, max_age_seconds: float = 2.0):
         """Authoritative pre-submit BBO.
 
-        IQFeed is accepted only when its persisted row is explicitly sourced and
-        inside the execution-age bound. Otherwise make a fresh Alpaca data request;
-        never reuse the lane's older decision quote at the broker boundary.
+        Execution authority always comes from a fresh direct Alpaca data request
+        carrying Alpaca's exact quote-event timestamp.  IQFeed Q/reference rows
+        deliberately keep ``provider_event_at`` null and are useful diagnostics,
+        but a trade-time proxy can never authorize an Alpaca order.
         """
-        sym = _to_symbol(product_id)
-        if not _is_crypto_pid(product_id) and bool(
-            getattr(settings, "chili_alpaca_quotes_via_iqfeed", True)
-        ):
-            iq = self._iqfeed_l1_quote(sym, max_age_seconds=max_age_seconds)
-            if iq is not None:
-                return iq
         direct = self._alpaca_latest_quote(product_id)
         if not isinstance(direct, tuple) or len(direct) != 2:
             return None, _fresh(max_age_seconds)
@@ -701,7 +1022,18 @@ class AlpacaSpotAdapter:
             provider_time_utc=provider_at,
             max_age_seconds=float(max_age_seconds),
         )
-        return replace(tick, freshness=execution_meta), execution_meta
+        normalized_raw = dict(tick.raw) if isinstance(tick.raw, dict) else {}
+        normalized_raw.update(
+            {
+                "provider_event_at_utc": provider_at.isoformat(),
+                "received_at_utc": execution_meta.retrieved_at_utc.isoformat(),
+                "timestamp_basis": "provider_event_at",
+            }
+        )
+        return (
+            replace(tick, freshness=execution_meta, raw=normalized_raw),
+            execution_meta,
+        )
 
     def get_best_bid_ask(self, product_id: str):
         sym = _to_symbol(product_id)
@@ -814,21 +1146,63 @@ class AlpacaSpotAdapter:
         time_in_force = getattr(o, "time_in_force", None)
         extended_hours = getattr(o, "extended_hours", None)
         position_intent = getattr(o, "position_intent", None)
+        status_echo = _alpaca_status_echo(getattr(o, "status", None))
+        filled_qty = _alpaca_filled_qty(getattr(o, "filled_qty", None))
+        # A returned NormalizedOrder must never fabricate zero fill truth.
+        # Strict lookup methods convert this failure into readable=False; the
+        # legacy convenience methods return None.
+        if filled_qty is None:
+            raise RuntimeError("Alpaca cumulative filled quantity is unavailable")
+        whole_share_fill = _whole_share_fill_or_none(filled_qty)
+        provider_order_id = _text_echo(getattr(o, "id", None))
+        provider_client_order_id = _text_echo(
+            getattr(o, "client_order_id", None)
+        )
+        provider_symbol = _text_echo(getattr(o, "symbol", None), upper=True)
+        provider_side = _text_echo(getattr(o, "side", None), lower=True)
+        provider_order_type = _order_type_echo(o)
+        provider_quantity = _decimal_echo(getattr(o, "qty", None))
+        provider_limit = _decimal_echo(getattr(o, "limit_price", None))
+        provider_tif = _text_echo(time_in_force, lower=True)
+        provider_extended = (
+            extended_hours if type(extended_hours) is bool else None
+        )
+        provider_intent = _text_echo(position_intent, lower=True)
+        provider_account_id = _text_echo(getattr(o, "account_id", None))
+        provider_asset_class = _text_echo(
+            getattr(o, "asset_class", None), lower=True
+        )
         return NormalizedOrder(
-            order_id=str(getattr(o, "id", "") or ""),
-            client_order_id=getattr(o, "client_order_id", None),
+            order_id=provider_order_id or "",
+            client_order_id=provider_client_order_id,
             product_id=_from_alpaca_symbol(getattr(o, "symbol", "")),
-            side=str(getattr(getattr(o, "side", None), "value", getattr(o, "side", "")) or "").lower(),
+            side=provider_side or "",
             status=_norm_status(getattr(o, "status", None)),
-            order_type=str(getattr(getattr(o, "order_type", None), "value",
-                                   getattr(o, "type", "") or getattr(o, "order_type", "")) or "").lower(),
-            filled_size=_f(getattr(o, "filled_qty", None)) or 0.0,
+            order_type=provider_order_type or "",
+            filled_size=float(filled_qty),
             average_filled_price=_f(getattr(o, "filled_avg_price", None)),
             created_time=str(getattr(o, "created_at", "") or ""),
             raw={
-                "alpaca_status": str(
-                    getattr(getattr(o, "status", None), "value", getattr(o, "status", ""))
+                "alpaca_status": status_echo,
+                "alpaca_filled_qty": format(filled_qty, "f"),
+                "filled_size": whole_share_fill,
+                "fill_truth_readable": bool(
+                    status_echo is not None and whole_share_fill is not None
                 ),
+                "broker_account_id_echo": provider_account_id,
+                "broker_order_id_echo": provider_order_id,
+                "broker_client_order_id_echo": provider_client_order_id,
+                "broker_symbol_echo": provider_symbol,
+                "broker_side_echo": provider_side,
+                "broker_order_type_echo": provider_order_type,
+                "broker_quantity_echo": provider_quantity,
+                "broker_limit_price_echo": provider_limit,
+                "broker_time_in_force_echo": provider_tif,
+                "broker_extended_hours_echo": provider_extended,
+                "broker_order_status_echo": status_echo,
+                "broker_filled_quantity_echo": format(filled_qty, "f"),
+                "broker_position_intent_echo": provider_intent,
+                "broker_asset_class_echo": provider_asset_class,
                 "filled_at": str(filled_at) if filled_at is not None else None,
                 "submitted_at": str(submitted_at) if submitted_at is not None else None,
                 "qty": _f(getattr(o, "qty", None)),
@@ -951,6 +1325,359 @@ class AlpacaSpotAdapter:
             logger.debug("[alpaca_spot] list_open_orders failed: %s", exc)
             return (None if strict else []), _fresh(5.0)
 
+    def get_paper_open_order_census(
+        self,
+        *,
+        read_binding: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return one complete, content-addressed PAPER open-order census.
+
+        Alpaca's order endpoint has no tie-safe order-id cursor.  A short page
+        therefore proves the full inventory for the bounded query; reaching the
+        maximum page size is COVERAGE_UNAVAILABLE rather than silently
+        truncating.  A later identical census brackets the account snapshot.
+        """
+
+        try:
+            _require_paper_posture()
+            if not _paper():
+                raise RuntimeError("Alpaca open-order census is not PAPER")
+            if (
+                AlpacaSpotAdapter._account_client
+                is not _EXACT_FILL_ACCOUNT_CLIENT_METHOD
+                or AlpacaSpotAdapter._exact_fill_reader_connection_generation
+                is not _EXACT_FILL_CONNECTION_GENERATION_METHOD
+            ):
+                raise RuntimeError("Alpaca open-order census method identity changed")
+            if not isinstance(read_binding, Mapping):
+                raise RuntimeError("Alpaca open-order census binding is missing")
+            binding_json, binding_sha256 = _canonical_evidence(dict(read_binding))
+            client = AlpacaSpotAdapter._account_client(self)
+            connection_generation = (
+                AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                    self, client
+                )
+            )
+            with _clients_lock:
+                account_id = str(
+                    _clients.get("trading:observed_account_id") or ""
+                ).strip()
+            if not account_id or account_id != self._bound_account_id:
+                raise RuntimeError("Alpaca open-order census account is unbound")
+
+            from alpaca.common.enums import Sort
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+
+            page_size = 500
+            query = {
+                "status": "open",
+                "limit": page_size,
+                "direction": "asc",
+                "nested": False,
+            }
+            query_json, query_sha256 = _canonical_evidence(query)
+            requested_at = _now()
+            request = GetOrdersRequest(
+                status=QueryOrderStatus.OPEN,
+                limit=page_size,
+                direction=Sort.ASC,
+                nested=False,
+            )
+            orders = client.get_orders(filter=request)
+            received_at = _now()
+            if not isinstance(orders, list):
+                raise RuntimeError("Alpaca open-order census response is malformed")
+            if len(orders) >= page_size:
+                raise RuntimeError(
+                    "Alpaca open-order census reached its non-pageable bound"
+                )
+            raw_orders: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            seen_cids: set[str] = set()
+            for order in orders:
+                payload = order.model_dump(mode="json")
+                if not isinstance(payload, dict):
+                    raise RuntimeError("Alpaca open order payload is malformed")
+                order_id = str(payload.get("id") or "").strip()
+                client_order_id = str(payload.get("client_order_id") or "").strip()
+                if (
+                    not order_id
+                    or not client_order_id
+                    or order_id in seen_ids
+                    or client_order_id in seen_cids
+                ):
+                    raise RuntimeError("Alpaca open-order identity is ambiguous")
+                seen_ids.add(order_id)
+                seen_cids.add(client_order_id)
+                native_account_id = str(payload.get("account_id") or "").strip()
+                if native_account_id and native_account_id != account_id:
+                    raise RuntimeError("Alpaca open order account identity mismatch")
+                if str(payload.get("asset_class") or "").strip().lower() != (
+                    "us_equity"
+                ):
+                    raise RuntimeError(
+                        "Alpaca open-order census contains a non-US-equity order"
+                    )
+                raw_orders.append(payload)
+            response_json, response_sha256 = _canonical_evidence(raw_orders)
+            available_at = _now()
+            if not requested_at <= received_at <= available_at:
+                raise RuntimeError("Alpaca open-order census clocks are not causal")
+            expires_at = available_at + timedelta(
+                seconds=_FILL_READER_CAPABILITY_TTL_SECONDS
+            )
+            page = {
+                "page_index": 0,
+                "request_page_token": None,
+                "request_canonical_json": query_json,
+                "request_sha256": query_sha256,
+                "requested_at": requested_at.isoformat(),
+                "received_at": received_at.isoformat(),
+                "available_at": available_at.isoformat(),
+                "response_count": len(raw_orders),
+                "response_canonical_json": response_json,
+                "response_sha256": response_sha256,
+                "next_page_token": None,
+                "terminal": True,
+            }
+            receipt = {
+                "schema_version": "chili.alpaca-paper-open-order-census.v1",
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_sha256": binding_sha256,
+                "query": query,
+                "pages": [page],
+                "terminal_proof": {
+                    "pagination_complete": True,
+                    "reason": "complete_short_page",
+                    "page_count": 1,
+                    "last_response_sha256": response_sha256,
+                    "last_response_count": len(raw_orders),
+                    "last_page_terminal": True,
+                },
+                "inventory_sha256": response_sha256,
+                "exact_order_count": len(raw_orders),
+            }
+            receipt_json, receipt_sha256 = _canonical_evidence(receipt)
+            capability_payload = {
+                "schema_version": "chili.alpaca-paper-bp-census-capability.v1",
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_sha256": binding_sha256,
+                "query_receipt_sha256": receipt_sha256,
+                "inventory_sha256": response_sha256,
+                "available_at": available_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+            capability = issue_alpaca_bp_census_capability(capability_payload)
+            return {
+                "readable": True,
+                "pagination_complete": True,
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_canonical_json": binding_json,
+                "read_binding_sha256": binding_sha256,
+                "query_receipt_canonical_json": receipt_json,
+                "query_receipt_sha256": receipt_sha256,
+                "inventory_canonical_json": response_json,
+                "inventory_sha256": response_sha256,
+                "orders": raw_orders,
+                "requested_at": requested_at,
+                "received_at": received_at,
+                "available_at": available_at,
+                "expires_at": expires_at,
+                "_capture_capability": capability,
+            }
+        except Exception as exc:
+            logger.warning(
+                "[alpaca_spot] exact PAPER open-order census failed: %s",
+                type(exc).__name__,
+            )
+            return {
+                "readable": False,
+                "pagination_complete": False,
+                "reason": "alpaca_paper_open_order_census_unavailable",
+                "error_type": type(exc).__name__,
+            }
+
+    def get_paper_position_census(
+        self,
+        *,
+        read_binding: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return every PAPER US-equity position with exact query evidence.
+
+        Alpaca's ``GET /v2/positions`` is a non-pageable account collection.
+        A successful list response is therefore the complete inventory for the
+        account/client generation.  The method retains the raw model payloads,
+        sorts them by stable provider identity before hashing, and refuses
+        duplicate symbols, missing quantity/average-price truth, or any account
+        or asset-class drift.  It never treats a failed read as a flat account.
+        """
+
+        try:
+            _require_paper_posture()
+            if not _paper():
+                raise RuntimeError("Alpaca position census is not PAPER")
+            if (
+                AlpacaSpotAdapter._account_client
+                is not _EXACT_FILL_ACCOUNT_CLIENT_METHOD
+                or AlpacaSpotAdapter._exact_fill_reader_connection_generation
+                is not _EXACT_FILL_CONNECTION_GENERATION_METHOD
+                or AlpacaSpotAdapter.get_paper_position_census
+                is not _EXACT_PAPER_POSITION_CENSUS_METHOD
+            ):
+                raise RuntimeError("Alpaca position census method identity changed")
+            if not isinstance(read_binding, Mapping):
+                raise RuntimeError("Alpaca position census binding is missing")
+            binding_json, binding_sha256 = _canonical_evidence(dict(read_binding))
+            client = AlpacaSpotAdapter._account_client(self)
+            connection_generation = (
+                AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                    self, client
+                )
+            )
+            with _clients_lock:
+                account_id = str(
+                    _clients.get("trading:observed_account_id") or ""
+                ).strip()
+            if not account_id or account_id != self._bound_account_id:
+                raise RuntimeError("Alpaca position census account is unbound")
+
+            query = {
+                "resource": "account_positions",
+                "asset_class": "us_equity",
+                "pagination": "not_applicable",
+            }
+            query_json, query_sha256 = _canonical_evidence(query)
+            requested_at = _now()
+            positions = client.get_all_positions()
+            received_at = _now()
+            if not isinstance(positions, list):
+                raise RuntimeError("Alpaca position census response is malformed")
+            raw_positions: list[dict[str, Any]] = []
+            seen_symbols: set[str] = set()
+            for position in positions:
+                payload = position.model_dump(mode="json")
+                if not isinstance(payload, dict):
+                    raise RuntimeError("Alpaca position payload is malformed")
+                symbol = str(payload.get("symbol") or "").strip().upper()
+                if not symbol or symbol in seen_symbols:
+                    raise RuntimeError("Alpaca position identity is ambiguous")
+                seen_symbols.add(symbol)
+                payload["symbol"] = symbol
+                native_account_id = str(payload.get("account_id") or "").strip()
+                if native_account_id and native_account_id != account_id:
+                    raise RuntimeError("Alpaca position account identity mismatch")
+                if str(payload.get("asset_class") or "").strip().lower() != (
+                    "us_equity"
+                ):
+                    raise RuntimeError(
+                        "Alpaca position census contains a non-US-equity position"
+                    )
+                quantity = _decimal_echo(payload.get("qty"))
+                average = _decimal_echo(payload.get("avg_entry_price"))
+                if (
+                    quantity is None
+                    or Decimal(quantity) == 0
+                    or average is None
+                    or Decimal(average) <= 0
+                ):
+                    raise RuntimeError(
+                        "Alpaca position quantity or average price is unavailable"
+                    )
+                raw_positions.append(payload)
+            raw_positions.sort(
+                key=lambda row: (
+                    str(row.get("symbol") or ""),
+                    str(row.get("asset_id") or ""),
+                )
+            )
+            response_json, response_sha256 = _canonical_evidence(raw_positions)
+            available_at = _now()
+            if not requested_at <= received_at <= available_at:
+                raise RuntimeError("Alpaca position census clocks are not causal")
+            expires_at = available_at + timedelta(
+                seconds=_FILL_READER_CAPABILITY_TTL_SECONDS
+            )
+            page = {
+                "page_index": 0,
+                "request_page_token": None,
+                "request_canonical_json": query_json,
+                "request_sha256": query_sha256,
+                "requested_at": requested_at.isoformat(),
+                "received_at": received_at.isoformat(),
+                "available_at": available_at.isoformat(),
+                "response_count": len(raw_positions),
+                "response_canonical_json": response_json,
+                "response_sha256": response_sha256,
+                "next_page_token": None,
+                "terminal": True,
+            }
+            receipt = {
+                "schema_version": "chili.alpaca-paper-position-census.v1",
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_sha256": binding_sha256,
+                "query": query,
+                "pages": [page],
+                "terminal_proof": {
+                    "pagination_complete": True,
+                    "reason": "complete_non_pageable_account_positions",
+                    "page_count": 1,
+                    "last_response_sha256": response_sha256,
+                    "last_response_count": len(raw_positions),
+                    "last_page_terminal": True,
+                },
+                "inventory_sha256": response_sha256,
+                "exact_position_count": len(raw_positions),
+            }
+            receipt_json, receipt_sha256 = _canonical_evidence(receipt)
+            return {
+                "readable": True,
+                "pagination_complete": True,
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_canonical_json": binding_json,
+                "read_binding_sha256": binding_sha256,
+                "query_receipt_canonical_json": receipt_json,
+                "query_receipt_sha256": receipt_sha256,
+                "inventory_canonical_json": response_json,
+                "inventory_sha256": response_sha256,
+                "positions": raw_positions,
+                "requested_at": requested_at,
+                "received_at": received_at,
+                "available_at": available_at,
+                "expires_at": expires_at,
+            }
+        except Exception as exc:
+            logger.warning(
+                "[alpaca_spot] exact PAPER position census failed: %s",
+                type(exc).__name__,
+            )
+            return {
+                "readable": False,
+                "pagination_complete": False,
+                "reason": "alpaca_paper_position_census_unavailable",
+                "error_type": type(exc).__name__,
+            }
+
     def get_fills(self, *, product_id: Optional[str] = None, order_id: Optional[str] = None, limit: int = 50):
         # Alpaca exposes fills via account activities; the runner reads avg_fill_price off the
         # order itself, so a thin best-effort implementation is sufficient for v1.
@@ -969,6 +1696,303 @@ class AlpacaSpotAdapter:
         except Exception as exc:
             logger.debug("[alpaca_spot] get_fills failed: %s", exc)
             return [], _fresh(5.0)
+
+    def get_paper_fill_activity_batch(
+        self,
+        order_id: str,
+        *,
+        read_binding: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return a pagination-complete PAPER activity observation or fail closed.
+
+        ``alpaca-py`` 0.43 does not expose the account-activities endpoint on
+        ``TradingClient``.  Its authenticated request seam does, so this uses
+        that same pinned PAPER client and paginates the official v2 endpoint.
+        The response preserves the raw provider activity and exact order JSON;
+        no average-price fill is synthesized from the order projection. A
+        terminal short page proves only pagination completion for this query;
+        an empty exact-order inventory is never treated as fill absence.
+
+        Alpaca's PAPER specification explicitly excludes regulatory fees and
+        this adapter is equity-only.  Each activity therefore carries a
+        content-addressable zero-fee simulator-contract receipt.  This is
+        scoped to ``paper=True`` and is never reusable by a live account.
+        """
+
+        oid = str(order_id or "").strip()
+        if not oid:
+            return {
+                "readable": False,
+                "pagination_complete": False,
+                "reason": "missing_order_id",
+            }
+        try:
+            _require_paper_posture()
+            if not _paper():
+                raise RuntimeError("Alpaca fill reader is not in PAPER posture")
+            if (
+                AlpacaSpotAdapter._account_client
+                is not _EXACT_FILL_ACCOUNT_CLIENT_METHOD
+                or AlpacaSpotAdapter._exact_fill_reader_connection_generation
+                is not _EXACT_FILL_CONNECTION_GENERATION_METHOD
+            ):
+                raise RuntimeError("Alpaca fill reader method identity changed")
+            if not isinstance(read_binding, Mapping):
+                raise RuntimeError("Alpaca fill reader cycle binding is missing")
+            read_binding_json, read_binding_sha256 = _canonical_evidence(
+                dict(read_binding)
+            )
+            # Exact class dispatch prevents an instance monkeypatch from
+            # replacing either authenticated-client acquisition or generation
+            # binding while still receiving a valid read capability.
+            client = AlpacaSpotAdapter._account_client(self)
+            connection_generation = (
+                AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                    self, client
+                )
+            )
+            with _clients_lock:
+                observed_account_id = str(
+                    _clients.get("trading:observed_account_id") or ""
+                ).strip()
+            if not observed_account_id or observed_account_id != self._bound_account_id:
+                raise RuntimeError("Alpaca PAPER account identity is unavailable")
+
+            order = client.get_order_by_id(oid)
+            provider_order = order.model_dump(mode="json")
+            if str(provider_order.get("id") or "").strip() != oid:
+                raise RuntimeError("Alpaca activity order identity changed")
+            # The zero-fee authority is deliberately exact: it is not valid for
+            # crypto, options, a generic "equity" alias, or a live account.
+            if str(provider_order.get("asset_class") or "").strip().lower() != (
+                "us_equity"
+            ):
+                raise RuntimeError("Alpaca PAPER fill authority is US-equity-only")
+            order_account_id = str(provider_order.get("account_id") or "").strip()
+            if order_account_id and order_account_id != observed_account_id:
+                raise RuntimeError("Alpaca PAPER order account identity mismatch")
+            created_at = provider_order.get("created_at")
+            if not isinstance(created_at, str) or len(created_at) < 10:
+                raise RuntimeError("Alpaca order creation date is unavailable")
+            provider_order_json, provider_order_sha256 = _canonical_evidence(
+                provider_order
+            )
+            # Do not constrain this read to the creation date. Protective GTC
+            # orders can fill on a later session. Starting at the creation day's
+            # UTC midnight also retains an immediate fill sharing created_at.
+            query_started_at = _now()
+            activity_after = f"{created_at[:10]}T00:00:00Z"
+            activity_until = query_started_at.isoformat()
+
+            raw_activities: list[dict[str, Any]] = []
+            page_receipts: list[dict[str, Any]] = []
+            page_token: str | None = None
+            page_size = 100
+            max_pages = 100
+            seen_tokens: set[str] = set()
+            terminal_reason: str | None = None
+            for page_index in range(max_pages):
+                request_token = page_token
+                query: dict[str, Any] = {
+                    "activity_types": "FILL",
+                    "after": activity_after,
+                    "until": activity_until,
+                    "direction": "asc",
+                    "page_size": page_size,
+                }
+                if request_token is not None:
+                    query["page_token"] = request_token
+                query_json, query_sha256 = _canonical_evidence(query)
+                page_requested_at = _now()
+                payload = client._request(
+                    "GET",
+                    "/account/activities",
+                    data=query,
+                    api_version="v2",
+                )
+                if not isinstance(payload, list) or any(
+                    not isinstance(item, dict) for item in payload
+                ):
+                    raise RuntimeError("Alpaca activities response is malformed")
+                page_received_at = _now()
+                page_json, page_sha256 = _canonical_evidence(payload)
+                page_available_at = _now()
+                if not (
+                    query_started_at
+                    <= page_requested_at
+                    <= page_received_at
+                    <= page_available_at
+                ):
+                    raise RuntimeError("Alpaca activities page clocks are not causal")
+                raw_activities.extend(payload)
+                next_token: str | None = None
+                terminal = len(payload) < page_size
+                if terminal:
+                    terminal_reason = "pagination_complete_short_page"
+                else:
+                    next_token = str(payload[-1].get("id") or "").strip()
+                    if not next_token or next_token in seen_tokens:
+                        raise RuntimeError(
+                            "Alpaca activities pagination did not advance"
+                        )
+                page_receipts.append(
+                    {
+                        "page_index": page_index,
+                        "request_page_token": request_token,
+                        "request_canonical_json": query_json,
+                        "request_sha256": query_sha256,
+                        "requested_at": page_requested_at.isoformat(),
+                        "received_at": page_received_at.isoformat(),
+                        "available_at": page_available_at.isoformat(),
+                        "response_count": len(payload),
+                        "response_canonical_json": page_json,
+                        "response_sha256": page_sha256,
+                        "next_page_token": next_token,
+                        "terminal": terminal,
+                    }
+                )
+                if terminal:
+                    break
+                seen_tokens.add(str(next_token))
+                page_token = next_token
+            else:
+                raise RuntimeError("Alpaca activities pagination exceeded bound")
+            if terminal_reason != "pagination_complete_short_page" or not page_receipts:
+                raise RuntimeError("Alpaca activities terminal proof is missing")
+
+            received_at = _now()
+            exact = [
+                dict(activity)
+                for activity in raw_activities
+                if str(activity.get("order_id") or "").strip() == oid
+            ]
+            envelopes: list[dict[str, Any]] = []
+            exact_activity_hashes: list[dict[str, str]] = []
+            for activity in exact:
+                # Current TradeActivity includes account_id; require it instead
+                # of injecting the cached account into provider bytes.
+                activity_account_id = str(activity.get("account_id") or "").strip()
+                if activity_account_id and activity_account_id != observed_account_id:
+                    raise RuntimeError("Alpaca activity account identity mismatch")
+                activity_id = str(activity.get("id") or "").strip()
+                if not activity_id:
+                    raise RuntimeError("Alpaca activity identity is unavailable")
+                _activity_json, activity_sha256 = _canonical_evidence(activity)
+                exact_activity_hashes.append(
+                    {
+                        "provider_activity_id": activity_id,
+                        "provider_payload_sha256": activity_sha256,
+                    }
+                )
+                fee_evidence = {
+                    "schema_version": "chili.alpaca-paper-equity-fee-contract.v1",
+                    "provider_activity_id": activity_id,
+                    "provider_order_id": oid,
+                    "fee_usd": "0.0000000000",
+                    "currency": "USD",
+                    "broker_environment": "paper",
+                    "asset_class": "us_equity",
+                    "basis": "alpaca_paper_does_not_account_for_regulatory_fees",
+                    "source": "https://docs.alpaca.markets/us/docs/paper-trading",
+                }
+                envelopes.append(
+                    {
+                        "provider_activity": activity,
+                        "fee_usd": "0.0000000000",
+                        "fee_evidence": fee_evidence,
+                    }
+                )
+            available_at = _now()
+            expires_at = available_at + timedelta(
+                seconds=_FILL_READER_CAPABILITY_TTL_SECONDS
+            )
+            query_receipt = {
+                "schema_version": "chili.alpaca-paper-fill-query-receipt.v1",
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": observed_account_id,
+                "provider_order_id": oid,
+                "provider_order_payload_sha256": provider_order_sha256,
+                "read_binding_sha256": read_binding_sha256,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "method": "GET",
+                "path": "/account/activities",
+                "api_version": "v2",
+                "query_after": activity_after,
+                "query_until": activity_until,
+                "direction": "asc",
+                "page_size": page_size,
+                "max_pages": max_pages,
+                "pages": page_receipts,
+                "terminal_proof": {
+                    "reason": terminal_reason,
+                    "pagination_complete": True,
+                    "scope": "pagination_only_not_fill_absence_or_economic_completeness",
+                    "page_count": len(page_receipts),
+                    "last_request_page_token": page_receipts[-1][
+                        "request_page_token"
+                    ],
+                    "last_response_sha256": page_receipts[-1][
+                        "response_sha256"
+                    ],
+                    "last_response_count": page_receipts[-1]["response_count"],
+                    "last_page_terminal": page_receipts[-1]["terminal"],
+                },
+                "raw_activity_count": len(raw_activities),
+                "exact_activity_count": len(exact),
+                "exact_activity_hashes": exact_activity_hashes,
+            }
+            query_receipt_json, query_receipt_sha256 = _canonical_evidence(
+                query_receipt
+            )
+            authority_payload = {
+                "schema_version": "chili.alpaca-paper-fill-read-capability.v1",
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": observed_account_id,
+                "provider_order_id": oid,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "query_receipt_sha256": query_receipt_sha256,
+                "read_binding_sha256": read_binding_sha256,
+                "available_at": available_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+            capability = issue_alpaca_fill_read_capability(authority_payload)
+            return {
+                "readable": True,
+                "pagination_complete": True,
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": observed_account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "provider_order": json.loads(provider_order_json),
+                "activities": envelopes,
+                "query_after": activity_after,
+                "query_until": activity_until,
+                "received_at": received_at,
+                "available_at": available_at,
+                "expires_at": expires_at,
+                "query_receipt_canonical_json": query_receipt_json,
+                "query_receipt_sha256": query_receipt_sha256,
+                "read_binding_canonical_json": read_binding_json,
+                "read_binding_sha256": read_binding_sha256,
+                "_capture_capability": capability,
+            }
+        except Exception as exc:
+            logger.warning(
+                "[alpaca_spot] exact PAPER fill activity read failed oid=%s: %s",
+                oid,
+                type(exc).__name__,
+            )
+            return {
+                "readable": False,
+                "pagination_complete": False,
+                "reason": "alpaca_paper_fill_activity_unavailable",
+                "error_type": type(exc).__name__,
+            }
 
     def list_positions(self):
         """ALL account positions, normalized to plain dicts (read-only; feeds the orphan
@@ -1040,7 +2064,7 @@ class AlpacaSpotAdapter:
                               time_in_force: Optional[str] = None,
                               asset_class: Any = None, **_ignored) -> dict[str, Any]:
         return self._submit(product_id, side, base_size, client_order_id,
-                            limit_price=limit_price, extended_hours=bool(extended_hours),
+                            limit_price=limit_price, extended_hours=extended_hours,
                             position_intent=position_intent, time_in_force=time_in_force,
                             asset_class=asset_class)
 
@@ -1099,6 +2123,15 @@ class AlpacaSpotAdapter:
                 client_order_id=client_order_id,
                 position_intent=PositionIntent.SELL_TO_CLOSE,
             )
+            AlpacaSpotAdapter._record_order_submission_attempt(
+                self,
+                surface="place_deadman_stop",
+                symbol=_to_symbol(product_id),
+                side="sell",
+                position_intent="sell_to_close",
+                client_order_id=str(client_order_id),
+                request_type="stop",
+            )
             o = self._account_client().submit_order(req)
             return {"ok": True, "order_id": str(getattr(o, "id", "") or ""),
                     "status": str(getattr(getattr(o, "status", None), "value", "") or ""),
@@ -1125,15 +2158,17 @@ class AlpacaSpotAdapter:
             }
 
     def cancel_order_by_id(self, order_id: str) -> bool:
-        """Cancel one resting order by broker id (the dead-man release path).
-        True = cancelled or already gone; False = a real cancel failure."""
+        """Request cancellation of one resting order by broker id.
+
+        ``True`` proves only that Alpaca accepted the SDK call without raising.
+        Every exception is unresolved: text such as ``filled`` or ``not found``
+        is not authoritative order truth and callers must re-read the exact
+        broker/client-order identity before releasing ownership or exposure.
+        """
         try:
             self._account_client().cancel_order_by_id(order_id)
             return True
         except Exception as exc:
-            msg = str(exc).lower()
-            if "not found" in msg or "unable to be cancel" in msg or "filled" in msg:
-                return True  # already gone / already terminal — released either way
             logger.warning("[alpaca_spot] cancel_order_by_id(%s) failed: %s", order_id, exc)
             return False
 
@@ -1226,11 +2261,18 @@ class AlpacaSpotAdapter:
         if intent_key == "buy_to_open":
             instruction_ok = bool(
                 instruction_ok
-                and requested_tif in {"day", "gfd"}
-                # This recertification lane is RTH-only.  A stale premarket
-                # decision must not carry extended-hours eligibility across the
-                # 09:30 boundary and later fill after the broker stop is dormant.
-                and extended_hours is False
+                and limit_price is not None
+                and type(extended_hours) is bool
+                and (
+                    (
+                        extended_hours is True
+                        and requested_tif == "day"
+                    )
+                    or (
+                        extended_hours is False
+                        and requested_tif in {"day", "gtc"}
+                    )
+                )
                 and abs(qty_value - round(qty_value)) <= 1e-9
             )
         fractional_entry = bool(
@@ -1239,7 +2281,14 @@ class AlpacaSpotAdapter:
             and abs(qty_value - round(qty_value)) > 1e-9
         )
         extended_entry = bool(
-            intent_key == "buy_to_open" and extended_hours is not False
+            intent_key == "buy_to_open"
+            and (
+                type(extended_hours) is not bool
+                or (
+                    extended_hours is True
+                    and requested_tif != "day"
+                )
+            )
         )
         if not instruction_ok:
             return {
@@ -1287,6 +2336,20 @@ class AlpacaSpotAdapter:
                     "submit_outcome": "pre_transport_blocked",
                     "pre_submit_blocked": True,
                 }
+        if intent_key == "buy_to_open":
+            expected_account_id = _expected_account_id()
+            if not (
+                _paper()
+                and expected_account_id
+                and self._bound_account_id == expected_account_id
+            ):
+                return {
+                    "ok": False,
+                    "error": "alpaca_paper_account_generation_not_bound",
+                    "client_order_id": client_order_id,
+                    "submit_outcome": "pre_transport_blocked",
+                    "pre_submit_blocked": True,
+                }
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
             from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
@@ -1311,7 +2374,7 @@ class AlpacaSpotAdapter:
                 # Marketable/posting limit. Alpaca rejects extended_hours unless the order
                 # is a LIMIT with DAY tif — so for pre-/after-market (Ross's gap-and-go) we
                 # send DAY + extended_hours=True; the RTH default stays a plain GTC.
-                if extended_hours:
+                if extended_hours is True:
                     req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,
                                             limit_price=_lp, client_order_id=client_order_id,
                                             extended_hours=True, **_intent_kw)
@@ -1357,17 +2420,80 @@ class AlpacaSpotAdapter:
                         "submit_outcome": "pre_transport_blocked",
                         "pre_submit_blocked": True,
                     }
+            AlpacaSpotAdapter._record_order_submission_attempt(
+                self,
+                surface=(
+                    "place_limit_order_gtc"
+                    if limit_price is not None
+                    else "place_market_order"
+                ),
+                symbol=sym,
+                side=side_key,
+                position_intent=intent_key,
+                client_order_id=str(client_order_id),
+                request_type=("limit" if limit_price is not None else "market"),
+            )
             o = self._account_client().submit_order(order_data=req)
-            res = {"ok": True, "order_id": str(getattr(o, "id", "") or ""),
-                   "client_order_id": getattr(o, "client_order_id", None) or client_order_id,
-                   "status": _norm_status(getattr(o, "status", None))}
+            status_echo = _alpaca_status_echo(getattr(o, "status", None))
+            filled_qty = _alpaca_filled_qty(getattr(o, "filled_qty", None))
+            cumulative_fill = _whole_share_fill_or_none(filled_qty)
+            provider_order_id = _text_echo(getattr(o, "id", None))
+            provider_client_order_id = _text_echo(
+                getattr(o, "client_order_id", None)
+            )
+            provider_position_intent = _text_echo(
+                getattr(o, "position_intent", None), lower=True
+            )
+            res = {
+                "ok": True,
+                "order_id": provider_order_id or "",
+                "client_order_id": (
+                    provider_client_order_id or client_order_id
+                ),
+                "status": _norm_status(getattr(o, "status", None)),
+                # Exact broker echoes are separate from normalized runner
+                # status.  Missing or fractional fill truth remains None and
+                # cannot be mistaken for a zero-fill acceptance.
+                "broker_order_status_echo": status_echo,
+                "broker_cumulative_filled_quantity": cumulative_fill,
+                "broker_account_id_echo": _text_echo(
+                    getattr(o, "account_id", None)
+                ),
+                "broker_order_id_echo": provider_order_id,
+                "broker_client_order_id_echo": provider_client_order_id,
+                "broker_symbol_echo": _text_echo(
+                    getattr(o, "symbol", None), upper=True
+                ),
+                "broker_side_echo": _text_echo(
+                    getattr(o, "side", None), lower=True
+                ),
+                "broker_order_type_echo": _order_type_echo(o),
+                "broker_quantity_echo": _decimal_echo(getattr(o, "qty", None)),
+                "broker_limit_price_echo": _decimal_echo(
+                    getattr(o, "limit_price", None)
+                ),
+                "broker_time_in_force_echo": _text_echo(
+                    getattr(o, "time_in_force", None), lower=True
+                ),
+                "broker_extended_hours_echo": (
+                    getattr(o, "extended_hours", None)
+                    if type(getattr(o, "extended_hours", None)) is bool
+                    else None
+                ),
+                "broker_filled_quantity_echo": (
+                    format(filled_qty, "f") if filled_qty is not None else None
+                ),
+                "broker_position_intent_echo": provider_position_intent,
+                "broker_asset_class_echo": _text_echo(
+                    getattr(o, "asset_class", None), lower=True
+                ),
+            }
             # Surface the resolved short intent + the broker's signed position-intent
             # echo so the runner can confirm a short opened/covered as expected.
             if _intent is not None:
                 res["position_intent"] = str(getattr(_intent, "value", _intent))
-                pi_echo = getattr(o, "position_intent", None)
-                if pi_echo is not None:
-                    res["position_intent_echo"] = str(getattr(pi_echo, "value", pi_echo))
+                if provider_position_intent is not None:
+                    res["position_intent_echo"] = provider_position_intent
             return res
         except Exception as exc:
             msg = str(exc)
@@ -1412,6 +2538,7 @@ class AlpacaSpotAdapter:
     def get_account_snapshot(self) -> dict[str, Any]:
         try:
             a = self._account_client().get_account()
+            retrieved_at = _now()
             return {"ok": True,
                     # Stable Alpaca UUID.  This is non-secret and is the durable
                     # execution-generation identity; account_number is intentionally
@@ -1422,12 +2549,33 @@ class AlpacaSpotAdapter:
                     "buying_power": _f(getattr(a, "buying_power", None)),
                     "cash": _f(getattr(a, "cash", None)),
                     "status": str(getattr(getattr(a, "status", None), "value", getattr(a, "status", "")) or ""),
+                    # Operational entry posture is fail-closed downstream: each
+                    # field must be present as a broker-native bool and false.
+                    # Strings/ints are deliberately surfaced as None instead of
+                    # truthiness-coerced into a misleading readiness pass.
+                    "account_blocked": _strict_bool_or_none(
+                        getattr(a, "account_blocked", None)
+                    ),
+                    "trading_blocked": _strict_bool_or_none(
+                        getattr(a, "trading_blocked", None)
+                    ),
+                    "transfers_blocked": _strict_bool_or_none(
+                        getattr(a, "transfers_blocked", None)
+                    ),
+                    "trade_suspended_by_user": _strict_bool_or_none(
+                        getattr(a, "trade_suspended_by_user", None)
+                    ),
                     # Short-lane capability surfacing (SHORT_SIDE_LANE.md P0): the lane must
                     # never arm a short on a cash / no-margin account. multiplier>1 ⇒ margin;
                     # shorting_enabled is the explicit account capability flag.
                     "shorting_enabled": _opt_bool(getattr(a, "shorting_enabled", None)),
                     "multiplier": _f(getattr(a, "multiplier", None)),
-                    "paper": True}
+                    "paper": True,
+                    # Local receive clock for the exact account query.  Alpaca's
+                    # account object has no provider-event timestamp; captured
+                    # paper wraps this with requested/returned clocks and a
+                    # query receipt instead of fabricating one.
+                    "retrieved_at_utc": retrieved_at.isoformat()}
         except Exception as exc:
             logger.debug("[alpaca_spot] get_account_snapshot failed: %s", exc)
             return {"ok": False, "error": str(exc)[:200]}
@@ -1447,3 +2595,28 @@ class AlpacaSpotAdapter:
         except Exception as exc:
             logger.debug("[alpaca_spot] get_market_clock_snapshot failed: %s", exc)
             return {"ok": False, "error": str(exc)[:200]}
+
+
+# One-shot registration pins capability issuance to the exact class method code
+# loaded by this process. Instance/class monkeypatches can return diagnostics,
+# but cannot mint a publication authority token.
+_EXACT_FILL_ACCOUNT_CLIENT_METHOD = AlpacaSpotAdapter._account_client
+_EXACT_FILL_CONNECTION_GENERATION_METHOD = (
+    AlpacaSpotAdapter._exact_fill_reader_connection_generation
+)
+_EXACT_PAPER_CONNECTION_RECEIPT_METHOD = (
+    AlpacaSpotAdapter.get_paper_connection_generation_receipt
+)
+_EXACT_ORDER_SUBMISSION_AUDIT_RECORD_METHOD = (
+    AlpacaSpotAdapter._record_order_submission_attempt
+)
+_EXACT_ORDER_SUBMISSION_AUDIT_SNAPSHOT_METHOD = (
+    AlpacaSpotAdapter.get_order_submission_audit_snapshot
+)
+_EXACT_PAPER_POSITION_CENSUS_METHOD = (
+    AlpacaSpotAdapter.get_paper_position_census
+)
+register_exact_alpaca_fill_reader(AlpacaSpotAdapter.get_paper_fill_activity_batch)
+register_exact_alpaca_bp_census_reader(
+    AlpacaSpotAdapter.get_paper_open_order_census
+)

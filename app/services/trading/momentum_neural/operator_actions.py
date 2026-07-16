@@ -34,6 +34,9 @@ from .alpaca_orphan_claims import (
 )
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import build_session_risk_snapshot, resolve_effective_risk_policy
+from .captured_paper_service_fence import (
+    try_acquire_generic_alpaca_arm_fence,
+)
 from .live_fsm import STATE_QUEUED_LIVE
 from .operator_readiness import (
     blocked_reason_for_session,
@@ -400,18 +403,19 @@ def create_paper_draft_session(
     vb = _viability_brief(row) if row else None
     rs = _readiness_subset(row) if row else None
 
+    ef = normalize_execution_family(execution_family)
     snap = build_session_risk_snapshot(
         policy_full=policy_full,
         evaluation=ev,
         viability_brief=vb,
         readiness_subset=rs,
         extra=None,
+        execution_family=ef,
         db=db,
     )
 
     runner_on = bool(settings.chili_momentum_paper_runner_enabled)
     initial_state = STATE_QUEUED if runner_on else STATE_DRAFT
-    ef = normalize_execution_family(execution_family)
     sess = create_trading_automation_session(
         db,
         user_id=user_id,
@@ -476,6 +480,38 @@ def _lock_live_symbol_arm(db: Session, *, user_id: int, symbol: str) -> bool:
     except Exception:
         _log.debug("[operator_actions] live symbol advisory lock unavailable", exc_info=True)
         return False
+
+
+def _generic_alpaca_arm_process_fence_acquired(
+    db: Session,
+    *,
+    execution_family: str,
+) -> bool:
+    """Exclude generic Alpaca arming while captured PAPER owns the process lane.
+
+    Non-Alpaca families intentionally bypass this exact fence.  Alpaca callers
+    hold the successful transaction advisory lock until their surrounding
+    transaction ends, so a captured service cannot start halfway through an
+    arm/promote mutation.  Any lock/read failure is a fail-closed rejection.
+    """
+
+    if normalize_execution_family(execution_family) not in ALPACA_EXECUTION_FAMILIES:
+        return True
+    return try_acquire_generic_alpaca_arm_fence(
+        db,
+        account_scope="alpaca:paper",
+    ) is True
+
+
+def _captured_paper_service_fence_rejection() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": "captured_paper_service_owns_alpaca_arm_path",
+        "message": (
+            "The dedicated captured Alpaca PAPER service owns arm creation; "
+            "the generic arm path made no change."
+        ),
+    }
 
 
 def _live_symbol_arm_lock_acquired(
@@ -659,8 +695,16 @@ def begin_live_arm(
     symbol: str,
     variant_id: int,
     execution_family: str = "coinbase_spot",
+    expected_guarded_account_scope: str | None = None,
+    expected_guarded_account_identity: str | None = None,
 ) -> dict[str, Any]:
-    """Validate live_eligible + risk policy; create pending arm session + token."""
+    """Validate live eligibility/risk and create a pending arm.
+
+    ``expected_guarded_account_*`` is a consistency fence, never an identity
+    override. Auto-arm supplies the exact account generation whose loss history
+    it just checked; this function independently re-reads/freeze-binds current
+    broker identity and rejects A->B rotation before a claim or session exists.
+    """
     if user_id is None:
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
     from ..portfolio_allocator import build_session_allocation_decision
@@ -674,6 +718,11 @@ def begin_live_arm(
             "error": _quarantine_reason,
             "message": "This Alpaca execution posture is quarantined pending certification.",
         }
+    if not _generic_alpaca_arm_process_fence_acquired(
+        db,
+        execution_family=_ef_norm,
+    ):
+        return _captured_paper_service_fence_rejection()
     if not _live_symbol_arm_lock_acquired(
         db,
         user_id=int(user_id),
@@ -771,6 +820,98 @@ def begin_live_arm(
                 )
                 continue
             snap = row.risk_snapshot_json if isinstance(row.risk_snapshot_json, dict) else {}
+            _expected_identity = str(
+                expected_guarded_account_identity or ""
+            ).strip()
+            _expected_scope = str(
+                expected_guarded_account_scope or ""
+            ).strip().lower()
+            if _ef_norm in ALPACA_EXECUTION_FAMILIES:
+                _dedup_identity = str(snap.get("alpaca_account_id") or "").strip()
+                _dedup_scope = str(
+                    snap.get("alpaca_account_scope") or ""
+                ).strip().lower()
+            else:
+                _dedup_identity = str(
+                    snap.get(NON_ALPACA_ACCOUNT_IDENTITY_KEY) or ""
+                ).strip()
+                _dedup_scope = ""
+            if _expected_scope and _expected_scope != _dedup_scope:
+                return {
+                    "ok": False,
+                    "error": "account_scope_changed_since_loss_guard",
+                    "message": (
+                        "The existing arm belongs to a different guarded account "
+                        "scope; it was not reused."
+                    ),
+                }
+            if _expected_identity and _expected_identity != _dedup_identity:
+                return {
+                    "ok": False,
+                    "error": "account_identity_changed_since_loss_guard",
+                    "message": (
+                        "The existing arm belongs to a different guarded account "
+                        "generation; it was not reused."
+                    ),
+                }
+            if _ef_norm in ALPACA_EXECUTION_FAMILIES:
+                _current_identity, _current_identity_error = (
+                    _certified_alpaca_account_id(_ef_norm)
+                )
+                _current_scope = "alpaca:paper"
+            else:
+                _current_identity, _current_identity_error = (
+                    _certified_non_alpaca_account_identity(_ef_norm)
+                )
+                _current_scope = ""
+            if _current_identity_error is not None or not _current_identity:
+                return {
+                    "ok": False,
+                    "error": str(
+                        _current_identity_error
+                        or "account_identity_unavailable_before_dedup"
+                    ),
+                    "message": (
+                        "The current broker account identity could not be verified; "
+                        "the existing arm was not reused."
+                    ),
+                }
+            if _expected_scope and _expected_scope != _current_scope:
+                return {
+                    "ok": False,
+                    "error": "account_scope_changed_since_loss_guard",
+                    "message": (
+                        "The broker account scope changed after loss-history "
+                        "admission; the existing arm was not reused."
+                    ),
+                }
+            if _expected_identity and _expected_identity != _current_identity:
+                return {
+                    "ok": False,
+                    "error": "account_identity_changed_since_loss_guard",
+                    "message": (
+                        "The broker account generation changed after loss-history "
+                        "admission; the existing arm was not reused."
+                    ),
+                }
+            if _dedup_scope != _current_scope:
+                return {
+                    "ok": False,
+                    "error": "existing_arm_account_scope_mismatch",
+                    "message": (
+                        "The existing arm belongs to a different current broker "
+                        "account scope; it was not reused."
+                    ),
+                }
+            if _dedup_identity != _current_identity:
+                return {
+                    "ok": False,
+                    "error": "existing_arm_account_identity_mismatch",
+                    "message": (
+                        "The existing arm belongs to a different current broker "
+                        "account generation; it was not reused."
+                    ),
+                }
             return {
                 "ok": True,
                 "session_id": int(row.id),
@@ -851,6 +992,34 @@ def begin_live_arm(
             "ok": False,
             "error": _non_alpaca_account_error,
             "message": "The broker account identity could not be frozen safely.",
+        }
+    _expected_identity = str(expected_guarded_account_identity or "").strip()
+    _expected_scope = str(expected_guarded_account_scope or "").strip().lower()
+    _frozen_identity = (
+        _alpaca_account_id
+        if _ef_norm in ALPACA_EXECUTION_FAMILIES
+        else _non_alpaca_account_identity
+    )
+    _frozen_scope = (
+        "alpaca:paper" if _ef_norm in ALPACA_EXECUTION_FAMILIES else None
+    )
+    if _expected_scope and _expected_scope != str(_frozen_scope or "").lower():
+        return {
+            "ok": False,
+            "error": "account_scope_changed_since_loss_guard",
+            "message": (
+                "The broker account scope changed after loss-history admission; "
+                "no arm or broker-action claim was created."
+            ),
+        }
+    if _expected_identity and _expected_identity != str(_frozen_identity or ""):
+        return {
+            "ok": False,
+            "error": "account_identity_changed_since_loss_guard",
+            "message": (
+                "The broker account generation changed after loss-history admission; "
+                "no arm or broker-action claim was created."
+            ),
         }
     if _ef_norm in ALPACA_EXECUTION_FAMILIES:
         _claim = acquire_action_claim(
@@ -1048,6 +1217,11 @@ def confirm_live_arm(
             "error": _quarantine_reason,
             "message": "This Alpaca execution posture is quarantined pending certification.",
         }
+    if not _generic_alpaca_arm_process_fence_acquired(
+        db,
+        execution_family=sess.execution_family,
+    ):
+        return _captured_paper_service_fence_rejection()
 
     if _arm_expired(sess):
         if user_id is None:
@@ -1470,6 +1644,12 @@ def promote_paper_session_to_live_arm(
             "message": "This Alpaca execution posture is quarantined pending certification.",
         }
 
+    if not _generic_alpaca_arm_process_fence_acquired(
+        db,
+        execution_family=ef,
+    ):
+        return _captured_paper_service_fence_rejection()
+
     if not _live_symbol_arm_lock_acquired(
         db,
         user_id=int(user_id),
@@ -1606,6 +1786,7 @@ def promote_paper_session_to_live_arm(
                 "severity": paper_snap.get("severity"),
             },
         },
+        execution_family=ef,
         db=db,
     )
 

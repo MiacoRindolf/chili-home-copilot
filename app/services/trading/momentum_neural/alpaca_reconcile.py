@@ -42,11 +42,13 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import (
+    AdaptiveRiskDecisionPacket,
+    AdaptiveRiskReservationEvent,
     MomentumAutomationOutcome,
     TradingAutomationEvent,
     TradingAutomationSession,
@@ -60,9 +62,24 @@ from .alpaca_orphan_claims import (
     list_unresolved_action_claims,
     persist_orphan_close_request_committed,
     read_action_claim,
+    resolve_action_claim,
     resolve_action_claim_committed,
+    update_action_claim_phase,
     update_action_claim_phase_committed,
 )
+from .adaptive_risk_policy import AdaptiveRiskContractError
+from .adaptive_risk_reservation import (
+    AdaptiveReservationError,
+    AdaptiveRiskReservationStore,
+    DurableOrderLifecycleEvidence,
+    load_adaptive_risk_reservation_request,
+)
+from .adaptive_risk_runtime_contract import (
+    load_and_verify_adaptive_risk_reservation_claim,
+)
+from .alpaca_cycle_settlement import settle_flat_alpaca_paper_cycle
+from .alpaca_fill_activity import capture_verified_alpaca_paper_order_fills
+from .alpaca_paper_identity import alpaca_paper_account_identity_sha256
 from .operator_actions import (
     _TERMINAL_OPERATOR_STATES,
     _alpaca_execution_quarantine_reason,
@@ -82,6 +99,19 @@ _ENTRY_TERMINAL_STATUSES = frozenset({
 # retained audit history is bounded; the per-sweep broker-action cap below limits
 # request pressure without silently abandoning a residual after N failures.
 _HANDOFF_CLOSE_HISTORY_MAX = 8
+_ADAPTIVE_REQUEST_KEY = "adaptive_risk_reservation_request"
+_ADAPTIVE_PACKET_KEY = "adaptive_risk_decision_packet"
+_ADAPTIVE_CLAIM_KEY = "adaptive_risk_reservation_claim"
+_ADAPTIVE_LIFECYCLE_KEY = "adaptive_risk_lifecycle_binding"
+_ADAPTIVE_LIFECYCLE_SCHEMA = "chili.adaptive-risk-alpaca-lifecycle.v1"
+_ADAPTIVE_MARKER_KEYS = frozenset(
+    {
+        _ADAPTIVE_REQUEST_KEY,
+        _ADAPTIVE_PACKET_KEY,
+        _ADAPTIVE_CLAIM_KEY,
+        _ADAPTIVE_LIFECYCLE_KEY,
+    }
+)
 
 # Per-symbol attempt memory (process-local): a stuck symbol (halt, reject loop) is
 # re-attempted at most once per grace window, not every 120s pass — bounds repeat-fire
@@ -501,6 +531,30 @@ def _strict_detached_entry_claim_order(
     )
 
 
+def _alpaca_unresolved_order_lineage(order: Any) -> str | None:
+    """Return the raw Alpaca state that cannot authorize cancel/terminal truth."""
+
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    raw_status = str(raw.get("alpaca_status") or "").strip().lower()
+    normalized = str(getattr(order, "status", "") or "").strip().lower()
+    replaced_by = str(raw.get("replaced_by") or "").strip()
+    if replaced_by or raw_status in {"pending_replace", "replaced"}:
+        return "replacement_lineage_unresolved"
+    if raw_status == "pending_cancel":
+        return "cancel_pending"
+    if raw_status in {
+        "held",
+        "calculated",
+        "suspended",
+        "done_for_day",
+    }:
+        return f"alpaca_{raw_status}_unresolved"
+    if normalized == "pending":
+        return "alpaca_pending_state_unresolved"
+    return None
+
+
 def _signed_broker_position(adapter: Any, symbol: str) -> float | None:
     if not hasattr(adapter, "get_position_quantity"):
         return None
@@ -596,6 +650,638 @@ def _detached_entry_position_authority(
     }, "strict_durable_entry_claim_handoff"
 
 
+def _adaptive_marker_present(metadata: Any) -> bool:
+    """Any adaptive marker upgrades the exact claim to strict semantics."""
+
+    meta = metadata if isinstance(metadata, dict) else {}
+    role_meta = meta.get("role_metadata")
+    role_meta = role_meta if isinstance(role_meta, dict) else {}
+    return any(key in meta or key in role_meta for key in _ADAPTIVE_MARKER_KEYS)
+
+
+def _aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_aware_utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    normalized = _aware_utc(parsed)
+    if normalized is None:
+        raise AdaptiveRiskContractError("adaptive lifecycle clock is missing")
+    return normalized
+
+
+def _adaptive_owner_connection_generation(
+    db: Session,
+    claim: dict[str, Any],
+) -> str | None:
+    """Recompute the live runner's frozen arm generation when its row survives."""
+
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    owner_id = claim.get("owner_session_id") or metadata.get("session_id")
+    try:
+        owner_id = int(owner_id)
+    except (TypeError, ValueError):
+        return None
+    owner = db.get(TradingAutomationSession, owner_id)
+    if owner is None:
+        return None
+    snapshot = owner.risk_snapshot_json
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    marker = snapshot.get("confirmed_arm_generation")
+    account_scope = str(snapshot.get("alpaca_account_scope") or "").strip().lower()
+    account_id = str(snapshot.get("alpaca_account_id") or "").strip()
+    if not (
+        isinstance(marker, dict)
+        and account_scope == "alpaca:paper"
+        and account_id
+        and str(owner.symbol or "").strip().upper()
+        == str(claim.get("symbol") or "").strip().upper()
+    ):
+        return None
+    body = {
+        "account_scope": account_scope,
+        "account_id": account_id,
+        "session_id": owner_id,
+        "marker": marker,
+    }
+    encoded = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "alpaca-arm:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _adaptive_claim_context(
+    db: Session,
+    claim: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Verify one complete adaptive claim without inferring missing state.
+
+    ``None`` means a pure legacy exact claim.  Once any adaptive marker exists,
+    every immutable request/packet/claim field and the durable lifecycle binding
+    is mandatory.  A partial marker therefore raises before any broker mutation.
+    """
+
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if not _adaptive_marker_present(metadata):
+        return None
+    request_payload = metadata.get(_ADAPTIVE_REQUEST_KEY)
+    packet_payload = metadata.get(_ADAPTIVE_PACKET_KEY)
+    reservation_claim_payload = metadata.get(_ADAPTIVE_CLAIM_KEY)
+    binding = metadata.get(_ADAPTIVE_LIFECYCLE_KEY)
+    if not all(
+        isinstance(value, dict)
+        for value in (
+            request_payload,
+            packet_payload,
+            reservation_claim_payload,
+            binding,
+        )
+    ):
+        raise AdaptiveRiskContractError(
+            "adaptive claim request/packet/claim/binding is incomplete"
+        )
+    request = load_adaptive_risk_reservation_request(request_payload)
+    reservation_claim = load_and_verify_adaptive_risk_reservation_claim(
+        packet_payload,
+        reservation_claim_payload,
+    )
+    if binding.get("schema_version") != _ADAPTIVE_LIFECYCLE_SCHEMA:
+        raise AdaptiveRiskContractError("adaptive lifecycle schema mismatch")
+    try:
+        reservation_id = uuid.UUID(str(binding.get("reservation_id") or ""))
+    except (TypeError, ValueError) as exc:
+        raise AdaptiveRiskContractError(
+            "adaptive lifecycle reservation id is invalid"
+        ) from exc
+    connection_generation = str(
+        binding.get("connection_generation") or ""
+    ).strip()
+    expected_account_id = str(
+        getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+    ).strip()
+    try:
+        expected_identity = alpaca_paper_account_identity_sha256(
+            expected_account_id
+        )
+    except (TypeError, ValueError):
+        expected_identity = ""
+    entry_proof = metadata.get("entry_handoff_proof")
+    entry_proof = entry_proof if isinstance(entry_proof, dict) else {}
+    entry_cid = (
+        str(claim.get("client_order_id") or "").strip()
+        if claim.get("action") == "entry"
+        else str(entry_proof.get("entry_client_order_id") or "").strip()
+    )
+    entry_oid = (
+        str(claim.get("broker_order_id") or "").strip()
+        if claim.get("action") == "entry"
+        else str(entry_proof.get("entry_broker_order_id") or "").strip()
+    )
+    order_request = metadata.get("order_request")
+    order_request = order_request if isinstance(order_request, dict) else {}
+    try:
+        frozen_quantity = float(order_request.get("base_size"))
+        frozen_limit = float(order_request.get("limit_price"))
+    except (TypeError, ValueError):
+        frozen_quantity = frozen_limit = math.nan
+    immutable_ok = bool(
+        expected_account_id
+        and connection_generation
+        and request.inputs.execution_surface == "alpaca_paper"
+        and request.inputs.execution_family == "alpaca_spot"
+        and request.inputs.venue == "alpaca"
+        and request.inputs.broker_environment == "paper"
+        and request.account_scope == "alpaca:paper"
+        and request.account_snapshot.account_scope == "alpaca:paper"
+        and request.inputs.symbol == str(claim.get("symbol") or "").strip().upper()
+        and request.inputs.account_identity_sha256 == expected_identity
+        and request.account_snapshot.account_identity_sha256 == expected_identity
+        and reservation_claim.account_identity_sha256 == expected_identity
+        and reservation_claim.symbol == request.inputs.symbol
+        and reservation_claim.claim_id == request.client_order_id
+        and reservation_claim.quantity_shares > 0
+        and str(order_request.get("product_id") or "").strip().upper()
+        == request.inputs.symbol
+        and str(order_request.get("side") or "").strip().lower() == "buy"
+        and str(order_request.get("position_intent") or "").strip().lower()
+        == "buy_to_open"
+        and str(order_request.get("client_order_id") or "").strip()
+        == request.client_order_id
+        and str(order_request.get("alpaca_account_id") or "").strip()
+        == expected_account_id
+        and math.isfinite(frozen_quantity)
+        and int(frozen_quantity) == reservation_claim.quantity_shares
+        and abs(frozen_quantity - reservation_claim.quantity_shares) <= 1e-9
+        and math.isfinite(frozen_limit)
+        and math.isclose(
+            frozen_limit,
+            request.entry_limit_price,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        )
+        and entry_cid == request.client_order_id
+        and entry_oid
+        and str(binding.get("request_sha256") or "") == request.request_sha256
+        and str(binding.get("decision_packet_sha256") or "")
+        == reservation_claim.decision_packet_sha256
+        and str(binding.get("account_scope") or "") == request.account_scope
+        and str(binding.get("account_identity_sha256") or "")
+        == request.inputs.account_identity_sha256
+        and str(binding.get("client_order_id") or "") == request.client_order_id
+    )
+    if not immutable_ok:
+        raise AdaptiveRiskContractError("adaptive lifecycle identity mismatch")
+
+    packet_row = db.get(
+        AdaptiveRiskDecisionPacket,
+        reservation_claim.decision_packet_sha256,
+    )
+    if not (
+        packet_row is not None
+        and packet_row.reservation_request_sha256 == request.request_sha256
+        and packet_row.account_scope == request.account_scope
+        and packet_row.symbol == request.inputs.symbol
+        and packet_row.client_order_id == request.client_order_id
+        and packet_row.account_identity_sha256
+        == request.inputs.account_identity_sha256
+        and int(packet_row.resolved_quantity_shares)
+        == int(reservation_claim.quantity_shares)
+    ):
+        raise AdaptiveRiskContractError(
+            "adaptive immutable decision packet does not match the claim"
+        )
+    bind = db.get_bind()
+    engine = getattr(bind, "engine", bind)
+    store = AdaptiveRiskReservationStore(engine)
+    state = store.read_state(reservation_id, session=db)
+    if not (
+        state.decision_packet_sha256 == reservation_claim.decision_packet_sha256
+        and state.account_scope == request.account_scope
+        and state.symbol == request.inputs.symbol
+        and int(state.planned_quantity_shares)
+        == int(reservation_claim.quantity_shares)
+    ):
+        raise AdaptiveRiskContractError("adaptive reservation projection mismatch")
+    if state.broker_order_id is not None and state.broker_order_id != entry_oid:
+        raise AdaptiveRiskContractError("adaptive entry broker order id mismatch")
+    if state.broker_connection_generation is not None:
+        if state.broker_connection_generation != connection_generation:
+            raise AdaptiveRiskContractError(
+                "adaptive broker connection generation mismatch"
+            )
+    else:
+        owner_generation = _adaptive_owner_connection_generation(db, claim)
+        if owner_generation != connection_generation:
+            raise AdaptiveRiskContractError(
+                "adaptive unbound connection generation is unverifiable"
+            )
+    return {
+        "request": request,
+        "reservation_claim": reservation_claim,
+        "reservation_id": reservation_id,
+        "connection_generation": connection_generation,
+        "entry_broker_order_id": entry_oid,
+        "binding": dict(binding),
+        "store": store,
+        "state": state,
+    }
+
+
+def _adaptive_claim_preflight(
+    db: Session,
+    claim: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Classify a claim before any broker read/cancel/submit boundary."""
+
+    metadata = claim.get("metadata")
+    if not _adaptive_marker_present(metadata):
+        return "legacy", None
+    try:
+        readable, locked = read_action_claim(
+            db,
+            symbol=claim["symbol"],
+            account_scope=claim["account_scope"],
+            for_update=True,
+        )
+        if not (
+            readable
+            and locked is not None
+            and locked.get("claim_token") == claim.get("claim_token")
+            and locked.get("action") == claim.get("action")
+        ):
+            raise AdaptiveRiskContractError("adaptive claim changed before preflight")
+        _adaptive_claim_context(db, locked)
+        db.rollback()
+        return "adaptive", None
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return "invalid", type(exc).__name__
+
+
+def _load_persisted_lifecycle_evidence(
+    db: Session,
+    *,
+    reservation_id: uuid.UUID,
+    provider_event_id: str,
+) -> DurableOrderLifecycleEvidence | None:
+    event = db.scalar(
+        select(AdaptiveRiskReservationEvent)
+        .where(AdaptiveRiskReservationEvent.reservation_id == reservation_id)
+        .where(AdaptiveRiskReservationEvent.broker_event_id == provider_event_id)
+    )
+    if event is None:
+        return None
+    details = dict((event.payload_json or {}).get("details") or {})
+    raw = details.get("lifecycle_evidence")
+    if not isinstance(raw, dict):
+        raise AdaptiveRiskContractError(
+            "persisted adaptive lifecycle evidence is missing"
+        )
+    values = dict(raw)
+    expected_sha = str(values.pop("evidence_sha256", "") or "")
+    values["observed_at"] = _parse_aware_utc(values.get("observed_at"))
+    values["available_at"] = _parse_aware_utc(values.get("available_at"))
+    evidence = DurableOrderLifecycleEvidence(**values)
+    if evidence.evidence_sha256 != expected_sha:
+        raise AdaptiveRiskContractError(
+            "persisted adaptive lifecycle evidence hash mismatch"
+        )
+    return evidence
+
+
+def _adaptive_lifecycle_evidence(
+    db: Session,
+    *,
+    context: dict[str, Any],
+    body: dict[str, Any],
+    event_kind: str,
+    order_status: str,
+    cumulative_fill: int,
+    broker_order_id: str,
+    source_table: str,
+    provider_prefix: str,
+    remaining_open_quantity: int | None = None,
+) -> DurableOrderLifecycleEvidence:
+    content = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+        default=str,
+    ).encode("utf-8")
+    content_sha = hashlib.sha256(content).hexdigest()
+    provider_event_id = f"{provider_prefix}:{event_kind}:{content_sha}"
+    existing = _load_persisted_lifecycle_evidence(
+        db,
+        reservation_id=context["reservation_id"],
+        provider_event_id=provider_event_id,
+    )
+    if existing is not None:
+        return existing
+    state = context["state"]
+    now = datetime.now(timezone.utc)
+    floors = [
+        value
+        for value in (
+            _aware_utc(state.last_broker_observed_at),
+            _aware_utc(state.last_broker_available_at),
+        )
+        if value is not None
+    ]
+    clock = max([now, *floors])
+    request = context["request"]
+    return DurableOrderLifecycleEvidence(
+        event_kind=event_kind,
+        durability_kind="authoritative_broker_event",
+        provider_event_id=provider_event_id,
+        broker_source="alpaca",
+        connection_generation=context["connection_generation"],
+        account_scope=request.account_scope,
+        execution_family="alpaca_spot",
+        broker_environment="paper",
+        account_identity_sha256=request.inputs.account_identity_sha256,
+        client_order_id=request.client_order_id,
+        broker_order_id=broker_order_id,
+        observed_at=clock,
+        available_at=clock,
+        event_content_sha256=content_sha,
+        cumulative_filled_quantity=int(cumulative_fill),
+        remaining_open_quantity=remaining_open_quantity,
+        source_record_table=source_table,
+        source_record_id=f"{broker_order_id}:{content_sha}",
+        order_status=order_status,
+    )
+
+
+def _adaptive_integer_quantity(value: Any, field: str) -> int:
+    quantity = float(value or 0.0)
+    rounded = int(round(quantity))
+    if (
+        not math.isfinite(quantity)
+        or quantity < 0.0
+        or abs(quantity - rounded) > 1e-8
+    ):
+        raise AdaptiveRiskContractError(
+            f"adaptive Alpaca {field} must be a non-negative integer"
+        )
+    return rounded
+
+
+def _adaptive_order_evidence(
+    db: Session,
+    *,
+    context: dict[str, Any],
+    order: Any,
+    event_kind: str,
+    order_status: str,
+    cumulative_fill: int,
+) -> DurableOrderLifecycleEvidence:
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    oid = str(getattr(order, "order_id", "") or "").strip()
+    body = {
+        "schema_version": "chili.alpaca-rest-order-observation.v2",
+        "adaptive_reservation_id": str(context["reservation_id"]),
+        "adaptive_request_sha256": context["request"].request_sha256,
+        "event_kind": event_kind,
+        "order_id": oid,
+        "client_order_id": str(getattr(order, "client_order_id", "") or ""),
+        "symbol": str(getattr(order, "product_id", "") or "").strip().upper(),
+        "side": str(getattr(order, "side", "") or "").strip().lower(),
+        "status": str(getattr(order, "status", "") or "").strip().lower(),
+        "alpaca_status": str(raw.get("alpaca_status") or "").strip().lower(),
+        "filled_size": int(cumulative_fill),
+        "average_filled_price": getattr(order, "average_filled_price", None),
+        "qty": raw.get("qty"),
+        "created_time": getattr(order, "created_time", None),
+        "submitted_at": raw.get("submitted_at"),
+        "filled_at": raw.get("filled_at"),
+    }
+    return _adaptive_lifecycle_evidence(
+        db,
+        context=context,
+        body=body,
+        event_kind=event_kind,
+        order_status=order_status,
+        cumulative_fill=cumulative_fill,
+        broker_order_id=oid,
+        source_table="alpaca_rest_order_observations",
+        provider_prefix="alpaca-rest-reconcile",
+    )
+
+
+def _adaptive_position_evidence(
+    db: Session,
+    *,
+    context: dict[str, Any],
+    close_order: Any,
+    remaining: int,
+) -> DurableOrderLifecycleEvidence:
+    state = context["state"]
+    entry_oid = str(state.broker_order_id or context["entry_broker_order_id"])
+    body = {
+        "schema_version": "chili.alpaca-rest-position-observation.v2",
+        "adaptive_reservation_id": str(context["reservation_id"]),
+        "adaptive_request_sha256": context["request"].request_sha256,
+        "symbol": context["request"].inputs.symbol,
+        "entry_broker_order_id": entry_oid,
+        "entry_cumulative_filled_quantity": int(
+            state.cumulative_filled_quantity_shares
+        ),
+        "remaining_quantity": int(remaining),
+        "exact_close_order_id": str(
+            getattr(close_order, "order_id", "") or ""
+        ),
+        "exact_close_client_order_id": str(
+            getattr(close_order, "client_order_id", "") or ""
+        ),
+        "exact_close_status": str(
+            getattr(close_order, "status", "") or ""
+        ).strip().lower(),
+        "exact_close_filled_size": getattr(close_order, "filled_size", None),
+    }
+    return _adaptive_lifecycle_evidence(
+        db,
+        context=context,
+        body=body,
+        event_kind="position_flat" if remaining == 0 else "position_reduced",
+        order_status="flat" if remaining == 0 else "partially_exited",
+        cumulative_fill=int(state.cumulative_filled_quantity_shares),
+        remaining_open_quantity=int(remaining),
+        broker_order_id=entry_oid,
+        source_table="alpaca_rest_position_observations",
+        provider_prefix="alpaca-position-reconcile",
+    )
+
+
+def _capture_adaptive_reconcile_order_fills(
+    db: Session,
+    adapter: Any,
+    *,
+    context: dict[str, Any],
+    provider_order_id: str,
+    expected_exit_client_order_id: str | None = None,
+) -> None:
+    """Append an exact PAPER fill batch in the reconciler's transaction."""
+
+    captured = capture_verified_alpaca_paper_order_fills(
+        db,
+        adapter=adapter,
+        reservation_id=context["reservation_id"],
+        provider_order_id=str(provider_order_id or "").strip(),
+        expected_exit_client_order_id=expected_exit_client_order_id,
+    )
+    if captured.observed_count <= 0:
+        raise AdaptiveRiskContractError(
+            "adaptive reconcile order has no exact fill activity"
+        )
+
+
+def _apply_adaptive_entry_order_lifecycle(
+    db: Session,
+    *,
+    context: dict[str, Any],
+    order: Any,
+) -> Any:
+    """Apply exact cumulative fill and terminal remainder in the caller tx."""
+
+    request = context["request"]
+    oid = str(getattr(order, "order_id", "") or "").strip()
+    cid = str(getattr(order, "client_order_id", "") or "").strip()
+    symbol = str(getattr(order, "product_id", "") or "").strip().upper()
+    side = str(getattr(order, "side", "") or "").strip().lower()
+    if not (
+        oid == context["entry_broker_order_id"]
+        and cid == request.client_order_id
+        and symbol == request.inputs.symbol
+        and side == "buy"
+    ):
+        raise AdaptiveRiskContractError(
+            "adaptive detached entry order identity mismatch"
+        )
+    state = context["state"]
+    cumulative = _adaptive_integer_quantity(
+        getattr(order, "filled_size", 0.0),
+        "cumulative fill",
+    )
+    status = str(getattr(order, "status", "") or "").strip().lower()
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    raw_status = str(raw.get("alpaca_status") or status).strip().lower()
+    if cumulative < int(state.cumulative_filled_quantity_shares):
+        raise AdaptiveRiskContractError(
+            "adaptive Alpaca cumulative fill regressed below durable truth"
+        )
+    if cumulative > int(state.cumulative_filled_quantity_shares):
+        state = context["store"].apply_cumulative_fill(
+            context["reservation_id"],
+            evidence=_adaptive_order_evidence(
+                db,
+                context={**context, "state": state},
+                order=order,
+                event_kind="cumulative_fill",
+                order_status=(
+                    "filled"
+                    if status == "filled" or raw_status == "filled"
+                    else "partially_filled"
+                ),
+                cumulative_fill=cumulative,
+            ),
+            session=db,
+        )
+    terminal_partial = cumulative > 0 and status in {
+        "canceled",
+        "cancelled",
+        "expired",
+    }
+    terminal_zero = cumulative == 0 and status in {
+        "rejected",
+        "canceled",
+        "cancelled",
+        "expired",
+    }
+    if terminal_partial and float(state.pending_structural_risk_usd) > 0.0:
+        state = context["store"].finalize_filled_entry_remainder(
+            context["reservation_id"],
+            evidence=_adaptive_order_evidence(
+                db,
+                context={**context, "state": state},
+                order=order,
+                event_kind="filled_entry_terminal",
+                order_status="canceled" if status == "cancelled" else status,
+                cumulative_fill=cumulative,
+            ),
+            session=db,
+        )
+    elif terminal_zero and state.state != "released":
+        release_reason = {
+            "rejected": "broker_rejected",
+            "canceled": "broker_canceled",
+            "cancelled": "broker_canceled",
+            "expired": "broker_expired",
+        }[status]
+        state = context["store"].release_zero_fill(
+            context["reservation_id"],
+            reason=release_reason,
+            evidence=_adaptive_order_evidence(
+                db,
+                context={**context, "state": state},
+                order=order,
+                event_kind="terminal_zero_fill",
+                order_status="canceled" if status == "cancelled" else status,
+                cumulative_fill=0,
+            ),
+            session=db,
+        )
+    elif status == "filled" or raw_status == "filled":
+        if cumulative != int(state.planned_quantity_shares):
+            raise AdaptiveRiskContractError(
+                "terminal filled order differs from adaptive planned quantity"
+            )
+    elif status not in {"canceled", "cancelled", "expired", "rejected"}:
+        raise AdaptiveRiskContractError(
+            "adaptive detached entry terminal status is unsupported"
+        )
+    context["state"] = state
+    return state
+
+
+def _refreshed_adaptive_binding(context: dict[str, Any], state: Any) -> dict[str, Any]:
+    binding = dict(context["binding"])
+    binding.update(
+        {
+            "schema_version": _ADAPTIVE_LIFECYCLE_SCHEMA,
+            "state": state.state,
+            "planned_quantity_shares": int(state.planned_quantity_shares),
+            "cumulative_filled_quantity_shares": int(
+                state.cumulative_filled_quantity_shares
+            ),
+            "open_quantity_shares": int(state.open_quantity_shares),
+            "broker_order_id": state.broker_order_id,
+            "opportunity_status": state.opportunity_status,
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return binding
+
+
 def _handoff_detached_entry_claim(
     db: Session,
     *,
@@ -625,6 +1311,7 @@ def _handoff_detached_entry_claim(
         or locked.get("action") != "entry"
         or locked.get("phase") == RESOLVED
         or locked.get("owner_session_id") != claim.get("owner_session_id")
+        or locked.get("updated_at") != claim.get("updated_at")
     ):
         db.rollback()
         return {"ok": False, "reason": "entry_claim_changed"}
@@ -677,6 +1364,35 @@ def _handoff_detached_entry_claim(
         db.rollback()
         return {"ok": False, "reason": "broker_position_zero"}
 
+    adaptive_binding = None
+    try:
+        adaptive_context = _adaptive_claim_context(db, locked)
+        if adaptive_context is not None:
+            adaptive_state = _apply_adaptive_entry_order_lifecycle(
+                db,
+                context=adaptive_context,
+                order=order,
+            )
+            close_quantity = _adaptive_integer_quantity(
+                close_qty,
+                "handoff position quantity",
+            )
+            if not (
+                adaptive_state.state == "filled"
+                and float(adaptive_state.pending_structural_risk_usd) == 0.0
+                and int(adaptive_state.open_quantity_shares) == close_quantity
+            ):
+                raise AdaptiveRiskContractError(
+                    "adaptive handoff does not own the exact open quantity"
+                )
+            adaptive_binding = _refreshed_adaptive_binding(
+                adaptive_context,
+                adaptive_state,
+            )
+    except (AdaptiveRiskContractError, AdaptiveReservationError, TypeError, ValueError):
+        db.rollback()
+        return {"ok": False, "reason": "adaptive_entry_lifecycle_conflict"}
+
     old_cid = str(locked.get("client_order_id") or "")
     entry_oid = str(getattr(order, "order_id", "") or "")
     digest = hashlib.sha256(
@@ -706,6 +1422,8 @@ def _handoff_detached_entry_claim(
             "handed_off_at_utc": datetime.now(timezone.utc).isoformat(),
         },
     }
+    if adaptive_binding is not None:
+        new_metadata[_ADAPTIVE_LIFECYCLE_KEY] = adaptive_binding
     now = datetime.now(timezone.utc)
     updated = db.execute(text(
         "UPDATE broker_symbol_action_claims SET "
@@ -742,6 +1460,180 @@ def _handoff_detached_entry_claim(
         db.rollback()
         return {"ok": False, "reason": "entry_claim_handoff_commit_failed"}
     return {"ok": True, "claim": handed, "owner_state": owner_state}
+
+
+def _resolve_detached_adaptive_entry_flat(
+    db: Session,
+    *,
+    adapter: Any,
+    claim: dict[str, Any],
+    order: Any,
+    owner_state: str,
+) -> dict[str, Any]:
+    """Atomically map exact entry+flat truth into both durable ledgers."""
+
+    try:
+        locked_owner_state = _detached_entry_owner_state(
+            db,
+            claim,
+            for_update=True,
+        )
+        if locked_owner_state not in {"terminal", "missing"}:
+            raise AdaptiveRiskContractError(
+                "adaptive detached entry owner is no longer terminal"
+            )
+        readable, locked = read_action_claim(
+            db,
+            symbol=claim["symbol"],
+            account_scope=claim["account_scope"],
+            for_update=True,
+        )
+        if not (
+            readable
+            and locked is not None
+            and locked.get("claim_token") == claim.get("claim_token")
+            and locked.get("action") == "entry"
+            and locked.get("phase") != RESOLVED
+            and locked.get("updated_at") == claim.get("updated_at")
+            and locked.get("owner_session_id") == claim.get("owner_session_id")
+            and _entry_claim_order_matches(order, locked)
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive detached entry claim changed"
+            )
+        metadata = locked.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        owner_transport = metadata.get("owner_transport")
+        if (
+            isinstance(owner_transport, dict)
+            and str(owner_transport.get("phase") or "").strip().lower()
+            != RESOLVED
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive detached owner transport remains unresolved"
+            )
+        context = _adaptive_claim_context(db, locked)
+        if context is None:
+            raise AdaptiveRiskContractError(
+                "adaptive detached resolver received a legacy claim"
+            )
+        state = _apply_adaptive_entry_order_lifecycle(
+            db,
+            context=context,
+            order=order,
+        )
+        if state.state == "exposure_quarantined":
+            if not update_action_claim_phase(
+                db,
+                symbol=locked["symbol"],
+                claim_token=locked["claim_token"],
+                phase=locked["phase"],
+                client_order_id=locked.get("client_order_id"),
+                broker_order_id=str(getattr(order, "order_id", "") or ""),
+                metadata={
+                    "adaptive_late_fill_contradiction": True,
+                    "adaptive_reconciliation_required": True,
+                    _ADAPTIVE_LIFECYCLE_KEY: _refreshed_adaptive_binding(
+                        context,
+                        state,
+                    ),
+                },
+                account_scope=locked["account_scope"],
+            ):
+                raise AdaptiveRiskContractError(
+                    "adaptive detached quarantine audit failed"
+                )
+            db.commit()
+            return {
+                "ok": False,
+                "reason": "adaptive_late_fill_exposure_quarantined",
+                "quarantined": True,
+                "state": state,
+            }
+        filled = _adaptive_integer_quantity(
+            getattr(order, "filled_size", 0.0),
+            "cumulative fill",
+        )
+        if filled > 0:
+            _capture_adaptive_reconcile_order_fills(
+                db,
+                adapter,
+                context=context,
+                provider_order_id=context["entry_broker_order_id"],
+            )
+        if filled > 0 and state.state != "flat_pending_settlement":
+            if not (
+                state.state == "filled"
+                and float(state.pending_structural_risk_usd) == 0.0
+                and int(state.open_quantity_shares) > 0
+            ):
+                raise AdaptiveRiskContractError(
+                    "adaptive entry cannot close before terminal remainder"
+                )
+            context["state"] = state
+            state = context["store"].close_open_exposure(
+                context["reservation_id"],
+                evidence=_adaptive_position_evidence(
+                    db,
+                    context=context,
+                    close_order=order,
+                    remaining=0,
+                ),
+                reason="detached_terminal_owner_broker_flat",
+                session=db,
+            )
+        if filled == 0 and state.state != "released":
+            raise AdaptiveRiskContractError(
+                "adaptive zero-fill entry was not safely released"
+            )
+        if filled > 0 and state.state != "flat_pending_settlement":
+            raise AdaptiveRiskContractError(
+                "adaptive filled entry did not retain flat settlement debt"
+            )
+        status = str(getattr(order, "status", "") or "").strip().lower()
+        resolved = resolve_action_claim(
+            db,
+            symbol=locked["symbol"],
+            claim_token=locked["claim_token"],
+            client_order_id=locked.get("client_order_id"),
+            broker_order_id=str(getattr(order, "order_id", "") or ""),
+            broker_order_status=status,
+            broker_position_zero=True,
+            zero_fill_terminal=bool(filled == 0),
+            terminal_owner_broker_flat=bool(filled > 0),
+            metadata={
+                "reason": "detached_terminal_entry_broker_flat",
+                "owner_state": owner_state,
+                "filled_size": filled,
+                "cycle_settlement_pending": bool(filled > 0),
+                "cycle_settlement_pending_reason": (
+                    "owned_exit_fill_activity_unavailable"
+                    if filled > 0
+                    else None
+                ),
+                _ADAPTIVE_LIFECYCLE_KEY: _refreshed_adaptive_binding(
+                    context,
+                    state,
+                ),
+            },
+            account_scope=locked["account_scope"],
+        )
+        if not resolved:
+            raise AdaptiveRiskContractError(
+                "adaptive detached exact claim resolution failed"
+            )
+        db.commit()
+        return {"ok": True, "state": state}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "reason": "adaptive_detached_flat_lifecycle_conflict",
+            "error_type": type(exc).__name__,
+        }
 
 
 def _rotate_orphan_claim_for_residual(
@@ -1258,12 +2150,269 @@ def _broker_position_is_zero(adapter: Any, symbol: str) -> bool:
         return False
 
 
+def _advance_adaptive_orphan_claim_from_order(
+    db: Session,
+    adapter: Any,
+    claim: dict[str, Any],
+    order: Any,
+    *,
+    signed_position_qty: float | None = None,
+) -> dict[str, Any]:
+    """Atomically bind an exact close and update adaptive open exposure."""
+
+    if signed_position_qty is None:
+        signed_position_qty = _signed_broker_position(adapter, claim["symbol"])
+    if signed_position_qty is None:
+        return {"ok": False, "reason": "broker_position_unreadable"}
+    try:
+        remaining = _adaptive_integer_quantity(
+            abs(float(signed_position_qty)),
+            "remaining broker position",
+        )
+        readable, locked = read_action_claim(
+            db,
+            symbol=claim["symbol"],
+            account_scope=claim["account_scope"],
+            for_update=True,
+        )
+        if not (
+            readable
+            and locked is not None
+            and locked.get("claim_token") == claim.get("claim_token")
+            and locked.get("action") == "orphan_flatten"
+            and locked.get("phase") != RESOLVED
+            and _orphan_claim_order_matches(order, locked)
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive orphan exact close claim changed"
+            )
+        context = _adaptive_claim_context(db, locked)
+        if context is None:
+            raise AdaptiveRiskContractError(
+                "adaptive orphan updater received a legacy claim"
+            )
+        try:
+            entry_order, _entry_meta = adapter.get_order(
+                context["entry_broker_order_id"]
+            )
+        except Exception as exc:
+            raise AdaptiveRiskContractError(
+                "adaptive orphan entry order is unreadable"
+            ) from exc
+        if entry_order is None:
+            raise AdaptiveRiskContractError(
+                "adaptive orphan exact entry order is missing"
+            )
+        state = _apply_adaptive_entry_order_lifecycle(
+            db,
+            context=context,
+            order=entry_order,
+        )
+        context["state"] = state
+        if state.state == "exposure_quarantined":
+            if not update_action_claim_phase(
+                db,
+                symbol=locked["symbol"],
+                claim_token=locked["claim_token"],
+                phase=SUBMITTED,
+                client_order_id=str(
+                    getattr(order, "client_order_id", "") or ""
+                ),
+                broker_order_id=str(getattr(order, "order_id", "") or ""),
+                metadata={
+                    "adaptive_late_fill_contradiction": True,
+                    "adaptive_reconciliation_required": True,
+                    _ADAPTIVE_LIFECYCLE_KEY: _refreshed_adaptive_binding(
+                        context,
+                        state,
+                    ),
+                },
+                account_scope=locked["account_scope"],
+            ):
+                raise AdaptiveRiskContractError(
+                    "adaptive quarantine claim audit failed"
+                )
+            db.commit()
+            return {
+                "ok": False,
+                "reason": "adaptive_late_fill_exposure_quarantined",
+                "quarantined": True,
+                "state": state,
+            }
+        if float(state.pending_structural_risk_usd) != 0.0:
+            raise AdaptiveRiskContractError(
+                "adaptive orphan entry remainder is not terminal"
+            )
+        if state.state not in {"filled", "flat_pending_settlement", "closed"}:
+            raise AdaptiveRiskContractError(
+                "adaptive orphan reservation is not filled"
+            )
+        if remaining > int(state.open_quantity_shares):
+            raise AdaptiveRiskContractError(
+                "broker position exceeds adaptive owned open quantity"
+            )
+        oid = str(getattr(order, "order_id", "") or "").strip()
+        cid = str(getattr(order, "client_order_id", "") or "").strip()
+        status = str(getattr(order, "status", "") or "").strip().lower()
+        if not update_action_claim_phase(
+            db,
+            symbol=locked["symbol"],
+            claim_token=locked["claim_token"],
+            phase=SUBMITTED,
+            client_order_id=cid,
+            broker_order_id=oid,
+            metadata={
+                "reconciled_order_status": status,
+                _ADAPTIVE_LIFECYCLE_KEY: _refreshed_adaptive_binding(
+                    context,
+                    state,
+                ),
+            },
+            account_scope=locked["account_scope"],
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive orphan exact close binding failed"
+            )
+        if remaining < int(state.open_quantity_shares):
+            context["state"] = state
+            evidence = _adaptive_position_evidence(
+                db,
+                context=context,
+                close_order=order,
+                remaining=remaining,
+            )
+            if remaining == 0:
+                state = context["store"].close_open_exposure(
+                    context["reservation_id"],
+                    evidence=evidence,
+                    reason="exact_orphan_close_broker_flat",
+                    session=db,
+                )
+            else:
+                state = context["store"].reduce_open_exposure(
+                    context["reservation_id"],
+                    evidence=evidence,
+                    reason="exact_orphan_close_partial_fill",
+                    session=db,
+                )
+        close_filled = _adaptive_integer_quantity(
+            getattr(order, "filled_size", 0.0),
+            "orphan close cumulative fill",
+        )
+        if int(state.cumulative_filled_quantity_shares) > 0:
+            _capture_adaptive_reconcile_order_fills(
+                db,
+                adapter,
+                context=context,
+                provider_order_id=context["entry_broker_order_id"],
+            )
+        if close_filled > 0:
+            _capture_adaptive_reconcile_order_fills(
+                db,
+                adapter,
+                context=context,
+                provider_order_id=oid,
+                expected_exit_client_order_id=cid,
+            )
+        if not update_action_claim_phase(
+            db,
+            symbol=locked["symbol"],
+            claim_token=locked["claim_token"],
+            phase=SUBMITTED,
+            client_order_id=cid,
+            broker_order_id=oid,
+            metadata={
+                "reconciled_order_status": status,
+                _ADAPTIVE_LIFECYCLE_KEY: _refreshed_adaptive_binding(
+                    context,
+                    state,
+                ),
+            },
+            account_scope=locked["account_scope"],
+        ):
+            raise AdaptiveRiskContractError(
+                "adaptive orphan lifecycle refresh failed"
+            )
+        resolved = False
+        terminal = status in _ENTRY_TERMINAL_STATUSES
+        if remaining == 0 and terminal:
+            settled = settle_flat_alpaca_paper_cycle(
+                db,
+                reservation_id=context["reservation_id"],
+            )
+            state = context["store"].read_state(
+                context["reservation_id"],
+                session=db,
+            )
+            if state.state != "closed":
+                raise AdaptiveRiskContractError(
+                    "adaptive orphan exact settlement did not close the cycle"
+                )
+            resolved = resolve_action_claim(
+                db,
+                symbol=locked["symbol"],
+                claim_token=locked["claim_token"],
+                client_order_id=cid,
+                broker_order_id=oid,
+                broker_order_status=status,
+                broker_position_zero=True,
+                orphan_handoff_broker_flat=(status != "filled"),
+                metadata={
+                    "reason": "exact_adaptive_orphan_close_broker_flat",
+                    "terminal_close_filled_size": float(
+                        getattr(order, "filled_size", 0.0) or 0.0
+                    ),
+                    "cycle_settlement_sha256": settled.row.settlement_sha256,
+                    _ADAPTIVE_LIFECYCLE_KEY: _refreshed_adaptive_binding(
+                        context,
+                        state,
+                    ),
+                },
+                account_scope=locked["account_scope"],
+            )
+            if not resolved:
+                raise AdaptiveRiskContractError(
+                    "adaptive orphan exact claim resolution failed"
+                )
+        db.commit()
+        return {
+            "ok": True,
+            "resolved": resolved,
+            "remaining_quantity": remaining,
+            "state": state,
+        }
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "reason": "adaptive_orphan_lifecycle_conflict",
+            "error_type": type(exc).__name__,
+        }
+
+
 def _advance_orphan_claim_from_order(
     adapter: Any,
     claim: dict[str, Any],
     order: Any,
+    *,
+    db: Session | None = None,
+    signed_position_qty: float | None = None,
 ) -> bool:
     """Bind an exact broker order and resolve only on filled+broker-flat proof."""
+    metadata = claim.get("metadata")
+    if db is not None and _adaptive_marker_present(metadata):
+        return bool(
+            _advance_adaptive_orphan_claim_from_order(
+                db,
+                adapter,
+                claim,
+                order,
+                signed_position_qty=signed_position_qty,
+            ).get("ok")
+        )
     cid = str(claim.get("client_order_id") or "")
     oid = str(getattr(order, "order_id", "") or "").strip()
     status = str(getattr(order, "status", "") or "").strip().lower()
@@ -1570,7 +2719,12 @@ def _place_alpaca_equity_close(
     }
 
 
-def _submit_handoff_close(adapter: Any, claim: dict[str, Any]) -> dict[str, Any]:
+def _submit_handoff_close(
+    adapter: Any,
+    claim: dict[str, Any],
+    *,
+    db: Session | None = None,
+) -> dict[str, Any]:
     """Recover or submit one deterministic close for a handed-off entry claim."""
     authority_ok, authority_reason = _strict_terminal_handoff_claim_authority(claim)
     if not authority_ok:
@@ -1595,10 +2749,15 @@ def _submit_handoff_close(adapter: Any, claim: dict[str, Any]) -> dict[str, Any]
         }
     existing = _exact_claim_order(adapter, claim)
     if existing is not None:
-        _advance_orphan_claim_from_order(adapter, claim, existing)
+        advanced = _advance_orphan_claim_from_order(
+            adapter,
+            claim,
+            existing,
+            db=db,
+        )
         return {
-            "ok": True,
-            "recovered": True,
+            "ok": bool(advanced),
+            "recovered": bool(advanced),
             "order_id": str(getattr(existing, "order_id", "") or ""),
             "status": str(getattr(existing, "status", "") or ""),
         }
@@ -1711,10 +2870,15 @@ def _submit_handoff_close(adapter: Any, claim: dict[str, Any]) -> dict[str, Any]
     # before marking the boundary indeterminate; never generate a second close ID.
     recovered = _exact_claim_order(adapter, effective_claim)
     if recovered is not None:
-        _advance_orphan_claim_from_order(adapter, claim, recovered)
+        advanced = _advance_orphan_claim_from_order(
+            adapter,
+            claim,
+            recovered,
+            db=db,
+        )
         return {
-            "ok": True,
-            "recovered": True,
+            "ok": bool(advanced),
+            "recovered": bool(advanced),
             "order_id": str(getattr(recovered, "order_id", "") or ""),
             "status": str(getattr(recovered, "status", "") or ""),
         }
@@ -1780,9 +2944,31 @@ def _sweep_detached_entry_claims(db: Session, adapter: Any) -> dict[str, int]:
             result["detached_entry_claims_pending"] += 1
             continue
 
+        adaptive_mode, adaptive_reason = _adaptive_claim_preflight(db, claim)
+        if adaptive_mode == "invalid":
+            result["detached_entry_claims_quarantined"] = int(
+                result.get("detached_entry_claims_quarantined") or 0
+            ) + 1
+            result["detached_adaptive_lifecycle_quarantined"] = int(
+                result.get("detached_adaptive_lifecycle_quarantined") or 0
+            ) + 1
+            if adaptive_reason:
+                result[f"detached_adaptive_{adaptive_reason}"] = int(
+                    result.get(f"detached_adaptive_{adaptive_reason}") or 0
+                ) + 1
+            continue
+
         lookup_state, order = _strict_detached_entry_claim_order(adapter, claim)
         if lookup_state != "found" or order is None:
             result["detached_entry_claims_pending"] += 1
+            continue
+
+        unresolved_lineage = _alpaca_unresolved_order_lineage(order)
+        if unresolved_lineage is not None:
+            result["detached_entry_claims_pending"] += 1
+            result[f"detached_{unresolved_lineage}"] = int(
+                result.get(f"detached_{unresolved_lineage}") or 0
+            ) + 1
             continue
 
         # Cancel an exact open remainder and re-read exact truth. A cancel ack is
@@ -1800,6 +2986,13 @@ def _sweep_detached_entry_claims(db: Session, adapter: Any) -> dict[str, int]:
             if lookup_state != "found" or order is None:
                 result["detached_entry_claims_pending"] += 1
                 continue
+            unresolved_lineage = _alpaca_unresolved_order_lineage(order)
+            if unresolved_lineage is not None:
+                result["detached_entry_claims_pending"] += 1
+                result[f"detached_{unresolved_lineage}"] = int(
+                    result.get(f"detached_{unresolved_lineage}") or 0
+                ) + 1
+                continue
         status = str(getattr(order, "status", "") or "").strip().lower()
         if status not in _ENTRY_TERMINAL_STATUSES:
             result["detached_entry_claims_pending"] += 1
@@ -1814,22 +3007,33 @@ def _sweep_detached_entry_claims(db: Session, adapter: Any) -> dict[str, int]:
             result["detached_entry_claims_pending"] += 1
             continue
         if abs(signed_qty) <= 1e-9:
-            resolved = resolve_action_claim_committed(
-                symbol=claim["symbol"],
-                claim_token=claim["claim_token"],
-                client_order_id=claim.get("client_order_id"),
-                broker_order_id=str(getattr(order, "order_id", "") or ""),
-                broker_order_status=status,
-                broker_position_zero=True,
-                zero_fill_terminal=bool(filled <= 1e-12),
-                terminal_owner_broker_flat=bool(filled > 1e-12),
-                metadata={
-                    "reason": "detached_terminal_entry_broker_flat",
-                    "owner_state": owner_state,
-                    "filled_size": filled,
-                },
-                account_scope=claim["account_scope"],
-            )
+            if adaptive_mode == "adaptive":
+                adaptive_resolved = _resolve_detached_adaptive_entry_flat(
+                    db,
+                    adapter=adapter,
+                    claim=claim,
+                    order=order,
+                    owner_state=owner_state,
+                )
+                resolved = bool(adaptive_resolved.get("ok"))
+            else:
+                resolved = resolve_action_claim_committed(
+                    symbol=claim["symbol"],
+                    claim_token=claim["claim_token"],
+                    client_order_id=claim.get("client_order_id"),
+                    broker_order_id=str(getattr(order, "order_id", "") or ""),
+                    broker_order_status=status,
+                    broker_position_zero=True,
+                    zero_fill_terminal=bool(filled <= 1e-12),
+                    terminal_owner_broker_flat=bool(filled > 1e-12),
+                    expected_claim_updated_at=claim.get("updated_at"),
+                    metadata={
+                        "reason": "detached_terminal_entry_broker_flat",
+                        "owner_state": owner_state,
+                        "filled_size": filled,
+                    },
+                    account_scope=claim["account_scope"],
+                )
             if resolved:
                 result["detached_entry_claims_resolved"] += 1
             else:
@@ -1869,7 +3073,11 @@ def _sweep_detached_entry_claims(db: Session, adapter: Any) -> dict[str, int]:
         if broker_actions >= 8:
             result["detached_entry_claims_pending"] += 1
             continue
-        close_result = _submit_handoff_close(adapter, handed["claim"])
+        close_result = _submit_handoff_close(
+            adapter,
+            handed["claim"],
+            db=db,
+        )
         broker_actions += 1 if close_result.get("transport_attempted") else 0
         if close_result.get("submitted") or close_result.get("recovered"):
             result["detached_entry_closes_submitted"] += 1
@@ -1908,6 +3116,19 @@ def _sweep_active_orphan_claims(db: Session, adapter: Any) -> dict[str, int]:
                 result.get("runner_emergency_close_only_claims_skipped") or 0
             ) + 1
             continue
+        adaptive_mode, adaptive_reason = _adaptive_claim_preflight(db, claim)
+        if adaptive_mode == "invalid":
+            result["claims_quarantined"] = int(
+                result.get("claims_quarantined") or 0
+            ) + 1
+            result["adaptive_lifecycle_claims_quarantined"] = int(
+                result.get("adaptive_lifecycle_claims_quarantined") or 0
+            ) + 1
+            if adaptive_reason:
+                result[f"adaptive_quarantine_{adaptive_reason}"] = int(
+                    result.get(f"adaptive_quarantine_{adaptive_reason}") or 0
+                ) + 1
+            continue
         authority_ok, _authority_reason = _strict_terminal_handoff_claim_authority(
             claim
         )
@@ -1942,8 +3163,16 @@ def _sweep_active_orphan_claims(db: Session, adapter: Any) -> dict[str, int]:
                         adapter, claim
                     )
                     if strict_state == "found" and strict_order is not None:
-                        _advance_orphan_claim_from_order(adapter, claim, strict_order)
-                        result["claims_recovered"] += 1
+                        advanced = _advance_orphan_claim_from_order(
+                            adapter,
+                            claim,
+                            strict_order,
+                            db=db,
+                        )
+                        if advanced:
+                            result["claims_recovered"] += 1
+                        else:
+                            result["claims_still_pending"] += 1
                         continue
                     if strict_state != "absent":
                         # Timeout/read failure/identity contradiction is not
@@ -1966,7 +3195,11 @@ def _sweep_active_orphan_claims(db: Session, adapter: Any) -> dict[str, int]:
                         result["claims_residual_rotated"] += 1
                         submit_claim = rotated["claim"]
                 if broker_actions < 8:
-                    submit = _submit_handoff_close(adapter, submit_claim)
+                    submit = _submit_handoff_close(
+                        adapter,
+                        submit_claim,
+                        db=db,
+                    )
                     broker_actions += 1 if submit.get("transport_attempted") else 0
                     if submit.get("submitted") or submit.get("recovered"):
                         result["claims_recovered"] += 1
@@ -1976,15 +3209,29 @@ def _sweep_active_orphan_claims(db: Session, adapter: Any) -> dict[str, int]:
                         continue
             result["claims_still_pending"] += 1
             continue
-        _advance_orphan_claim_from_order(adapter, claim, order)
-        result["claims_recovered"] += 1
         status = str(getattr(order, "status", "") or "").strip().lower()
         signed_qty = _signed_broker_position(adapter, claim["symbol"])
         metadata = dict(claim.get("metadata") or {})
         if signed_qty is None:
             result["claims_still_pending"] += 1
-        elif abs(signed_qty) <= 1e-9:
-            if status != "filled" and metadata.get("terminal_entry_handoff"):
+            continue
+        advanced = _advance_orphan_claim_from_order(
+            adapter,
+            claim,
+            order,
+            db=db,
+            signed_position_qty=signed_qty,
+        )
+        if not advanced:
+            result["claims_still_pending"] += 1
+            continue
+        result["claims_recovered"] += 1
+        if abs(signed_qty) <= 1e-9:
+            if (
+                adaptive_mode == "legacy"
+                and status != "filled"
+                and metadata.get("terminal_entry_handoff")
+            ):
                 resolved = resolve_action_claim_committed(
                     symbol=claim["symbol"],
                     claim_token=claim["claim_token"],
@@ -2017,7 +3264,11 @@ def _sweep_active_orphan_claims(db: Session, adapter: Any) -> dict[str, int]:
                     result["claims_still_pending"] += 1
                 else:
                     result["claims_residual_rotated"] += 1
-                    retry = _submit_handoff_close(adapter, rotated["claim"])
+                    retry = _submit_handoff_close(
+                        adapter,
+                        rotated["claim"],
+                        db=db,
+                    )
                     broker_actions += 1 if retry.get("transport_attempted") else 0
                     if not (
                         retry.get("submitted")
@@ -2619,6 +3870,94 @@ def _settle_submitted_orphan_flattens(
     return result
 
 
+def _verify_exact_paper_account_for_reconcile(
+    adapter: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Bind one reconciler instance to the configured paper-account generation.
+
+    The exact-claim sweep is allowed to reduce exposure, but it still must not
+    mutate an account selected only by credentials.  Freeze the adapter to the
+    configured UUID and require a fresh broker account snapshot whose native
+    operational flags are explicitly readable and false.  No account number or
+    credential material is returned in the audit evidence.
+    """
+
+    expected_account_id = str(
+        getattr(settings, "chili_alpaca_expected_account_id", "") or ""
+    ).strip()
+    if not expected_account_id:
+        return False, {
+            "reason": "alpaca_expected_account_id_unconfigured",
+            "account_snapshot_read": False,
+        }
+    bind_account_id = getattr(adapter, "bind_account_id", None)
+    get_account_snapshot = getattr(adapter, "get_account_snapshot", None)
+    if not callable(bind_account_id) or not callable(get_account_snapshot):
+        return False, {
+            "reason": "alpaca_reconcile_account_capability_missing",
+            "account_snapshot_read": False,
+        }
+    try:
+        if bind_account_id(expected_account_id) is not True:
+            return False, {
+                "reason": "alpaca_reconcile_account_bind_failed",
+                "account_snapshot_read": False,
+            }
+        snapshot = get_account_snapshot()
+    except Exception as exc:
+        return False, {
+            "reason": "alpaca_reconcile_account_snapshot_unreadable",
+            "error_type": type(exc).__name__,
+            "account_snapshot_read": False,
+        }
+    if not isinstance(snapshot, dict) or snapshot.get("ok") is not True:
+        return False, {
+            "reason": "alpaca_reconcile_account_snapshot_unreadable",
+            "account_snapshot_read": False,
+        }
+    observed_account_id = str(snapshot.get("account_id") or "").strip()
+    if observed_account_id != expected_account_id:
+        return False, {
+            "reason": "alpaca_reconcile_account_generation_mismatch",
+            "account_snapshot_read": True,
+        }
+    if snapshot.get("paper") is not True:
+        return False, {
+            "reason": "alpaca_reconcile_non_paper_account_blocked",
+            "account_snapshot_read": True,
+        }
+    status = str(snapshot.get("status") or "").strip().lower()
+    if status != "active":
+        return False, {
+            "reason": "alpaca_reconcile_account_status_blocked",
+            "status": status or None,
+            "account_snapshot_read": True,
+        }
+    blocking_flags = (
+        "account_blocked",
+        "trading_blocked",
+        "trade_suspended_by_user",
+    )
+    if any(snapshot.get(field) is not False for field in blocking_flags):
+        return False, {
+            "reason": "alpaca_reconcile_account_operational_flags_blocked",
+            "account_blocked": snapshot.get("account_blocked"),
+            "trading_blocked": snapshot.get("trading_blocked"),
+            "trade_suspended_by_user": snapshot.get("trade_suspended_by_user"),
+            "account_snapshot_read": True,
+        }
+    return True, {
+        "reason": "exact_paper_account_verified",
+        "account_identity_sha256": alpaca_paper_account_identity_sha256(
+            observed_account_id
+        ),
+        "paper": True,
+        "status": status,
+        "account_snapshot_read": True,
+        "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def run_alpaca_orphan_reconcile(db: Session) -> dict[str, Any]:
     """One reconcile pass. Returns a summary dict (logged by the scheduler job)."""
     out: dict[str, Any] = {
@@ -2668,14 +4007,6 @@ def run_alpaca_orphan_reconcile(db: Session) -> dict[str, Any]:
         out["broker_calls"] = 0
         return out
 
-    # Recertification boundary: detached/orphan broker mutation is disabled.
-    # Only the retained entry owner in the live runner may service its exact
-    # immutable protection/close transport. Generic reconciliation remains a
-    # persistence quarantine until a separately reviewed same-CID handoff exists.
-    out["skipped"] = "alpaca_orphan_broker_mutation_disabled_recertification"
-    out["broker_calls"] = 0
-    return out
-
     try:
         from ..venue.alpaca_spot import AlpacaSpotAdapter
 
@@ -2687,15 +4018,19 @@ def run_alpaca_orphan_reconcile(db: Session) -> dict[str, Any]:
         out["skipped"] = "adapter_import_failed"
         return out
 
-    views = _managed_and_recent_symbols(db)
-    if views is None:
-        out["skipped"] = "db_view_unreadable"
+    account_ok, account_evidence = _verify_exact_paper_account_for_reconcile(adapter)
+    out["account_verification"] = dict(account_evidence)
+    if not account_ok:
+        out["skipped"] = account_evidence.get("reason") or (
+            "alpaca_reconcile_account_verification_failed"
+        )
         return out
-    active, recent = views
     try:
-        db.rollback()  # end the read tx before the broker HTTP calls (idle-in-tx hygiene)
+        # End persistence reads before any exact broker-order/position lookup.
+        db.rollback()
     except Exception:
-        pass
+        out["skipped"] = "reconcile_pre_broker_rollback_failed"
+        return out
 
     # A successful submit is not a fill.  Poll prior passes' broker orders and
     # repair only broker-confirmed, full-fill ACTU-class outcomes before looking
@@ -2722,156 +4057,8 @@ def run_alpaca_orphan_reconcile(db: Session) -> dict[str, Any]:
     out.update(_sweep_detached_entry_claims(db, adapter))
     out.update(_sweep_active_orphan_claims(db, adapter))
 
-    positions, _ = adapter.list_positions()
-    if positions is None:
-        out["skipped"] = "positions_unreadable"  # fail-closed: no mutation on a bad read
-        return out
-
-    # Open orders FIRST: any symbol with ANY resting order is NOT flattened this pass
-    # (cancel-first policy). This kills two failure modes: (a) HALTED-STOCK STACKING —
-    # a flatten sell rests open through the halt; without this guard the next pass
-    # would submit ANOTHER sell (new minute key) and on resume they would ALL fill,
-    # flipping the account SHORT; (b) OVERSELL — a stranded exit sell from the dead
-    # session fills while our full-qty flatten also fills. The stale-order cancel loop
-    # below clears the book this pass; the clean position flattens on the NEXT pass.
-    orders, _ = adapter.list_open_orders(limit=50, strict=True)
-    if orders is None:
-        # FAIL-CLOSED: the in-flight guard (anti-double-sell) needs a trustworthy
-        # order view; an unreadable book means NO flatten and NO cancel this pass.
-        out["skipped"] = "orders_unreadable"
-        return out
-    _inflight_syms: set[str] = set()
-    for _o in orders or []:
-        _os = str(getattr(_o, "product_id", None) or (_o.get("product_id") if isinstance(_o, dict) else "") or "").strip().upper()
-        if _os:
-            _inflight_syms.add(_os)
-
-    max_actions = 8  # per-pass bound: a runaway loop can never mass-fire orders
-    actions = 0
-    for pos in positions:
-        if actions >= max_actions:
-            break
-        sym = str(pos.get("product_id") or "").strip().upper()
-        qty = float(pos.get("qty") or 0.0)
-        asset_class = str(pos.get("asset_class") or "")
-        raw_sym = str(pos.get("raw_symbol") or "")
-        # Scope: LONG EQUITIES only. Crypto (asset_class/crypto symbol forms) and
-        # shorts are explicitly out of scope for this guard.
-        if not sym or qty <= 0:
-            continue
-        if "crypto" in asset_class or "/" in raw_sym or sym.endswith("-USD"):
-            continue
-        if sym in active:
-            out["skipped_active"] += 1
-            continue
-        if sym in recent:
-            out["skipped_recent"] += 1
-            continue
-        _has_open_order = sym in _inflight_syms
-        # Exact-claim recovery ran above. The generic position path must never
-        # stack a second sell beside any resting order sharing this ticker.
-        if _has_open_order:
-            out["skipped_inflight"] = int(out.get("skipped_inflight") or 0) + 1
-            continue
-        # Existing durable entry/orphan claims were recovered before this loop.
-        # A broker position with no such claim has no continuous lot-ownership
-        # proof. Historical OID/CID, quantity, and average-price equality can all
-        # be recreated by a manual sell/re-buy, so this generic path has no order
-        # authority and never mints a new close claim.
-        out["quarantined_unattributed_positions"] = int(
-            out.get("quarantined_unattributed_positions") or 0
-        ) + 1
-        _audit(
-            db,
-            sym,
-            {
-                "action": "quarantine_unattributed_position",
-                "ok": False,
-                "reason": "continuous_chili_lot_ownership_unproven",
-                "symbol": sym,
-                "qty": qty,
-                "market_value": pos.get("market_value"),
-                "unrealized_pl": pos.get("unrealized_pl"),
-            },
-        )
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-        continue
-
-
-    for o in orders or []:
-        if actions >= max_actions:
-            break
-        sym = str(getattr(o, "product_id", None) or (o.get("product_id") if isinstance(o, dict) else "") or "").strip().upper()
-        oid = str(getattr(o, "order_id", None) or (o.get("order_id") if isinstance(o, dict) else "") or "")
-        coid = str(getattr(o, "client_order_id", None) or (o.get("client_order_id") if isinstance(o, dict) else "") or "")
-        if not sym or not oid:
-            continue
-        if "/" in sym or sym.endswith("-USD"):
-            continue
-        if coid.startswith("orphrec-"):
-            continue  # our own in-flight flatten — never cancel it
-        # TOCTOU guard (adversarial lens 1): the sessions view was snapshotted at pass
-        # start; a session armed + entry posted DURING this pass would look orphaned.
-        # A genuine orphan order has been RESTING — only cancel orders older than the
-        # grace window; unknown timestamps are skipped (fail-closed/no mutation).
-        _created = str(getattr(o, "created_time", None) or (o.get("created_time") if isinstance(o, dict) else "") or "")
-        _age_ok = False
-        try:
-            from datetime import datetime as _dt
-
-            _cts = _dt.fromisoformat(_created.replace("Z", "+00:00"))
-            if _cts.tzinfo is None:
-                _cts = _cts.replace(tzinfo=timezone.utc)
-            _age_ok = (datetime.now(timezone.utc) - _cts).total_seconds() >= _grace_minutes() * 60.0
-        except Exception:
-            _age_ok = False
-        if not _age_ok:
-            out["skipped_young_order"] = int(out.get("skipped_young_order") or 0) + 1
-            continue
-        if sym in active:
-            out["skipped_active"] += 1
-            continue
-        if sym in recent:
-            out["skipped_recent"] += 1
-            continue
-        owned, ownership_reason = _open_order_has_exact_chili_claim(db, o)
-        try:
-            db.rollback()
-        except Exception:
-            owned = False
-            ownership_reason = "open_order_claim_read_rollback_failed"
-        if not owned:
-            out["quarantined_unowned_open_orders"] = int(
-                out.get("quarantined_unowned_open_orders") or 0
-            ) + 1
-            _audit(
-                db,
-                sym,
-                {
-                    "action": "quarantine_unowned_open_order",
-                    "ok": False,
-                    "reason": ownership_reason,
-                    "symbol": sym,
-                    "order_id": oid,
-                    "client_order_id": coid or None,
-                },
-            )
-            try:
-                db.commit()
-            except Exception:
-                db.rollback()
-            continue
-        res = adapter.cancel_order(oid)
-        actions += 1
-        ok = bool(res.get("ok", True))
-        out["cancelled"] += 1 if ok else 0
-        logger.warning(
-            "[alpaca_reconcile] ORPHAN open order %s %s -> cancel %s",
-            sym, oid, "OK" if ok else f"FAILED ({res.get('error')})",
-        )
-        _audit(db, sym, {"action": "cancel_orphan_order", "ok": ok, "order_id": oid})
-
+    # Certification scope is deliberately exact-claim-only. No broad account
+    # inventory shape may mint close/cancel authority in this reconciler.
+    out["reconcile_scope"] = "exact_claims_only"
+    out["generic_inventory_mutation_enabled"] = False
     return out

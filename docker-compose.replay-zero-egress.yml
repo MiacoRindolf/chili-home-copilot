@@ -1,0 +1,61 @@
+services:
+  replay-postgres:
+    image: postgres:16-alpine
+    network_mode: none
+    environment:
+      POSTGRES_DB: chili_test
+      POSTGRES_USER: chili
+      POSTGRES_PASSWORD: chili
+    volumes:
+      - replay-postgres-socket:/var/run/postgresql
+    tmpfs:
+      - /var/lib/postgresql/data
+      - /tmp
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h /var/run/postgresql -U chili -d chili_test",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+
+  replay-zero-egress:
+    image: chili-app:local
+    network_mode: none
+    working_dir: /workspace
+    command:
+      [
+        "python",
+        "scripts/run_replay_zero_egress_gate.py",
+      ]
+    environment:
+      DATABASE_URL: postgresql://chili:chili@/chili_test?host=%2Fvar%2Frun%2Fpostgresql
+      TEST_DATABASE_URL: postgresql://chili:chili@/chili_test?host=%2Fvar%2Frun%2Fpostgresql
+      PYTHONPATH: /workspace
+      PYTHONDONTWRITEBYTECODE: "1"
+      CHILI_REPLAY_OS_ZERO_EGRESS: "1"
+      CHILI_MOMENTUM_LIVE_RUNNER_ENABLED: "0"
+      CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED: "0"
+      CHILI_MOMENTUM_PAPER_RUNNER_ENABLED: "0"
+      CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED: "0"
+    volumes:
+      - .:/workspace:ro
+      - replay-postgres-socket:/var/run/postgresql
+    tmpfs:
+      - /tmp
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      replay-postgres:
+        condition: service_healthy
+
+volumes:
+  replay-postgres-socket:

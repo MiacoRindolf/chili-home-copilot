@@ -8,8 +8,17 @@ load-bearing dual-path guarantee; minute_vol is replay-only/lookahead and exclud
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
-from app.services.trading.momentum_neural.entry_features import capture_entry_features
+from app.services.trading.momentum_neural import entry_features as entry_features_module
+from app.services.trading.momentum_neural.entry_features import (
+    capture_entry_features,
+    macro_feature_cache,
+    macro_regime_features,
+)
+from app.services.trading.momentum_neural.replay_errors import (
+    ReplayOhlcvInputUnavailableError,
+)
 
 
 def _df(n: int = 20) -> pd.DataFrame:
@@ -85,3 +94,47 @@ def test_noncanonical_cols_renamed():
                                session_df=df, df_cols=("high", "low", "close", "volume"),
                                l2_db=None, l2_as_of=None)
     assert f is not None and "front_side_score" in f
+
+
+def test_macro_runtime_cache_is_local_deterministic_and_reuses_exact_frames():
+    calls: list[tuple[str, str, str]] = []
+
+    def fetcher(symbol: str, *, interval: str, period: str) -> pd.DataFrame:
+        calls.append((symbol, interval, period))
+        count = 21 if symbol in {"SPY", "IWM"} else 1
+        close = 20.0 if symbol == "^VIX" else (22.0 if symbol == "^VIX3M" else 100.0)
+        values = [close + index for index in range(count)]
+        return pd.DataFrame(
+            {
+                "Open": values,
+                "High": [value + 1.0 for value in values],
+                "Low": [value - 1.0 for value in values],
+                "Close": values,
+                "Volume": [1_000.0] * count,
+            },
+            index=pd.date_range("2026-06-01", periods=count, freq="1d", tz="UTC"),
+        )
+
+    entry_features_module._MACRO_CACHE["SPY"] = (9_999_999_999.0, [1.0] * 21)
+    local_cache: dict = {}
+    try:
+        with macro_feature_cache(local_cache):
+            first = macro_regime_features(now_ts=1_782_000_000.0, fetcher=fetcher)
+            second = macro_regime_features(now_ts=1_782_000_100.0, fetcher=fetcher)
+        assert first == second
+        assert [call[0] for call in calls] == ["SPY", "IWM", "^VIX", "^VIX3M"]
+        assert set(local_cache) == {"SPY", "IWM", "VIXSLOPE"}
+        assert first["vix_slope"] == pytest.approx(22.0 / 20.0)
+    finally:
+        entry_features_module._MACRO_CACHE.pop("SPY", None)
+
+
+def test_macro_input_contract_failure_is_never_median_imputed_or_swallowed():
+    def rejected_fetcher(*_args, **_kwargs):
+        raise ReplayOhlcvInputUnavailableError("fixture_missing_exact_receipt")
+
+    with macro_feature_cache({}), pytest.raises(
+        ReplayOhlcvInputUnavailableError,
+        match="fixture_missing_exact_receipt",
+    ):
+        macro_regime_features(now_ts=1_782_000_000.0, fetcher=rejected_fetcher)

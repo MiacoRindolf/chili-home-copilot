@@ -446,6 +446,22 @@ def _enable_orphan_reconcile(monkeypatch, adapter):
     monkeypatch.setattr(ar.settings, "chili_alpaca_enabled", True)
     monkeypatch.setattr(ar.settings, "chili_alpaca_paper", True)
     monkeypatch.setattr(ar.settings, "chili_alpaca_api_key", "paper-key")
+    monkeypatch.setattr(
+        ar.settings,
+        "chili_alpaca_expected_account_id",
+        "paper-account",
+        raising=False,
+    )
+    adapter.bind_account_id = lambda account_id: account_id == "paper-account"
+    adapter.get_account_snapshot = lambda: {
+        "ok": True,
+        "account_id": "paper-account",
+        "paper": True,
+        "status": "ACTIVE",
+        "account_blocked": False,
+        "trading_blocked": False,
+        "trade_suspended_by_user": False,
+    }
     monkeypatch.setattr(alpaca_spot_mod, "AlpacaSpotAdapter", lambda: adapter)
     monkeypatch.setattr(ar, "_managed_and_recent_symbols", lambda _db: (set(), set()))
     monkeypatch.setattr(ar, "_persisted_reconcile_quarantine_reason", lambda _db: None)
@@ -461,8 +477,9 @@ def test_matching_historical_shape_cannot_mint_unclaimed_close_authority(monkeyp
 
     result = ar.run_alpaca_orphan_reconcile(db)
 
-    assert result["skipped"] == "alpaca_orphan_broker_mutation_disabled_recertification"
-    assert result["broker_calls"] == 0
+    assert result["reconcile_scope"] == "exact_claims_only"
+    assert result["generic_inventory_mutation_enabled"] is False
+    assert result["account_verification"]["account_snapshot_read"] is True
     assert result["flattened"] == 0
     assert adapter.market_orders == []
 
@@ -474,8 +491,8 @@ def test_unattributed_manual_position_is_quarantined_without_sell(monkeypatch):
 
     result = ar.run_alpaca_orphan_reconcile(db)
 
-    assert result["skipped"] == "alpaca_orphan_broker_mutation_disabled_recertification"
-    assert result["broker_calls"] == 0
+    assert result["reconcile_scope"] == "exact_claims_only"
+    assert result["generic_inventory_mutation_enabled"] is False
     assert result["flattened"] == 0
     assert adapter.market_orders == []
 
@@ -509,10 +526,79 @@ def test_unowned_manual_open_order_is_never_cancelled(monkeypatch):
 
     result = ar.run_alpaca_orphan_reconcile(db)
 
-    assert result["skipped"] == "alpaca_orphan_broker_mutation_disabled_recertification"
-    assert result["broker_calls"] == 0
+    assert result["reconcile_scope"] == "exact_claims_only"
+    assert result["generic_inventory_mutation_enabled"] is False
     assert result["cancelled"] == 0
     assert cancelled == []
+
+
+def test_exact_claim_sweeps_run_only_after_pinned_paper_account_verification(
+    monkeypatch,
+):
+    db = _RunDb()
+    adapter = _RecheckAdapter(db, "EXACT")
+    _enable_orphan_reconcile(monkeypatch, adapter)
+    calls = []
+    monkeypatch.setattr(
+        ar,
+        "_settle_submitted_orphan_flattens",
+        lambda _db, _adapter: calls.append("settle") or {"settled": 1},
+    )
+    monkeypatch.setattr(
+        ar,
+        "_sweep_detached_entry_claims",
+        lambda _db, _adapter: calls.append("detached") or {"detached": 1},
+    )
+    monkeypatch.setattr(
+        ar,
+        "_sweep_active_orphan_claims",
+        lambda _db, _adapter: calls.append("active") or {"active": 1},
+    )
+
+    result = ar.run_alpaca_orphan_reconcile(db)
+
+    assert calls == ["settle", "detached", "active"]
+    assert result["settled"] == 1
+    assert result["detached"] == 1
+    assert result["active"] == 1
+    assert result["reconcile_scope"] == "exact_claims_only"
+    assert adapter.market_orders == []
+
+
+def test_wrong_paper_account_generation_blocks_all_exact_claim_sweeps(monkeypatch):
+    db = _RunDb()
+    adapter = _RecheckAdapter(db, "WRONGACCOUNT")
+    _enable_orphan_reconcile(monkeypatch, adapter)
+    adapter.get_account_snapshot = lambda: {
+        "ok": True,
+        "account_id": "different-paper-account",
+        "paper": True,
+        "status": "ACTIVE",
+        "account_blocked": False,
+        "trading_blocked": False,
+        "trade_suspended_by_user": False,
+    }
+    monkeypatch.setattr(
+        ar,
+        "_settle_submitted_orphan_flattens",
+        lambda *_args: pytest.fail("wrong account reached settlement"),
+    )
+    monkeypatch.setattr(
+        ar,
+        "_sweep_detached_entry_claims",
+        lambda *_args: pytest.fail("wrong account reached detached claims"),
+    )
+    monkeypatch.setattr(
+        ar,
+        "_sweep_active_orphan_claims",
+        lambda *_args: pytest.fail("wrong account reached active claims"),
+    )
+
+    result = ar.run_alpaca_orphan_reconcile(db)
+
+    assert result["skipped"] == "alpaca_reconcile_account_generation_mismatch"
+    assert result["account_verification"]["account_snapshot_read"] is True
+    assert adapter.market_orders == []
 
 
 def test_persisted_uncertified_row_keeps_reconciler_broker_dark(monkeypatch):

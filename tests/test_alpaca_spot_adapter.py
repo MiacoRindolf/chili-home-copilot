@@ -5,6 +5,7 @@ these tests need neither alpaca-py installed nor keys (lazy SDK imports)."""
 from __future__ import annotations
 
 import ast
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -127,7 +128,46 @@ def test_submit_failure_metadata_distinguishes_timeout_from_broker_reject():
     assert reject["http_status"] == 422
 
 
-def test_submit_boundary_rejects_non_long_equity_or_gtc_entry_before_client(monkeypatch):
+def test_paper_order_submission_audit_is_monotonic_and_content_addressed(
+    monkeypatch,
+):
+    account_id = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
+    monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        account_id,
+        raising=False,
+    )
+    adapter = AlpacaSpotAdapter()
+    assert adapter.bind_account_id(account_id) is True
+    adapter._fill_reader_connection_generation = "alpaca-paper-rest:" + "a" * 64
+
+    before = adapter.get_order_submission_audit_snapshot()
+    alpaca_mod.AlpacaSpotAdapter._record_order_submission_attempt(
+        adapter,
+        surface="place_limit_order_gtc",
+        symbol="ACTU",
+        side="buy",
+        position_intent="buy_to_open",
+        client_order_id="paper-audit-cid",
+        request_type="limit",
+    )
+    after = adapter.get_order_submission_audit_snapshot()
+
+    assert before["submission_call_count"] == 0
+    assert after["submission_call_count"] == 1
+    assert before["audit_generation"] == after["audit_generation"]
+    assert before["submission_chain_sha256"] != after[
+        "submission_chain_sha256"
+    ]
+    body = after["snapshot_canonical_json"]
+    assert hashlib.sha256(body.encode()).hexdigest() == after[
+        "snapshot_sha256"
+    ]
+
+
+def test_submit_boundary_rejects_non_long_or_non_equity_entry_before_client(monkeypatch):
     calls = {"client": 0}
 
     def _forbidden_client():
@@ -142,7 +182,6 @@ def test_submit_boundary_rejects_non_long_equity_or_gtc_entry_before_client(monk
         {"side": "sell", "position_intent": "sell_to_open", "time_in_force": "day"},
         {"side": "buy", "position_intent": "buy_to_close", "time_in_force": "day"},
         {"side": "buy", "position_intent": "sell_to_close", "time_in_force": "day"},
-        {"side": "buy", "position_intent": "buy_to_open", "time_in_force": "gtc"},
     ]
     for index, instruction in enumerate(invalid):
         result = adapter.place_limit_order_gtc(
@@ -175,30 +214,154 @@ def test_submit_boundary_rejects_non_long_equity_or_gtc_entry_before_client(monk
     assert calls["client"] == 0
 
 
-def test_submit_boundary_rejects_extended_hours_entry_before_client(monkeypatch):
-    calls = {"client": 0}
+def test_submit_boundary_certifies_exact_extended_hours_and_rth_tif(
+    monkeypatch,
+):
+    import sys
+    import types
 
-    def _forbidden_client():
-        calls["client"] += 1
-        raise AssertionError("extended-hours entry reached the Alpaca client")
+    account_id = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
+    alpaca_pkg = types.ModuleType("alpaca")
+    alpaca_pkg.__path__ = []
+    trading_pkg = types.ModuleType("alpaca.trading")
+    trading_pkg.__path__ = []
+    enums_mod = types.ModuleType("alpaca.trading.enums")
+    requests_mod = types.ModuleType("alpaca.trading.requests")
 
-    monkeypatch.setattr(alpaca_mod, "_trading_client", _forbidden_client)
-    result = AlpacaSpotAdapter().place_limit_order_gtc(
+    class _OrderSide:
+        BUY = "buy"
+        SELL = "sell"
+
+    class _PositionIntent:
+        BUY_TO_OPEN = "buy_to_open"
+        BUY_TO_CLOSE = "buy_to_close"
+        SELL_TO_OPEN = "sell_to_open"
+        SELL_TO_CLOSE = "sell_to_close"
+
+    class _TimeInForce:
+        DAY = "day"
+        GTC = "gtc"
+
+    class _OrderRequest:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    enums_mod.OrderSide = _OrderSide
+    enums_mod.PositionIntent = _PositionIntent
+    enums_mod.TimeInForce = _TimeInForce
+    requests_mod.LimitOrderRequest = _OrderRequest
+    requests_mod.MarketOrderRequest = _OrderRequest
+    monkeypatch.setitem(sys.modules, "alpaca", alpaca_pkg)
+    monkeypatch.setitem(sys.modules, "alpaca.trading", trading_pkg)
+    monkeypatch.setitem(sys.modules, "alpaca.trading.enums", enums_mod)
+    monkeypatch.setitem(sys.modules, "alpaca.trading.requests", requests_mod)
+    monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        account_id,
+        raising=False,
+    )
+
+    submitted = []
+
+    class _Order:
+        id = "paper-entry-oid"
+        client_order_id = "paper-entry-cid"
+        status = "new"
+        filled_qty = "0"
+        position_intent = "buy_to_open"
+
+    class _Client:
+        def submit_order(self, *, order_data):
+            submitted.append(order_data)
+            return _Order()
+
+    adapter = AlpacaSpotAdapter()
+    assert adapter.bind_account_id(account_id) is True
+    monkeypatch.setattr(adapter, "_account_client", lambda: _Client())
+
+    unbound = AlpacaSpotAdapter()
+    monkeypatch.setattr(unbound, "_account_client", lambda: _Client())
+    unbound_result = unbound.place_limit_order_gtc(
         product_id="ACTU",
         side="buy",
         position_intent="buy_to_open",
         base_size="1",
         limit_price="10.00",
-        client_order_id="cid-stale-premarket-generation",
+        client_order_id="paper-entry-unbound",
+        time_in_force="day",
+        extended_hours=False,
+    )
+    assert unbound_result["ok"] is False
+    assert unbound_result["error"] == "alpaca_paper_account_generation_not_bound"
+    assert unbound_result["submit_outcome"] == "pre_transport_blocked"
+    assert submitted == []
+
+    premarket = adapter.place_limit_order_gtc(
+        product_id="ACTU",
+        side="buy",
+        position_intent="buy_to_open",
+        base_size="1",
+        limit_price="10.00",
+        client_order_id="paper-entry-cid",
         time_in_force="day",
         extended_hours=True,
     )
+    assert premarket["ok"] is True
+    assert premarket["broker_order_status_echo"] == "new"
+    assert premarket["broker_cumulative_filled_quantity"] == 0
+    assert len(submitted) == 1
+    assert submitted[-1].time_in_force == _TimeInForce.DAY
+    assert submitted[-1].extended_hours is True
+    assert submitted[-1].position_intent == _PositionIntent.BUY_TO_OPEN
 
-    assert result["ok"] is False
-    assert result["error"] == "alpaca_extended_hours_entry_not_certified"
-    assert result["pre_submit_blocked"] is True
-    assert result["submit_outcome"] == "pre_transport_blocked"
-    assert calls["client"] == 0
+    invalid_premarket = adapter.place_limit_order_gtc(
+        product_id="ACTU",
+        side="buy",
+        position_intent="buy_to_open",
+        base_size="1",
+        limit_price="10.00",
+        client_order_id="paper-entry-gtc-extended",
+        time_in_force="gtc",
+        extended_hours=True,
+    )
+    assert invalid_premarket["ok"] is False
+    assert invalid_premarket["error"] == "alpaca_extended_hours_entry_not_certified"
+    assert invalid_premarket["submit_outcome"] == "pre_transport_blocked"
+    assert len(submitted) == 1
+
+    for tif in ("day", "gtc"):
+        rth = adapter.place_limit_order_gtc(
+            product_id="ACTU",
+            side="buy",
+            position_intent="buy_to_open",
+            base_size="1",
+            limit_price="10.00",
+            client_order_id=f"paper-entry-rth-{tif}",
+            time_in_force=tif,
+            extended_hours=False,
+        )
+        assert rth["ok"] is True
+        assert submitted[-1].time_in_force == tif
+        assert not hasattr(submitted[-1], "extended_hours")
+    assert len(submitted) == 3
+
+    non_boolean = adapter.place_limit_order_gtc(
+        product_id="ACTU",
+        side="buy",
+        position_intent="buy_to_open",
+        base_size="1",
+        limit_price="10.00",
+        client_order_id="paper-entry-string-extended",
+        time_in_force="day",
+        extended_hours="false",  # type: ignore[arg-type]
+    )
+    assert non_boolean["ok"] is False
+    assert non_boolean["error"] == "alpaca_extended_hours_entry_not_certified"
+    assert non_boolean["submit_outcome"] == "pre_transport_blocked"
+    assert len(submitted) == 3
 
 
 def test_deadman_boundary_rejects_crypto_or_malformed_request_before_client(monkeypatch):
@@ -502,7 +665,7 @@ def test_account_snapshot_includes_last_equity(monkeypatch):
     assert snap["account_id"] == "acct-snapshot-test"
 
 
-_IQFEED_PIN = "iqfeed-l1-quote-provenance-v2+sha256:0123456789abcdef"
+_IQFEED_PIN = "iqfeed-l1-exact-print-provenance-v3+sha256:0123456789abcdef"
 _IQFEED_RUN_ID = "12553525-2da8-4b22-a69f-d3034871e90c"
 
 
@@ -611,7 +774,7 @@ def test_iqfeed_quote_rejects_legacy_receive_time_basis(monkeypatch):
     assert AlpacaSpotAdapter()._iqfeed_l1_quote("ACTU", max_age_seconds=2.0) is None
 
 
-def test_execution_bbo_falls_back_to_direct_quote_when_iqfeed_is_stale(monkeypatch):
+def test_execution_bbo_always_uses_direct_exact_quote_not_iqfeed_q_proxy(monkeypatch):
     adapter = AlpacaSpotAdapter()
     now = datetime.now(timezone.utc)
     meta = FreshnessMeta(
@@ -622,7 +785,13 @@ def test_execution_bbo_falls_back_to_direct_quote_when_iqfeed_is_stale(monkeypat
     marker = NormalizedTicker(
         product_id="ACTU", bid=1.0, ask=1.01, mid=1.005, freshness=meta
     )
-    monkeypatch.setattr(adapter, "_iqfeed_l1_quote", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        adapter,
+        "_iqfeed_l1_quote",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("IQFeed Q proxy consulted for execution authority")
+        ),
+    )
     monkeypatch.setattr(adapter, "_alpaca_latest_quote", lambda _pid: (marker, meta))
     monkeypatch.setattr(settings, "chili_alpaca_quotes_via_iqfeed", True, raising=False)
 
@@ -664,7 +833,7 @@ def test_execution_bbo_rejects_missing_or_future_provider_timestamp(monkeypatch)
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"bridge_version": "iqfeed-l1-quote-provenance-v2+sha256:ffffffffffffffff"},
+        {"bridge_version": "iqfeed-l1-exact-print-provenance-v3+sha256:ffffffffffffffff"},
         {"message_type": "P"},
         {"connection_generation": 0},
         {"bridge_run_id": "not-a-uuid"},
@@ -777,6 +946,27 @@ def test_bound_adapter_blocks_credential_rotation_before_account_mutation(monkey
     assert adapter.cancel_order_by_id("old-session-order") is False
     assert new_calls == []
     alpaca_mod.reset_clients_for_tests()
+
+
+@pytest.mark.parametrize(
+    "broker_error",
+    (
+        "order filled",
+        "order not found",
+        "order is unable to be canceled",
+    ),
+)
+def test_cancel_order_by_id_never_treats_exception_text_as_terminal_truth(
+    monkeypatch, broker_error
+):
+    class _Client:
+        def cancel_order_by_id(self, _order_id):
+            raise RuntimeError(broker_error)
+
+    adapter = AlpacaSpotAdapter()
+    monkeypatch.setattr(adapter, "_account_client", lambda: _Client())
+
+    assert adapter.cancel_order_by_id("order-with-unresolved-truth") is False
 
 
 def test_governed_equity_product_and_entry_are_whole_share_only(monkeypatch):
