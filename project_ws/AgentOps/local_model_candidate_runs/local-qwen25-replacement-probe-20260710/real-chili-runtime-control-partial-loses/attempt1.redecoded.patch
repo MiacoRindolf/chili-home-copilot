@@ -1,0 +1,32 @@
+diff --git a/autopilot_prompt.py b/autopilot_prompt.py
+--- a/autopilot_prompt.py
++++ b/autopilot_prompt.py
+@@ -11,3 +11,28 @@
+     if classify_prompt(prompt) == 'repo_edit':
+         return planner(prompt)
+     return {'status': 'blocked', 'reason': 'not_repo_edit'}
++
++
++from autopilot_prompt import plan_if_repo_edit
++
++
++def test_runtime_control_prompt_blocks_before_planner():
++    calls = []
++
++    def planner(prompt):
++        calls.append(prompt)
++        return {'status': 'planned'}
++
++    result = plan_if_repo_edit('docker compose restart chili and scheduler-worker', planner)
++
++    assert result['status'] == 'blocked'
++    assert calls == []
++
++
++def test_repo_edit_still_reaches_planner():
++    result = plan_if_repo_edit(
++        'update app/example.py to fix the button',
++        lambda prompt: {'status': 'planned'},
++    )
++
++    assert result['status'] == 'planned'

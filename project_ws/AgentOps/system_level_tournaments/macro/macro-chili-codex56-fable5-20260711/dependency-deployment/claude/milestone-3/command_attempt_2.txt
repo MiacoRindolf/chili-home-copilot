@@ -1,0 +1,1 @@
+claude --print --model claude-fable-5 --output-format text --permission-mode dontAsk --no-session-persistence --effort max --max-budget-usd 10.0

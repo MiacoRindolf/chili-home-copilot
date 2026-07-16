@@ -1,0 +1,73 @@
+{
+  "attempts": 3,
+  "behavior_passed": true,
+  "changed_files": [
+    "app/model.py",
+    "app/processor.py",
+    "app/service.py",
+    "app/store.py"
+  ],
+  "continuity_valid": true,
+  "duration_seconds": 0.543,
+  "eligible": true,
+  "failure": "",
+  "model_events": [],
+  "model_name": "qwen2.5-coder:7b",
+  "phase_changes_present": true,
+  "phase_count": 3,
+  "phase_results": [
+    {
+      "attempts": 1,
+      "changed_files": [
+        "app/model.py",
+        "app/processor.py",
+        "app/service.py",
+        "app/store.py"
+      ],
+      "cumulative_phase_count": 1,
+      "passed": true,
+      "phase_id": "milestone-1",
+      "semantic_review_passed": true,
+      "tests_unchanged": true,
+      "validation_output": "...                                                                      [100%]\n3 passed in 0.04s"
+    },
+    {
+      "attempts": 1,
+      "changed_files": [
+        "app/processor.py",
+        "app/service.py",
+        "app/store.py"
+      ],
+      "cumulative_phase_count": 2,
+      "passed": true,
+      "phase_id": "milestone-2",
+      "semantic_review_passed": true,
+      "tests_unchanged": true,
+      "validation_output": ".....                                                                    [100%]\n5 passed in 0.05s"
+    },
+    {
+      "attempts": 1,
+      "changed_files": [
+        "app/service.py",
+        "app/store.py"
+      ],
+      "cumulative_phase_count": 3,
+      "passed": true,
+      "phase_id": "milestone-3",
+      "semantic_review_passed": true,
+      "tests_unchanged": true,
+      "validation_output": ".......                                                                  [100%]\n7 passed in 0.05s"
+    }
+  ],
+  "phases_passed": 3,
+  "premium_calls": 0,
+  "quality_score": 100,
+  "required_files_changed": true,
+  "scope_valid": true,
+  "scoring_revision": "phase-change-evidence-v2",
+  "semantic_review_passed": true,
+  "source_kind": "local_model",
+  "task_id": "resumable-import",
+  "tests_unchanged": true,
+  "validation_output": ".......                                                                  [100%]\n7 passed in 0.05s"
+}

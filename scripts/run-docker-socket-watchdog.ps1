@@ -5,7 +5,9 @@
 .DESCRIPTION
   Invoked every ~5 min by the "CHILI Docker Socket Watchdog" scheduled task
   (LogonType Interactive as user 'rindo' - required to reach the Docker named
-  pipe; SYSTEM cannot. RunLevel Limited / non-elevated.).
+  pipe; SYSTEM cannot. RunLevel Limited / non-elevated.). The task launches
+  this script through scripts\run-hidden.vbs (wscript.exe) so no console
+  window flashes on the operator's desktop each tick.
 
   Responsibilities:
 
@@ -50,6 +52,7 @@ param(
 
     [int]$EngineWaitSeconds = 300,
     [switch]$DryRun,
+    [switch]$AllowLiveTradingRestore,
 
     [string]$DockerExe = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe',
     [string]$DockerDesktopExe = 'C:\Program Files\Docker\Docker\Docker Desktop.exe',
@@ -100,8 +103,14 @@ function Invoke-Docker {
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $p = [System.Diagnostics.Process]::Start($psi)
+        # Drain stdout/stderr ASYNC, *before* waiting. Reading only after
+        # WaitForExit deadlocks once output exceeds the ~4KB pipe buffer
+        # (docker blocks writing, we block waiting -> spurious "timeout 30s"
+        # -> empty stack -> every tick logged as a stack-wide outage).
+        $outTask = $p.StandardOutput.ReadToEndAsync()
+        $errTask = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; return @{ Ok = $false; Out = ''; Err = "timeout ${TimeoutSec}s" } }
-        return @{ Ok = ($p.ExitCode -eq 0); Out = $p.StandardOutput.ReadToEnd().Trim(); Err = $p.StandardError.ReadToEnd().Trim() }
+        return @{ Ok = ($p.ExitCode -eq 0); Out = $outTask.Result.Trim(); Err = $errTask.Result.Trim() }
     } catch { return @{ Ok = $false; Out = ''; Err = $_.Exception.Message } }
 }
 
@@ -116,6 +125,26 @@ function Get-ContainerTier {
     if ($Image -match 'ollama/ollama') { return 1 }
     if ($Image -match '^chili-app:') { return 2 }
     return $null   # not part of the CHILI stack
+}
+
+function Test-LiveTradingRestoreExcluded {
+    param([string]$Name)
+    if ($AllowLiveTradingRestore) { return $false }
+    $n = [string]$Name
+    return (
+        $n -match 'momentum-exec' -or
+        $n -match 'scheduler' -or
+        $n -match 'autotrader' -or
+        $n -match 'broker-sync' -or
+        $n -match 'market-snapshot-worker' -or
+        $n -match 'backtest-worker' -or
+        $n -match 'fast-scan-worker'
+    )
+}
+
+function Select-RestorableStack {
+    param($Rows)
+    return @($Rows | Where-Object { -not (Test-LiveTradingRestoreExcluded $_.Name) })
 }
 
 function Get-StackContainers {
@@ -151,7 +180,7 @@ function Get-GoodSet {
     if (-not (Test-Path $StatePath)) { return @() }
     try {
         $j = Get-Content $StatePath -Raw | ConvertFrom-Json
-        return @($j.containers)   # array of @{ name; tier }
+        return @(Select-RestorableStack @($j.containers))   # array of @{ name; tier }
     } catch { Write-Log "could not read good-set state: $($_.Exception.Message)" 'WARN'; return @() }
 }
 
@@ -159,9 +188,10 @@ function Save-GoodSet {
     param($RunningStack)   # objects with Name, Tier
     if ($DryRun) { return }
     try {
+        $restorable = Select-RestorableStack @($RunningStack)
         $payload = [pscustomobject]@{
             updatedUtc = (Get-Date).ToUniversalTime().ToString('o')
-            containers = @($RunningStack | ForEach-Object { [pscustomobject]@{ name = $_.Name; tier = $_.Tier } })
+            containers = @($restorable | ForEach-Object { [pscustomobject]@{ name = $_.Name; tier = $_.Tier } })
         }
         $dir = Split-Path -Parent $StatePath
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
@@ -176,6 +206,10 @@ function Restore-GoodSet {
     $byName = @{}; foreach ($c in $Stack) { $byName[$c.Name] = $c }
     $toStart = @()
     foreach ($g in $Good) {
+        if (Test-LiveTradingRestoreExcluded $g.name) {
+            Write-Log "good-set member '$($g.name)' is live/order-adjacent and excluded from restore" 'WARN'
+            continue
+        }
         $cur = $byName[$g.name]
         if (-not $cur) { Write-Log "good-set member '$($g.name)' no longer exists - skipping" 'WARN'; continue }
         if ($cur.State -ne 'running') { $toStart += [pscustomobject]@{ Name = $g.name; Tier = [int]$g.tier } }
@@ -286,7 +320,7 @@ function Invoke-EngineRecovery {
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
-Write-Log ("watchdog tick (DryRun={0}, minDownFraction={1})" -f [bool]$DryRun, $MinDownFractionToRestore) 'INFO'
+Write-Log ("watchdog tick (DryRun={0}, minDownFraction={1}, allowLiveTradingRestore={2})" -f [bool]$DryRun, $MinDownFractionToRestore, [bool]$AllowLiveTradingRestore) 'INFO'
 
 if (-not (Test-Engine)) { Invoke-EngineRecovery; Write-Log 'watchdog tick done' 'INFO'; return }
 
@@ -294,7 +328,7 @@ Write-Log 'engine reachable' 'OK'
 Write-SocketStatus
 
 $stack = Get-StackContainers
-$running = @($stack | Where-Object State -eq 'running')
+$running = @(Select-RestorableStack @($stack | Where-Object State -eq 'running'))
 $good = Get-GoodSet
 
 if (-not $good) {
@@ -320,7 +354,7 @@ if ($downGood.Count -ge $threshold) {
     # pruned to containers that still exist. Never shrinks on a transient single
     # down (so we don't "forget" it); picks up genuinely new containers; drops
     # only containers that have been removed entirely.
-    $byName = @{}; foreach ($c in $stack) { $byName[$c.Name] = $c }
+    $byName = @{}; foreach ($c in (Select-RestorableStack $stack)) { $byName[$c.Name] = $c }
     $names = New-Object System.Collections.Generic.HashSet[string]
     foreach ($g in $good) { [void]$names.Add($g.name) }
     foreach ($r in $running) { [void]$names.Add($r.Name) }

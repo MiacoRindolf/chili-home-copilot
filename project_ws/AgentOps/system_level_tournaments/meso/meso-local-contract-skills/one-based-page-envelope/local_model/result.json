@@ -1,0 +1,23 @@
+{
+  "attempts": 1,
+  "behavior_passed": true,
+  "changed_files": [
+    "app/api.py",
+    "app/paging.py",
+    "app/query.py"
+  ],
+  "coordinated_files_changed": true,
+  "duration_seconds": 0.181,
+  "eligible": false,
+  "failure": "",
+  "model_events": [],
+  "model_name": "qwen2.5-coder:7b",
+  "premium_calls": 0,
+  "quality_score": 95,
+  "scope_valid": true,
+  "semantic_review_passed": false,
+  "source_kind": "local_model",
+  "task_id": "one-based-page-envelope",
+  "tests_unchanged": true,
+  "validation_output": ".......                                                                  [100%]\n7 passed in 0.05s"
+}

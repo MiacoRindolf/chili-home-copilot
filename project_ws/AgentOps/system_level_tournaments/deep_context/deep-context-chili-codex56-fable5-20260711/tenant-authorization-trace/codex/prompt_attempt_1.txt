@@ -1,0 +1,567 @@
+You are competing in a measured deep-context repository reasoning tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Infer the minimal contract-owning files from symbols and repository relationships.
+Do not edit tests, add dependencies, touch distractors, use placeholders, or modify unrelated source files.
+Held-out tests are not shown.
+
+Goal: Deep-context repository contract repair. Trace the unique owners of Claims, can_access, handle_request, and record_decision across the repository; no target paths are provided and similarly themed files are distractors. Claims.from_mapping must trim required subject_id and tenant_id, normalize unique lowercase roles, retain token only internally, and raise ValueError('invalid claims') when invalid. can_access must deny cross-tenant access before any role, then allow same-tenant admin, then owner, else deny with reasons tenant_mismatch, tenant_admin, owner, or not_authorized. handle_request returns status, reason, subject_id, tenant_id and always calls record_decision. Audit records contain only subject_id, tenant_id, resource_id, allowed, and reason, never token or full payload. Change only the minimal repository contract owners.
+Repository source files in context: 24
+
+Repository snapshot:
+### api/handler.py
+```python
+def handle_request(claims_payload, resource, audit):
+    return {"status": 200}
+```
+
+### audit/events.py
+```python
+def record_decision(audit, claims, resource, allowed, reason):
+    audit.append({"claims": vars(claims), "resource": dict(resource), "allowed": allowed})
+```
+
+### distractors/authorization_policy/module_01.py
+```python
+"""Archived authorization policy compatibility component 1."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord1:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_1(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-1",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_1(record: ArchivedAuthorizationPolicyRecord1) -> str:
+    return f"{record.key}:1"
+```
+
+### distractors/authorization_policy/module_02.py
+```python
+"""Archived authorization policy compatibility component 2."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord2:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_2(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-2",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_2(record: ArchivedAuthorizationPolicyRecord2) -> str:
+    return f"{record.key}:2"
+```
+
+### distractors/authorization_policy/module_03.py
+```python
+"""Archived authorization policy compatibility component 3."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord3:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_3(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-3",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_3(record: ArchivedAuthorizationPolicyRecord3) -> str:
+    return f"{record.key}:3"
+```
+
+### distractors/authorization_policy/module_04.py
+```python
+"""Archived authorization policy compatibility component 4."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord4:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_4(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-4",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_4(record: ArchivedAuthorizationPolicyRecord4) -> str:
+    return f"{record.key}:4"
+```
+
+### distractors/authorization_policy/module_05.py
+```python
+"""Archived authorization policy compatibility component 5."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord5:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_5(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-5",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_5(record: ArchivedAuthorizationPolicyRecord5) -> str:
+    return f"{record.key}:5"
+```
+
+### distractors/authorization_policy/module_06.py
+```python
+"""Archived authorization policy compatibility component 6."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord6:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_6(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-6",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_6(record: ArchivedAuthorizationPolicyRecord6) -> str:
+    return f"{record.key}:6"
+```
+
+### distractors/authorization_policy/module_07.py
+```python
+"""Archived authorization policy compatibility component 7."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord7:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_7(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-7",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_7(record: ArchivedAuthorizationPolicyRecord7) -> str:
+    return f"{record.key}:7"
+```
+
+### distractors/authorization_policy/module_08.py
+```python
+"""Archived authorization policy compatibility component 8."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord8:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_8(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-8",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_8(record: ArchivedAuthorizationPolicyRecord8) -> str:
+    return f"{record.key}:8"
+```
+
+### distractors/authorization_policy/module_09.py
+```python
+"""Archived authorization policy compatibility component 9."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord9:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_9(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-9",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_9(record: ArchivedAuthorizationPolicyRecord9) -> str:
+    return f"{record.key}:9"
+```
+
+### distractors/authorization_policy/module_10.py
+```python
+"""Archived authorization policy compatibility component 10."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord10:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_10(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-10",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_10(record: ArchivedAuthorizationPolicyRecord10) -> str:
+    return f"{record.key}:10"
+```
+
+### distractors/authorization_policy/module_11.py
+```python
+"""Archived authorization policy compatibility component 11."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord11:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_11(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-11",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_11(record: ArchivedAuthorizationPolicyRecord11) -> str:
+    return f"{record.key}:11"
+```
+
+### distractors/authorization_policy/module_12.py
+```python
+"""Archived authorization policy compatibility component 12."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord12:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_12(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-12",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_12(record: ArchivedAuthorizationPolicyRecord12) -> str:
+    return f"{record.key}:12"
+```
+
+### distractors/authorization_policy/module_13.py
+```python
+"""Archived authorization policy compatibility component 13."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord13:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_13(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-13",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_13(record: ArchivedAuthorizationPolicyRecord13) -> str:
+    return f"{record.key}:13"
+```
+
+### distractors/authorization_policy/module_14.py
+```python
+"""Archived authorization policy compatibility component 14."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord14:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_14(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-14",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_14(record: ArchivedAuthorizationPolicyRecord14) -> str:
+    return f"{record.key}:14"
+```
+
+### distractors/authorization_policy/module_15.py
+```python
+"""Archived authorization policy compatibility component 15."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord15:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_15(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-15",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_15(record: ArchivedAuthorizationPolicyRecord15) -> str:
+    return f"{record.key}:15"
+```
+
+### distractors/authorization_policy/module_16.py
+```python
+"""Archived authorization policy compatibility component 16."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord16:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_16(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-16",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_16(record: ArchivedAuthorizationPolicyRecord16) -> str:
+    return f"{record.key}:16"
+```
+
+### distractors/authorization_policy/module_17.py
+```python
+"""Archived authorization policy compatibility component 17."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord17:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_17(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-17",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_17(record: ArchivedAuthorizationPolicyRecord17) -> str:
+    return f"{record.key}:17"
+```
+
+### distractors/authorization_policy/module_18.py
+```python
+"""Archived authorization policy compatibility component 18."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord18:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_18(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-18",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_18(record: ArchivedAuthorizationPolicyRecord18) -> str:
+    return f"{record.key}:18"
+```
+
+### distractors/authorization_policy/module_19.py
+```python
+"""Archived authorization policy compatibility component 19."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord19:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_19(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-19",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_19(record: ArchivedAuthorizationPolicyRecord19) -> str:
+    return f"{record.key}:19"
+```
+
+### distractors/authorization_policy/module_20.py
+```python
+"""Archived authorization policy compatibility component 20."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedAuthorizationPolicyRecord20:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_authorization_policy_20(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "authorization_policy-20",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_authorization_policy_20(record: ArchivedAuthorizationPolicyRecord20) -> str:
+    return f"{record.key}:20"
+```
+
+### domain/claims.py
+```python
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class Claims:
+    subject_id: str
+    tenant_id: str
+    roles: tuple[str, ...]
+    token: str = ""
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "Claims":
+        return cls(
+            subject_id=str(value.get("subject_id", "")),
+            tenant_id=str(value.get("tenant_id", "")),
+            roles=tuple(value.get("roles", ())),
+            token=str(value.get("token", "")),
+        )
+```
+
+### domain/policy.py
+```python
+def can_access(claims, resource):
+    return True, "allowed"
+```
+
+### tests/test_authorization_contract.py
+```python
+from api.handler import handle_request
+
+
+def test_same_tenant_admin_is_allowed_and_audit_is_secret_free():
+    audit = []
+    result = handle_request(
+        {"subject_id": " user ", "tenant_id": " t1 ", "roles": ["ADMIN", "admin"], "token": "secret"},
+        {"resource_id": "r1", "tenant_id": "t1", "owner_id": "other"},
+        audit,
+    )
+    assert result == {"status": 200, "reason": "tenant_admin", "subject_id": "user", "tenant_id": "t1"}
+    assert audit == [{"subject_id": "user", "tenant_id": "t1", "resource_id": "r1", "allowed": True, "reason": "tenant_admin"}]
+    assert "secret" not in repr(audit)
+```

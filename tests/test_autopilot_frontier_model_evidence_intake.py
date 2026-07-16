@@ -150,6 +150,56 @@ def _write_preflight_recovery_report(path: Path, source_kind: str = "claude") ->
     )
 
 
+def _write_source_availability_report(path: Path, source_kind: str = "claude") -> None:
+    label = source_kind.replace("_", " ").title()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "# CHILI Frontier Source Availability Diagnostics",
+                "",
+                "- Schema: chili.frontier-source-availability-diagnostics.v1",
+                "- Status: warning",
+                f"- {label} probe status: auth_failed",
+                f"- {label} blocker: {source_kind}_auth_failed",
+                f"- {label} credential status: env_credentials_absent; logged_in",
+                (
+                    f"- {label} next action: Run `claude setup-token` in a trusted "
+                    "interactive terminal; then collect/import a real all-cases "
+                    f"{label} response."
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_collection_packet_summary(path: Path, source_kind: str = "claude") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "# CHILI Frontier Source Collection Packets",
+                "",
+                "- Schema: chili.frontier-source-collection-packets.v1",
+                "",
+                "| Source | Model | Status | Availability | Packet | Staging file | Source runner | Dry-run recorder command | Write/import command | Intake validation | Publish command |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+                (
+                    f"| {source_kind} | claude-fable-5 | partial | claude_auth_failed | "
+                    "claude_collection_packet.md | claude_all_cases_response.txt | "
+                    "python scripts/autopilot_frontier_source_runner.py "
+                    f"--source-kind {source_kind} --source-auth-mode auto --json | "
+                    "dry-run | write/import | validate | publish |"
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _patch_fast_scorecard_writers(
     monkeypatch,
     intake,
@@ -307,6 +357,38 @@ def test_frontier_model_evidence_intake_allows_prepared_but_incomplete_sources_i
     assert len(summary["manifests"]) == 1
 
 
+def test_frontier_model_evidence_intake_reports_empty_partial_sources(tmp_path, monkeypatch):
+    intake = _load_intake_module()
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    for source_kind in ("codex", "claude", "local_model"):
+        (input_root / source_kind).mkdir(parents=True)
+
+    summary = intake.run_intake(
+        input_root=input_root,
+        output_root=output_root,
+        allow_partial=True,
+    )
+
+    assert summary["status"] == "warning"
+    assert summary["source_kinds"] == []
+    assert summary["ready_source_count"] == 0
+    assert summary["missing_source_kinds"] == ["codex", "claude", "local_model"]
+    assert summary["manifests"] == []
+    assert summary["shadow"]["checks"] == 1
+    assert summary["tournament"]["cases"] == 0
+    readiness = {
+        item["source_kind"]: item
+        for item in summary["source_readiness"]
+        if isinstance(item, dict)
+    }
+    assert readiness["codex"]["status"] == "partial"
+    assert "codex/metadata.json" in readiness["codex"]["missing_files"]
+    assert "codex/raw/*.json" in readiness["codex"]["missing_files"]
+    assert "model_shadow_evidence_mode" in summary["blockers"]
+    assert "model_tournament_status" in summary["blockers"]
+
+
 def test_frontier_model_evidence_intake_renders_source_readiness_table(tmp_path, monkeypatch):
     intake = _load_intake_module()
     input_root = tmp_path / "input"
@@ -436,6 +518,76 @@ def test_frontier_model_evidence_intake_attaches_preflight_recovery_route(tmp_pa
     assert "--json --no-write" in markdown
     assert "--publish-scorecards --json" in markdown
     assert "Preflight recovery: Import saved claude response" in markdown
+
+
+def test_frontier_model_evidence_intake_attaches_availability_recovery_route(tmp_path, monkeypatch):
+    intake = _load_intake_module()
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    availability = tmp_path / "FRONTIER_SOURCE_AVAILABILITY_DIAGNOSTICS.md"
+    collection_packets = tmp_path / "FRONTIER_SOURCE_COLLECTION_PACKETS.md"
+    _write_intake_input(input_root)
+    shutil.rmtree(input_root / "claude")
+    (input_root / "claude").mkdir(parents=True)
+    (input_root / "claude" / "prompt_pack.md").write_text(
+        "prepared claude prompt pack\n",
+        encoding="utf-8",
+    )
+    _write_source_availability_report(availability)
+    _write_collection_packet_summary(collection_packets)
+    _patch_fast_scorecard_writers(
+        monkeypatch,
+        intake,
+        missing_source_kinds=["claude"],
+        tournament_status="failed",
+    )
+
+    summary = intake.run_intake(
+        input_root=input_root,
+        output_root=output_root,
+        allow_partial=True,
+        availability_report=availability,
+        collection_packet_summary=collection_packets,
+    )
+    readiness = {
+        item["source_kind"]: item
+        for item in summary["source_readiness"]
+        if isinstance(item, dict)
+    }
+    claude = readiness["claude"]
+    markdown = intake.render_intake_summary(summary)
+
+    assert summary["availability_report"] == str(availability.resolve())
+    assert summary["availability_recovery_route_count"] == 1
+    assert summary["collection_packet_summary"] == str(collection_packets.resolve())
+    assert summary["source_runner_route_count"] == 1
+    route = summary["availability_recovery_routes"][0]
+    runner_route = summary["source_runner_routes"][0]
+    assert route["source_kind"] == "claude"
+    assert runner_route["source_kind"] == "claude"
+    assert "--source-auth-mode auto" in runner_route["source_runner_command"]
+    assert route["probe_status"] == "auth_failed"
+    assert route["blocker"] == "claude_auth_failed"
+    assert "claude setup-token" in route["action"]
+    assert claude["availability_probe_status"] == "auth_failed"
+    assert claude["availability_blocker"] == "claude_auth_failed"
+    assert claude["availability_credential_status"] == "env_credentials_absent; logged_in"
+    assert "claude setup-token" in claude["availability_recovery_action"]
+    assert "--source-auth-mode auto" in claude["source_runner_command"]
+    assert claude["collection_packet_summary"] == str(collection_packets.resolve())
+    assert "Availability recovery: Run `claude setup-token`" in claude["next_action"]
+    assert "Current blocker: claude_auth_failed" in claude["next_action"]
+    assert "Automated source runner:" in claude["next_action"]
+    assert "--source-kind claude --source-auth-mode auto --json" in claude["next_action"]
+    assert "Manual fallback:" in claude["next_action"]
+    assert "autopilot_frontier_source_collection_packet.py --source-kind claude" in claude["next_action"]
+    assert "- Availability recovery routes: 1" in markdown
+    assert "- Source runner routes: 1" in markdown
+    assert "## Availability Recovery Routes" in markdown
+    assert "## Source Runner Routes" in markdown
+    assert "claude_auth_failed" in markdown
+    assert "claude setup-token" in markdown
+    assert "--source-auth-mode auto" in markdown
 
 
 def test_frontier_model_evidence_intake_resolves_relative_output_root(tmp_path, monkeypatch):

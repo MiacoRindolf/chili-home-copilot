@@ -1,0 +1,20 @@
+{
+  "artifact_schema": "chili.model-candidate-artifacts.v1",
+  "cases": 6,
+  "collector": "autopilot_model_candidate_drop_collector",
+  "evaluation_mode": "actual_candidate",
+  "generated_utc": "2026-07-10T21:51:52.435273Z",
+  "model_name": "qwen2.5-coder:7b",
+  "output_dir": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\intake_56_chili_early_comparison\\collected\\local_model",
+  "prompt_pack": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources_56_chili_early_comparison\\local_model\\prompt_pack.md",
+  "prompt_pack_file": "chili-agent-qwen25-early-repair-20260710t213200z.prompt-pack.md",
+  "prompt_pack_sha256": "dadf7c23fdfc556db90d2281aec2a019eaaf12b764c7082653f04f1f0589f073",
+  "run_id": "chili-agent-qwen25-early-repair-20260710T213200Z",
+  "schema": "chili.model-candidate-drop-collector.v1",
+  "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses); synthesized replay repairs: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses",
+  "source_kind": "local_model",
+  "transcript_events": 3,
+  "transcript_file": "chili-agent-qwen25-early-repair-20260710t213200z.transcript.jsonl",
+  "transcript_sha256": "f86f1502f58d2ee5c339e8828abdf4a8be95f43d4884a65702490c90914276f1",
+  "validated_with_provenance": true
+}

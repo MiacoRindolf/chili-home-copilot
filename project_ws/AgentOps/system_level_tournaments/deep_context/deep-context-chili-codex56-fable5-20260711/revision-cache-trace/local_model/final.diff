@@ -1,0 +1,111 @@
+diff --git a/cache/keys.py b/cache/keys.py
+index 255aaed..f437cb8 100644
+--- a/cache/keys.py
++++ b/cache/keys.py
+@@ -1,2 +1,5 @@
+-def build_cache_key(token):
+-    return f"catalog:{token.entity_id}"
++from domain.revision import RevisionToken
++
++
++def build_cache_key(token: RevisionToken) -> str:
++    return f"catalog:{token.entity_id}:v{token.revision}"
+diff --git a/cache/store.py b/cache/store.py
+index 58abb2f..679fabd 100644
+--- a/cache/store.py
++++ b/cache/store.py
+@@ -1,10 +1,36 @@
++from typing import Any
++
++from cache.keys import build_cache_key
++from domain.revision import RevisionToken
++
++
+ class CacheStore:
+-    def __init__(self):
+-        self.value = None
++    def __init__(self) -> None:
++        self.values: dict[str, Any] = {}
++        self.latest_revision: dict[str, int] = {}
+ 
+-    def get(self, token):
+-        return self.value
++    def get(self, token: RevisionToken) -> Any | None:
++        return self.values.get(build_cache_key(token))
+ 
+-    def put(self, token, value):
+-        self.value = value
++    def put(self, token: RevisionToken, value: Any) -> bool:
++        latest = self.latest_revision.get(token.entity_id, 0)
++        if token.revision < latest:
++            return False
++        self.latest_revision[token.entity_id] = token.revision
++        self.values[build_cache_key(token)] = value
+         return True
++
++    def invalidate_before(self, entity_id: str, minimum_revision: int) -> int:
++        prefix = f"catalog:{entity_id}:v"
++        stale = [
++            key
++            for key in self.values
++            if key.startswith(prefix) and int(key.rsplit("v", 1)[1]) < minimum_revision
++        ]
++        for key in stale:
++            self.values.pop(key, None)
++        self.latest_revision[entity_id] = max(
++            self.latest_revision.get(entity_id, 0),
++            minimum_revision,
++        )
++        return len(stale)
+diff --git a/domain/revision.py b/domain/revision.py
+index 994d6d2..7137527 100644
+--- a/domain/revision.py
++++ b/domain/revision.py
+@@ -1,4 +1,5 @@
+ from dataclasses import dataclass
++from typing import Any, Mapping
+ 
+ 
+ @dataclass(frozen=True)
+@@ -7,5 +8,12 @@ class RevisionToken:
+     revision: int
+ 
+     @classmethod
+-    def from_payload(cls, value):
+-        return cls(str(value.get("entity_id", "")), int(value.get("revision", 0)))
++    def from_payload(cls, value: Mapping[str, Any]) -> "RevisionToken":
++        entity_id = str(value.get("entity_id", "")).strip()
++        try:
++            revision = int(value.get("revision", 0))
++        except (TypeError, ValueError):
++            raise ValueError("invalid revision token") from None
++        if not entity_id or revision < 1:
++            raise ValueError("invalid revision token")
++        return cls(entity_id=entity_id, revision=revision)
+diff --git a/service/catalog.py b/service/catalog.py
+index e0fb858..713d03e 100644
+--- a/service/catalog.py
++++ b/service/catalog.py
+@@ -1,2 +1,20 @@
+-def load_catalog(token_payload, store, fetcher):
+-    return {"source": "origin", "value": fetcher("", 0), "revision": 0}
++from collections.abc import Callable
++from typing import Any, Mapping
++
++from domain.revision import RevisionToken
++from cache.store import CacheStore
++
++
++def load_catalog(
++    token_payload: Mapping[str, Any],
++    store: CacheStore,
++    fetcher: Callable[[str, int], Any],
++) -> dict[str, Any]:
++    token = RevisionToken.from_payload(token_payload)
++    cached = store.get(token)
++    if cached is not None:
++        return {"source": "cache", "value": cached, "revision": token.revision}
++    value = fetcher(token.entity_id, token.revision)
++    if not store.put(token, value):
++        return {"source": "stale_rejected", "value": None, "revision": token.revision}
++    return {"source": "origin", "value": value, "revision": token.revision}

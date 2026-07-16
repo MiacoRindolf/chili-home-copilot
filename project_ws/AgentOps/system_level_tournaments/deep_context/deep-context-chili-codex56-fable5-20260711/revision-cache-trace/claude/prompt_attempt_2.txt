@@ -1,0 +1,701 @@
+You are competing in a measured deep-context repository reasoning tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Infer the minimal contract-owning files from symbols and repository relationships.
+Do not edit tests, add dependencies, touch distractors, use placeholders, or modify unrelated source files.
+Held-out tests are not shown.
+
+Goal: Deep-context repository contract repair. Trace the unique owners of RevisionToken, build_cache_key, CacheStore, and load_catalog across the repository; no target paths are provided and similarly themed files are distractors. RevisionToken.from_payload must trim entity_id, require revision >= 1, and raise ValueError('invalid revision token'). build_cache_key includes entity and revision. CacheStore stores exact revision values, tracks latest revision per entity, rejects stale put operations without mutation, and invalidate_before removes older revisions and returns the removal count. load_catalog returns cache on exact hit, origin after accepted fetch, or stale_rejected with no stale value after a rejected write. Change only the minimal repository contract owners.
+Repository source files in context: 24
+
+Repository snapshot:
+### cache/keys.py
+```python
+def build_cache_key(token):
+    return f"catalog:{token.entity_id}:{token.revision}"
+```
+
+### cache/store.py
+```python
+class CacheStore:
+    def __init__(self):
+        self._entries = {}
+        self._latest = {}
+
+    def get(self, token):
+        return self._entries.get(token.entity_id, {}).get(token.revision)
+
+    def put(self, token, value):
+        latest = self._latest.get(token.entity_id)
+        if latest is not None and token.revision < latest:
+            return False
+        self._entries.setdefault(token.entity_id, {})[token.revision] = value
+        if latest is None or token.revision > latest:
+            self._latest[token.entity_id] = token.revision
+        return True
+
+    def invalidate_before(self, token):
+        revisions = self._entries.get(token.entity_id, {})
+        stale = [revision for revision in revisions if revision < token.revision]
+        for revision in stale:
+            del revisions[revision]
+        return len(stale)
+```
+
+### distractors/catalog_cache/module_01.py
+```python
+"""Archived catalog cache compatibility component 1."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord1:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_1(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-1",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_1(record: ArchivedCatalogCacheRecord1) -> str:
+    return f"{record.key}:1"
+```
+
+### distractors/catalog_cache/module_02.py
+```python
+"""Archived catalog cache compatibility component 2."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord2:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_2(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-2",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_2(record: ArchivedCatalogCacheRecord2) -> str:
+    return f"{record.key}:2"
+```
+
+### distractors/catalog_cache/module_03.py
+```python
+"""Archived catalog cache compatibility component 3."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord3:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_3(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-3",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_3(record: ArchivedCatalogCacheRecord3) -> str:
+    return f"{record.key}:3"
+```
+
+### distractors/catalog_cache/module_04.py
+```python
+"""Archived catalog cache compatibility component 4."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord4:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_4(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-4",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_4(record: ArchivedCatalogCacheRecord4) -> str:
+    return f"{record.key}:4"
+```
+
+### distractors/catalog_cache/module_05.py
+```python
+"""Archived catalog cache compatibility component 5."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord5:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_5(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-5",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_5(record: ArchivedCatalogCacheRecord5) -> str:
+    return f"{record.key}:5"
+```
+
+### distractors/catalog_cache/module_06.py
+```python
+"""Archived catalog cache compatibility component 6."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord6:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_6(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-6",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_6(record: ArchivedCatalogCacheRecord6) -> str:
+    return f"{record.key}:6"
+```
+
+### distractors/catalog_cache/module_07.py
+```python
+"""Archived catalog cache compatibility component 7."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord7:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_7(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-7",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_7(record: ArchivedCatalogCacheRecord7) -> str:
+    return f"{record.key}:7"
+```
+
+### distractors/catalog_cache/module_08.py
+```python
+"""Archived catalog cache compatibility component 8."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord8:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_8(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-8",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_8(record: ArchivedCatalogCacheRecord8) -> str:
+    return f"{record.key}:8"
+```
+
+### distractors/catalog_cache/module_09.py
+```python
+"""Archived catalog cache compatibility component 9."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord9:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_9(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-9",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_9(record: ArchivedCatalogCacheRecord9) -> str:
+    return f"{record.key}:9"
+```
+
+### distractors/catalog_cache/module_10.py
+```python
+"""Archived catalog cache compatibility component 10."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord10:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_10(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-10",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_10(record: ArchivedCatalogCacheRecord10) -> str:
+    return f"{record.key}:10"
+```
+
+### distractors/catalog_cache/module_11.py
+```python
+"""Archived catalog cache compatibility component 11."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord11:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_11(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-11",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_11(record: ArchivedCatalogCacheRecord11) -> str:
+    return f"{record.key}:11"
+```
+
+### distractors/catalog_cache/module_12.py
+```python
+"""Archived catalog cache compatibility component 12."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord12:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_12(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-12",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_12(record: ArchivedCatalogCacheRecord12) -> str:
+    return f"{record.key}:12"
+```
+
+### distractors/catalog_cache/module_13.py
+```python
+"""Archived catalog cache compatibility component 13."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord13:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_13(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-13",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_13(record: ArchivedCatalogCacheRecord13) -> str:
+    return f"{record.key}:13"
+```
+
+### distractors/catalog_cache/module_14.py
+```python
+"""Archived catalog cache compatibility component 14."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord14:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_14(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-14",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_14(record: ArchivedCatalogCacheRecord14) -> str:
+    return f"{record.key}:14"
+```
+
+### distractors/catalog_cache/module_15.py
+```python
+"""Archived catalog cache compatibility component 15."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord15:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_15(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-15",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_15(record: ArchivedCatalogCacheRecord15) -> str:
+    return f"{record.key}:15"
+```
+
+### distractors/catalog_cache/module_16.py
+```python
+"""Archived catalog cache compatibility component 16."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord16:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_16(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-16",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_16(record: ArchivedCatalogCacheRecord16) -> str:
+    return f"{record.key}:16"
+```
+
+### distractors/catalog_cache/module_17.py
+```python
+"""Archived catalog cache compatibility component 17."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord17:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_17(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-17",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_17(record: ArchivedCatalogCacheRecord17) -> str:
+    return f"{record.key}:17"
+```
+
+### distractors/catalog_cache/module_18.py
+```python
+"""Archived catalog cache compatibility component 18."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord18:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_18(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-18",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_18(record: ArchivedCatalogCacheRecord18) -> str:
+    return f"{record.key}:18"
+```
+
+### distractors/catalog_cache/module_19.py
+```python
+"""Archived catalog cache compatibility component 19."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord19:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_19(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-19",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_19(record: ArchivedCatalogCacheRecord19) -> str:
+    return f"{record.key}:19"
+```
+
+### distractors/catalog_cache/module_20.py
+```python
+"""Archived catalog cache compatibility component 20."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedCatalogCacheRecord20:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_catalog_cache_20(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "catalog_cache-20",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_catalog_cache_20(record: ArchivedCatalogCacheRecord20) -> str:
+    return f"{record.key}:20"
+```
+
+### domain/revision.py
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class RevisionToken:
+    entity_id: str
+    revision: int
+
+    @classmethod
+    def from_payload(cls, value):
+        if not isinstance(value, dict):
+            raise ValueError("invalid revision token")
+        entity_id = str(value.get("entity_id", "")).strip()
+        try:
+            revision = int(value.get("revision", 0))
+        except (TypeError, ValueError):
+            raise ValueError("invalid revision token")
+        if not entity_id or revision < 1:
+            raise ValueError("invalid revision token")
+        return cls(entity_id, revision)
+```
+
+### service/catalog.py
+```python
+from domain.revision import RevisionToken
+
+
+def load_catalog(token_payload, store, fetcher):
+    token = RevisionToken.from_payload(token_payload)
+    cached = store.get(token)
+    if cached is not None:
+        return {"source": "cache", "value": cached, "revision": token.revision}
+    value = fetcher(token.entity_id, token.revision)
+    if store.put(token, value):
+        return {"source": "origin", "value": value, "revision": token.revision}
+    return {"source": "stale_rejected", "value": None, "revision": token.revision}
+```
+
+### tests/test_revision_cache_contract.py
+```python
+from cache.store import CacheStore
+from service.catalog import load_catalog
+
+
+def test_exact_revision_is_cached_without_refetch():
+    store = CacheStore()
+    calls = []
+
+    def fetch(entity_id, revision):
+        calls.append((entity_id, revision))
+        return {"name": "catalog"}
+
+    payload = {"entity_id": " item ", "revision": "2"}
+    assert load_catalog(payload, store, fetch)["source"] == "origin"
+    assert load_catalog(payload, store, fetch)["source"] == "cache"
+    assert calls == [("item", 2)]
+```
+
+The previous patch failed validation. Repair the current snapshot using this evidence:
+validation failed: ...F                                                                     [100%]
+================================== FAILURES ===================================
+_______ test_stale_write_is_rejected_and_old_entries_can_be_invalidated _______
+    def test_stale_write_is_rejected_and_old_entries_can_be_invalidated():
+        store = CacheStore()
+        latest = RevisionToken("x", 5)
+        older = RevisionToken("x", 4)
+        assert store.put(latest, "new") is True
+        assert store.put(older, "old") is False
+        result = load_catalog({"entity_id": "x", "revision": 4}, store, lambda entity, revision: "old")
+        assert result == {"source": "stale_rejected", "value": None, "revision": 4}
+        assert store.put(RevisionToken("x", 6), "newer") is True
+>       assert store.invalidate_before("x", 6) == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: CacheStore.invalidate_before() takes 2 positional arguments but 3 were given
+hidden_tests\test_revision_cache_edges.py:23: TypeError
+=========================== short test summary info ===========================
+FAILED hidden_tests/test_revision_cache_edges.py::test_stale_write_is_rejected_and_old_entries_can_be_invalidated
+1 failed, 3 passed in 0.12s
+
+Previous response:
+Shell execution is denied in this mode, so I verified the contract by hand-tracing the visible test and each stated behavior against the four owner files (`domain/revision.py`, `cache/keys.py`, `cache/store.py`, `service/catalog.py`), leaving tests and `distractors/` untouched. The diff below is line-exact against the snapshot.
+
+```diff
+diff --git a/domain/revision.py b/domain/revision.py
+--- a/domain/revision.py
++++ b/domain/revision.py
+@@ -8,4 +8,13 @@ class RevisionToken:
+ 
+     @classmethod
+     def from_payload(cls, value):
+-        return cls(str(value.get("entity_id", "")), int(value.get("revision", 0)))
++        if not isinstance(value, dict):
++            raise ValueError("invalid revision token")
++        entity_id = str(value.get("entity_id", "")).strip()
++        try:
++            revision = int(value.get("revision", 0))
++        except (TypeError, ValueError):
++            raise ValueError("invalid revision token")
++        if not entity_id or revision < 1:
++            raise ValueError("invalid revision token")
++        return cls(entity_id, revision)
+diff --git a/cache/keys.py b/cache/keys.py
+--- a/cache/keys.py
++++ b/cache/keys.py
+@@ -1,2 +1,2 @@
+ def build_cache_key(token):
+-    return f"catalog:{token.entity_id}"
++    return f"catalog:{token.entity_id}:{token.revision}"
+diff --git a/cache/store.py b/cache/store.py
+--- a/cache/store.py
++++ b/cache/store.py
+@@ -1,10 +1,23 @@
+ class CacheStore:
+     def __init__(self):
+-        self.value = None
++        self._entries = {}
++        self._latest = {}
+ 
+     def get(self, token):
+-        return self.value
++        return self._entries.get(token.entity_id, {}).get(token.revision)
+ 
+     def put(self, token, value):
+-        self.value = value
++        latest = self._latest.get(token.entity_id)
++        if latest is not None and token.revision < latest:
++            return False
++        self._entries.setdefault(token.entity_id, {})[token.revision] = value
++        if latest is None or token.revision > latest:
++            self._latest[token.entity_id] = token.revision
+         return True
++
++    def invalidate_before(self, token):
++        revisions = self._entries.get(token.entity_id, {})
++        stale = [revision for revision in revisions if revision < token.revision]
++        for revision in stale:
++            del revisions[revision]
++        return len(stale)
+diff --git a/service/catalog.py b/service/catalog.py
+--- a/service/catalog.py
++++ b/service/catalog.py
+@@ -1,2 +1,12 @@
++from domain.revision import RevisionToken
++
++
+ def load_catalog(token_payload, store, fetcher):
+-    return {"source": "origin", "value": fetcher("", 0), "revision": 0}
++    token = RevisionToken.from_payload(token_payload)
++    cached = store.get(token)
++    if cached is not None:
++        return {"source": "cache", "value": cached, "revision": token.revision}
++    value = fetcher(token.entity_id, token.revision)
++    if store.put(token, value):
++        return {"source": "origin", "value": value, "revision": token.revision}
++    return {"source": "stale_rejected", "value": None, "revision": token.revision}
+```

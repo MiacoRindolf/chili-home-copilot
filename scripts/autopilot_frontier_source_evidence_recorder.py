@@ -196,6 +196,19 @@ def _optional_number(payload: Mapping[str, object], key: str, *, default: float)
     return float(value)
 
 
+def _measured_or_reported_duration(
+    payload: Mapping[str, object],
+    *,
+    measured_default: float | None,
+) -> float:
+    reported = _optional_number(payload, "duration_seconds", default=0.0)
+    if reported > 0:
+        return reported
+    if measured_default is not None and measured_default > 0:
+        return float(measured_default)
+    return reported
+
+
 def _read_json(path: Path) -> Mapping[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -330,19 +343,25 @@ def _build_response_drop_dir(
     model_name: str,
     case_id: str,
     candidate_id: str | None,
+    measured_run_duration_seconds: float | None = None,
 ) -> Path:
     if not response_path.is_file():
         raise FrontierSourceEvidenceRecorderError(f"response file does not exist: {response_path}")
     response_text = response_path.read_text(encoding="utf-8", errors="replace")
     try:
         payload = parse_model_response(response_text)
-        patch_text = _patch_from_model_payload(payload)
     except LocalModelCandidateRunnerError as exc:
         raise FrontierSourceEvidenceRecorderError(
             f"model response could not be converted into a candidate drop: {exc}"
         ) from exc
 
     case = _case_by_id(case_id)
+    try:
+        patch_text = _patch_from_model_payload(payload, case=case)
+    except LocalModelCandidateRunnerError as exc:
+        raise FrontierSourceEvidenceRecorderError(
+            f"model response could not be converted into a candidate drop: {exc}"
+        ) from exc
     command = _command_text(case.test_command)
     planned_file = case.incumbent.planned_file
     expected_changed_files = list(case.incumbent.expected_changed_files)
@@ -404,7 +423,10 @@ def _build_response_drop_dir(
         "planned_file": planned_file,
         "expected_changed_files": expected_changed_files,
         "declared_commands": [command],
-        "duration_seconds": _optional_number(payload, "duration_seconds", default=0.0),
+        "duration_seconds": _measured_or_reported_duration(
+            payload,
+            measured_default=measured_run_duration_seconds,
+        ),
         "cost_units": _optional_number(payload, "cost_units", default=0.0),
         "notes": str(notes).strip(),
     }
@@ -422,6 +444,7 @@ def _build_response_suite_drop_dir(
     source_kind: str,
     model_name: str,
     candidate_id: str | None,
+    measured_run_duration_seconds: float | None = None,
 ) -> Path:
     if not response_path.is_file():
         raise FrontierSourceEvidenceRecorderError(f"response file does not exist: {response_path}")
@@ -434,11 +457,24 @@ def _build_response_suite_drop_dir(
             f"model response could not be converted into suite candidate drops: {exc}"
         ) from exc
 
+    measured_per_case = (
+        float(measured_run_duration_seconds) / len(payloads)
+        if measured_run_duration_seconds is not None
+        and measured_run_duration_seconds > 0
+        and payloads
+        else None
+    )
+
     raw_dir.mkdir(parents=True, exist_ok=True)
     for payload in payloads:
         case_id = _required_text(payload.get("case_id"), label="model_response.case_id")
-        patch_text = _patch_from_model_payload(payload)
         case = _case_by_id(case_id)
+        try:
+            patch_text = _patch_from_model_payload(payload, case=case)
+        except LocalModelCandidateRunnerError as exc:
+            raise FrontierSourceEvidenceRecorderError(
+                f"model response could not be converted into suite candidate drops: {exc}"
+            ) from exc
         command = _command_text(case.test_command)
         planned_file = case.incumbent.planned_file
         expected_changed_files = list(case.incumbent.expected_changed_files)
@@ -497,7 +533,10 @@ def _build_response_suite_drop_dir(
             "planned_file": planned_file,
             "expected_changed_files": expected_changed_files,
             "declared_commands": [command],
-            "duration_seconds": _optional_number(payload, "duration_seconds", default=0.0),
+            "duration_seconds": _measured_or_reported_duration(
+                payload,
+                measured_default=measured_per_case,
+            ),
             "cost_units": _optional_number(payload, "cost_units", default=0.0),
             "notes": str(notes).strip(),
         }
@@ -542,6 +581,8 @@ def _write_metadata(
     source_command: str,
     prompt_pack_sha256: str,
     recorded_at: str,
+    measured_run_duration_seconds: float | None,
+    duration_attribution: str,
 ) -> None:
     payload = {
         "model_name": model_name,
@@ -554,6 +595,8 @@ def _write_metadata(
         "source_command": source_command,
         "source_kind": source_kind,
         "transcript_file": TRANSCRIPT_FILE,
+        "measured_run_duration_seconds": measured_run_duration_seconds,
+        "duration_attribution": duration_attribution,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -568,6 +611,8 @@ def _build_transcript_from_response(
     prompt_pack_sha256: str,
     raw_files: Sequence[str],
     case_ids: Sequence[str],
+    measured_run_duration_seconds: float | None,
+    duration_attribution: str,
 ) -> str:
     if not response_path.is_file():
         raise FrontierSourceEvidenceRecorderError(f"response file does not exist: {response_path}")
@@ -588,6 +633,8 @@ def _build_transcript_from_response(
             "run_id": run_id,
             "source_command": source_command,
             "source_kind": source_kind,
+            "measured_run_duration_seconds": measured_run_duration_seconds,
+            "duration_attribution": duration_attribution,
         },
         {
             "content": response_text,
@@ -623,6 +670,8 @@ def _copy_or_build_transcript(
     prompt_pack_sha256: str,
     raw_files: Sequence[str],
     case_ids: Sequence[str],
+    measured_run_duration_seconds: float | None,
+    duration_attribution: str,
 ) -> None:
     if transcript_path and response_path:
         raise FrontierSourceEvidenceRecorderError("use --transcript or --response, not both")
@@ -646,6 +695,8 @@ def _copy_or_build_transcript(
                 prompt_pack_sha256=prompt_pack_sha256,
                 raw_files=raw_files,
                 case_ids=case_ids,
+                measured_run_duration_seconds=measured_run_duration_seconds,
+                duration_attribution=duration_attribution,
             ),
             encoding="utf-8",
         )
@@ -666,6 +717,8 @@ def _prepare_recording_target(
     source_command: str,
     prompt_pack_sha256: str,
     overwrite: bool,
+    measured_run_duration_seconds: float | None,
+    duration_attribution: str,
 ) -> dict[str, object]:
     conflicts = _target_conflicts(target_source_dir, overwrite=overwrite)
     if conflicts:
@@ -693,6 +746,8 @@ def _prepare_recording_target(
         source_command=source_command,
         prompt_pack_sha256=prompt_pack_sha256,
         recorded_at=recorded_at,
+        measured_run_duration_seconds=measured_run_duration_seconds,
+        duration_attribution=duration_attribution,
     )
     _copy_or_build_transcript(
         transcript_path=transcript_path,
@@ -705,6 +760,8 @@ def _prepare_recording_target(
         prompt_pack_sha256=prompt_pack_sha256,
         raw_files=raw_files,
         case_ids=case_ids,
+        measured_run_duration_seconds=measured_run_duration_seconds,
+        duration_attribution=duration_attribution,
     )
     with tempfile.TemporaryDirectory(prefix="chili_frontier_source_recorder_validate_") as tmp:
         _drops, manifest = collect_candidate_drops(
@@ -746,6 +803,7 @@ def record_frontier_source_evidence(
     source_command: str,
     write: bool = True,
     overwrite: bool = False,
+    measured_run_duration_seconds: float | None = None,
 ) -> dict[str, object]:
     clean_source_kind = _source_kind(source_kind)
     target_source_dir = source_dir or source_root / clean_source_kind
@@ -757,6 +815,18 @@ def record_frontier_source_evidence(
     )
     clean_run_id = _required_text(run_id, label="run_id")
     clean_source_command = _required_text(source_command, label="source_command")
+    measured_duration = (
+        max(0.0, float(measured_run_duration_seconds))
+        if measured_run_duration_seconds is not None
+        else None
+    )
+    duration_attribution = (
+        "measured_source_wall_clock_evenly_attributed_across_cases"
+        if measured_duration is not None and all_cases
+        else "measured_source_wall_clock"
+        if measured_duration is not None
+        else "source_reported_or_unmeasured"
+    )
     prompt_pack_sha256 = _validate_prompt_pack(
         prompt_pack,
         source_kind=clean_source_kind,
@@ -790,6 +860,7 @@ def record_frontier_source_evidence(
                 source_kind=clean_source_kind,
                 model_name=resolved_model_name,
                 candidate_id=candidate_id,
+                measured_run_duration_seconds=measured_duration,
             )
         else:
             effective_drop_dir = _build_response_drop_dir(
@@ -799,6 +870,7 @@ def record_frontier_source_evidence(
                 model_name=resolved_model_name,
                 case_id=str(case_id),
                 candidate_id=candidate_id,
+                measured_run_duration_seconds=measured_duration,
             )
         response_imported = True
 
@@ -829,6 +901,8 @@ def record_frontier_source_evidence(
                     source_command=clean_source_command,
                     prompt_pack_sha256=prompt_pack_sha256,
                     overwrite=overwrite,
+                    measured_run_duration_seconds=measured_duration,
+                    duration_attribution=duration_attribution,
                 )
             except DropCollectionError as exc:
                 raise FrontierSourceEvidenceRecorderError(str(exc)) from exc
@@ -850,6 +924,8 @@ def record_frontier_source_evidence(
                         source_command=clean_source_command,
                         prompt_pack_sha256=prompt_pack_sha256,
                         overwrite=True,
+                        measured_run_duration_seconds=measured_duration,
+                        duration_attribution=duration_attribution,
                     )
                 except DropCollectionError as exc:
                     raise FrontierSourceEvidenceRecorderError(str(exc)) from exc
@@ -876,6 +952,8 @@ def record_frontier_source_evidence(
         "model_name": resolved_model_name,
         "run_id": clean_run_id,
         "source_command": clean_source_command,
+        "measured_run_duration_seconds": measured_duration,
+        "duration_attribution": duration_attribution,
         "input_prompt_pack": str(prompt_pack),
         "prompt_pack": str(target_source_dir / PROMPT_PACK_FILE),
         "prompt_pack_sha256": prompt_pack_sha256,

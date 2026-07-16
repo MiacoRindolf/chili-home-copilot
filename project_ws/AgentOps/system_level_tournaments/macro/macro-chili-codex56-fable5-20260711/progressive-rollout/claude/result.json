@@ -1,0 +1,74 @@
+{
+  "attempts": 5,
+  "behavior_passed": true,
+  "changed_files": [
+    "app/cohort.py",
+    "app/config.py",
+    "app/decision.py",
+    "app/service.py"
+  ],
+  "continuity_valid": true,
+  "duration_seconds": 1533.882,
+  "eligible": true,
+  "failure": "",
+  "model_events": [],
+  "model_name": "claude-fable-5",
+  "phase_changes_present": true,
+  "phase_count": 3,
+  "phase_results": [
+    {
+      "attempts": 2,
+      "changed_files": [
+        "app/cohort.py",
+        "app/config.py",
+        "app/decision.py",
+        "app/service.py"
+      ],
+      "cumulative_phase_count": 1,
+      "passed": true,
+      "phase_id": "milestone-1",
+      "semantic_review_passed": true,
+      "tests_unchanged": true,
+      "validation_output": ".......                                                                  [100%]\n7 passed in 0.04s"
+    },
+    {
+      "attempts": 2,
+      "changed_files": [
+        "app/config.py",
+        "app/decision.py",
+        "app/service.py"
+      ],
+      "cumulative_phase_count": 2,
+      "passed": true,
+      "phase_id": "milestone-2",
+      "semantic_review_passed": true,
+      "tests_unchanged": true,
+      "validation_output": "..........                                                               [100%]\n10 passed in 0.05s"
+    },
+    {
+      "attempts": 1,
+      "changed_files": [
+        "app/config.py",
+        "app/decision.py",
+        "app/service.py"
+      ],
+      "cumulative_phase_count": 3,
+      "passed": true,
+      "phase_id": "milestone-3",
+      "semantic_review_passed": true,
+      "tests_unchanged": true,
+      "validation_output": ".............                                                            [100%]\n13 passed in 0.06s"
+    }
+  ],
+  "phases_passed": 3,
+  "premium_calls": null,
+  "quality_score": 100,
+  "required_files_changed": true,
+  "scope_valid": true,
+  "scoring_revision": "phase-change-evidence-v2",
+  "semantic_review_passed": true,
+  "source_kind": "claude",
+  "task_id": "progressive-rollout",
+  "tests_unchanged": true,
+  "validation_output": ".............                                                            [100%]\n13 passed in 0.06s"
+}

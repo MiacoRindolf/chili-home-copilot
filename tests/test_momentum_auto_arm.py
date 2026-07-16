@@ -1,14 +1,17 @@
 """Autonomous auto-arm-live guard + selection logic (Ross-style)."""
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
+from app.models.trading import MomentumSymbolViability
 import app.services.trading.momentum_neural.auto_arm as aa
 from app.services import coinbase_service
 from app.services.trading import governance, portfolio_risk
 from app.services.trading.momentum_neural import automation_query, operator_actions
+from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants
 
 
 class _FakeDB:
@@ -19,8 +22,17 @@ class _FakeDB:
         pass
 
 
-def _cand(symbol="RSC-USD", variant_id=8, score=0.61):
-    return SimpleNamespace(symbol=symbol, variant_id=variant_id, viability_score=score)
+def _cand(symbol="RSC-USD", variant_id=8, score=0.61, execution_readiness_json=None):
+    return SimpleNamespace(
+        symbol=symbol,
+        variant_id=variant_id,
+        viability_score=score,
+        execution_readiness_json=execution_readiness_json or {},
+    )
+
+
+def _ross_exec(symbol: str, signal: dict) -> dict:
+    return {"extra": {"ross_signals": {symbol: dict(signal)}}}
 
 
 @pytest.fixture
@@ -29,17 +41,21 @@ def happy(monkeypatch):
     monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_live_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_live_scheduler_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_momentum_live_runner_enabled", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_decouple_watching_enabled", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", False, raising=False)
     monkeypatch.setattr(aa.settings, "chili_autotrader_user_id", 1, raising=False)
     monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
     monkeypatch.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 0)
     monkeypatch.setattr(portfolio_risk, "check_portfolio_drawdown_breaker", lambda db, uid: (False, None))
     monkeypatch.setattr(automation_query, "expire_stale_live_arm_sessions", lambda db, *, user_id: 0)
-    monkeypatch.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand()])
+    monkeypatch.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: [_cand()])
     monkeypatch.setattr(aa, "_symbol_free", lambda db, sym, uid: True)
     monkeypatch.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "pullback_break_ok"))
     # Default freshness UNKNOWN (None) — keeps existing tests network-free and on the
     # arm-on-active-break contract; freshness-specific tests override this seam.
     monkeypatch.setattr(aa, "_candidate_freshness", lambda sym: None)
+    monkeypatch.setattr(aa, "_ross_snapshot_rows_by_symbol", lambda: {})
     monkeypatch.setattr(coinbase_service, "connect", lambda: {"ok": True})
     monkeypatch.setattr(
         operator_actions, "begin_live_arm",
@@ -100,7 +116,7 @@ def test_drawdown_breaker_skips(happy):
 
 
 def test_no_candidates_skips(happy):
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [])
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: [])
     assert aa.run_auto_arm_pass(_FakeDB())["skipped"] == "no_fresh_live_eligible"
 
 
@@ -206,6 +222,25 @@ def test_profit_giveback_halts_scan(happy, monkeypatch):
     assert out["giveback_fraction"] == 0.5
 
 
+def test_recent_broker_submit_failure_blocks_new_auto_arm(happy):
+    happy.setattr(
+        aa,
+        "_recent_broker_order_submit_failure",
+        lambda db, *, user_id, now: {
+            "event_type": "live_exit_submit_failed",
+            "session_id": 10323,
+            "symbol": "META",
+            "window_seconds": 180.0,
+        },
+    )
+
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["skipped"] == "broker_order_rail_unhealthy"
+    assert out["armed"] == 0
+    assert out["broker_failure"]["symbol"] == "META"
+
+
 def test_within_giveback_band_does_not_skip(happy, monkeypatch):
     # Peaked $200, only down to $150 (gave back 25% < 50%): Guard 5 must NOT trip — the
     # pass proceeds to arm the fresh mover.
@@ -275,7 +310,7 @@ def test_equity_candidate_skipped_even_if_higher_viability(happy):
     # cannot trade it -> must be skipped; the crypto KAIO is armed instead.
     happy.setattr(
         aa, "_fresh_live_eligible_candidates",
-        lambda db, *, limit: [_cand("ARKK", 8, 0.80), _cand("KAIO-USD", 8, 0.65)],
+        lambda db, *, limit, **_k: [_cand("ARKK", 8, 0.80), _cand("KAIO-USD", 8, 0.65)],
     )
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "momentum_ok"))
     out = aa.run_auto_arm_pass(_FakeDB())
@@ -289,7 +324,7 @@ def test_market_closed_equity_skipped(happy):
     happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
     happy.setattr(
         aa, "_fresh_live_eligible_candidates",
-        lambda db, *, limit: [_cand("ARKK", 8, 0.80), _cand("KAIO-USD", 8, 0.65)],
+        lambda db, *, limit, **_k: [_cand("ARKK", 8, 0.80), _cand("KAIO-USD", 8, 0.65)],
     )
     happy.setattr(aa, "_symbol_market_open", lambda sym: sym.endswith("-USD"))
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "momentum_ok"))
@@ -337,7 +372,7 @@ def test_pass_surfaces_reaped_count(happy):
 
 def test_picks_first_firing_candidate(happy):
     cands = [_cand("AAA-USD", 8, 0.70), _cand("BBB-USD", 8, 0.65), _cand("CCC-USD", 8, 0.60)]
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: cands)
     # only BBB is surging now
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (sym == "BBB-USD", "pullback_break_ok" if sym == "BBB-USD" else "waiting_for_break"))
     out = aa.run_auto_arm_pass(_FakeDB())
@@ -360,7 +395,7 @@ def test_watches_freshest_known_fresh_when_none_firing(happy):
     """No break is firing, but two names are positively in a fresh up-impulse — arm the
     FRESHEST one to WATCH (instead of skipping), and prefer it over the lower-position one."""
     cands = [_cand("LO-USD", 8, 0.80), _cand("HI-USD", 8, 0.55)]
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: cands)
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (False, "waiting_for_break"))
     # HI-USD is fresher (closer to its recent high) despite lower 24h viability.
@@ -375,7 +410,7 @@ def test_watches_freshest_known_fresh_when_none_firing(happy):
 
 def test_drops_faded_non_firing_candidate(happy):
     """A faded 24h mover that is not firing is NOT watched — the slot stays free."""
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("FADED-USD")])
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: [_cand("FADED-USD")])
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (False, "pullback_too_deep"))
     happy.setattr(aa, "_candidate_freshness", lambda sym: _fresh(False, 0.12))
@@ -389,7 +424,7 @@ def test_firing_break_beats_fresh_watch_even_if_faded(happy):
     """An actively-firing break is always a valid entry — it wins over a fresh watch
     candidate, even if the firing name's current price reads 'faded'."""
     cands = [_cand("FIRE-USD", 8, 0.50), _cand("WATCH-USD", 8, 0.90)]
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: cands)
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (sym == "FIRE-USD", "pullback_break_ok" if sym == "FIRE-USD" else "waiting_for_break"))
     fr = {"FIRE-USD": _fresh(False, 0.30), "WATCH-USD": _fresh(True, 0.95)}
@@ -404,7 +439,7 @@ def test_firing_break_beats_fresh_watch_even_if_faded(happy):
 def test_reranks_among_simultaneous_firing_by_freshness(happy):
     """When several names fire at once, arm the freshest of them."""
     cands = [_cand("A-USD", 8, 0.80), _cand("B-USD", 8, 0.60)]
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: cands)
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "pullback_break_ok"))
     fr = {"A-USD": _fresh(True, 0.62), "B-USD": _fresh(True, 0.99)}
@@ -417,7 +452,7 @@ def test_reranks_among_simultaneous_firing_by_freshness(happy):
 def test_require_fresh_off_restores_arm_on_break_only(happy):
     """Knob OFF: a fresh-but-not-firing name is NOT watched — old contract preserved."""
     happy.setattr(aa.settings, "chili_momentum_auto_arm_require_fresh_impulse", False, raising=False)
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("HI-USD", 8, 0.7)])
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: [_cand("HI-USD", 8, 0.7)])
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (False, "waiting_for_break"))
     happy.setattr(aa, "_candidate_freshness", lambda sym: _fresh(True, 0.98))
@@ -451,7 +486,7 @@ def test_probe_budget_arms_fast_firing_despite_slow_straggler(happy, monkeypatch
 
     happy.setattr(aa.settings, "chili_momentum_auto_arm_probe_time_budget_seconds", 1.0, raising=False)
     cands = [_cand("SLOW-USD", 8, 0.90), _cand("FAST-USD", 8, 0.55)]
-    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: cands)
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
 
     def _probe(sym):
@@ -477,13 +512,291 @@ def test_equity_only_skips_crypto(happy):
     happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
     happy.setattr(
         aa, "_fresh_live_eligible_candidates",
-        lambda db, *, limit: [_cand("KAIO-USD", 8, 0.80), _cand("ARKK", 8, 0.55)],
+        lambda db, *, limit, **_k: [
+            _cand("KAIO-USD", 8, 0.80),
+            _cand(
+                "ARKK",
+                8,
+                0.55,
+                _ross_exec(
+                    "ARKK",
+                    {
+                        "ticker": "ARKK",
+                        "price": 12.0,
+                        "todays_change_perc": 18.0,
+                        "volume": 200_000,
+                        "source": "tape_delta_ignite",
+                    },
+                ),
+            ),
+        ],
     )
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "momentum_ok"))
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["armed"] == 1
     assert out["symbol"] == "ARKK"  # crypto KAIO-USD excluded by equity-only focus
+
+
+def test_ross_selector_universe_excludes_broad_caps_before_scoring():
+    """Ross source universe is resolved before generic viability ranking can dominate."""
+    rows = {
+        "AAPL": {
+            "ticker": "AAPL",
+            "lastTrade": {"p": 210.0},
+            "day": {"v": 10_000_000},
+            "todaysChangePerc": 8.0,
+        },
+        "JEM": {
+            "ticker": "JEM",
+            "lastTrade": {"p": 6.16},
+            "day": {"v": 300_000},
+            "todaysChangePerc": 12.1,
+        },
+        "THIN": {
+            "ticker": "THIN",
+            "lastTrade": {"p": 4.0},
+            "day": {"v": 10_000},
+            "todaysChangePerc": 40.0,
+        },
+    }
+    assert aa._ross_universe_symbols_from_snapshot_rows(rows) == {"JEM"}
+
+
+def test_equity_only_requires_ross_lane_evidence_before_bar_probe(happy):
+    """Ross equity lane must not let a large-cap/default signal fall through to bar probing."""
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
+    cands = [
+        _cand(
+            "ADBE",
+            8,
+            0.90,
+            _ross_exec(
+                "ADBE",
+                {
+                    "ticker": "ADBE",
+                    "price": 209.7,
+                    "rvol": 56.66,
+                    "signal_type": "momentum_continuation",
+                },
+            ),
+        ),
+        _cand(
+            "JEM",
+            8,
+            0.48,
+            _ross_exec(
+                "JEM",
+                {
+                    "ticker": "JEM",
+                    "price": 6.16,
+                    "todays_change_perc": 12.1,
+                    "volume": 300_000,
+                    "source": "tape_delta_ignite",
+                    "signal_type": "tape_delta_ignite",
+                },
+            ),
+        ),
+    ]
+    probed: list[str] = []
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: cands)
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+
+    def _probe(sym: str):
+        probed.append(sym)
+        return True, "pullback_break_ok"
+
+    happy.setattr(aa, "_entry_trigger_fires", _probe)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "JEM"
+    assert "ADBE" not in probed
+    assert out["ross_universe_skipped"] == 1
+    assert out["ross_universe_skip_reasons"] == {"ross_universe_price_above_profile": 1}
+
+
+def test_ross_required_blocks_broad_equity_even_when_not_equity_only(happy):
+    """Ross universe enforcement is independent from the equity-only focus toggle."""
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", False, raising=False)
+    happy.setattr(aa.settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    cands = [
+        _cand(
+            "ADBE",
+            8,
+            0.90,
+            _ross_exec(
+                "ADBE",
+                {
+                    "ticker": "ADBE",
+                    "price": 209.7,
+                    "todays_change_perc": 9.0,
+                    "dollar_volume": 90_000_000,
+                    "source": "generic_momentum",
+                },
+            ),
+        ),
+        _cand(
+            "JEM",
+            8,
+            0.48,
+            _ross_exec(
+                "JEM",
+                {
+                    "ticker": "JEM",
+                    "price": 6.16,
+                    "todays_change_perc": 12.1,
+                    "volume": 300_000,
+                    "source": "tape_delta_ignite",
+                    "signal_type": "tape_delta_ignite",
+                },
+            ),
+        ),
+    ]
+    probed: list[str] = []
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit, **_k: cands)
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+
+    def _probe(sym: str):
+        probed.append(sym)
+        return True, "pullback_break_ok"
+
+    happy.setattr(aa, "_entry_trigger_fires", _probe)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "JEM"
+    assert "ADBE" not in probed
+    assert out["ross_universe_skipped"] == 1
+    assert out["ross_universe_skip_reasons"] == {"ross_universe_price_above_profile": 1}
+
+
+def test_demote_non_ross_live_eligible_covers_equity_and_null_scopes(db, monkeypatch):
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_risk_viability_max_age_seconds", 600.0, raising=False)
+
+    ensure_momentum_strategy_variants(db)
+    variant = db.query(aa.MomentumSymbolViability.variant_id).first()
+    if variant is None:
+        from app.services.trading.momentum_neural.persistence import active_variant_for_family
+
+        active = active_variant_for_family(db, "impulse_breakout")
+        assert active is not None
+        variant_id = int(active.id)
+    else:
+        variant_id = int(variant[0])
+
+    for idx, scope in enumerate(("symbol", "equity", None), start=1):
+        db.add(
+            MomentumSymbolViability(
+                symbol=f"AIS{idx}",
+                scope=scope,
+                variant_id=variant_id,
+                viability_score=0.9,
+                paper_eligible=True,
+                live_eligible=True,
+                freshness_ts=datetime.utcnow(),
+            )
+        )
+    db.commit()
+
+    summary = aa._demote_non_ross_live_eligible_rows(db, ross_universe_symbols={"JEM"})
+    db.commit()
+
+    assert summary["demoted"] == 3
+    rows = db.query(MomentumSymbolViability).filter(MomentumSymbolViability.symbol.like("AIS%")).all()
+    assert rows
+    assert all(row.live_eligible is False for row in rows)
+
+
+def test_equity_only_rejects_generic_ross_signal_without_universe_proof(happy):
+    """A generic Ross/source tag cannot turn a broad mega-cap row into a Ross universe name."""
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
+    happy.setattr(
+        aa,
+        "_fresh_live_eligible_candidates",
+        lambda db, *, limit, **_k: [
+            _cand(
+                "META",
+                8,
+                0.95,
+                _ross_exec(
+                    "META",
+                    {
+                        "ticker": "META",
+                        "todays_change_perc": 11.0,
+                        "rvol": 8.0,
+                        "source": "ross scanner momentum",
+                    },
+                ),
+            )
+        ],
+    )
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+
+    def _probe_must_not_run(sym: str):
+        raise AssertionError(f"{sym} should not be probed")
+
+    happy.setattr(aa, "_entry_trigger_fires", _probe_must_not_run)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 0
+    assert out["skipped"] == "no_active_trigger"
+    assert out["ross_universe_skipped"] == 1
+    assert out["ross_universe_skip_reasons"] == {"ross_universe_missing_price": 1}
+
+
+def test_fresh_equity_candidates_fail_closed_when_ross_universe_empty(monkeypatch):
+    """Empty Ross universe means no Ross candidate, not generic live_eligible fallback."""
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def order_by(self, *_args, **_kwargs):
+            raise AssertionError("generic viability ranking must not run with empty Ross universe")
+
+        def limit(self, *_args, **_kwargs):
+            raise AssertionError("generic viability rows must not consume the Ross lane")
+
+        def all(self):
+            raise AssertionError("generic viability rows must not be loaded")
+
+    class _DB(_FakeDB):
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+    assert aa._fresh_live_eligible_candidates(_DB(), limit=10, ross_universe_symbols=set()) == []
+
+
+def test_ross_required_candidates_fail_closed_when_universe_empty_without_equity_only(monkeypatch):
+    """Ross-required bare equities cannot fall back to generic viability ranking."""
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def order_by(self, *_args, **_kwargs):
+            raise AssertionError("generic viability ranking must not run with empty Ross universe")
+
+        def limit(self, *_args, **_kwargs):
+            raise AssertionError("generic viability rows must not consume the Ross lane")
+
+        def all(self):
+            raise AssertionError("generic viability rows must not be loaded")
+
+    class _DB(_FakeDB):
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+    assert aa._fresh_live_eligible_candidates(_DB(), limit=10, ross_universe_symbols=set()) == []
 
 
 # ── Adaptive concurrency (equity-relative, risk-bounded) ──────────────────────
@@ -509,14 +822,14 @@ def test_adaptive_concurrency_is_basis_independent_ratio(monkeypatch):
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
     for eq in (10_000.0, 25_000.0, 100_000.0):
-        monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None, _e=eq: _e)
+        monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None, _e=eq, **_k: _e)
         assert rp.adaptive_max_concurrent_live_sessions() == 10, f"eq={eq}"
 
 
 def test_adaptive_concurrency_clamps_to_ceiling(monkeypatch):
     """A large risk-budget ratio is clamped at the 15 guardrail (0.30 / 0.01 = 30 -> 15)."""
     from app.services.trading.momentum_neural import risk_policy as rp
-    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 100_000.0)
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None, **_k: 100_000.0)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.30, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01, raising=False)

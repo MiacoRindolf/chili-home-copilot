@@ -1,0 +1,202 @@
+diff --git a/app/executor.py b/app/executor.py
+index 9e563f0..21b9521 100644
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,2 +1,17 @@
+-def execute_deployment(services, deploy=lambda name: None, healthy=lambda name: True, rollback=lambda name: None, state=None):
+-    return {"status": "planned"}
++from collections.abc import Callable, Sequence
++from typing import Any
++
++from app.graph import dependency_waves
++from app.model import ServiceSpec
++from app.state import DeploymentState
++
++
++def execute_deployment(
++    services: Sequence[ServiceSpec],
++    deploy: Callable[[str], None] = lambda _name: None,
++    healthy: Callable[[str], bool] = lambda _name: True,
++    rollback: Callable[[str], None] = lambda _name: None,
++    state: DeploymentState | None = None,
++) -> dict[str, Any]:
++    waves = dependency_waves(services)
++    return {"status": "planned", "waves": waves, "deployed": [], "rolled_back": []}
+diff --git a/app/graph.py b/app/graph.py
+index 3e7435d..37bd407 100644
+--- a/app/graph.py
++++ b/app/graph.py
+@@ -1,2 +1,37 @@
+-def dependency_waves(services):
+-    return tuple((service.name,) for service in services)
++import hashlib
++import json
++from collections.abc import Sequence
++
++from app.model import ServiceSpec
++
++
++def dependency_waves(services: Sequence[ServiceSpec]) -> tuple[tuple[str, ...], ...]:
++    by_name = {service.name: service for service in services}
++    if len(by_name) != len(services) or any(
++        dependency not in by_name
++        for service in services
++        for dependency in service.dependencies
++    ):
++        raise ValueError("invalid deployment graph")
++    remaining = set(by_name)
++    completed: set[str] = set()
++    waves: list[tuple[str, ...]] = []
++    while remaining:
++        ready = tuple(sorted(
++            name for name in remaining if set(by_name[name].dependencies) <= completed
++        ))
++        if not ready:
++            raise ValueError("invalid deployment graph")
++        waves.append(ready)
++        completed.update(ready)
++        remaining.difference_update(ready)
++    return tuple(waves)
++
++
++def plan_fingerprint(services: Sequence[ServiceSpec]) -> str:
++    payload = [
++        {"name": item.name, "dependencies": list(item.dependencies)}
++        for item in sorted(services, key=lambda value: value.name)
++    ]
++    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
++    return hashlib.sha256(encoded).hexdigest()
+diff --git a/app/model.py b/app/model.py
+index ade9e02..3402d23 100644
+--- a/app/model.py
++++ b/app/model.py
+@@ -1,7 +1,16 @@
+ from dataclasses import dataclass
++from typing import Any, Mapping
+ 
+ 
+ @dataclass(frozen=True)
+ class ServiceSpec:
+     name: str
+     dependencies: tuple[str, ...] = ()
++
++    @classmethod
++    def from_mapping(cls, value: Mapping[str, Any]) -> "ServiceSpec":
++        name = str(value.get("name", "")).strip()
++        dependencies = tuple(sorted({str(item).strip() for item in value.get("dependencies", ()) if str(item).strip()}))
++        if not name or name in dependencies:
++            raise ValueError("invalid deployment graph")
++        return cls(name=name, dependencies=dependencies)
+diff --git a/app/state.py b/app/state.py
+index cc34c03..5491ba3 100644
+--- a/app/state.py
++++ b/app/state.py
+@@ -1,2 +1,8 @@
++from dataclasses import dataclass, field
++
++
++@dataclass
+ class DeploymentState:
+-    pass
++    fingerprint: str = ""
++    completed_waves: set[int] = field(default_factory=set)
++    deployed: list[str] = field(default_factory=list)
+diff --git a/app/executor.py b/app/executor.py
+index 21b9521..ddda3cd 100644
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -8,10 +8,29 @@ from app.state import DeploymentState
+ 
+ def execute_deployment(
+     services: Sequence[ServiceSpec],
+-    deploy: Callable[[str], None] = lambda _name: None,
+-    healthy: Callable[[str], bool] = lambda _name: True,
+-    rollback: Callable[[str], None] = lambda _name: None,
++    deploy: Callable[[str], None] | None = None,
++    healthy: Callable[[str], bool] | None = None,
++    rollback: Callable[[str], None] | None = None,
+     state: DeploymentState | None = None,
+ ) -> dict[str, Any]:
+     waves = dependency_waves(services)
+-    return {"status": "planned", "waves": waves, "deployed": [], "rolled_back": []}
++    if deploy is None and healthy is None and rollback is None:
++        return {"status": "planned", "waves": waves, "deployed": [], "rolled_back": []}
++    if deploy is None or healthy is None or rollback is None:
++        raise ValueError("incomplete deployment callbacks")
++    deployed: list[str] = []
++    for wave in waves:
++        for name in wave:
++            deploy(name)
++            deployed.append(name)
++        if not all(healthy(name) for name in wave):
++            rolled_back = list(reversed(deployed))
++            for name in rolled_back:
++                rollback(name)
++            return {
++                "status": "rolled_back",
++                "waves": waves,
++                "deployed": deployed,
++                "rolled_back": rolled_back,
++            }
++    return {"status": "completed", "waves": waves, "deployed": deployed, "rolled_back": []}
+diff --git a/app/executor.py b/app/executor.py
+index ddda3cd..d16f4a7 100644
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,7 +1,7 @@
+ from collections.abc import Callable, Sequence
+ from typing import Any
+ 
+-from app.graph import dependency_waves
++from app.graph import dependency_waves, plan_fingerprint
+ from app.model import ServiceSpec
+ from app.state import DeploymentState
+ 
+@@ -18,19 +18,41 @@ def execute_deployment(
+         return {"status": "planned", "waves": waves, "deployed": [], "rolled_back": []}
+     if deploy is None or healthy is None or rollback is None:
+         raise ValueError("incomplete deployment callbacks")
+-    deployed: list[str] = []
+-    for wave in waves:
++    fingerprint = plan_fingerprint(services)
++    current = state if state is not None else DeploymentState()
++    if current.fingerprint and current.fingerprint != fingerprint:
++        raise ValueError("deployment plan changed")
++    resumed = bool(current.completed_waves)
++    current.fingerprint = fingerprint
++    deployed_this_run: list[str] = []
++    for wave_index, wave in enumerate(waves):
++        if wave_index in current.completed_waves:
++            continue
+         for name in wave:
+             deploy(name)
+-            deployed.append(name)
++            deployed_this_run.append(name)
++            if name not in current.deployed:
++                current.deployed.append(name)
+         if not all(healthy(name) for name in wave):
+-            rolled_back = list(reversed(deployed))
++            rolled_back = list(reversed(current.deployed))
+             for name in rolled_back:
+                 rollback(name)
++            current.deployed.clear()
++            current.completed_waves.clear()
+             return {
+                 "status": "rolled_back",
+                 "waves": waves,
+-                "deployed": deployed,
++                "deployed": deployed_this_run,
+                 "rolled_back": rolled_back,
++                "resumed": resumed,
++                "completed_waves": (),
+             }
+-    return {"status": "completed", "waves": waves, "deployed": deployed, "rolled_back": []}
++        current.completed_waves.add(wave_index)
++    return {
++        "status": "completed",
++        "waves": waves,
++        "deployed": deployed_this_run,
++        "rolled_back": [],
++        "resumed": resumed,
++        "completed_waves": tuple(sorted(current.completed_waves)),
++    }

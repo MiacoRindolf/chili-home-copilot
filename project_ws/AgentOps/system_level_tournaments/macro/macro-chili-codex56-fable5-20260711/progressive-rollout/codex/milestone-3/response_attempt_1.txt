@@ -1,0 +1,156 @@
+```diff
+diff --git a/app/cohort.py b/app/cohort.py
+--- a/app/cohort.py
++++ b/app/cohort.py
+@@ -9,3 +9,14 @@ def stable_bucket(subject_id: str, salt: str) -> int:
+ 
+     digest = hashlib.sha256(f"{salt}:{subject_id}".encode("utf-8")).digest()
+     return int.from_bytes(digest[:8], byteorder="big") % 100
++
++
++def stable_decision_id(subject_id: str, config_version: int) -> str:
++    if not isinstance(subject_id, str) or not subject_id.strip():
++        raise ValueError("subject_id must be non-empty")
++    if (
++        not isinstance(config_version, int)
++        or isinstance(config_version, bool)
++        or config_version <= 0
++    ):
++        raise ValueError("config_version must be positive")
++
++    evidence = f"rollout-decision:{config_version}:{subject_id}".encode("utf-8")
++    return hashlib.sha256(evidence).hexdigest()[:16]
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -10,6 +10,8 @@ class RolloutConfig:
+     salt: str = ""
+     allowlist: FrozenSet[str] = frozenset()
+     denylist: FrozenSet[str] = frozenset()
++    kill_switch: bool = False
++    config_version: int = 1
+ 
+     @classmethod
+     def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
+@@ -38,6 +40,23 @@ class RolloutConfig:
+             denylist = cls._parse_list(values.get("DENYLIST", ""))
+             if allowlist & denylist:
+                 raise ValueError
++
++            kill_switch_value = values.get("KILL_SWITCH", "false")
++            if not isinstance(kill_switch_value, str):
++                raise ValueError
++
++            normalized_kill_switch = kill_switch_value.strip().lower()
++            if normalized_kill_switch == "true":
++                kill_switch = True
++            elif normalized_kill_switch == "false":
++                kill_switch = False
++            else:
++                raise ValueError
++
++            config_version_value = values.get("CONFIG_VERSION", "1")
++            if not isinstance(config_version_value, str):
++                raise ValueError
++            config_version = int(config_version_value)
++            if config_version <= 0:
++                raise ValueError
+         except (KeyError, TypeError, ValueError):
+             raise ValueError("invalid rollout config") from None
+ 
+@@ -48,6 +67,8 @@ class RolloutConfig:
+             salt=salt,
+             allowlist=allowlist,
+             denylist=denylist,
++            kill_switch=kill_switch,
++            config_version=config_version,
+         )
+ 
+     @staticmethod
+diff --git a/app/decision.py b/app/decision.py
+--- a/app/decision.py
++++ b/app/decision.py
+@@ -1,35 +1,51 @@
+ from typing import Any
+ 
+-from app.cohort import stable_bucket
++from app.cohort import stable_bucket, stable_decision_id
+ from app.config import RolloutConfig
+ 
+ 
+-def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
+-    if subject_id in config.denylist:
+-        return {"enabled": False, "reason": "denylist", "bucket": None}
+-
+-    if not config.enabled:
+-        return {"enabled": False, "reason": "disabled", "bucket": None}
+-
+-    if subject_id in config.allowlist:
+-        return {
+-            "enabled": True,
+-            "reason": "allowlist",
+-            "bucket": None,
+-        }
+-
+-    bucket = stable_bucket(subject_id, config.salt)
+-    if bucket < config.percentage:
+-        return {"enabled": True, "reason": "cohort", "bucket": bucket}
+-
++def _decision(
++    subject_id: str,
++    config: RolloutConfig,
++    enabled: bool,
++    reason: str,
++    bucket: int | None,
++) -> dict[str, Any]:
+     return {
+-        "enabled": False,
+-        "reason": "outside_cohort",
++        "enabled": enabled,
++        "reason": reason,
+         "bucket": bucket,
++        "config_version": config.config_version,
++        "decision_id": stable_decision_id(subject_id, config.config_version),
+     }
++
++
++def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
++    if config.kill_switch:
++        return _decision(
++            subject_id, config, False, "kill_switch", None
++        )
++
++    if subject_id in config.denylist:
++        return _decision(subject_id, config, False, "denylist", None)
++
++    if not config.enabled:
++        return _decision(subject_id, config, False, "disabled", None)
++
++    if subject_id in config.allowlist:
++        return _decision(subject_id, config, True, "allowlist", None)
++
++    bucket = stable_bucket(subject_id, config.salt)
++    if bucket < config.percentage:
++        return _decision(subject_id, config, True, "cohort", bucket)
++
++    return _decision(
++        subject_id, config, False, "outside_cohort", bucket
++    )
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -12,3 +12,11 @@ def evaluate_request(
+     if audit is not None:
+         audit.append({"subject_id": subject_id, **decision})
+     return decision
++
++
++def summarize_decisions(
++    decisions: list[dict[str, Any]],
++) -> dict[str, int]:
++    summary: dict[str, int] = {}
++    for decision in decisions:
++        reason = decision["reason"]
++        summary[reason] = summary.get(reason, 0) + 1
++    return summary
+```

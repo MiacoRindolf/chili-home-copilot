@@ -1,0 +1,7 @@
+diff --git a/main.py b/main.py
+        index 1234567..8765432 100644
+        --- a/main.py
+        +++ b/main.py
+        @@ -4,7 +4,7 @@
+        -    return 'repo_edit' if any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy')) else 'blocked'
+        +    return 'repo_edit' if any(word in text for word in ('fix', 'update', 'change', 'add','deploy')) else 'blocked'

@@ -363,9 +363,10 @@ class Settings(BaseSettings):
     # (auth, rate-limit, error) falls back to the local cascade, so enabling it
     # never makes the code path worse than today. Inert by default: with no key
     # or the flag off, behavior is byte-identical to the existing cascade.
-    # Defaults target Anthropic's OpenAI-compatible endpoint + Claude Opus 4.8;
-    # point frontier_base_url / frontier_model at any OpenAI-compatible frontier
-    # (e.g. OpenAI's strongest coding model) to use a different provider.
+    # These defaults describe the optional frontier lane only; Project Autopilot
+    # does not require it. The lane targets Anthropic's OpenAI-compatible endpoint
+    # + Claude Fable 5 when explicitly enabled. Point frontier_base_url /
+    # frontier_model at another compatible provider to benchmark a different model.
     frontier_api_key: str = Field(
         default="",
         validation_alias=AliasChoices(
@@ -377,7 +378,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("FRONTIER_BASE_URL", "CHILI_FRONTIER_BASE_URL"),
     )
     frontier_model: str = Field(
-        default="claude-opus-4-8",
+        default="claude-fable-5",
         validation_alias=AliasChoices("FRONTIER_MODEL", "CHILI_FRONTIER_MODEL"),
     )
     chili_code_frontier_enabled: bool = Field(
@@ -1277,7 +1278,7 @@ class Settings(BaseSettings):
     # Minimum coverage-score below which composite labels are forced
     # to neutral (``vol_normal``, ``dispersion_normal``,
     # ``correlation_normal``). Rows below threshold are still
-    # persisted so the soak / ops surface can see the coverage signal.
+    # persisted so the parity / ops surface can see the coverage signal.
     brain_vol_dispersion_min_coverage_score: float = 0.5
     # Universe caps for dispersion and pairwise correlation. Keeps
     # the daily sweep tractable regardless of snapshot universe size.
@@ -1830,8 +1831,8 @@ class Settings(BaseSettings):
     # the DSR pool-percentile threshold based on the candidate's
     # hypothesis-family size. Default OFF — the BH-adjusted threshold is
     # shadow-logged into ``pattern_family_trial_log`` regardless of the
-    # flag so operators can observe legacy vs adjusted divergence for
-    # the 7-day soak window before flipping. See
+    # flag so operators can observe legacy vs adjusted divergence against
+    # deterministic shadow metrics before flipping. See
     # ``app/services/trading/family_fdr.py``.
     chili_family_fdr_enabled: bool = True
     # Q1.T3 phase 1: INSERT into ``unified_signals`` alongside existing payloads (default OFF).
@@ -2135,6 +2136,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_NEURAL_FEEDBACK_ENABLED"),
     )
+    chili_momentum_replay_regression_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_REGRESSION_ENABLED"),
+    )
     # Autopilot profitability: pattern/momentum/regime entry gates (paper runner).
     chili_momentum_entry_gates_enabled: bool = Field(
         default=True,
@@ -2241,6 +2246,23 @@ class Settings(BaseSettings):
     chili_robinhood_agentic_mcp_tool_map: str = Field(
         default="",
         validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_TOOL_MAP"),
+    )
+    # Cache the Agentic MCP adapter by default so a transient rail outage does not
+    # make every live-runner candidate open a fresh MCP session/auth probe. The
+    # adapter itself still fails closed and retries on its configured MCP timeout.
+    chili_momentum_cache_rh_agentic_adapter: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CACHE_RH_AGENTIC_ADAPTER"),
+    )
+    chili_robinhood_agentic_mcp_positions_error_backoff_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_POSITIONS_ERROR_BACKOFF_SECONDS"),
+    )
+    chili_robinhood_agentic_mcp_open_orders_error_backoff_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_OPEN_ORDERS_ERROR_BACKOFF_SECONDS"),
     )
     # Which rail equities route to: "robinhood_spot" (default, unofficial robin_stocks) or
     # "robinhood_agentic_mcp" (sanctioned rail; trades the isolated Agentic account). A
@@ -2486,11 +2508,772 @@ class Settings(BaseSettings):
         default="hybrid",
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_TRIGGER_MODE"),
     )
-    # Timeframe for the Ross pullback-break trigger (1m = scalp, 5m = default).
+    # Tick-first-pullback scalp path for Ross/Warrior 5 Pillars/HOD evidence.
+    # Bars remain available for slower continuation entries; this path is driven
+    # by quote ticks and does not wait for a 1m/5m candle close.
+    chili_momentum_tick_first_pullback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_FIRST_PULLBACK_ENABLED"),
+    )
+    chili_momentum_tick_first_pullback_min_pullback_bps: float = Field(
+        default=35.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_FIRST_PULLBACK_MIN_PULLBACK_BPS"),
+        description="Minimum tick pullback from the Ross/HOD high before watching for a first reclaim.",
+    )
+    chili_momentum_tick_first_pullback_max_pullback_bps: float = Field(
+        default=1800.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_FIRST_PULLBACK_MAX_PULLBACK_BPS"),
+        description="Maximum accepted tick pullback depth; deeper is treated as backside/reversal risk.",
+    )
+    chili_momentum_tick_first_pullback_min_reclaim_bps: float = Field(
+        default=8.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_FIRST_PULLBACK_MIN_RECLAIM_BPS"),
+        description="Minimum bounce from tick pullback low that confirms the first reclaim.",
+    )
+    chili_momentum_tick_first_pullback_stop_buffer_bps: float = Field(
+        default=12.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_FIRST_PULLBACK_STOP_BUFFER_BPS"),
+        description="Buffer below the tick pullback low for the structural scalp stop.",
+    )
+    chili_momentum_tick_scalp_max_hold_seconds: float = Field(
+        default=12.0,
+        ge=1.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_SCALP_MAX_HOLD_SECONDS"),
+        description="Maximum hold for tick-first-pullback scalps unless stop/target exits sooner.",
+    )
+    chili_momentum_ross_breakout_starter_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_BREAKOUT_STARTER_ENABLED"),
+        description="Enable Ross-style starter entries near premarket/HOD/half/whole-dollar breakout levels. This is separate from first-pullback and does not wait for a candle close.",
+    )
+    chili_momentum_ross_breakout_starter_lookback_bars: int = Field(
+        default=8,
+        ge=3,
+        le=24,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_BREAKOUT_STARTER_LOOKBACK_BARS"),
+        description="Recent micro-bars used to identify the starter level and tight failure stop.",
+    )
+    chili_momentum_ross_breakout_starter_anticipation_bps: float = Field(
+        default=35.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_BREAKOUT_STARTER_ANTICIPATION_BPS"),
+        description="How far below the watched breakout level CHILI may start when live tick momentum is positive.",
+    )
+    chili_momentum_ross_breakout_starter_max_above_level_bps: float = Field(
+        default=180.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_BREAKOUT_STARTER_MAX_ABOVE_LEVEL_BPS"),
+        description="Do not classify late chases far above the watched level as starter entries.",
+    )
+    chili_momentum_ross_breakout_starter_min_velocity_bps: float = Field(
+        default=8.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_BREAKOUT_STARTER_MIN_VELOCITY_BPS"),
+        description="Minimum live-price push versus the prior micro-bar close when anticipating below the level.",
+    )
+    chili_momentum_ross_breakout_starter_max_failure_stop_bps: float = Field(
+        default=160.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_BREAKOUT_STARTER_MAX_FAILURE_STOP_BPS"),
+        description="Tight failure stop cap for starter scalps; matches the pull-away-or-bail behavior.",
+    )
+    chili_momentum_entry_pending_place_max_age_seconds: float = Field(
+        default=6.0,
+        ge=0.25,
+        le=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_PENDING_PLACE_MAX_AGE_SECONDS"),
+        description="Maximum age for a pre-submit live pending-entry marker with no order id. If it cannot submit from fresh tick context, re-watch instead of placing from stale evidence.",
+    )
+    chili_momentum_quote_freshness_floor_seconds: float = Field(
+        default=15.0,
+        ge=0.25,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_FLOOR_SECONDS"),
+        description="Minimum quote freshness window shared by live entry quality checks and the C1 IQFeed phantom-loss cross-check.",
+    )
+    chili_momentum_max_loss_fresh_quote_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_FRESH_QUOTE_GUARD_ENABLED"),
+        description="Require fresh quote evidence before the C1 per-trade max-loss bailout can fire.",
+    )
+    chili_momentum_max_loss_phantom_divergence_spread_mult: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PHANTOM_DIVERGENCE_SPREAD_MULT"),
+        description="C1 phantom-loss tolerance in multiples of the symbol's recent median NBBO spread.",
+    )
+    chili_momentum_max_loss_phantom_divergence_fallback_bps: float = Field(
+        default=100.0,
+        ge=0.0,
+        le=5000.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PHANTOM_DIVERGENCE_FALLBACK_BPS"),
+        description="Documented fallback C1 phantom-loss tolerance when recent spread history is unavailable.",
+    )
+    chili_momentum_quote_freshness_ceiling_seconds: float = Field(default=120.0, ge=0.25, validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_CEILING_SECONDS"))
+    chili_momentum_quote_freshness_cadence_mult: float = Field(default=3.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_CADENCE_MULT"))
+    chili_momentum_max_loss_circuit_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_CIRCUIT_ENABLED"))
+    chili_momentum_max_loss_risk_multiple: float = Field(default=2.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"))
+    chili_momentum_a_setup_size_floor_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_SIZE_FLOOR_ENABLED"))
+    chili_momentum_a_setup_size_floor_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_SIZE_FLOOR_FRACTION"))
+    chili_momentum_a_setup_size_floor_viability_min: float = Field(default=0.70, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_SIZE_FLOOR_VIABILITY_MIN"))
+    chili_momentum_a_setup_size_floor_frontside_min: float = Field(default=0.50, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_SIZE_FLOOR_FRONTSIDE_MIN"))
+    chili_momentum_a_setup_size_floor_entry_bar_margin: float = Field(default=0.08, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_SIZE_FLOOR_ENTRY_BAR_MARGIN"))
+    chili_momentum_a_setup_notional_floor_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_NOTIONAL_FLOOR_ENABLED"))
+    chili_momentum_a_setup_notional_floor_target_fraction: float = Field(default=1.0, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_NOTIONAL_FLOOR_TARGET_FRACTION"))
+    chili_momentum_early_trail_arm_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_TRAIL_ARM_ENABLED"))
+    chili_momentum_no_confirmation_min_hold_seconds: float = Field(default=8.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_NO_CONFIRMATION_MIN_HOLD_SECONDS"))
+    chili_momentum_no_confirmation_window_seconds: float = Field(default=20.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_NO_CONFIRMATION_WINDOW_SECONDS"))
+    chili_momentum_no_confirmation_buffer_bps: float = Field(default=10.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_NO_CONFIRMATION_BUFFER_BPS"))
+    chili_momentum_pullback_add_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_ENABLED"))
+    chili_momentum_pullback_add_max: int = Field(default=2, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_MAX"))
+    chili_momentum_pullback_add_cooldown_seconds: float = Field(default=30.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_COOLDOWN_SECONDS"))
+    chili_momentum_pullback_add_risk_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_RISK_FRACTION"))
+    chili_momentum_pullback_add_strength_floor: float = Field(default=0.50, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_STRENGTH_FLOOR"))
+    chili_momentum_pullback_add_depth_lo_frac: float = Field(default=0.20, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_DEPTH_LO_FRAC"))
+    chili_momentum_pullback_add_depth_hi_frac: float = Field(default=0.62, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_DEPTH_HI_FRAC"))
+    chili_momentum_micropullback_reentry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_ENABLED"))
+    chili_momentum_micropullback_reentry_max: int = Field(default=3, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX"))
+    chili_momentum_micropullback_reentry_cooldown_seconds: float = Field(default=30.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_COOLDOWN_SECONDS"))
+    chili_momentum_micropullback_reentry_risk_fraction: float = Field(default=0.30, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_RISK_FRACTION"))
+    chili_momentum_micropullback_reentry_max_dip_pct: float = Field(default=0.04, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX_DIP_PCT"))
+    chili_momentum_micropullback_reentry_ofi_thr: float = Field(default=0.30, validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_OFI_THR"))
+    chili_momentum_micropullback_reentry_trade_flow_thr: float = Field(default=0.20, validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_TRADE_FLOW_THR"))
+    chili_momentum_flag_breakout_add_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_ENABLED"))
+    chili_momentum_flag_breakout_add_max: int = Field(default=2, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_MAX"))
+    chili_momentum_flag_breakout_add_cooldown_seconds: float = Field(default=30.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_COOLDOWN_SECONDS"))
+    chili_momentum_flag_breakout_add_risk_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_RISK_FRACTION"))
+    chili_momentum_flag_breakout_add_strength_floor: float = Field(default=0.50, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_STRENGTH_FLOOR"))
+    chili_momentum_flag_breakout_add_margin_frac: float = Field(default=0.10, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_MARGIN_FRAC"))
+    chili_momentum_pyramid_max_adds: int = Field(default=1, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_MAX_ADDS"))
+    chili_momentum_pyramid_min_cushion_r: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_MIN_CUSHION_R"))
+    chili_momentum_pyramid_add_risk_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ADD_RISK_FRACTION"))
+    chili_momentum_pyramid_add_submit_retry_max: int = Field(default=0, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ADD_SUBMIT_RETRY_MAX"))
+    # Timeframe for the Ross pullback-break trigger. Ross equity scalps are
+    # evaluated on the 1m frame unless the operator explicitly overrides it.
     chili_momentum_pullback_entry_interval: str = Field(
-        default="5m",
+        default="1m",
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL"),
     )
+    chili_momentum_adaptive_pullback_depth_ceiling_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_PULLBACK_DEPTH_CEILING_ENABLED"),
+        description=(
+            "Enable the adaptive ATR-relative pullback-depth ceiling used by bull-flag "
+            "style entries. Default off preserves the documented static Ross depth band."
+        ),
+    )
+    chili_momentum_micropull_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_ENABLED"),
+        description=(
+            "Explicitly force dense IQFeed micro-bar evaluation for Ross pullback entries. "
+            "When false, the live runner may still enable micro-bars from active setup needs "
+            "(for example primary micro-pullback on equity) and will emit the enable source."
+        ),
+    )
+    chili_momentum_micro_pullback_primary_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICRO_PULLBACK_PRIMARY_ENABLED"),
+        description="Enable the primary micro-pullback entry detector; the frame selector derives dense-bar use from this on equity symbols.",
+    )
+    chili_momentum_micropull_bar_seconds: int = Field(
+        default=15,
+        ge=5,
+        le=30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_BAR_SECONDS"),
+        description="Target dense micro-bar size for IQFeed-derived Ross micro structure.",
+    )
+    chili_momentum_first_pullback_interval: str = Field(
+        default="1m",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_PULLBACK_INTERVAL"),
+        description="Structural interval expected by first-pullback geometry; sub-minute values derive dense micro-frame evaluation.",
+    )
+    # First-class momentum feature switches. These preserve the current fail-closed
+    # defaults while making every implemented handler visible in readiness.
+    chili_momentum_wedge_break_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_WEDGE_BREAK_ENTRY_ENABLED"))
+    chili_momentum_absorption_snap_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ABSORPTION_SNAP_ENTRY_ENABLED"))
+    chili_momentum_blue_sky_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_ENTRY_ENABLED"))
+    chili_momentum_round_number_entry_timing_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ROUND_NUMBER_ENTRY_TIMING_ENABLED"))
+    chili_momentum_deep_reclaim_dipbuy_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_ENABLED"))
+    chili_momentum_deep_reclaim_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_ENABLED"))
+    chili_momentum_entry_flow_veto_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_ENABLED"))
+    chili_momentum_entry_extension_veto_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_VETO_ENABLED"))
+    chili_momentum_backside_vwap_reclaim_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_VWAP_RECLAIM_ENABLED"))
+    chili_momentum_flush_dip_buy_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_BUY_ENABLED"))
+    chili_momentum_vwap_reclaim_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_ENABLED"))
+    chili_momentum_wick_reclaim_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_ENTRY_ENABLED"))
+    chili_momentum_abcd_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ABCD_ENTRY_ENABLED"))
+    chili_momentum_double_bottom_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_ENTRY_ENABLED"))
+    chili_momentum_entry_first_pullback_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FIRST_PULLBACK_ENABLED"))
+    chili_momentum_explosive_raw_break_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RAW_BREAK_ENABLED"))
+    chili_momentum_backside_veto_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_VETO_ENABLED"))
+    chili_momentum_red_vol_exhaustion_veto_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_RED_VOL_EXHAUSTION_VETO_ENABLED"))
+    chili_momentum_explosive_floor_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_ENABLED"))
+    chili_momentum_orb_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"))
+    chili_momentum_red_to_green_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_RED_TO_GREEN_ENTRY_ENABLED"))
+    chili_momentum_entry_extension_floor_pct: float = Field(
+        default=0.08,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_FLOOR_PCT"),
+        description="Base extension cap used by entry chase and round-number overhead timing when ATR is thin.",
+    )
+    chili_momentum_entry_extension_atr_mult: float = Field(
+        default=8.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_ATR_MULT"),
+        description="ATR-percent multiplier for adaptive entry-extension and round-number overhead timing.",
+    )
+    chili_momentum_round_number_overhead_band_fraction: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROUND_NUMBER_OVERHEAD_BAND_FRACTION"),
+        description="Fraction of the adaptive extension cap used as the tight overhead band for whole/half-dollar entry timing.",
+    )
+    chili_momentum_bull_flag_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BULL_FLAG_ENTRY_ENABLED"))
+    chili_momentum_cup_and_handle_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_ENTRY_ENABLED"))
+    chili_momentum_cup_and_handle_lookback_bars: int = Field(
+        default=20,
+        ge=3,
+        le=120,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_LOOKBACK_BARS"),
+        description="Maximum bars between the two cup-rim swing highs; preserves the prior literal fallback as a first-class operator-visible knob.",
+    )
+    chili_momentum_cup_and_handle_max_handle_bars: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_MAX_HANDLE_BARS"),
+        description="Maximum completed bars in the handle pullback before the break; preserves the prior literal fallback as a first-class operator-visible knob.",
+    )
+    chili_momentum_ma_vwap_pullback_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_PULLBACK_ENABLED"))
+    chili_momentum_vwap_reclaim_vol_mult: float = Field(
+        default=1.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_VOL_MULT"),
+        description="Rolling-volume multiplier required by Replay v3 tick VWAP reclaim burst candidates.",
+    )
+    chili_momentum_tape_hold_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_HOLD_ENTRY_ENABLED"))
+    chili_momentum_momentum_continuation_entry_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_MOMENTUM_CONTINUATION_ENTRY_ENABLED"))
+    chili_momentum_premarket_pivot_macd_entry_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_PIVOT_MACD_ENTRY_ENABLED"))
+    chili_momentum_premarket_pivot_cold_rvol_floor: float = Field(default=1.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_PIVOT_COLD_RVOL_FLOOR"))
+    chili_momentum_ask_thins_dip_entry_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ASK_THINS_DIP_ENTRY_ENABLED"))
+    chili_momentum_sub_vwap_trap_entry_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED"))
+    chili_momentum_pulling_away_roc_entry_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLING_AWAY_ROC_ENTRY_ENABLED"))
+    chili_momentum_bottom_reversal_entry_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_ENTRY_ENABLED"))
+    chili_momentum_inverse_head_shoulders_entry_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_INVERSE_HEAD_SHOULDERS_ENTRY_ENABLED"))
+    chili_momentum_big_buyer_bid_starter_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_STARTER_ENABLED"))
+    chili_momentum_big_buyer_bid_max_spread_bps: float = Field(
+        default=80.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_MAX_SPREAD_BPS"),
+        description="Maximum spread for the bid-support starter annotation; preserves the prior literal fallback as an operator-visible knob.",
+    )
+    chili_momentum_big_buyer_bid_pctile_ceiling: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_PCTILE_CEILING"),
+        description="Minimum self-relative depth-imbalance percentile required before annotating a big-buyer bid starter.",
+    )
+    chili_momentum_l2_confirm_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_ENABLED"))
+    chili_momentum_entry_tight_false_break_reclaim_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_TIGHT_FALSE_BREAK_RECLAIM_ENABLED"))
+    chili_momentum_add_into_halt_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_ENABLED"))
+    chili_momentum_entry_l2_veto_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_VETO_ENABLED"))
+    chili_momentum_wick_reclaim_slow_recovery_gate_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_SLOW_RECOVERY_GATE_ENABLED"))
+    chili_momentum_dip_velocity_conviction_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_VELOCITY_CONVICTION_ENABLED"))
+    chili_momentum_candle_quality_multitf_veto_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_CANDLE_QUALITY_MULTITF_VETO_ENABLED"))
+    chili_momentum_break_candle_adaptive_close_pos_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_CANDLE_ADAPTIVE_CLOSE_POS_ENABLED"))
+    chili_momentum_second_leg_preference_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_LEG_PREFERENCE_ENABLED"))
+    chili_momentum_anticipation_starter_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ANTICIPATION_STARTER_ENABLED"))
+    # Entry-gate shape knobs below preserve prior literal fallbacks while making
+    # Ross setup math visible to readiness/audit tooling.
+    chili_momentum_add_into_halt_min_profit_r: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_MIN_PROFIT_R"))
+    chili_momentum_ask_thins_min_depletion_frac: float = Field(default=0.25, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ASK_THINS_MIN_DEPLETION_FRAC"))
+    chili_momentum_bottom_reversal_min_red: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_MIN_RED"))
+    chili_momentum_bottom_reversal_velocity_floor_atr_mult: float = Field(default=0.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_VELOCITY_FLOOR_ATR_MULT"))
+    chili_momentum_bottom_reversal_volume_spike_multiple: float = Field(default=1.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_VOLUME_SPIKE_MULTIPLE"))
+    chili_momentum_break_candle_adaptive_close_pos_floor: float = Field(default=0.3, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_CANDLE_ADAPTIVE_CLOSE_POS_FLOOR"))
+    chili_momentum_break_volume_rvol_min_floor: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_VOLUME_RVOL_MIN_FLOOR"))
+    chili_momentum_break_volume_rvol_ratio: float = Field(default=0.25, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_VOLUME_RVOL_RATIO"))
+    chili_momentum_break_volume_rvol_relative: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_VOLUME_RVOL_RELATIVE"))
+    chili_momentum_coiling_exempt_rvol_mult: float = Field(default=3.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_COILING_EXEMPT_RVOL_MULT"))
+    chili_momentum_continuation_ross_floor: float = Field(default=0.7, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_CONTINUATION_ROSS_FLOOR"))
+    chili_momentum_deep_reclaim_collapse_cap_mult: float = Field(default=1.6, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_COLLAPSE_CAP_MULT"))
+    chili_momentum_deep_reclaim_dipbuy_dryup_ratio: float = Field(default=0.85, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_DRYUP_RATIO"))
+    chili_momentum_deep_reclaim_dipbuy_pullback_bars: int = Field(default=3, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_PULLBACK_BARS"))
+    chili_momentum_deep_reclaim_dipbuy_stop_buffer_bps: float = Field(default=10.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_STOP_BUFFER_BPS"))
+    chili_momentum_deep_reclaim_dipbuy_vwap_lookback: int = Field(default=12, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_VWAP_LOOKBACK"))
+    chili_momentum_dip_buy_rth_end_hour: float = Field(default=16.0, ge=0.0, le=24.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_END_HOUR"))
+    chili_momentum_dip_buy_rth_start_hour: float = Field(default=9.5, ge=0.0, le=24.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_START_HOUR"))
+    chili_momentum_dip_velocity_conviction_max_boost: float = Field(default=0.25, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_VELOCITY_CONVICTION_MAX_BOOST"))
+    chili_momentum_dipbuy_distribution_vol_mult: float = Field(default=0.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DIPBUY_DISTRIBUTION_VOL_MULT"))
+    chili_momentum_dipbuy_impulse_accum_min_slope: float = Field(default=-1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DIPBUY_IMPULSE_ACCUM_MIN_SLOPE"))
+    chili_momentum_doji_body_frac: float = Field(default=0.25, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DOJI_BODY_FRAC"))
+    chili_momentum_double_bottom_band_atr_mult: float = Field(default=0.6, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_BAND_ATR_MULT"))
+    chili_momentum_entry_extension_rvol_boost_max: float = Field(default=0.15, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_MAX"))
+    chili_momentum_entry_extension_rvol_boost_per: float = Field(default=0.05, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_PER"))
+    chili_momentum_entry_flow_veto_trade_flow_strong: float = Field(default=-0.5, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW_STRONG"))
+    chili_momentum_entry_flow_veto_trade_flow_strong_explosive: float = Field(default=-0.85, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW_STRONG_EXPLOSIVE"))
+    chili_momentum_entry_l2_bigseller_pctile_floor: float = Field(default=0.15, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_BIGSELLER_PCTILE_FLOOR"))
+    chili_momentum_entry_verticality_atr_mult: float = Field(default=1.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_VERTICALITY_ATR_MULT"))
+    chili_momentum_explosive_floor_change_pct: float = Field(default=10.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_CHANGE_PCT"))
+    chili_momentum_explosive_floor_rvol: float = Field(default=5.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_RVOL"))
+    chili_momentum_halt_chain_block_count: int = Field(default=3, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_CHAIN_BLOCK_COUNT"))
+    chili_momentum_halt_resume_dip_window_seconds: float = Field(default=600.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_DIP_WINDOW_SECONDS"))
+    chili_momentum_halt_resumption_boost_frac: float = Field(default=0.15, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUMPTION_BOOST_FRAC"))
+    chili_momentum_hod_base_atr_mult: float = Field(default=1.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_ATR_MULT"))
+    chili_momentum_hod_base_bars: int = Field(default=4, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_BARS"))
+    chili_momentum_htf_against_ema9_rolldown_bars: int = Field(default=3, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_HTF_AGAINST_EMA9_ROLLDOWN_BARS"))
+    chili_momentum_htf_against_macd_threshold: float = Field(default=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_HTF_AGAINST_MACD_THRESHOLD"))
+    chili_momentum_l2_confirm_max_snapshot_age_s: float = Field(default=10.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_MAX_SNAPSHOT_AGE_S"))
+    chili_momentum_l2_confirm_tick_rate_floor_pctile: float = Field(default=0.0, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_TICK_RATE_FLOOR_PCTILE"))
+    chili_momentum_l2_confirm_window_s: float = Field(default=15.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_WINDOW_S"))
+    chili_momentum_ma_vwap_consolidation_bars: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_CONSOLIDATION_BARS"))
+    chili_momentum_ma_vwap_impulse_bars: int = Field(default=3, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_IMPULSE_BARS"))
+    chili_momentum_ma_vwap_vol_mult: Optional[float] = Field(default=None, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_VOL_MULT"))
+    chili_momentum_orb_minutes: int = Field(default=5, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_MINUTES"))
+    chili_momentum_orb_window_minutes: float = Field(default=60.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_WINDOW_MINUTES"))
+    chili_momentum_premarket_tickbreak_atr_mult: float = Field(default=0.1, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_TICKBREAK_ATR_MULT"))
+    chili_momentum_premarket_tickbreak_confirm: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_TICKBREAK_CONFIRM"))
+    chili_momentum_premarket_tickbreak_floor_bps: float = Field(default=100.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_TICKBREAK_FLOOR_BPS"))
+    chili_momentum_pullback_raw_break_rvol_mult: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_RVOL_MULT"))
+    chili_momentum_pullback_raw_break_thrust_frac: float = Field(default=0.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_THRUST_FRAC"))
+    chili_momentum_pullback_retrace_pct: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RETRACE_PCT"))
+    chili_momentum_pulling_away_min_taps: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLING_AWAY_MIN_TAPS"))
+    chili_momentum_reclaim_confirm_bars: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_RECLAIM_CONFIRM_BARS"))
+    chili_momentum_reclaim_max_hours_after_open: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RECLAIM_MAX_HOURS_AFTER_OPEN"))
+    chili_momentum_second_leg_rr_tilt: float = Field(default=0.15, validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_LEG_RR_TILT"))
+    chili_momentum_swing_pivot_atr_noise_frac: float = Field(default=0.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SWING_PIVOT_ATR_NOISE_FRAC"))
+    chili_momentum_swing_pivot_half_window: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_SWING_PIVOT_HALF_WINDOW"))
+    chili_momentum_tight_compression_coil_bars: int = Field(default=5, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_COMPRESSION_COIL_BARS"))
+    chili_momentum_tight_compression_lookback: int = Field(default=20, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_COMPRESSION_LOOKBACK"))
+    chili_momentum_tight_compression_pctile: float = Field(default=0.3, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_COMPRESSION_PCTILE"))
+    chili_momentum_tight_flow_tail_q: float = Field(default=0.15, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_FLOW_TAIL_Q"))
+    chili_momentum_tight_geometry_lookback: int = Field(default=6, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_GEOMETRY_LOOKBACK"))
+    chili_momentum_tight_volume_lookback: int = Field(default=20, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_LOOKBACK"))
+    chili_momentum_tight_volume_mult_ceil: float = Field(default=3.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_MULT_CEIL"))
+    chili_momentum_tight_volume_mult_floor: float = Field(default=1.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_MULT_FLOOR"))
+    chili_momentum_tight_volume_pctile: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_PCTILE"))
+    chili_momentum_verticality_skip_on_cold_atr: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICALITY_SKIP_ON_COLD_ATR"))
+    chili_momentum_vwap_reclaim_min_below_bars: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_MIN_BELOW_BARS"))
+    chili_momentum_wick_reclaim_max_recovery_bars: int = Field(default=4, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MAX_RECOVERY_BARS"))
+    chili_momentum_wick_reclaim_min_retrace_frac: float = Field(default=0.4, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MIN_RETRACE_FRAC"))
+    chili_momentum_wick_reclaim_min_wick_frac: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MIN_WICK_FRAC"))
+    chili_momentum_pyramid_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ENABLED"))
+    chili_momentum_pyramid_discrete_add_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_DISCRETE_ADD_ENABLED"))
+    chili_momentum_scale_grid_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_ENABLED"))
+    chili_momentum_smart_hold_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_ENABLED"))
+    chili_momentum_exit_ofi_lock_partial_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED"))
+    chili_momentum_exit_ofi_hidden_seller_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED"))
+    chili_momentum_measured_move_exit_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_MEASURED_MOVE_EXIT_ENABLED"))
+    chili_momentum_stop_l2_confirm_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_ENABLED"))
+    chili_momentum_l2_snapshot_max_age_seconds: float = Field(
+        default=5.0,
+        ge=0.25,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_SNAPSHOT_MAX_AGE_SECONDS"),
+        description="Maximum age for L2 snapshots used by entry-only L2 triggers; stale depth returns no signal.",
+    )
+    chili_momentum_l2_distribution_window_snaps: int = Field(
+        default=8,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_DISTRIBUTION_WINDOW_SNAPS"),
+        description="Recent L2 snapshots used to self-normalize OFI, depth percentile, ask build, and bid refill.",
+    )
+    chili_momentum_l2_distribution_min_snaps: int = Field(
+        default=3,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_DISTRIBUTION_MIN_SNAPS"),
+        description="Minimum fresh L2 snapshots required before entry-only L2 triggers can produce a signal.",
+    )
+    chili_momentum_l2_level_match_spread_mult: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_LEVEL_MATCH_SPREAD_MULT"),
+        description="Match a target L2 price level within this multiple of the latest NBBO spread for per-tier ask-eaten/bid-support evidence.",
+    )
+    chili_momentum_l2_ask_eaten_pctile_ceiling: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_ASK_EATEN_PCTILE_CEILING"),
+        description="Self-normalized percentile ceiling for latest ask size at the target level to count as an ask-eaten absorption signal.",
+    )
+    chili_momentum_l2_bid_refill_pctile_floor: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_BID_REFILL_PCTILE_FLOOR"),
+        description="Self-normalized percentile floor for latest bid size at the target level to count as bid-support refill.",
+    )
+    chili_momentum_l2_target_print_window_seconds: float = Field(
+        default=15.0,
+        ge=0.25,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_TARGET_PRINT_WINDOW_SECONDS"),
+        description="Trailing IQFeed trade-print window used to attribute target-level ask-eaten evidence to prints lifting that ask.",
+    )
+    chili_momentum_trade_flow_window_seconds: float = Field(
+        default=15.0,
+        ge=0.25,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_FLOW_WINDOW_SECONDS"),
+        description="Trailing IQFeed print window for signed trade-flow confirmation; missing prints return no signal.",
+    )
+    chili_momentum_trade_flow_tick_limit: int = Field(
+        default=200,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_FLOW_TICK_LIMIT"),
+        description="Maximum IQFeed trade prints read for live signed trade-flow confirmation.",
+    )
+    chili_momentum_flow_slope_window_seconds: float = Field(
+        default=15.0,
+        ge=0.25,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOW_SLOPE_WINDOW_SECONDS"),
+        description="Trailing IQFeed depth window used to compute live OFI slope.",
+    )
+    chili_momentum_flow_slope_snapshot_limit: int = Field(
+        default=64,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOW_SLOPE_SNAPSHOT_LIMIT"),
+        description="Maximum IQFeed depth snapshots read for live OFI slope.",
+    )
+    chili_momentum_realized_vol_window_seconds: float = Field(
+        default=60.0,
+        ge=0.25,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REALIZED_VOL_WINDOW_SECONDS"),
+        description="Trailing IQFeed print window used to estimate short-horizon realized volatility.",
+    )
+    chili_momentum_realized_vol_tick_limit: int = Field(
+        default=300,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REALIZED_VOL_TICK_LIMIT"),
+        description="Maximum IQFeed prints read for short-horizon realized-volatility estimation.",
+    )
+    chili_momentum_realized_vol_min_ticks: int = Field(
+        default=3,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REALIZED_VOL_MIN_TICKS"),
+        description="Minimum valid IQFeed print prices required before realized volatility can produce a signal.",
+    )
+    chili_momentum_broker_truth_reconciliation_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_RECONCILIATION_ENABLED"))
+    chili_momentum_broker_truth_label_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"))
+    chili_momentum_instant_bid_below_fill_cut_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_BELOW_FILL_CUT_ENABLED"))
+    chili_momentum_instant_bid_above_fill_confirm_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_ABOVE_FILL_CONFIRM_ENABLED"))
+    chili_momentum_sub5min_scalp_bailout_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_SUB5MIN_SCALP_BAILOUT_ENABLED"))
+    chili_momentum_bail_on_no_confirmation_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED"))
+    chili_momentum_exit_submit_max_attempts: int = Field(default=8, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_SUBMIT_MAX_ATTEMPTS"))
+    chili_momentum_exit_submit_backoff_base_seconds: float = Field(default=5.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_SUBMIT_BACKOFF_BASE_SECONDS"))
+    chili_momentum_exit_submit_backoff_max_seconds: float = Field(default=300.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_SUBMIT_BACKOFF_MAX_SECONDS"))
+    chili_momentum_exit_limit_repeg_seconds: float = Field(default=20.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LIMIT_REPEG_SECONDS"))
+    chili_momentum_exit_cancel_covering_sells: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANCEL_COVERING_SELLS"))
+    chili_momentum_eod_flatten_lead_min: float = Field(default=5.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EOD_FLATTEN_LEAD_MIN"))
+    chili_momentum_bos_exit_live_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_LIVE_ENABLED"))
+    chili_momentum_bos_exit_buffer_pct: float = Field(default=0.003, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_BUFFER_PCT"))
+    chili_momentum_exit_adaptive_equity_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ADAPTIVE_EQUITY_ENABLED"))
+    chili_momentum_exit_ladder_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_ENABLED"))
+    chili_momentum_exit_ofi_lock_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_ENABLED"))
+    chili_momentum_exit_candle_confirm_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_ENABLED"))
+    chili_momentum_exit_tape_accel_reversal_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_TAPE_ACCEL_REVERSAL_ENABLED"))
+    chili_momentum_cadence_aware_exit_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_CADENCE_AWARE_EXIT_ENABLED"))
+    chili_momentum_velocity_persistence_exit_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_PERSISTENCE_EXIT_ENABLED"))
+    chili_momentum_measured_move_exit_scale_fraction: float = Field(default=0.33, gt=0.0, lt=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MEASURED_MOVE_EXIT_SCALE_FRACTION"))
+    chili_momentum_measured_move_exit_double_top_atr_mult: float = Field(default=0.75, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MEASURED_MOVE_EXIT_DOUBLE_TOP_ATR_MULT"))
+    chili_momentum_sub5min_scalp_bailout_minutes: float = Field(default=5.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SUB5MIN_SCALP_BAILOUT_MINUTES"))
+    chili_momentum_exit_ofi_arm_frac: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_ARM_FRAC"))
+    chili_momentum_exit_ofi_base_lock_bps: float = Field(default=120.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_BASE_LOCK_BPS"))
+    chili_momentum_exit_accel_reversal_giveback_frac: float = Field(default=0.35, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ACCEL_REVERSAL_GIVEBACK_FRAC"))
+    chili_momentum_squeeze_exit_tail_pctl: float = Field(default=0.9, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_EXIT_TAIL_PCTL"))
+    chili_momentum_squeeze_exit_max_widen: float = Field(default=1.5, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_EXIT_MAX_WIDEN"))
+    chili_momentum_overnight_dark_flatten_onset_ticks: int = Field(default=1, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_DARK_FLATTEN_ONSET_TICKS"))
+    chili_momentum_per_symbol_fatigue_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_FATIGUE_ENABLED"))
+    chili_momentum_win_cycle_fatigue_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_FATIGUE_ENABLED"))
+    chili_momentum_hot_cold_size_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_SIZE_ENABLED"))
+    chili_momentum_fatigue_derate_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_DERATE_ENABLED"))
+    chili_momentum_timeofday_schedule_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_TIMEOFDAY_SCHEDULE_ENABLED"))
+    chili_momentum_catalyst_conviction_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CONVICTION_ENABLED"))
+    chili_momentum_catalyst_conviction_step: float = Field(default=0.15, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CONVICTION_STEP"))
+    chili_momentum_catalyst_conviction_max_multiplier: float = Field(default=1.5, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CONVICTION_MAX_MULTIPLIER"))
+    chili_momentum_green_day_graduation_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_GRADUATION_ENABLED"))
+    chili_momentum_green_day_step_per_day: float = Field(default=0.1, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_STEP_PER_DAY"))
+    chili_momentum_green_day_max_multiplier: float = Field(default=2.0, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_MAX_MULTIPLIER"))
+    chili_momentum_green_day_lookback_days: int = Field(default=30, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_LOOKBACK_DAYS"))
+    chili_momentum_explosive_recalibration_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RECALIBRATION_ENABLED"))
+    chili_momentum_entry_extension_rvol_boost_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_ENABLED"))
+    chili_momentum_conviction_rvol_fallback_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_CONVICTION_RVOL_FALLBACK_ENABLED"))
+    chili_momentum_midday_deweight_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_MIDDAY_DEWEIGHT_ENABLED"))
+    chili_momentum_regime_holdtime_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_REGIME_HOLDTIME_ENABLED"))
+    chili_momentum_consecutive_loss_halt_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_CONSECUTIVE_LOSS_HALT_ENABLED"))
+    chili_momentum_consecutive_loss_halt_count: int = Field(default=4, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_CONSECUTIVE_LOSS_HALT_COUNT"))
+    chili_momentum_crypto_reward_risk_ratio: Optional[float] = Field(default=None, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_REWARD_RISK_RATIO"))
+    chili_momentum_daily_trade_count_budget_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_TRADE_COUNT_BUDGET_ENABLED"))
+    chili_momentum_daily_trade_count_base: int = Field(default=5, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_TRADE_COUNT_BASE"))
+    chili_momentum_daily_trade_count_max_multiple: float = Field(default=2.0, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_TRADE_COUNT_MAX_MULTIPLE"))
+    chili_momentum_fatigue_derate_floor: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_DERATE_FLOOR"))
+    chili_momentum_fatigue_full_session_minutes: float = Field(default=240.0, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_FULL_SESSION_MINUTES"))
+    chili_momentum_kelly_conviction_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_ENABLED"))
+    chili_momentum_kelly_conviction_gain: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_GAIN"))
+    chili_momentum_kelly_conviction_max_multiplier: float = Field(default=1.5, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_MAX_MULTIPLIER"))
+    chili_momentum_prior_day_pnl_damper_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_PNL_DAMPER_ENABLED"))
+    chili_momentum_prior_day_damper_lookback_days: int = Field(default=20, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_DAMPER_LOOKBACK_DAYS"))
+    chili_momentum_prior_day_damper_z_threshold: float = Field(default=1.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_DAMPER_Z_THRESHOLD"))
+    chili_momentum_prior_day_damper_floor: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_DAMPER_FLOOR"))
+    chili_momentum_prior_day_damper_slope: float = Field(default=0.25, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_DAMPER_SLOPE"))
+    chili_momentum_red_intraday_full_down_units: float = Field(default=2.0, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_FULL_DOWN_UNITS"))
+    chili_momentum_red_intraday_size_floor: float = Field(default=0.4, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_SIZE_FLOOR"))
+    chili_momentum_red_intraday_size_down_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_SIZE_DOWN_ENABLED"))
+    chili_momentum_meta_label_min_size: float = Field(default=0.4, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_META_LABEL_MIN_SIZE"))
+    chili_momentum_max_aggregate_risk_pct_of_equity: float = Field(default=0.03, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_AGGREGATE_RISK_PCT_OF_EQUITY"))
+    chili_momentum_max_aggregate_crypto_risk_pct_of_equity: float = Field(default=0.07, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_AGGREGATE_CRYPTO_RISK_PCT_OF_EQUITY"))
+    chili_momentum_liquidity_risk_cap_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_LIQUIDITY_RISK_CAP_ENABLED"))
+    chili_momentum_liquidity_risk_floor: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_LIQUIDITY_RISK_FLOOR"))
+    chili_momentum_risk_liquidity_participation_fraction: float = Field(default=0.01, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_LIQUIDITY_PARTICIPATION_FRACTION"))
+    chili_momentum_run_r_breaker_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_ENABLED"))
+    chili_momentum_run_r_breaker_viability_bump: float = Field(default=0.05, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_VIABILITY_BUMP"))
+    chili_momentum_run_r_breaker_lookback: int = Field(default=40, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_LOOKBACK"))
+    chili_momentum_run_r_breaker_short_window: int = Field(default=10, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_SHORT_WINDOW"))
+    chili_momentum_run_r_breaker_min_history: int = Field(default=8, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_MIN_HISTORY"))
+    chili_momentum_entry_ask_heavy_size_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ASK_HEAVY_SIZE_FRACTION"))
+    chili_momentum_entry_fast_poll_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_ENABLED"))
+    chili_momentum_entry_fast_poll_seed_interval_s: float = Field(default=0.25, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_SEED_INTERVAL_S"))
+    chili_momentum_entry_fast_poll_widen_factor: float = Field(default=1.6, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_WIDEN_FACTOR"))
+    chili_momentum_entry_fast_poll_max_iters: int = Field(default=12, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_MAX_ITERS"))
+    chili_momentum_entry_fast_poll_max_wall_s: float = Field(default=5.0, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_MAX_WALL_S"))
+    chili_momentum_entry_chase_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_CHASE_ENABLED"))
+    chili_momentum_entry_chase_ceiling_bps: float = Field(default=0.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_CHASE_CEILING_BPS"))
+    chili_momentum_entry_chase_move_ratio: float = Field(default=0.25, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_CHASE_MOVE_RATIO"))
+    chili_momentum_entry_guard_move_ratio: float = Field(default=0.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_GUARD_MOVE_RATIO"))
+    chili_momentum_entry_flow_veto_ofi: float = Field(default=-0.6, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_OFI"))
+    chili_momentum_entry_flow_veto_trade_flow: float = Field(default=-0.25, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW"))
+    chili_momentum_entry_inline_repeg_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_INLINE_REPEG_ENABLED"))
+    chili_momentum_entry_inline_repeg_max_delay_s: float = Field(default=0.75, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_INLINE_REPEG_MAX_DELAY_S"))
+    chili_momentum_entry_max_repegs: int = Field(default=3, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MAX_REPEGS"))
+    chili_momentum_entry_max_rest_bars: float = Field(default=2.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MAX_REST_BARS"))
+    chili_momentum_entry_placement_governor_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_PLACEMENT_GOVERNOR_ENABLED"))
+    chili_momentum_entry_quote_refetch_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_QUOTE_REFETCH_ENABLED"))
+    chili_momentum_instant_bid_cut_window_seconds: float = Field(default=6.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_CUT_WINDOW_SECONDS"))
+    chili_momentum_instant_bid_confirm_window_seconds: float = Field(default=6.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_CONFIRM_WINDOW_SECONDS"))
+    chili_momentum_instant_bid_cut_margin_bps: float = Field(default=25.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_CUT_MARGIN_BPS"))
+    chili_momentum_recycle_entry_state_reset_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_RECYCLE_ENTRY_STATE_RESET_ENABLED"))
+    chili_momentum_require_live_atr_for_entry: str = Field(default="observe", validation_alias=AliasChoices("CHILI_MOMENTUM_REQUIRE_LIVE_ATR_FOR_ENTRY"))
+    chili_momentum_skip_spread_gate_for_limit_entry: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_SKIP_SPREAD_GATE_FOR_LIMIT_ENTRY"))
+    chili_momentum_explosive_atr_pct_floor: float = Field(default=0.045, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_ATR_PCT_FLOOR"))
+    chili_momentum_explosive_rvol_floor: float = Field(default=3.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RVOL_FLOOR"))
+    chili_momentum_frontside_adaptive_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_ADAPTIVE_ENABLED"))
+    chili_momentum_frontside_defer_pctile: float = Field(default=0.15, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_DEFER_PCTILE"))
+    chili_momentum_frontside_size_floor: float = Field(default=0.25, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_SIZE_FLOOR"))
+    chili_momentum_smart_hold_k_atr: float = Field(default=1.2, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_K_ATR"))
+    chili_momentum_smart_hold_t_flow_floor: float = Field(default=0.25, validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_T_FLOW_FLOOR"))
+    chili_momentum_smart_hold_s_flow_floor: float = Field(default=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_S_FLOW_FLOOR"))
+    chili_momentum_smart_hold_time_floor_min_samples: int = Field(default=5, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_TIME_FLOOR_MIN_SAMPLES"))
+    chili_momentum_smart_hold_time_floor_q: float = Field(default=0.25, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_TIME_FLOOR_Q"))
+    chili_momentum_smart_hold_rho: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_RHO"))
+    chili_momentum_lost_vwap_flatten_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_LOST_VWAP_FLATTEN_ENABLED"))
+    chili_momentum_lost_vwap_margin_sigma: float = Field(default=0.25, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_LOST_VWAP_MARGIN_SIGMA"))
+    chili_momentum_breakout_bailout_lock_in_seconds: float = Field(default=0.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_SECONDS"))
+    chili_momentum_breakout_bailout_lock_in_explosive_seconds: float = Field(default=0.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_EXPLOSIVE_SECONDS"))
+    chili_momentum_exit_candle_confirm_use_macd: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_USE_MACD"))
+    chili_momentum_velocity_persist_frac: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_PERSIST_FRAC"))
+    chili_momentum_clean_decline_terminal_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_CLEAN_DECLINE_TERMINAL_ENABLED"))
+    chili_momentum_overnight_max_stale_sec: float = Field(default=0.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MAX_STALE_SEC"))
+    chili_momentum_broker_zero_trust_clamp_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_ZERO_TRUST_CLAMP_ENABLED"))
+    chili_momentum_broker_zero_confirm_reads: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_ZERO_CONFIRM_READS"))
+    chili_momentum_squeeze_entry_top_pctl: float = Field(default=0.80, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_ENTRY_TOP_PCTL"))
+    chili_momentum_squeeze_entry_max_mult: float = Field(default=1.50, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_ENTRY_MAX_MULT"))
+    chili_momentum_spread_cost_derate_floor: float = Field(default=0.5, gt=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_DERATE_FLOOR"))
+    chili_momentum_spread_cost_max_fraction_of_r: float = Field(default=0.25, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_MAX_FRACTION_OF_R"))
+    chili_momentum_spread_cost_reclaim_max_fraction_of_r: float = Field(default=0.35, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_RECLAIM_MAX_FRACTION_OF_R"))
+    chili_momentum_spread_anomaly_p50_mult: float = Field(default=2.0, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_ANOMALY_P50_MULT"))
+    chili_momentum_spread_anomaly_extreme_p90_mult: float = Field(default=1.5, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_ANOMALY_EXTREME_P90_MULT"))
+    chili_momentum_spread_norm_lookback_days: float = Field(default=20.0, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_NORM_LOOKBACK_DAYS"))
+    chili_momentum_spread_cost_derate_engage_frac: float = Field(default=0.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_DERATE_ENGAGE_FRAC"))
+    chili_momentum_spread_cap_em_fallback_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_CAP_EM_FALLBACK_ENABLED"))
+    chili_momentum_spread_cap_em_fallback_shrink: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_CAP_EM_FALLBACK_SHRINK"))
+    chili_momentum_spread_cap_em_fallback_price_tier_bps: float = Field(default=150.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_CAP_EM_FALLBACK_PRICE_TIER_BPS"))
+    chili_momentum_spread_stability_window_bars: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_STABILITY_WINDOW_BARS"))
+    chili_momentum_spread_stability_min_samples: int = Field(default=5, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_STABILITY_MIN_SAMPLES"))
+    chili_momentum_ext_hours_quote_age_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EXT_HOURS_QUOTE_AGE_ENABLED"))
+    chili_momentum_ext_hours_quote_ceiling_seconds: float = Field(default=300.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXT_HOURS_QUOTE_CEILING_SECONDS"))
+    chili_momentum_quote_block_diagnostics: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_BLOCK_DIAGNOSTICS"))
+    chili_momentum_bid_prop_spread_blowout_mult: float = Field(default=1.5, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_SPREAD_BLOWOUT_MULT"))
+    chili_momentum_nbbo_tape_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_ENABLED"))
+    chili_momentum_nbbo_tape_retention_days: int = Field(default=30, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_RETENTION_DAYS"))
+    chili_momentum_universe_tick_retention_days: int = Field(default=5, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_TICK_RETENTION_DAYS"))
+    chili_momentum_universe_tick_record_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_TICK_RECORD_ENABLED"))
+    chili_momentum_universe_uncapped_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_UNCAPPED_ENABLED"))
+    chili_momentum_running_up_lookback_min: float = Field(default=5.0, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RUNNING_UP_LOOKBACK_MIN"))
+    chili_momentum_running_up_min_pct: float = Field(default=3.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RUNNING_UP_MIN_PCT"))
+    chili_momentum_running_up_max_symbols: int = Field(default=6, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_RUNNING_UP_MAX_SYMBOLS"))
+    chili_momentum_ignition_min_pct: float = Field(default=3.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_MIN_PCT"))
+    chili_momentum_event_select_primary_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_SELECT_PRIMARY_ENABLED"))
+    chili_momentum_tape_delta_ignite_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_DELTA_IGNITE_ENABLED"),
+    )
+    chili_momentum_tape_delta_min_seconds: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=15.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_DELTA_MIN_SECONDS"),
+        description=(
+            "Minimum scheduler cadence for tape-delta/event-select prewarm. The job "
+            "self-throttles upward from live tape density, so this is a startup/floor "
+            "bound rather than a fixed polling rate."
+        ),
+    )
+    chili_momentum_ross_rvol_feed_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_RVOL_FEED_ENABLED"))
+    chili_momentum_premarket_start_et: Optional[str] = Field(default=None, validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_START_ET"))
+    chili_momentum_afterhours_end_et: Optional[str] = Field(default=None, validation_alias=AliasChoices("CHILI_MOMENTUM_AFTERHOURS_END_ET"))
+    chili_momentum_early_premarket_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_ENABLED"))
+    chili_momentum_selection_prep_lead_min: int = Field(default=30, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_SELECTION_PREP_LEAD_MIN"))
+    chili_momentum_early_premarket_min_movers: int = Field(default=1, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_MIN_MOVERS"))
+    chili_momentum_early_premarket_window_min: int = Field(default=5, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_WINDOW_MIN"))
+    chili_momentum_premarket_gap_full_universe_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_GAP_FULL_UNIVERSE_ENABLED"))
+    chili_momentum_live_eligible_max_spread_bps: float = Field(default=300.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_MAX_SPREAD_BPS"))
+    chili_momentum_live_eligible_recency_grace_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_RECENCY_GRACE_ENABLED"))
+    chili_momentum_live_eligible_recency_grace_seconds: float = Field(default=90.0, ge=0.0, le=600.0, validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_RECENCY_GRACE_SECONDS"))
+    chili_momentum_thin_spread_hard_loss_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_THIN_SPREAD_HARD_LOSS_FRACTION"))
+    chili_momentum_thin_spread_squeeze_lane_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_THIN_SPREAD_SQUEEZE_LANE_ENABLED"))
+    chili_momentum_squeeze_entry_sizeup_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_ENTRY_SIZEUP_ENABLED"))
+    chili_momentum_live_eligible_allow_extreme_explosive: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_ALLOW_EXTREME_EXPLOSIVE"))
+    chili_momentum_meta_label_derate_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_META_LABEL_DERATE_ENABLED"))
+    chili_momentum_live_capture_features: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_CAPTURE_FEATURES"))
+    chili_momentum_midday_viability_bump: float = Field(default=0.05, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_MIDDAY_VIABILITY_BUMP"))
+    chili_momentum_opening_bell_suppression_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_OPENING_BELL_SUPPRESSION_ENABLED"))
+    chili_momentum_opening_bell_suppress_base_min: float = Field(default=2.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_OPENING_BELL_SUPPRESS_BASE_MIN"))
+    chili_momentum_order_burst_guard_window_minutes: float = Field(default=3.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_BURST_GUARD_WINDOW_MINUTES"))
+    chili_momentum_bid_prop_confirmer_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_CONFIRMER_ENABLED"))
+    chili_momentum_bid_prop_min_samples: int = Field(default=3, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_MIN_SAMPLES"))
+    chili_momentum_bid_prop_max_samples: int = Field(default=8, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_MAX_SAMPLES"))
+    chili_momentum_runaway_cross_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_RUNAWAY_CROSS_ENABLED"))
+    chili_momentum_runaway_cross_ask_band_bps: float = Field(default=8.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_RUNAWAY_CROSS_ASK_BAND_BPS"))
+    chili_momentum_vertical_chase_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_ENABLED"))
+    chili_momentum_vertical_chase_min_confluence: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_MIN_CONFLUENCE"))
+    chili_momentum_vertical_chase_max_bps: float = Field(default=800.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_MAX_BPS"))
+    chili_momentum_setup_selector_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_SETUP_SELECTOR_ENABLED"))
+    chili_momentum_attention_leadership_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ATTENTION_LEADERSHIP_ENABLED"))
+    chili_momentum_sticky_backside_bench_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_STICKY_BACKSIDE_BENCH_ENABLED"))
+    chili_momentum_auto_arm_watch_extend_seconds: float = Field(default=600.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_WATCH_EXTEND_SECONDS"))
+    chili_momentum_max_open_positions_per_correlation_bucket: int = Field(default=4, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_OPEN_POSITIONS_PER_CORRELATION_BUCKET"))
+    chili_momentum_news_catalyst_max_age_min: float = Field(default=120.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_CATALYST_MAX_AGE_MIN"))
+    chili_momentum_adaptive_scale_vol_ref_pct: float = Field(default=0.05, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_SCALE_VOL_REF_PCT"))
+    chili_momentum_adaptive_target_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_TARGET_ENABLED"))
+    chili_momentum_adaptive_target_rr_cap: float = Field(default=6.0, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_TARGET_RR_CAP"))
+    chili_momentum_adaptive_target_room_capture: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_TARGET_ROOM_CAPTURE"))
+    chili_momentum_adaptive_scale_vol_tilt: float = Field(default=0.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_SCALE_VOL_TILT"))
+    chili_momentum_crypto_scale_out_fraction: Optional[float] = Field(default=None, gt=0.0, lt=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_SCALE_OUT_FRACTION"))
+    chili_momentum_scale_grid_r_multiples: str = Field(default="1.0,2.0", validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_R_MULTIPLES"))
+    chili_momentum_scale_grid_fractions: str = Field(default="0.5,0.25", validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_FRACTIONS"))
+    chili_momentum_hard_no_trade_regime_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_REGIME_ENABLED"))
+    chili_momentum_hard_no_trade_midday_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_MIDDAY_ENABLED"))
+    chili_momentum_hard_no_trade_event_window_min: float = Field(default=30.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_EVENT_WINDOW_MIN"))
+    chili_momentum_hard_no_trade_event_times_utc: str = Field(default="", validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_EVENT_TIMES_UTC"))
+    chili_momentum_halt_chain_risk_gate_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_CHAIN_RISK_GATE_ENABLED"))
+    chili_momentum_halt_down_cascade_liquidate_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_DOWN_CASCADE_LIQUIDATE_ENABLED"))
+    chili_momentum_false_halt_avoid_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_FALSE_HALT_AVOID_ENABLED"))
+    chili_momentum_halt_resumption_direction_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUMPTION_DIRECTION_ENABLED"))
+    chili_momentum_halt_stale_ticks: int = Field(default=3, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_STALE_TICKS"))
+    chili_momentum_halt_resume_cooldown_seconds: float = Field(default=120.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_COOLDOWN_SECONDS"))
+    chili_momentum_halt_down_cascade_threshold: int = Field(default=2, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_DOWN_CASCADE_THRESHOLD"))
+    chili_momentum_add_into_halt_swing_lookback: int = Field(default=6, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_SWING_LOOKBACK"))
+    chili_momentum_vertical_chase_nohalt_thrust_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_NOHALT_THRUST_ENABLED"))
+    chili_momentum_vertical_chase_nohalt_min_confluence: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_NOHALT_MIN_CONFLUENCE"))
+    chili_momentum_overnight_max_loss_pct_bp: float = Field(default=0.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MAX_LOSS_PCT_BP"))
+    chili_momentum_overnight_size_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_SIZE_FRACTION"))
+    chili_momentum_extreme_vol_risk_bounded_fraction: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXTREME_VOL_RISK_BOUNDED_FRACTION"))
+    chili_momentum_overhead_veto_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ENABLED"))
+    chili_momentum_overhead_veto_atr: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ATR"),
+        description="Daily-ATR room required to avoid the overhead-supply veto when that explicit hard gate is enabled.",
+    )
+    chili_momentum_blue_sky_entry_min_room_atr: float = Field(
+        default=1.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_ENTRY_MIN_ROOM_ATR"),
+        description="Daily-ATR clear-room floor for the blue-sky breakout entry detector.",
+    )
+    chili_momentum_daily_lookback_days: int = Field(
+        default=20,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_LOOKBACK_DAYS"),
+        description="Daily bars used for nearest resistance and ATR context in Ross overhead-room logic.",
+    )
+    chili_momentum_daily_room_size_down_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_SIZE_DOWN_ENABLED"),
+        description="Soft size-down into daily 200SMA/resistance room; never vetoes an entry by itself.",
+    )
+    chili_momentum_daily_room_band_atr: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_BAND_ATR"),
+        description="Daily-ATR room over which the daily-room size-down smoothstep ramps back to full size.",
+    )
+    chili_momentum_daily_room_size_floor: float = Field(
+        default=0.4,
+        ge=0.05,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_SIZE_FLOOR"),
+        description="Lower bound for soft daily-room sizing multiplier when price is directly under overhead.",
+    )
+    chili_momentum_reentry_after_stop_bound_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"))
+    chili_momentum_max_stopout_reentries: int = Field(default=3, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_STOPOUT_REENTRIES"))
+    chili_momentum_adaptive_reentry_cooldown_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REENTRY_COOLDOWN_ENABLED"))
+    chili_momentum_reentry_profit_cooldown_factor: float = Field(default=0.25, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_PROFIT_COOLDOWN_FACTOR"))
+    chili_momentum_reentry_cooldown_vol_ref_atr_pct: float = Field(default=0.03, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_COOLDOWN_VOL_REF_ATR_PCT"))
+    chili_momentum_reentry_cooldown_vol_span: float = Field(default=1.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_COOLDOWN_VOL_SPAN"))
+    chili_momentum_pullback_retracement_threshold: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RETRACEMENT_THRESHOLD"))
+    chili_momentum_ofi_threshold: float = Field(default=0.25, validation_alias=AliasChoices("CHILI_MOMENTUM_OFI_THRESHOLD"))
+    chili_momentum_iceberg_add_probe_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_ICEBERG_ADD_PROBE_ENABLED"))
+    chili_momentum_iceberg_add_refill_ratio: float = Field(default=1.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_ICEBERG_ADD_REFILL_RATIO"))
+    chili_momentum_exit_ladder_rung_bps: float = Field(default=60.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_RUNG_BPS"))
+    chili_momentum_stop_l2_confirm_max_age_s: float = Field(default=2.5, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_MAX_AGE_S"))
+    chili_momentum_stop_l2_confirm_min_snaps: int = Field(default=3, ge=1, validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_MIN_SNAPS"))
+    chili_momentum_stop_l2_confirm_max_ticks: int = Field(default=2, ge=0, validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_MAX_TICKS"))
+    chili_momentum_squeeze_exit_hold_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_EXIT_HOLD_ENABLED"))
+    chili_momentum_trail_floor_bps: float = Field(default=500.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_FLOOR_BPS"))
+    chili_momentum_trail_ceiling_bps: float = Field(default=1000.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_CEILING_BPS"))
+    chili_momentum_volnorm_trail_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_ENABLED"))
+    chili_momentum_volnorm_trail_k: float = Field(default=1.3, gt=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_K"))
+    chili_momentum_volnorm_trail_maturity_widen_enabled: bool = Field(default=True, validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_MATURITY_WIDEN_ENABLED"))
+    chili_momentum_volnorm_trail_maturity_max_widen: float = Field(default=2.0, ge=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_MATURITY_MAX_WIDEN"))
+    chili_momentum_volnorm_trail_max_dist_pct: float = Field(default=0.15, ge=0.0, le=1.0, validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_MAX_DIST_PCT"))
+    chili_momentum_cadence_atr_pct_slow_threshold: float = Field(default=0.2, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_CADENCE_ATR_PCT_SLOW_THRESHOLD"))
+    chili_momentum_regime_holdtime_hot_mult: float = Field(default=1.25, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_REGIME_HOLDTIME_HOT_MULT"))
+    chili_momentum_regime_holdtime_cold_mult: float = Field(default=0.85, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_REGIME_HOLDTIME_COLD_MULT"))
+    chili_momentum_lane_leak_cleanup_threshold_s: float = Field(default=120.0, ge=0.0, validation_alias=AliasChoices("CHILI_MOMENTUM_LANE_LEAK_CLEANUP_THRESHOLD_S"))
+    chili_momentum_float_turnover_size_down_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_TURNOVER_SIZE_DOWN_ENABLED"),
+        description="Soft size-down when a low-float equity has already traded much of its float late in the active session; never vetoes entry by itself.",
+    )
+    chili_momentum_float_turnover_size_floor: float = Field(
+        default=0.55,
+        ge=0.05,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_TURNOVER_SIZE_FLOOR"),
+        description="Lower bound for the adaptive float-turnover soft sizing multiplier.",
+    )
+    chili_momentum_red_candle_entry_block_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_RED_CANDLE_ENTRY_BLOCK_ENABLED"))
+    chili_momentum_order_burst_candle_guard_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_BURST_CANDLE_GUARD_ENABLED"))
+    chili_momentum_adaptive_spread_cost_veto_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_SPREAD_COST_VETO_ENABLED"))
+    chili_momentum_dip_buy_rth_only_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_ONLY_ENABLED"))
+    chili_momentum_overnight_dark_flatten_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_DARK_FLATTEN_ENABLED"))
+    chili_momentum_fill_log_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_LOG_ENABLED"))
+    chili_momentum_overnight_trading_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_TRADING_ENABLED"))
+    chili_momentum_overnight_tape_enabled: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_TAPE_ENABLED"))
+    chili_momentum_entry_flow_veto_explosive_exempt: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_EXPLOSIVE_EXEMPT"))
+    chili_momentum_pullback_raw_break_when_explosive: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_WHEN_EXPLOSIVE"))
+    chili_momentum_entry_macd_open_strict: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MACD_OPEN_STRICT"))
+    chili_momentum_bid_prop_explosive_exempt: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_EXPLOSIVE_EXEMPT"))
+    chili_momentum_exit_candle_confirm_live: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_LIVE"))
+    chili_momentum_exit_ladder_live: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_LIVE"))
+    chili_momentum_pyramid_skip_viability_recheck: bool = Field(default=False, validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_SKIP_VIABILITY_RECHECK"))
     # ── Ross RECENT (post-book) entry-quality refinements (docs/DESIGN/MOMENTUM_LANE.md §8) ──
     # #1 Break-AND-retest: don't buy the raw first break (it wicks out / reverses);
     # wait for the break, a shallow retest of the broken level, and a hold+reclaim.
@@ -2607,6 +3390,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_BUFFER_PCT"),
         description="Small wick buffer below the breakout level before fast-bailing (0.001 = 10 bps).",
     )
+    chili_momentum_ross_scalp_smart_hold_time_floor_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_SCALP_SMART_HOLD_TIME_FLOOR_SECONDS"),
+        description="Legacy fixed Ross-scalp smart-hold floor cap; 0 keeps the current adaptive trade-horizon bound.",
+    )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
         ge=0.0,
@@ -2648,6 +3438,85 @@ class Settings(BaseSettings):
         default=300.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_ABS_CAP"),
+    )
+    # CONVERSION FIX A — low-float spread-cap fallback. When the expected-move proxy
+    # is unavailable (cold/thin candles at the entry tick) the adaptive cap collapses
+    # to the 12bps live FLOOR — which structurally blocks the explosive low-float
+    # names the lane SELECTS (their natural spread is wide). When this is on and the
+    # candidate is a low-float explosive (selection already certified it), substitute
+    # a documented fallback expected-move so the cap scales instead of collapsing.
+    # The absolute cap still bounds it, so a TOXIC small-move name with a wide spread
+    # still blocks (the win-win). Flag-OFF => byte-identical (returns the base floor).
+    chili_momentum_spread_lowfloat_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_LOWFLOAT_FALLBACK_ENABLED"),
+        description="When expected-move is unavailable, scale the spread cap off a low-float fallback move instead of collapsing to the floor.",
+    )
+    chili_momentum_spread_lowfloat_fallback_move_bps: float = Field(
+        default=120.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_LOWFLOAT_FALLBACK_MOVE_BPS"),
+        description="Fallback expected per-bar move (bps) for a low-float explosive when its realized move is unknown; feeds the adaptive spread cap.",
+    )
+    # CONVERSION FIX C — RVOL-relative break volume floor. The break-bar volume floor
+    # is a flat multiple; a genuinely explosive name (very high session RVOL) is
+    # already proving demand, so it should clear a LOWER per-bar break-volume bar. On
+    # => the floor is divided down by an RVOL factor (bounded), so high-RVOL explosives
+    # convert; a quiet name keeps the full floor. Flag-OFF => byte-identical.
+    chili_momentum_break_rvol_relative_floor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_RVOL_RELATIVE_FLOOR_ENABLED"),
+        description="Scale the break-bar volume floor DOWN for high session-RVOL explosives (they already prove demand).",
+    )
+    chili_momentum_break_rvol_floor_min_multiple: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_RVOL_FLOOR_MIN_MULTIPLE"),
+        description="Hard floor the RVOL-relative break-volume requirement can never drop below (still a real volume bar).",
+    )
+    chili_momentum_break_rvol_floor_reference: float = Field(
+        default=5.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_RVOL_FLOOR_REFERENCE"),
+        description="Session RVOL at which the break-volume floor is fully relaxed to the min multiple (Ross explosive ~5x).",
+    )
+    # CONVERSION FIX D — backside bench + VWAP-reclaim un-bench. A genuine fade
+    # (below VWAP, lower-third of day range, no reclaim momentum) is benched. BUT a
+    # VWAP-reclaim-FROM-BELOW carried by momentum (price back above VWAP + rising) is
+    # un-benched — Ross's bread-and-butter reclaim entry. Flag-OFF => never benches.
+    chili_momentum_backside_bench_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_BENCH_ENABLED"),
+        description="Bench genuine backside fades; un-bench a momentum VWAP-reclaim-from-below (the Ross reclaim entry).",
+    )
+    chili_momentum_backside_day_range_pos_floor: float = Field(
+        default=0.34,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_DAY_RANGE_POS_FLOOR"),
+        description="At/under this position in the day's range (0=low,1=high) a below-VWAP name reads as a genuine fade.",
+    )
+    # CONVERSION FIX B — repeg/cross escalation. An armed, unfilled resting entry whose
+    # reference price is ADVANCING away should re-peg UP toward the new marketable
+    # price (cancel prior, re-submit) — but only within a chase ceiling off the
+    # original arm price, so it never chases a runaway into extension. Flag-OFF =>
+    # never escalates (byte-identical resting behavior).
+    chili_momentum_repeg_on_advance_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPEG_ON_ADVANCE_ENABLED"),
+        description="Re-peg an armed/unfilled entry UP when price advances away (cancel prior + re-submit), bounded by the chase ceiling.",
+    )
+    chili_momentum_repeg_chase_ceiling_pct: float = Field(
+        default=0.02,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPEG_CHASE_CEILING_PCT"),
+        description="Max fraction above the original arm price the re-peg may chase (0.02 = 2%); past it, abandon rather than chase extension.",
+    )
+    chili_momentum_repeg_min_advance_pct: float = Field(
+        default=0.001,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPEG_MIN_ADVANCE_PCT"),
+        description="Minimum upward move of the reference price before a re-peg fires (avoids churning on noise).",
     )
     chili_momentum_risk_max_estimated_slippage_bps: float = Field(
         default=18.0,
@@ -3079,6 +3948,154 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_DEV_TICK_ENABLED"),
     )
+    chili_momentum_live_new_entries_paused: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_NEW_ENTRIES_PAUSED"),
+        description=(
+            "Emergency entry-side pause for live momentum. Held positions still "
+            "tick for management, but pre-entry sessions cannot submit new buys."
+        ),
+    )
+    chili_momentum_live_same_session_reentry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_SAME_SESSION_REENTRY_ENABLED"),
+        description=(
+            "Allow one live automation session to recycle into another entry after "
+            "cooldown. Default false: a completed live trade finishes, and any "
+            "re-entry requires a fresh Ross event/session."
+        ),
+    )
+    chili_momentum_ross_breakout_attempt_min_viability: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_BREAKOUT_ATTEMPT_MIN_VIABILITY"),
+    )
+    chili_momentum_ross_equity_universe_required: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED"),
+        description=(
+            "Require live equity momentum entries on the Ross/Robinhood lane to prove "
+            "they belong to the Ross small-cap active-mover universe. This is an "
+            "entry-time invariant, not an auto-arm preference."
+        ),
+    )
+    chili_momentum_ws_ignition_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WS_IGNITION_ENABLED"),
+        description=(
+            "Enable the additive WS ignition scorer so fresh equity ticks can score "
+            "directly into momentum viability instead of waiting only for the "
+            "scheduled batch builder."
+        ),
+    )
+    chili_momentum_ross_event_admission_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EVENT_ADMISSION_ENABLED"),
+        description=(
+            "Allow proven Ross small-cap events to create a guarded live watcher "
+            "immediately instead of waiting for scheduler auto-arm."
+        ),
+    )
+    chili_momentum_independent_smallcap_a_plus_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INDEPENDENT_SMALLCAP_A_PLUS_ENABLED"),
+        description=(
+            "Allow non-Ross-source small-cap tape events only when independent A+ "
+            "evidence passes the small-cap profile, tape/source, change, float, "
+            "volume, and liquidity checks."
+        ),
+    )
+    chili_momentum_ross_event_admission_tick_count: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EVENT_ADMISSION_TICK_COUNT"),
+        description=(
+            "Synchronous ticks performed inside Ross event admission after arming. "
+            "Default 1 forces an immediate runner evaluation from the event path; "
+            "the IQFeed/live event loop continues quote-speed ticking after that."
+        ),
+    )
+    chili_momentum_ross_event_admission_cooldown_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EVENT_ADMISSION_COOLDOWN_SECONDS"),
+    )
+    # Event-driven live runner driver. Batch scheduling is only a fallback; Ross-style
+    # equity scalps need live sessions ticked from market-data events.
+    chili_momentum_live_runner_loop_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_ENABLED"),
+    )
+    chili_momentum_live_runner_loop_min_tick_interval_ms: int = Field(
+        default=250,
+        ge=50,
+        le=5000,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_MIN_TICK_INTERVAL_MS"),
+    )
+    chili_momentum_live_runner_loop_refresh_seconds: float = Field(
+        default=2.0,
+        ge=0.25,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_REFRESH_SECONDS"),
+    )
+    chili_momentum_live_runner_loop_heartbeat_seconds: float = Field(
+        default=2.0,
+        ge=0.25,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_HEARTBEAT_SECONDS"),
+    )
+    chili_momentum_live_runner_loop_iqfeed_tape_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_TAPE_ENABLED"),
+    )
+    chili_momentum_live_runner_loop_iqfeed_notify_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_NOTIFY_ENABLED"),
+    )
+    chili_momentum_live_runner_loop_iqfeed_poll_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_POLL_FALLBACK_ENABLED"),
+    )
+    chili_momentum_live_runner_loop_iqfeed_poll_seconds: float = Field(
+        default=0.25,
+        ge=0.05,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_POLL_SECONDS"),
+    )
+    chili_momentum_live_runner_loop_iqfeed_poll_recent_seconds: float = Field(
+        default=180.0,
+        ge=1.0,
+        le=3600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_POLL_RECENT_SECONDS"),
+        description=(
+            "Lookback window used by the IQFeed poll fallback to decide which recent "
+            "live sessions should receive event-loop ticks. First-class so fallback "
+            "cadence coverage cannot hide behind a literal in the loop."
+        ),
+    )
+    chili_momentum_ross_feed_health_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_FEED_HEALTH_ENABLED"),
+        description=(
+            "Run a housekeeping-only health check that verifies the Ross equity lane "
+            "has fresh Massive tape and IQFeed L1 during the hot live window."
+        ),
+    )
+    chili_momentum_ross_feed_health_interval_seconds: int = Field(
+        default=30,
+        ge=15,
+        le=600,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_FEED_HEALTH_INTERVAL_SECONDS"),
+    )
+    chili_momentum_ross_feed_health_max_iqfeed_age_hot_seconds: float = Field(
+        default=60.0,
+        ge=5.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_FEED_HEALTH_MAX_IQFEED_AGE_HOT_SECONDS"),
+    )
     # APScheduler interval when paper/live runner batch jobs are registered (minutes; jobs still require *_scheduler_enabled).
     chili_momentum_paper_runner_scheduler_interval_minutes: int = Field(
         default=3,
@@ -3092,15 +4109,28 @@ class Settings(BaseSettings):
         le=1440,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_MINUTES"),
     )
-    # Ross-style cadence: a momentum entry/exit window is fleeting (seconds-
-    # minutes), so the 2min floor above missed fast breaks. When > 0 this
-    # SECONDS cadence wins over the minutes knob. 30s = 4x faster, safely above
-    # the ~12s batch run time (max_instances=1 + coalesce prevent overlap).
+    # Batch fallback cadence only. Ross-style first-pullback scalps must be
+    # driven by the quote/IQFeed loop or a dev tick; a 30s scheduler cannot catch
+    # a 9-second hold or a sub-second entry. When > 0 this SECONDS cadence wins
+    # over the minutes knob for slower watch/exit maintenance only.
     chili_momentum_live_runner_scheduler_interval_seconds: int = Field(
         default=30,
         ge=0,
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
+    )
+    chili_momentum_live_runner_batch_fallback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_BATCH_FALLBACK_ENABLED"),
+    )
+    chili_momentum_live_runner_replay_snapshot_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_REPLAY_SNAPSHOT_ENABLED"),
+        description=(
+            "Emit replay-only scheduler snapshot telemetry from the live batch planner. "
+            "This advisory evidence is for Replay v3 scheduler/priority validation and "
+            "must never gate order routing or consume useful broker capacity."
+        ),
     )
     # The live-runner batch ticks each open live session on a small bounded pool
     # so the batch wall-time is ~the slowest single session, not the SERIAL SUM
@@ -3116,6 +4146,44 @@ class Settings(BaseSettings):
         le=20,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_BATCH_WORKERS"),
     )
+    # Ross/equity momentum architecture: WATCHING is not risk. Keep many $0-risk
+    # pre-fill watchers subscribed/ticked, then enforce real exposure atomically at
+    # the broker-submit/fill boundary. Without this split, stale watchers and
+    # cooldown rows consume the same cap as real positions and starve fast starters.
+    chili_momentum_decouple_watching_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DECOUPLE_WATCHING_ENABLED"),
+    )
+    chili_momentum_watch_fanout_max: int = Field(
+        default=25,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_MAX"),
+    )
+    chili_momentum_max_open_positions_ceiling: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_OPEN_POSITIONS_CEILING"),
+    )
+    chili_momentum_watch_fanout_floor: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_FLOOR"),
+    )
+    chili_momentum_watch_fanout_adaptive_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_ADAPTIVE_ENABLED"),
+    )
+    chili_momentum_atomic_risk_budget_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ATOMIC_RISK_BUDGET_ENABLED"),
+    )
+    chili_momentum_fill_boundary_breaker_recheck_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_BOUNDARY_BREAKER_RECHECK_ENABLED"),
+    )
     # Auto-arm-live: autonomously arm ONE live session for the fresh, live-
     # eligible candidate whose momentum trigger is firing now (Ross "the one
     # moving right now"). Guarded by kill-switch + drawdown + concurrency=1 +
@@ -3125,8 +4193,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED"),
     )
     chili_momentum_auto_arm_live_scheduler_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_ENABLED"),
+        description=(
+            "Enable periodic scheduler auto-arm. Default is off because Ross equity "
+            "admission should be driven by IQFeed/WS events; the scheduler is an "
+            "operator-enabled fallback, not the primary entry path."
+        ),
+    )
+    chili_momentum_auto_arm_live_scheduler_fallback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_FALLBACK_ENABLED"),
+        description=(
+            "Second explicit opt-in for periodic live auto-arm. This prevents a stale "
+            "AUTO_ARM_LIVE_SCHEDULER_ENABLED env override from making Ross equity "
+            "entries clock-driven while event admission is enabled."
+        ),
     )
     chili_momentum_auto_arm_live_scheduler_interval_seconds: int = Field(
         default=30,
@@ -3172,6 +4254,11 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_REQUIRE_FRESH_IMPULSE"),
     )
+    chili_momentum_24h_eligible_symbols: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_24H_ELIGIBLE_SYMBOLS"),
+        description="Comma-separated positive whitelist of RH 24h-eligible symbols; empty means no explicit cache.",
+    )
     # Auto-arm checks each candidate's entry trigger via an OHLCV fetch; run them
     # concurrently so a pass is ~the slowest single fetch (not the serial sum).
     chili_momentum_auto_arm_trigger_workers: int = Field(
@@ -3187,6 +4274,13 @@ class Settings(BaseSettings):
         ge=60,
         le=86400,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_MAX_WATCH_SECONDS"),
+    )
+    chili_momentum_auto_arm_broker_failure_cooldown_seconds: float = Field(
+        default=600.0,
+        ge=0.0,
+        le=3600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_BROKER_FAILURE_COOLDOWN_SECONDS"),
+        description="Block new auto-arms after fresh broker order-submit failures; existing sessions still retry exits.",
     )
     # The momentum live lane executes via coinbase_spot (crypto). The viability
     # board ALSO carries equities (ARKK, CLSK...) that go live-eligible at US
@@ -3204,6 +4298,55 @@ class Settings(BaseSettings):
     chili_momentum_auto_arm_equity_only: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_EQUITY_ONLY"),
+    )
+    # Ross transcript event feeder: Ross mentioning/trying a ticker is discovery,
+    # not an order instruction. The bridge enriches the symbol with live five-pillar
+    # market evidence and refreshes symbol-level viability immediately; auto-arm,
+    # risk, and tick-entry gates still decide whether to watch/enter.
+    chili_momentum_ross_transcript_bridge_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_BRIDGE_ENABLED"),
+    )
+    chili_momentum_ross_transcript_path: str = Field(
+        default=r"D:\CHILI-Docker\chili-data\ross_stream\transcript.jsonl",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_PATH", "ROSS_TRANSCRIPT_PATH"),
+    )
+    chili_momentum_ross_transcript_require_warrior_session_ok: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_REQUIRE_WARRIOR_SESSION_OK"),
+        description=(
+            "Require a fresh local Warrior-session marker before transcript rows can "
+            "refresh Ross viability/admission. This prevents replay/non-live audio "
+            "from creating live watchers when the browser session is invalid."
+        ),
+    )
+    chili_momentum_ross_transcript_warrior_session_ok_path: str = Field(
+        default=r"D:\CHILI-Docker\chili-data\ross_stream\warrior_session_ok.json",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_WARRIOR_SESSION_OK_PATH"),
+    )
+    chili_momentum_ross_transcript_warrior_session_ok_max_age_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_WARRIOR_SESSION_OK_MAX_AGE_SECONDS"),
+    )
+    chili_momentum_ross_transcript_bridge_interval_seconds: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_BRIDGE_INTERVAL_SECONDS"),
+    )
+    chili_momentum_ross_transcript_bridge_lookback_seconds: float = Field(
+        default=90.0,
+        ge=5.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_BRIDGE_LOOKBACK_SECONDS"),
+    )
+    chili_momentum_ross_transcript_bridge_max_symbols: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_TRANSCRIPT_BRIDGE_MAX_SYMBOLS"),
     )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
@@ -3225,6 +4368,77 @@ class Settings(BaseSettings):
         ge=3600,
         le=1209600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_POST_EXIT_MAX_AGE_SECONDS"),
+    )
+
+    # ------------------------------------------------------------------
+    # LEVER 1 — extreme-vol / explosive eligibility.
+    # Today extreme volatility unconditionally sets live_eligible=False, which
+    # blanket-blocks the UPC-class explosive runners the Ross lane SELECTS (they
+    # ARE extreme-vol by construction). When this is on, an extreme-vol name that
+    # ALSO clears the explosive-quality floor (ross_score, threaded via ctx.meta),
+    # is product-tradable, and has an OK spread becomes live-eligible — but flagged
+    # for RISK-BOUNDED (size-down) admission so worst-case qty/loss stays bounded.
+    # An extreme-vol name that is NOT explosive stays gated. Flag-OFF =>
+    # byte-identical blanket-block parity.
+    chili_momentum_extreme_explosive_eligible_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXTREME_EXPLOSIVE_ELIGIBLE_ENABLED"),
+        description="Let extreme-vol names that clear the explosive-quality floor become live-eligible under risk-bounded (size-down) admission instead of blanket-gating them.",
+    )
+    chili_momentum_extreme_explosive_floor: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXTREME_EXPLOSIVE_FLOOR"),
+        description="Ross-quality (explosive) percentile floor a name must clear to earn extreme-vol live eligibility. FLOOR, not a magic cap.",
+    )
+    chili_momentum_extreme_explosive_risk_mult: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXTREME_EXPLOSIVE_RISK_MULT"),
+        description="Size-down multiple applied to the risk budget when an extreme-vol explosive name is admitted live (bounds worst-case qty/loss).",
+    )
+
+    # ------------------------------------------------------------------
+    # LEVER 2 — adaptive volatility-normalized trailing exit.
+    # The current ATR trail uses a fixed ATR multiple. This lever normalizes the
+    # trail distance by DENOISED realized volatility scaled to the hold horizon
+    # (sqrt-of-time), references the micro-price (not last) so the stop tracks true
+    # fair value, and adapts the band on order-flow VELOCITY: a RIDE state (positive
+    # flow) holds the trail WIDE to capture MFE, a LOCK state (rollover) tightens it.
+    # INVARIANT-A: the stop only ever ratchets UP (long) / DOWN (short) — a sequence
+    # of ticks can only tighten, never loosen. Flag-OFF => byte-identical (the caller
+    # keeps its existing fixed-ATR trail).
+    chili_momentum_volnorm_exit_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_EXIT_ENABLED"),
+        description="Enable the adaptive volatility-normalized trailing exit (denoised rv, sqrt-time hold scaling, micro-price ref, velocity RIDE/LOCK). Ratchet-only.",
+    )
+    chili_momentum_volnorm_exit_base_k: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_EXIT_BASE_K"),
+        description="Base trail width in rv_hold units (the irreducible documented multiple; RIDE widens, LOCK tightens around it).",
+    )
+    chili_momentum_volnorm_exit_min_k: float = Field(
+        default=1.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_EXIT_MIN_K"),
+        description="Lower clamp on the adaptive trail width (LOCK can tighten to here, never below).",
+    )
+    chili_momentum_volnorm_exit_max_k: float = Field(
+        default=4.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_EXIT_MAX_K"),
+        description="Upper clamp on the adaptive trail width (RIDE can widen to here, never above).",
+    )
+    chili_momentum_volnorm_exit_denoise_alpha: float = Field(
+        default=0.4,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_EXIT_DENOISE_ALPHA"),
+        description="EWMA weight on the new rv sample when denoising rv_live (lower = smoother / less noise-driven stop-outs).",
     )
 
     chili_auto_execute_stops: bool = Field(
@@ -3815,7 +5029,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_MAX_NOTIONAL_USD"),
         description=(
             "Small-dollar cap for fraction-based synergy scale-ins. Set 0 "
-            "only for an intentional uncapped paper/live soak."
+            "only for an intentional uncapped paper/live validation run."
         ),
     )
     chili_autotrader_synergy_max_scale_ins_per_trade: int = Field(
@@ -4767,7 +5981,8 @@ class Settings(BaseSettings):
     # position_resolver.position_has_recorded_sell(position_id) as the
     # discriminator -- precise across all Trade row generations linked
     # to a position. When False (default), the existing event_count==0
-    # path is used. Operator flips to True after a paper-soak window.
+    # path is used. Operator flips to True after deterministic paper/live
+    # parity checks show the inverse-reconcile path is safe.
     chili_position_identity_phase4_authority_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(
@@ -4784,7 +5999,8 @@ class Settings(BaseSettings):
     # Trade-off: if the limit can't fill at best-bid (price moved up),
     # the order is REJECTED by the broker and the entry is MISSED. The
     # design assumption: missing one entry is better than paying ~100bps
-    # of slippage. Default OFF for paper-soak before promotion.
+    # of slippage. Default OFF until deterministic TCA comparison supports
+    # promotion.
     chili_coinbase_maker_only_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(
@@ -4798,7 +6014,8 @@ class Settings(BaseSettings):
     # realized_stats_sync). Tiers:
     # Uses posterior-smoothed sizing (prior_ratio/prior_n below) instead
     # of raw threshold cliffs, while preserving tier labels in audit rows.
-    # Default OFF. Operator flips after paper-soak comparison.
+    # Default OFF. Operator flips after deterministic payoff/realized-risk
+    # comparison supports promotion.
     chili_autotrader_payoff_sizing_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(
@@ -5946,7 +7163,8 @@ class Settings(BaseSettings):
     # successful value exists, the cache serves it tagged ``cache:stale``
     # (up to ``chili_autotrader_broker_equity_cache_max_stale_seconds``) so
     # the sizing logic degrades gracefully instead of collapsing to the env
-    # default. Defaults disabled — flip to true after a paper-mode soak.
+    # default. Defaults disabled until deterministic broker-cache parity
+    # checks support promotion.
     chili_autotrader_broker_equity_cache_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_BROKER_EQUITY_CACHE_ENABLED"),

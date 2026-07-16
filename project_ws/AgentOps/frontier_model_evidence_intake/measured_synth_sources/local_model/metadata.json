@@ -1,0 +1,12 @@
+{
+  "model_name": "qwen2.5-coder:7b",
+  "prompt_pack_file": "prompt_pack.md",
+  "prompt_pack_sha256": "fe8b90a7574627f0e079495312893c90393d6cfe655ba2bd43ef015aa4b8e0d0",
+  "raw_dir": "raw",
+  "recorded_at": "2026-07-10T14:21:29.224114Z",
+  "recorder": "autopilot_local_model_evidence_recorder",
+  "run_id": "local-qwen25-allcases-synth-probe-20260710-070150",
+  "source_command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=1600 temperature=0 per case; model attempts failed isolated replay; CHILI replay-guided synthesized repairs recorded for all six cases: preflight fail-closed guard, runtime-control partial/no-evidence/unscoped runtime quarantine, startup static manifest completion, broker timeout fail-closed guard",
+  "source_kind": "local_model",
+  "transcript_file": "transcript.jsonl"
+}

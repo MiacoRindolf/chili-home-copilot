@@ -1,0 +1,1 @@
+codex exec --ignore-user-config --ignore-rules --model gpt-5.6-sol --ephemeral --sandbox read-only --skip-git-repo-check -c model_reasoning_effort="xhigh" -

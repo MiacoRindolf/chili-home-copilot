@@ -1,0 +1,21 @@
+```json
+{
+  "candidate_id": "local_model-real-chili-preflight-candidate-wins",
+  "case_id": "real-chili-preflight-candidate-wins",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 1.2345678901234567,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "phi4-mini:latest",
+  "notes": "Candidate patch for real-chili-preflight-candidate-wins.",
+  "patch": "-diff --git a/preflight.py b/preflight.py\nindex cde..fgh #1\n--- preflight.py\n+++ preflight.py\n@@ -0 +2,3 @@\n def can_enter(\n-    ticker: str,\n+    broker_position_qty: float,\n     buying_power: float,\n+  required_cash: float,\n   *,
++        broker_timeout: bool = False,\n) -> bool:\n return True\n",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```

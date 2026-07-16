@@ -176,6 +176,34 @@ def _diff_new_paths(diff_text: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
+def _diff_chunks_by_new_path(diff_text: str) -> dict[str, str]:
+    chunks: dict[str, str] = {}
+    current_lines: list[str] = []
+    current_path = ""
+
+    def flush() -> None:
+        if current_path and current_lines:
+            chunks[current_path] = "\n".join(current_lines) + "\n"
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("diff --git "):
+            flush()
+            current_lines = [line]
+            current_path = ""
+            continue
+        if current_lines:
+            current_lines.append(line)
+        if line.startswith("+++ "):
+            raw = line[4:].strip().split("\t", 1)[0]
+            if raw == "/dev/null":
+                continue
+            if raw.startswith("b/"):
+                raw = raw[2:]
+            current_path = raw.replace("\\", "/")
+    flush()
+    return chunks
+
+
 def _is_safe_repo_relative(path: str) -> bool:
     if not path or path == "/dev/null":
         return False
@@ -232,20 +260,22 @@ def _validate_candidate_patch(case: BakeoffCase, candidate: PatchCandidate, root
 
     if not candidate.planned_file:
         return "missing_plan_file", "candidate has no planned file"
-    file_path = root / candidate.planned_file
-    file_content = file_path.read_text(encoding="utf-8") if file_path.exists() else None
-    validation_kwargs = {}
-    if "allow_new_file" in inspect.signature(_validate_diff).parameters:
-        validation_kwargs["allow_new_file"] = candidate.planned_file not in case.files
-    validation = _validate_diff(
-        candidate.patch,
-        candidate.planned_file,
-        file_content,
-        **validation_kwargs,
-    )
-    if not validation.get("valid"):
-        warnings = "; ".join(str(warning) for warning in validation.get("warnings") or [])
-        return "invalid_diff", warnings or "diff validation failed"
+    chunks_by_path = _diff_chunks_by_new_path(candidate.patch)
+    for target in targets:
+        file_path = root / target
+        file_content = file_path.read_text(encoding="utf-8") if file_path.exists() else None
+        validation_kwargs = {}
+        if "allow_new_file" in inspect.signature(_validate_diff).parameters:
+            validation_kwargs["allow_new_file"] = target not in case.files
+        validation = _validate_diff(
+            chunks_by_path.get(target, candidate.patch),
+            target,
+            file_content,
+            **validation_kwargs,
+        )
+        if not validation.get("valid"):
+            warnings = "; ".join(str(warning) for warning in validation.get("warnings") or [])
+            return "invalid_diff", warnings or f"diff validation failed for {target}"
     return "patch_valid", "targets=" + ",".join(targets)
 
 

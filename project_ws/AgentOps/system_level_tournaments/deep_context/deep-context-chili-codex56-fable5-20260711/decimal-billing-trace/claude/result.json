@@ -1,0 +1,26 @@
+{
+  "attempts": 1,
+  "behavior_passed": true,
+  "changed_files": [
+    "billing/discounts.py",
+    "billing/invoice.py",
+    "billing/tax.py",
+    "money/amount.py"
+  ],
+  "context_files": 24,
+  "context_scope_precise": true,
+  "distractor_files": 20,
+  "duration_seconds": 603.397,
+  "eligible": true,
+  "failure": "",
+  "model_events": [],
+  "model_name": "claude-fable-5",
+  "premium_calls": null,
+  "quality_score": 100,
+  "scope_valid": true,
+  "semantic_review_passed": true,
+  "source_kind": "claude",
+  "task_id": "decimal-billing-trace",
+  "tests_unchanged": true,
+  "validation_output": ".....                                                                    [100%]\n5 passed in 0.05s"
+}

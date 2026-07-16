@@ -1,0 +1,13 @@
+{
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=4096 temperature=0 < compact_prompt_pack.md (CPU fallback after forced API replacement-content probe)",
+  "duration_seconds": 129.60580109999864,
+  "passed": false,
+  "reason": "behavior_tests_failed",
+  "status": "failed",
+  "test_output_tail": "cd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nC:\\Users\\rindo\\miniconda3\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:197: in exec_module\n    exec(co, module.__dict__)\ntest_autopilot_prompt.py:1: in <module>\n    from autopilot_prompt import plan_if_repo_edit\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-bakeoff-real-chili-runtime-control-partial-loses-0stjt_zl\\repo\\autopilot_prompt.py\", line 3\nE       return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))def classify_prompt(prompt: str) -> str:\nE                                                                                                   ^^^\nE   SyntaxError: invalid syntax\n=========================== short test summary info ===========================\nERROR test_autopilot_prompt.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n1 error in 0.22s\n",
+  "used_replacement": true
+}

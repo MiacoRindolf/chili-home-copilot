@@ -1,0 +1,111 @@
+diff --git a/money/amount.py b/money/amount.py
+index 10bdb00..a2e9961 100644
+--- a/money/amount.py
++++ b/money/amount.py
+@@ -1,14 +1,30 @@
+ from dataclasses import dataclass
++from decimal import Decimal, DecimalException, ROUND_HALF_UP
+ 
+ 
+ @dataclass(frozen=True)
+ class Money:
+     currency: str
+-    amount: float
++    amount: Decimal
+ 
+     @classmethod
+     def from_value(cls, currency, value):
+-        return cls(currency, float(value))
++        if (
++            not isinstance(currency, str)
++            or len(currency) != 3
++            or not currency.isalpha()
++        ):
++            raise ValueError("invalid money")
++
++        try:
++            amount = Decimal(str(value))
++            if not amount.is_finite() or amount < 0:
++                raise ValueError("invalid money")
++            amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
++        except (DecimalException, ValueError):
++            raise ValueError("invalid money") from None
++
++        return cls(currency.upper(), amount)
+ 
+     def formatted(self):
+-        return str(self.amount)
++        return format(self.amount, ".2f")
+diff --git a/billing/discounts.py b/billing/discounts.py
+index c8db2cf..b4045ec 100644
+--- a/billing/discounts.py
++++ b/billing/discounts.py
+@@ -1,2 +1,19 @@
++from decimal import Decimal
++
++from money.amount import Money
++
++
+ def apply_discount(subtotal, basis_points):
+-    return 0, subtotal
++    if (
++        isinstance(basis_points, bool)
++        or not isinstance(basis_points, int)
++        or not 0 <= basis_points <= 10000
++    ):
++        raise ValueError("invalid basis points")
++
++    discount = Money.from_value(
++        subtotal.currency,
++        subtotal.amount * Decimal(basis_points) / Decimal(10000),
++    )
++    net = Money.from_value(subtotal.currency, subtotal.amount - discount.amount)
++    return discount, net
+diff --git a/billing/tax.py b/billing/tax.py
+index 57330b5..ffea041 100644
+--- a/billing/tax.py
++++ b/billing/tax.py
+@@ -1,2 +1,17 @@
++from decimal import Decimal
++
++from money.amount import Money
++
++
+ def apply_tax(net, basis_points):
+-    return 0
++    if (
++        isinstance(basis_points, bool)
++        or not isinstance(basis_points, int)
++        or not 0 <= basis_points <= 10000
++    ):
++        raise ValueError("invalid basis points")
++
++    return Money.from_value(
++        net.currency,
++        net.amount * Decimal(basis_points) / Decimal(10000),
++    )
+diff --git a/billing/invoice.py b/billing/invoice.py
+index 38b28c8..d25693f 100644
+--- a/billing/invoice.py
++++ b/billing/invoice.py
+@@ -1,2 +1,19 @@
++from billing.discounts import apply_discount
++from billing.tax import apply_tax
++from money.amount import Money
++
++
+ def build_invoice(currency, subtotal_value, discount_basis_points, tax_basis_points):
+-    return {"currency": currency, "total": str(subtotal_value)}
++    subtotal = Money.from_value(currency, subtotal_value)
++    discount, net = apply_discount(subtotal, discount_basis_points)
++    tax = apply_tax(net, tax_basis_points)
++    total = Money.from_value(net.currency, net.amount + tax.amount)
++
++    return {
++        "currency": subtotal.currency,
++        "subtotal": subtotal.formatted(),
++        "discount": discount.formatted(),
++        "net": net.formatted(),
++        "tax": tax.formatted(),
++        "total": total.formatted(),
++    }

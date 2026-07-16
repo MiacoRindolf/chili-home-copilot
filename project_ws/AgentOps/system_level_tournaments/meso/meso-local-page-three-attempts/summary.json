@@ -1,0 +1,116 @@
+{
+  "artifact_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\system_level_tournaments\\meso\\meso-local-page-three-attempts",
+  "evidence_mode": "real_artifacts",
+  "generated_utc": "2026-07-11T01:16:42.420265Z",
+  "model_names": {
+    "local_model": "qwen2.5-coder:7b"
+  },
+  "premium_independent_local_results": 1,
+  "run_id": "meso-local-page-three-attempts",
+  "runtime_measurements": {
+    "measured": 1,
+    "unmeasured": 0
+  },
+  "safety": "isolated temporary repositories only; premium frontier models are benchmark opponents; CHILI premium routes are fatal; no real source edit, git publication, deployment, database migration, broker, or live-trading action",
+  "schema": "chili.meso-project-workflow-tournament.v1",
+  "source_kinds": [
+    "local_model"
+  ],
+  "status": "failed",
+  "task_results": [
+    {
+      "results": [
+        {
+          "attempts": 3,
+          "behavior_passed": false,
+          "changed_files": [
+            "app/api.py",
+            "app/paging.py",
+            "app/query.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 220.459,
+          "eligible": false,
+          "failure": "validation failed: FF....F                                                                  [100%]\n================================== FAILURES ===================================\n__________________________ test_default_page_is_one ___________________________\n    def test_default_page_is_one():\n>       assert parse_page(None) == 1\n               ^^^^^^^^^^^^^^^^\ntests\\test_paging.py:6:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nraw = None\n    def parse_page(raw: str | None) -> int:\n        if raw is None or raw.strip() == \"\":\n>           raise ValueError('page must be a positive integer')\nE           ValueError: page must be a positive integer\napp\\query.py:4: ValueError\n__________________ test_second_page_has_navigation_metadata ___________________\n    def test_second_page_has_navigation_metadata():\n        result = build_page([1, 2, 3, 4, 5], \"2\", 2)\n>       assert result == {\n            \"page\": 2,\n            \"items\": [3, 4],\n            \"has_next\": True,\n            \"next_page\": 3,\n        }\nE       AssertionError: assert {'has_next': ...ne, 'page': 2} == {'has_next': ... 3, 'page': 2}\nE\nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'next_page': None} != {'next_page': 3}\nE         {'items': [1, 2]} != {'items': [3, 4]}\nE         {'has_next': False} != {'has_next': True}\nE         Use -v to get more diff\ntests\\test_paging.py:12: AssertionError\n_______________________ test_last_page_has_no_next_page _______________________\n    def test_last_page_has_no_next_page():\n>       assert build_page([1, 2, 3], \"2\", 2) == {\n            \"page\": 2,\n            \"items\": [3],\n            \"has_next\": False,\n            \"next_page\": None,\n        }\nE       AssertionError: assert {'has_next': ...ne, 'pag",
+          "model_events": [
+            {
+              "error": "",
+              "latency_ms": 35353,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 32024,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 23857,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 15384,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 13983,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 40520,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 24001,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 13832,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 12552,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            }
+          ],
+          "model_name": "qwen2.5-coder:7b",
+          "premium_calls": 0,
+          "quality_score": 30,
+          "scope_valid": true,
+          "semantic_review_passed": false,
+          "source_kind": "local_model",
+          "task_id": "one-based-page-envelope",
+          "tests_unchanged": true,
+          "validation_output": "FF....F                                                                  [100%]\n================================== FAILURES ===================================\n__________________________ test_default_page_is_one ___________________________\n    def test_default_page_is_one():\n>       assert parse_page(None) == 1\n               ^^^^^^^^^^^^^^^^\ntests\\test_paging.py:6:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nraw = None\n    def parse_page(raw: str | None) -> int:\n        if raw is None or raw.strip() == \"\":\n>           raise ValueError('page must be a positive integer')\nE           ValueError: page must be a positive integer\napp\\query.py:4: ValueError\n__________________ test_second_page_has_navigation_metadata ___________________\n    def test_second_page_has_navigation_metadata():\n        result = build_page([1, 2, 3, 4, 5], \"2\", 2)\n>       assert result == {\n            \"page\": 2,\n            \"items\": [3, 4],\n            \"has_next\": True,\n            \"next_page\": 3,\n        }\nE       AssertionError: assert {'has_next': ...ne, 'page': 2} == {'has_next': ... 3, 'page': 2}\nE\nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'next_page': None} != {'next_page': 3}\nE         {'items': [1, 2]} != {'items': [3, 4]}\nE         {'has_next': False} != {'has_next': True}\nE         Use -v to get more diff\ntests\\test_paging.py:12: AssertionError\n_______________________ test_last_page_has_no_next_page _______________________\n    def test_last_page_has_no_next_page():\n>       assert build_page([1, 2, 3], \"2\", 2) == {\n            \"page\": 2,\n            \"items\": [3],\n            \"has_next\": False,\n            \"next_page\": None,\n        }\nE       AssertionError: assert {'has_next': ...ne, 'page': 2} == {'has_next': ...ne, 'page': 2}\nE\nE         Omitting 3 identical items, use -vv to show\nE         Differing items:\nE         {'items': [1, 2]} != {'items': [3]}\nE         Use -v to get more diff\nhidden_tests\\test_paging_edges.py:20: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_paging.py::test_default_page_is_one - ValueError: page must...\nFAILED tests/test_paging.py::test_second_page_has_navigation_metadata - Asser...\nFAILED hidden_tests/test_paging_edges.py::test_last_page_has_no_next_page - A...\n3 failed, 4 passed in 0.11s"
+        }
+      ],
+      "task_id": "one-based-page-envelope",
+      "title": "One-based page envelope contract",
+      "winner": "none",
+      "winner_model": "none",
+      "winner_reason": "no contestant passed all correctness and safety gates"
+    }
+  ],
+  "tasks": 1,
+  "winner_counts": {
+    "claude": 0,
+    "codex": 0,
+    "local_model": 0,
+    "none": 1
+  }
+}

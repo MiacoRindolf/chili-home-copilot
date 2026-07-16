@@ -1,0 +1,12 @@
+{
+  "model_name": "qwen2.5-coder:7b",
+  "prompt_pack_file": "prompt_pack.md",
+  "prompt_pack_sha256": "f97412f93aebd649d00a0cf081c30d57fd8e919dc716ac8550916e265b1d6849",
+  "raw_dir": "raw",
+  "recorded_at": "2026-07-10T21:28:18.143878Z",
+  "recorder": "autopilot_local_model_evidence_recorder",
+  "run_id": "chili-agent-qwen25-parse-retry-20260710T212500Z",
+  "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (retry from project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\suite_diagnostics.json); behavior-repair attempt 1: ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=4096 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api); behavior-repair attempt 2: ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=4096 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api)",
+  "source_kind": "local_model",
+  "transcript_file": "transcript.jsonl"
+}

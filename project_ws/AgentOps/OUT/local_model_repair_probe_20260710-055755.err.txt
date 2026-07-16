@@ -1,0 +1,8 @@
+api : The term 'api' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the 
+spelling of the name, or if a path was included, verify that the path is correct and try again.
+At line:1 char:29
++ $env:CHILI_OLLAMA_TRANSPORT=api; python .\scripts\autopilot_local_mod ...
++                             ~~~
+    + CategoryInfo          : ObjectNotFound: (api:String) [], CommandNotFoundException
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 

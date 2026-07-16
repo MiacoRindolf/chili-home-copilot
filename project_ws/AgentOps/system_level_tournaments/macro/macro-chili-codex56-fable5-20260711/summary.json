@@ -1,0 +1,685 @@
+{
+  "artifact_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\system_level_tournaments\\macro\\macro-chili-codex56-fable5-20260711",
+  "collection_failures": [],
+  "evidence_mode": "real_artifacts",
+  "generated_utc": "2026-07-11T04:31:38.729213Z",
+  "model_names": {
+    "claude": "claude-fable-5",
+    "codex": "gpt-5.6-sol",
+    "local_model": "qwen2.5-coder:7b"
+  },
+  "phases_per_task": 3,
+  "premium_independent_local_results": 3,
+  "regraded_from_raw_artifacts": true,
+  "run_id": "macro-chili-codex56-fable5-20260711",
+  "runtime_measurements": {
+    "measured": 9,
+    "unmeasured": 0
+  },
+  "safety": "isolated temporary repositories only; Fable 5 and Codex 5.6 Sol are benchmark opponents; premium routes are fatal inside CHILI; no real source publication, deployment, runtime, broker, or live-trading action",
+  "schema": "chili.macro-long-horizon-tournament.v1",
+  "scoring_revision": "phase-change-evidence-v2",
+  "source_kinds": [
+    "local_model",
+    "codex",
+    "claude"
+  ],
+  "status": "passed",
+  "task_results": [
+    {
+      "results": [
+        {
+          "attempts": 3,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/cohort.py",
+            "app/config.py",
+            "app/decision.py",
+            "app/service.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 0.646,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "qwen2.5-coder:7b",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/cohort.py",
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".......                                                                  [100%]\n7 passed in 0.05s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "..........                                                               [100%]\n10 passed in 0.06s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".............                                                            [100%]\n13 passed in 0.08s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": 0,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "local_model",
+          "task_id": "progressive-rollout",
+          "tests_unchanged": true,
+          "validation_output": ".............                                                            [100%]\n13 passed in 0.08s"
+        },
+        {
+          "attempts": 5,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/cohort.py",
+            "app/config.py",
+            "app/decision.py",
+            "app/service.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 127.72,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "gpt-5.6-sol",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/cohort.py",
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".......                                                                  [100%]\n7 passed in 0.04s"
+            },
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "..........                                                               [100%]\n10 passed in 0.04s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/cohort.py",
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".............                                                            [100%]\n13 passed in 0.07s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": null,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "codex",
+          "task_id": "progressive-rollout",
+          "tests_unchanged": true,
+          "validation_output": ".............                                                            [100%]\n13 passed in 0.07s"
+        },
+        {
+          "attempts": 5,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/cohort.py",
+            "app/config.py",
+            "app/decision.py",
+            "app/service.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 1533.882,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "claude-fable-5",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/cohort.py",
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".......                                                                  [100%]\n7 passed in 0.04s"
+            },
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "..........                                                               [100%]\n10 passed in 0.05s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/config.py",
+                "app/decision.py",
+                "app/service.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".............                                                            [100%]\n13 passed in 0.06s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": null,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "claude",
+          "task_id": "progressive-rollout",
+          "tests_unchanged": true,
+          "validation_output": ".............                                                            [100%]\n13 passed in 0.06s"
+        }
+      ],
+      "task_id": "progressive-rollout",
+      "title": "Progressive rollout evolution",
+      "winner": "local_model",
+      "winner_model": "qwen2.5-coder:7b",
+      "winner_reason": "cumulative correctness/safety; zero-premium tie-break; then measured runtime"
+    },
+    {
+      "results": [
+        {
+          "attempts": 3,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/model.py",
+            "app/processor.py",
+            "app/service.py",
+            "app/store.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 0.543,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "qwen2.5-coder:7b",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/model.py",
+                "app/processor.py",
+                "app/service.py",
+                "app/store.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "...                                                                      [100%]\n3 passed in 0.04s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/processor.py",
+                "app/service.py",
+                "app/store.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".....                                                                    [100%]\n5 passed in 0.05s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/service.py",
+                "app/store.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".......                                                                  [100%]\n7 passed in 0.05s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": 0,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "local_model",
+          "task_id": "resumable-import",
+          "tests_unchanged": true,
+          "validation_output": ".......                                                                  [100%]\n7 passed in 0.05s"
+        },
+        {
+          "attempts": 2,
+          "behavior_passed": false,
+          "changed_files": [
+            "app/model.py",
+            "app/service.py",
+            "app/store.py"
+          ],
+          "continuity_valid": false,
+          "duration_seconds": 106.015,
+          "eligible": false,
+          "failure": "validation failed: .FF                                                                      [100%]\n================================== FAILURES ===================================\n_________________ test_checkpoint_advances_only_after_success _________________\n    def test_checkpoint_advances_only_after_success():\n        store = CheckpointStore()\n        items = [ImportItem(\"a\", 1, {}), ImportItem(\"b\", 2, {})]\n        with pytest.raises(RuntimeError, match=\"stop\"):\n            run_import(items, \"job\", store, lambda item: (_ for _ in ()).throw(RuntimeError(\"stop\")) if item.item_id == \"b\" else None)\n>       assert store.checkpoint(\"job\") == 1\n               ^^^^^^^^^^^^^^^^^^^^^^^\nE       TypeError: CheckpointStore.checkpoint() missing 1 required positional argument: 'sequence'\nhidden_tests\\test_import_m1_edges.py:13: TypeError\n_____________________ test_out_of_order_batch_is_rejected _____________________\n    def test_out_of_order_batch_is_rejected():\n        with pytest.raises(ValueError, match=\"invalid import batch\"):\n>           run_import([ImportItem(\"b\", 2, {}), ImportItem(\"a\", 1, {})], \"job\", CheckpointStore(), lambda item: None)\nhidden_tests\\test_import_m1_edges.py:18:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nitems = [ImportItem(item_id='b', sequence=2, payload={}), ImportItem(item_id='a', sequence=1, payload={})]\njob_id = 'job', store = <app.store.CheckpointStore object at 0x0000021EDD290910>\nhandler = <function test_out_of_order_batch_is_rejected.<locals>.<lambda> at 0x0000021EDD2877E0>\n    def run_import(items, job_id, store, handler):\n        items = list(items)\n        previous_sequence = 0\n        item_ids = set()\n        for item in items:\n            if item.sequence <= previous_sequence:\n>               raise ValueError(\"item sequences must be strictly increasing and unique\")\nE               ValueError: item sequences must be strictly increasing and unique\napp\\service.py:11: ValueError\nDuring handling of the above exception, another exception occurred:\n    def test_out_of_order_batch_is_rejected():\n>       with pytest.raises(ValueError, match=\"invalid import batch\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: Regex pattern did not match.\nE         Expected regex: 'invalid import batch'\nE         Actual message: 'item sequences must be strictly increasing an",
+          "model_events": [],
+          "model_name": "gpt-5.6-sol",
+          "phase_changes_present": false,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 2,
+              "cumulative_phase_count": 1,
+              "passed": false,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": false,
+              "tests_unchanged": true,
+              "validation_output": ".FF                                                                      [100%]\n================================== FAILURES ===================================\n_________________ test_checkpoint_advances_only_after_success _________________\n    def test_checkpoint_advances_only_after_success():\n        store = CheckpointStore()\n        items = [ImportItem(\"a\", 1, {}), ImportItem(\"b\", 2, {})]\n        with pytest.raises(RuntimeError, match=\"stop\"):\n            run_import(items, \"job\", store, lambda item: (_ for _ in ()).throw(RuntimeError(\"stop\")) if item.item_id == \"b\" else None)\n>       assert store.checkpoint(\"job\") == 1\n               ^^^^^^^^^^^^^^^^^^^^^^^\nE       TypeError: CheckpointStore.checkpoint() missing 1 required positional argument: 'sequence'\nhidden_tests\\test_import_m1_edges.py:13: TypeError\n_____________________ test_out_of_order_batch_is_rejected _____________________\n    def test_out_of_order_batch_is_rejected():\n        with pytest.raises(ValueError, match=\"invalid import batch\"):\n>           run_import([ImportItem(\"b\", 2, {}), ImportItem(\"a\", 1, {})], \"job\", CheckpointStore(), lambda item: None)\nhidden_tests\\test_import_m1_edges.py:18:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nitems = [ImportItem(item_id='b', sequence=2, payload={}), ImportItem(item_id='a', sequence=1, payload={})]\njob_id = 'job', store = <app.store.CheckpointStore object at 0x0000021EDD290910>\nhandler = <function test_out_of_order_batch_is_rejected.<locals>.<lambda> at 0x0000021EDD2877E0>\n    def run_import(items, job_id, store, handler):\n        items = list(items)\n        previous_sequence = 0\n        item_ids = set()\n        for item in items:\n            if item.sequence <= previous_sequence:\n>               raise ValueError(\"item sequences must be strictly increasing and unique\")\nE               ValueError: item sequences must be strictly increasing and unique\napp\\service.py:11: ValueError\nDuring handling of the above exception, another exception occurred:\n    def test_out_of_order_batch_is_rejected():\n>       with pytest.raises(ValueError, match=\"invalid import batch\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: Regex pattern did not match.\nE         Expected regex: 'invalid import batch'\nE         Actual message: 'item sequences must be strictly increasing and unique'\nhidden_tests\\test_import_m1_edges.py:17: AssertionError\n=========================== short test summary info ===========================\nFAILED hidden_tests/test_import_m1_edges.py::test_checkpoint_advances_only_after_success\nFAILED hidden_tests/test_import_m1_edges.py::test_out_of_order_batch_is_rejected\n2 failed, 1 passed in 0.14s"
+            }
+          ],
+          "phases_passed": 0,
+          "premium_calls": null,
+          "quality_score": 20,
+          "required_files_changed": false,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": false,
+          "source_kind": "codex",
+          "task_id": "resumable-import",
+          "tests_unchanged": true,
+          "validation_output": ".FF                                                                      [100%]\n================================== FAILURES ===================================\n_________________ test_checkpoint_advances_only_after_success _________________\n    def test_checkpoint_advances_only_after_success():\n        store = CheckpointStore()\n        items = [ImportItem(\"a\", 1, {}), ImportItem(\"b\", 2, {})]\n        with pytest.raises(RuntimeError, match=\"stop\"):\n            run_import(items, \"job\", store, lambda item: (_ for _ in ()).throw(RuntimeError(\"stop\")) if item.item_id == \"b\" else None)\n>       assert store.checkpoint(\"job\") == 1\n               ^^^^^^^^^^^^^^^^^^^^^^^\nE       TypeError: CheckpointStore.checkpoint() missing 1 required positional argument: 'sequence'\nhidden_tests\\test_import_m1_edges.py:13: TypeError\n_____________________ test_out_of_order_batch_is_rejected _____________________\n    def test_out_of_order_batch_is_rejected():\n        with pytest.raises(ValueError, match=\"invalid import batch\"):\n>           run_import([ImportItem(\"b\", 2, {}), ImportItem(\"a\", 1, {})], \"job\", CheckpointStore(), lambda item: None)\nhidden_tests\\test_import_m1_edges.py:18:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nitems = [ImportItem(item_id='b', sequence=2, payload={}), ImportItem(item_id='a', sequence=1, payload={})]\njob_id = 'job', store = <app.store.CheckpointStore object at 0x0000021EDD290910>\nhandler = <function test_out_of_order_batch_is_rejected.<locals>.<lambda> at 0x0000021EDD2877E0>\n    def run_import(items, job_id, store, handler):\n        items = list(items)\n        previous_sequence = 0\n        item_ids = set()\n        for item in items:\n            if item.sequence <= previous_sequence:\n>               raise ValueError(\"item sequences must be strictly increasing and unique\")\nE               ValueError: item sequences must be strictly increasing and unique\napp\\service.py:11: ValueError\nDuring handling of the above exception, another exception occurred:\n    def test_out_of_order_batch_is_rejected():\n>       with pytest.raises(ValueError, match=\"invalid import batch\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: Regex pattern did not match.\nE         Expected regex: 'invalid import batch'\nE         Actual message: 'item sequences must be strictly increasing and unique'\nhidden_tests\\test_import_m1_edges.py:17: AssertionError\n=========================== short test summary info ===========================\nFAILED hidden_tests/test_import_m1_edges.py::test_checkpoint_advances_only_after_success\nFAILED hidden_tests/test_import_m1_edges.py::test_out_of_order_batch_is_rejected\n2 failed, 1 passed in 0.14s"
+        },
+        {
+          "attempts": 5,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/model.py",
+            "app/processor.py",
+            "app/service.py",
+            "app/store.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 1783.747,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "claude-fable-5",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/model.py",
+                "app/service.py",
+                "app/store.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "...                                                                      [100%]\n3 passed in 0.03s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/processor.py",
+                "app/service.py",
+                "app/store.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".....                                                                    [100%]\n5 passed in 1.04s"
+            },
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/service.py",
+                "app/store.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": ".......                                                                  [100%]\n7 passed in 1.04s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": null,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "claude",
+          "task_id": "resumable-import",
+          "tests_unchanged": true,
+          "validation_output": ".......                                                                  [100%]\n7 passed in 1.04s"
+        }
+      ],
+      "task_id": "resumable-import",
+      "title": "Resumable import evolution",
+      "winner": "local_model",
+      "winner_model": "qwen2.5-coder:7b",
+      "winner_reason": "cumulative correctness/safety; zero-premium tie-break; then measured runtime"
+    },
+    {
+      "results": [
+        {
+          "attempts": 3,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/executor.py",
+            "app/graph.py",
+            "app/model.py",
+            "app/state.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 0.569,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "qwen2.5-coder:7b",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/executor.py",
+                "app/graph.py",
+                "app/model.py",
+                "app/state.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "....                                                                     [100%]\n4 passed in 0.05s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/executor.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "......                                                                   [100%]\n6 passed in 0.04s"
+            },
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/executor.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "........                                                                 [100%]\n8 passed in 0.06s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": 0,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "local_model",
+          "task_id": "dependency-deployment",
+          "tests_unchanged": true,
+          "validation_output": "........                                                                 [100%]\n8 passed in 0.06s"
+        },
+        {
+          "attempts": 5,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/executor.py",
+            "app/graph.py",
+            "app/model.py",
+            "app/state.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 142.944,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "gpt-5.6-sol",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/executor.py",
+                "app/graph.py",
+                "app/model.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "....                                                                     [100%]\n4 passed in 0.04s"
+            },
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/executor.py",
+                "app/state.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "......                                                                   [100%]\n6 passed in 0.04s"
+            },
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/executor.py",
+                "app/graph.py",
+                "app/state.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "........                                                                 [100%]\n8 passed in 0.04s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": null,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "codex",
+          "task_id": "dependency-deployment",
+          "tests_unchanged": true,
+          "validation_output": "........                                                                 [100%]\n8 passed in 0.04s"
+        },
+        {
+          "attempts": 5,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/executor.py",
+            "app/graph.py",
+            "app/model.py",
+            "app/state.py"
+          ],
+          "continuity_valid": true,
+          "duration_seconds": 1786.405,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "claude-fable-5",
+          "phase_changes_present": true,
+          "phase_count": 3,
+          "phase_results": [
+            {
+              "attempts": 1,
+              "changed_files": [
+                "app/executor.py",
+                "app/graph.py",
+                "app/model.py",
+                "app/state.py"
+              ],
+              "cumulative_phase_count": 1,
+              "passed": true,
+              "phase_id": "milestone-1",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "....                                                                     [100%]\n4 passed in 0.05s"
+            },
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/executor.py"
+              ],
+              "cumulative_phase_count": 2,
+              "passed": true,
+              "phase_id": "milestone-2",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "......                                                                   [100%]\n6 passed in 0.03s"
+            },
+            {
+              "attempts": 2,
+              "changed_files": [
+                "app/executor.py",
+                "app/graph.py",
+                "app/state.py"
+              ],
+              "cumulative_phase_count": 3,
+              "passed": true,
+              "phase_id": "milestone-3",
+              "semantic_review_passed": true,
+              "tests_unchanged": true,
+              "validation_output": "........                                                                 [100%]\n8 passed in 0.05s"
+            }
+          ],
+          "phases_passed": 3,
+          "premium_calls": null,
+          "quality_score": 100,
+          "required_files_changed": true,
+          "scope_valid": true,
+          "scoring_revision": "phase-change-evidence-v2",
+          "semantic_review_passed": true,
+          "source_kind": "claude",
+          "task_id": "dependency-deployment",
+          "tests_unchanged": true,
+          "validation_output": "........                                                                 [100%]\n8 passed in 0.05s"
+        }
+      ],
+      "task_id": "dependency-deployment",
+      "title": "Dependency deployment evolution",
+      "winner": "local_model",
+      "winner_model": "qwen2.5-coder:7b",
+      "winner_reason": "cumulative correctness/safety; zero-premium tie-break; then measured runtime"
+    }
+  ],
+  "tasks": 3,
+  "winner_counts": {
+    "claude": 0,
+    "codex": 0,
+    "local_model": 3,
+    "none": 0
+  }
+}

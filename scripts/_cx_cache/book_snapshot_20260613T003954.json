@@ -1,0 +1,257 @@
+{
+ "ts": "2026-06-13T00:39:41.000574+00:00",
+ "books": {
+  "BTC-USD": {
+   "bid": 63564.0,
+   "ask": 63564.01,
+   "bid_sz": 0.08864924,
+   "ask_sz": 0.1282172,
+   "spread_bps": 0.0015732174210919007,
+   "bid_depth_usd": 5634.900291360001,
+   "ask_depth_usd": 8149.999382972001
+  },
+  "SOL-USD": {
+   "bid": 66.97,
+   "ask": 66.98,
+   "bid_sz": 162.90118439,
+   "ask_sz": 179.53565675,
+   "spread_bps": 1.4930944382239817,
+   "bid_depth_usd": 10909.492318598299,
+   "ask_depth_usd": 12025.298289115
+  },
+  "DOGE-USD": {
+   "bid": 0.08601,
+   "ask": 0.08602,
+   "bid_sz": 24572.0,
+   "ask_sz": 12.8,
+   "spread_bps": 1.162587920711053,
+   "bid_depth_usd": 2113.43772,
+   "ask_depth_usd": 1.101056
+  },
+  "OSMO-USD": {
+   "bid": 0.0474,
+   "ask": 0.0475,
+   "bid_sz": 2445.49,
+   "ask_sz": 9355.51,
+   "spread_bps": 21.074815595364147,
+   "bid_depth_usd": 115.91622599999998,
+   "ask_depth_usd": 444.386725
+  },
+  "LAYER-USD": {
+   "bid": 0.0664,
+   "ask": 0.0666,
+   "bid_sz": 19729.64,
+   "ask_sz": 3281.0,
+   "spread_bps": 30.075187969925672,
+   "bid_depth_usd": 1310.048096,
+   "ask_depth_usd": 218.51460000000003
+  },
+  "YB-USD": {
+   "bid": 0.0894,
+   "ask": 0.0896,
+   "bid_sz": 16.76,
+   "ask_sz": 340.34,
+   "spread_bps": 22.346368715084438,
+   "bid_depth_usd": 1.4983440000000001,
+   "ask_depth_usd": 30.494463999999997
+  },
+  "MOG-USD": {
+   "bid": 1e-07,
+   "ask": 1.1e-07,
+   "bid_sz": 1549543220583.0,
+   "ask_sz": 841318734396.0,
+   "spread_bps": 952.3809523809533,
+   "bid_depth_usd": 154954.3220583,
+   "ask_depth_usd": 92545.06078356001
+  },
+  "STG-USD": {
+   "bid": 0.6405,
+   "ask": 0.6412,
+   "bid_sz": 31.1,
+   "ask_sz": 1.8,
+   "spread_bps": 10.922992900055146,
+   "bid_depth_usd": 19.91955,
+   "ask_depth_usd": 1.15416
+  },
+  "FIDA-USD": {
+   "bid": 0.0228,
+   "ask": 0.0229,
+   "bid_sz": 36647.83,
+   "ask_sz": 132839.4,
+   "spread_bps": 43.76367614879623,
+   "bid_depth_usd": 835.5705240000001,
+   "ask_depth_usd": 3042.0222599999997
+  },
+  "META-USD": {
+   "bid": 2.678,
+   "ask": 2.705,
+   "bid_sz": 10.0,
+   "ask_sz": 10.0,
+   "spread_bps": 100.31580902842332,
+   "bid_depth_usd": 26.78,
+   "ask_depth_usd": 27.05
+  },
+  "DOGINME-USD": {
+   "bid": 6.96e-05,
+   "ask": 7.06e-05,
+   "bid_sz": 4702507.0,
+   "ask_sz": 6134723.0,
+   "spread_bps": 142.65335235377992,
+   "bid_depth_usd": 327.2944872,
+   "ask_depth_usd": 433.11144379999996
+  },
+  "MAMO-USD": {
+   "bid": 0.0084,
+   "ask": 0.00843,
+   "bid_sz": 35375.5,
+   "ask_sz": 35148.7,
+   "spread_bps": 35.65062388591862,
+   "bid_depth_usd": 297.1542,
+   "ask_depth_usd": 296.303541
+  },
+  "CTSI-USD": {
+   "bid": 0.0235,
+   "ask": 0.0237,
+   "bid_sz": 64603.3,
+   "ask_sz": 80957.4,
+   "spread_bps": 84.7457627118639,
+   "bid_depth_usd": 1518.17755,
+   "ask_depth_usd": 1918.6903799999998
+  },
+  "IDEX-USD": {
+   "bid": 0.00137,
+   "ask": 0.00139,
+   "bid_sz": 445722.2,
+   "ask_sz": 2159194.3,
+   "spread_bps": 144.92753623188443,
+   "bid_depth_usd": 610.639414,
+   "ask_depth_usd": 3001.2800769999994
+  },
+  "BTRST-USD": {
+   "bid": 0.06421,
+   "ask": 0.06422,
+   "bid_sz": 24.8,
+   "ask_sz": 2725.0,
+   "spread_bps": 1.5572685509610096,
+   "bid_depth_usd": 1.592408,
+   "ask_depth_usd": 174.9995
+  },
+  "MEGA-USD": {
+   "bid": 0.04736,
+   "ask": 0.04738,
+   "bid_sz": 5076.8,
+   "ask_sz": 2607.5,
+   "spread_bps": 4.222081486172511,
+   "bid_depth_usd": 240.437248,
+   "ask_depth_usd": 123.54334999999999
+  },
+  "FOX-USD": {
+   "bid": 0.00459,
+   "ask": 0.00463,
+   "bid_sz": 5449.4,
+   "ask_sz": 259334.9,
+   "spread_bps": 86.7678958785233,
+   "bid_depth_usd": 25.012746,
+   "ask_depth_usd": 1200.7205869999998
+  },
+  "EIGEN-USD": {
+   "bid": 0.175,
+   "ask": 0.176,
+   "bid_sz": 19316.8,
+   "ask_sz": 17335.05,
+   "spread_bps": 56.980056980057036,
+   "bid_depth_usd": 3380.4399999999996,
+   "ask_depth_usd": 3050.9687999999996
+  },
+  "DRV-USD": {
+   "bid": 0.10216,
+   "ask": 0.10217,
+   "bid_sz": 3038.5,
+   "ask_sz": 4107.5,
+   "spread_bps": 0.978808789702552,
+   "bid_depth_usd": 310.41316,
+   "ask_depth_usd": 419.663275
+  },
+  "KAIO-USD": {
+   "bid": 0.03071,
+   "ask": 0.03077,
+   "bid_sz": 5000.0,
+   "ask_sz": 25000.0,
+   "spread_bps": 19.518542615483916,
+   "bid_depth_usd": 153.55,
+   "ask_depth_usd": 769.25
+  },
+  "GWEI-USD": {
+   "bid": 0.183576,
+   "ask": 0.183981,
+   "bid_sz": 211.0,
+   "ask_sz": 211.0,
+   "spread_bps": 22.037398281083828,
+   "bid_depth_usd": 38.734536,
+   "ask_depth_usd": 38.819991
+  },
+  "RSC-USD": {
+   "bid": 0.0968,
+   "ask": 0.0974,
+   "bid_sz": 3069.44,
+   "ask_sz": 813.14,
+   "spread_bps": 61.79196704428459,
+   "bid_depth_usd": 297.12179199999997,
+   "ask_depth_usd": 79.199836
+  },
+  "DRIFT-USD": {
+   "bid": 0.01627,
+   "ask": 0.01628,
+   "bid_sz": 15256.92,
+   "ask_sz": 37219.91,
+   "spread_bps": 6.144393241167186,
+   "bid_depth_usd": 248.2300884,
+   "ask_depth_usd": 605.9401348
+  },
+  "BILL-USD": {
+   "bid": 0.07391,
+   "ask": 0.07394,
+   "bid_sz": 540.0,
+   "ask_sz": 2282.0,
+   "spread_bps": 4.05816706121099,
+   "bid_depth_usd": 39.9114,
+   "ask_depth_usd": 168.73108000000002
+  },
+  "POLS-USD": {
+   "bid": 0.0719,
+   "ask": 0.0724,
+   "bid_sz": 500.0,
+   "ask_sz": 853.66,
+   "spread_bps": 69.30006930006935,
+   "bid_depth_usd": 35.95,
+   "ask_depth_usd": 61.804984000000005
+  },
+  "INX-USD": {
+   "bid": 0.007723,
+   "ask": 0.007762,
+   "bid_sz": 3232.0,
+   "ask_sz": 2000.0,
+   "spread_bps": 50.37132709073294,
+   "bid_depth_usd": 24.960736,
+   "ask_depth_usd": 15.524
+  },
+  "XPL-USD": {
+   "bid": 0.0837,
+   "ask": 0.0838,
+   "bid_sz": 16079.0,
+   "ask_sz": 43.6,
+   "spread_bps": 11.94029850746303,
+   "bid_depth_usd": 1345.8123,
+   "ask_depth_usd": 3.65368
+  },
+  "ROBO-USD": {
+   "bid": 0.02107,
+   "ask": 0.02113,
+   "bid_sz": 18615.0,
+   "ask_sz": 2752.0,
+   "spread_bps": 28.436018957346455,
+   "bid_depth_usd": 392.21804999999995,
+   "ask_depth_usd": 58.14976
+  }
+ }
+}

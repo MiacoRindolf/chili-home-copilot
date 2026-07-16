@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CHILI Live Deploy Status</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      line-height: 1.5;
+      color: #18212f;
+      background: #f5f7fb;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      line-height: 1.15;
+    }
+    h2 {
+      margin-top: 28px;
+      padding-top: 18px;
+      border-top: 1px solid #d8deea;
+      font-size: 20px;
+    }
+    .status {
+      margin: 18px 0;
+      padding: 16px;
+      border: 1px solid #c6d7c8;
+      background: #eef8ef;
+      border-radius: 8px;
+    }
+    code, pre {
+      font-family: Consolas, "Courier New", monospace;
+      background: #eef1f6;
+      border-radius: 6px;
+    }
+    code {
+      padding: 2px 5px;
+    }
+    pre {
+      padding: 12px;
+      overflow-x: auto;
+    }
+    li {
+      margin: 6px 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>CHILI Live Deploy Status</h1>
+  <p>Generated: 2026-07-01</p>
+
+  <div class="status">
+    <strong>Short answer:</strong> Codex took over the deploy. The live scheduler is now running
+    <code>chili-app:main-clean-subagent-hotfix-20260701-035955</code>
+    with revision <code>subagent-hotfix-20260701-035955</code>.
+  </div>
+
+  <h2>What Changed</h2>
+  <ul>
+    <li>Deployed the subagent bundle work: adaptive anticipation starter/remainder, Replay v3 sizing/PnL updates, RVOL/volume pace support, Ross setup audit, and exit lifecycle improvements.</li>
+    <li>Added a live-exit hotfix: equity exits outside the tradable window now defer from the market/session profile instead of submitting market sells first.</li>
+    <li>Deferred exits with an old <code>exit_order_id</code> skip broker polling until the tradable window, preventing the repeated unauthorized polling loop.</li>
+    <li>Stale <code>last_exit_submit_failed</code> telemetry is cleared when the exit lifecycle becomes valid deferred.</li>
+    <li>Disabled self-mutating code dispatch in the live scheduler with <code>CHILI_DISPATCH_ENABLED=0</code> and <code>CHILI_CODE_FRONTIER_ENABLED=0</code>. Trading scheduler jobs still run.</li>
+  </ul>
+
+  <h2>Validation</h2>
+  <pre>Focused deploy suite: 57 passed, 65 deselected</pre>
+  <ul>
+    <li>Scheduler image is the new hotfix image.</li>
+    <li>Container is running and not paused.</li>
+    <li><code>live_runner</code> imports successfully inside the container.</li>
+    <li>Momentum live runner ticks are <code>phase=ok</code>.</li>
+    <li>No repeated unauthorized <code>get_order</code> loop after the final hotfix.</li>
+    <li>No repeated market-order submit loop while the equity is non-tradable.</li>
+  </ul>
+
+  <h2>LGPS Status</h2>
+  <pre>session_id: 10125
+symbol: LGPS
+state: live_exited
+last_exit_reason: operator_manual_sold_lgps
+position: null
+last_exit_submit_failed: blank</pre>
+
+  <h2>Remaining Caveat</h2>
+  <p>
+    Equity execution is configured for <code>CHILI_EQUITY_EXECUTION_RAIL=robinhood_agentic_mcp</code>.
+    That rail requires the local Robinhood Agentic token to be valid for new live equity orders.
+    The code/deploy side is healthy, but Agentic equity order execution still needs a valid local token.
+  </p>
+
+  <h2>Files Touched</h2>
+  <pre>app/services/trading/momentum_neural/live_runner.py
+tests/test_momentum_live_runner.py</pre>
+</main>
+</body>
+</html>

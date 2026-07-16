@@ -1,0 +1,12 @@
+{
+  "model_name": "gpt-5.6-sol",
+  "prompt_pack_file": "prompt_pack.md",
+  "prompt_pack_sha256": "9cbe83ddae80311e5a6edfcb58c39f8b7ce450ae2d2279bb738e810194707834",
+  "raw_dir": "raw",
+  "recorded_at": "2026-07-10T20:50:37.769561Z",
+  "recorder": "autopilot_frontier_source_evidence_recorder",
+  "run_id": "codex-gpt-5-6-sol-20260710T204950Z",
+  "source_command": "codex exec --ignore-user-config --ignore-rules --model gpt-5.6-sol --ephemeral --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=\"xhigh\" -",
+  "source_kind": "codex",
+  "transcript_file": "transcript.jsonl"
+}

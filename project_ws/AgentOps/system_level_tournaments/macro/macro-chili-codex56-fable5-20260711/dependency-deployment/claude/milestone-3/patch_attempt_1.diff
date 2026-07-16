@@ -1,0 +1,247 @@
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,53 +1,85 @@
+-from app.graph import dependency_waves
+-
+-
+-def _noop(name):
+-    return None
+-
+-
+-def _always_healthy(name):
+-    return True
+-
+-
+-def execute_deployment(services, deploy=None, healthy=None, rollback=None, state=None):
+-    """Plan *services* into dependency waves and optionally execute them.
+-
+-    With none of *deploy*, *healthy*, or *rollback* provided the call is
+-    plan-only and returns status "planned". Otherwise each wave is deployed
+-    in deterministic order and health-checked as a whole; on any unhealthy
+-    service every deployed service is rolled back in strict reverse order
+-    (status "rolled_back"), else status is "completed". Progress is recorded
+-    on *state* when provided.
+-    """
+-    waves = dependency_waves(services)
+-    if state is not None:
+-        state.plan(waves)
+-    result = {"status": "planned", "waves": waves, "deployed": [], "rolled_back": []}
+-    if deploy is None and healthy is None and rollback is None:
+-        return result
+-    deploy = _noop if deploy is None else deploy
+-    healthy = _always_healthy if healthy is None else healthy
+-    rollback = _noop if rollback is None else rollback
+-    deployed = result["deployed"]
+-    rolled_back = result["rolled_back"]
+-    for wave in waves:
+-        for name in wave:
+-            deploy(name)
+-            deployed.append(name)
+-            if state is not None:
+-                state.record_deployed(name)
+-        unhealthy = [name for name in wave if not healthy(name)]
+-        if not unhealthy:
+-            continue
+-        if state is not None:
+-            for name in unhealthy:
+-                state.record_failed(name)
+-        for name in reversed(deployed):
+-            rollback(name)
+-            rolled_back.append(name)
+-            if state is not None:
+-                state.record_rolled_back(name)
+-        result["status"] = "rolled_back"
+-        return result
+-    result["status"] = "completed"
+-    return result
++from app.graph import dependency_waves, plan_fingerprint
++
++
++def _noop(name):
++    return None
++
++
++def _always_healthy(name):
++    return True
++
++
++def execute_deployment(services, deploy=None, healthy=None, rollback=None, state=None):
++    """Plan *services* into dependency waves and optionally execute them.
++
++    With none of *deploy*, *healthy*, or *rollback* provided the call is
++    plan-only and returns status "planned". Otherwise each wave is deployed
++    in deterministic order and health-checked as a whole; on any unhealthy
++    service every deployed service, including services *state* recorded as
++    deployed by earlier runs, is rolled back in strict reverse order
++    (status "rolled_back"), else status is "completed".
++
++    Progress is recorded on *state* when provided: waves *state* already
++    marks completed are skipped and reported via resumed=True, and the
++    result's completed_waves is the cumulative sorted tuple of completed
++    wave indexes. A *state* whose fingerprint belongs to another plan
++    fails closed with ValueError("deployment plan changed") before any
++    deploy call or *state* mutation.
++    """
++    specs = list(services)
++    waves = dependency_waves(specs)
++    fingerprint = plan_fingerprint(specs)
++    completed = set()
++    previously_deployed = []
++    if state is not None:
++        if state.fingerprint is not None and state.fingerprint != fingerprint:
++            raise ValueError("deployment plan changed")
++        state.fingerprint = fingerprint
++        completed = set(state.completed_waves)
++        previously_deployed = list(state.deployed)
++        state.plan(waves)
++    result = {
++        "status": "planned",
++        "waves": waves,
++        "deployed": [],
++        "rolled_back": [],
++        "resumed": bool(completed or previously_deployed),
++        "completed_waves": tuple(sorted(completed)),
++    }
++    if deploy is None and healthy is None and rollback is None:
++        return result
++    deploy = _noop if deploy is None else deploy
++    healthy = _always_healthy if healthy is None else healthy
++    rollback = _noop if rollback is None else rollback
++    deployed = result["deployed"]
++    rolled_back = result["rolled_back"]
++    for index, wave in enumerate(waves):
++        if index in completed:
++            continue
++        for name in wave:
++            deploy(name)
++            deployed.append(name)
++            if state is not None:
++                state.record_deployed(name)
++        unhealthy = [name for name in wave if not healthy(name)]
++        if not unhealthy:
++            completed.add(index)
++            if state is not None:
++                state.record_completed_wave(index)
++            continue
++        if state is not None:
++            for name in unhealthy:
++                state.record_failed(name)
++        for name in reversed(previously_deployed + deployed):
++            if name in rolled_back:
++                continue
++            rollback(name)
++            rolled_back.append(name)
++            if state is not None:
++                state.record_rolled_back(name)
++        result["status"] = "rolled_back"
++        result["completed_waves"] = tuple(sorted(completed))
++        return result
++    result["status"] = "completed"
++    result["completed_waves"] = tuple(sorted(completed))
++    return result
+diff --git a/app/graph.py b/app/graph.py
+--- a/app/graph.py
++++ b/app/graph.py
+@@ -1,3 +1,6 @@
++import hashlib
++
++
+ def dependency_waves(services):
+     """Return deterministic sorted topological waves for *services*.
+ 
+@@ -28,3 +31,19 @@
+         for n in ready:
+             del pending[n]
+     return tuple(waves)
++
++
++def plan_fingerprint(services):
++    """Return a deterministic SHA-256 hex fingerprint for *services*.
++
++    The digest covers the canonical dependency graph: each service name
++    paired with its sorted, de-duplicated dependencies, ordered by name.
++    It is stable across service order, dependency order, and processes,
++    and changes whenever the graph itself changes. Raises
++    ValueError("invalid deployment graph") for graphs that cannot be
++    planned, like dependency_waves.
++    """
++    specs = list(services)
++    dependency_waves(specs)
++    canonical = sorted((spec.name, tuple(sorted(set(spec.dependencies)))) for spec in specs)
++    return hashlib.sha256(repr(canonical).encode("utf-8")).hexdigest()
+diff --git a/app/state.py b/app/state.py
+--- a/app/state.py
++++ b/app/state.py
+@@ -1,28 +1,43 @@
+-class DeploymentState:
+-    """Mutable record of a deployment run's plan and progress."""
+-
+-    def __init__(self):
+-        self.waves = ()
+-        self.deployed = []
+-        self.failed = []
+-        self.rolled_back = []
+-
+-    def plan(self, waves):
+-        self.waves = tuple(tuple(wave) for wave in waves)
+-
+-    def record_deployed(self, name):
+-        self.deployed.append(name)
+-
+-    def record_failed(self, name):
+-        self.failed.append(name)
+-
+-    def record_rolled_back(self, name):
+-        self.rolled_back.append(name)
+-
+-    def snapshot(self):
+-        return {
+-            "waves": self.waves,
+-            "deployed": tuple(self.deployed),
+-            "failed": tuple(self.failed),
+-            "rolled_back": tuple(self.rolled_back),
+-        }
++class DeploymentState:
++    """Durable record of a deployment run's plan, fingerprint, and progress."""
++
++    def __init__(
++        self,
++        fingerprint=None,
++        completed_waves=(),
++        deployed=(),
++        failed=(),
++        rolled_back=(),
++        waves=(),
++    ):
++        self.fingerprint = fingerprint
++        self.waves = tuple(tuple(wave) for wave in waves)
++        self.completed_waves = set(completed_waves)
++        self.deployed = list(deployed)
++        self.failed = list(failed)
++        self.rolled_back = list(rolled_back)
++
++    def plan(self, waves):
++        self.waves = tuple(tuple(wave) for wave in waves)
++
++    def record_completed_wave(self, index):
++        self.completed_waves.add(index)
++
++    def record_deployed(self, name):
++        self.deployed.append(name)
++
++    def record_failed(self, name):
++        self.failed.append(name)
++
++    def record_rolled_back(self, name):
++        self.rolled_back.append(name)
++
++    def snapshot(self):
++        return {
++            "fingerprint": self.fingerprint,
++            "waves": self.waves,
++            "completed_waves": tuple(sorted(self.completed_waves)),
++            "deployed": tuple(self.deployed),
++            "failed": tuple(self.failed),
++            "rolled_back": tuple(self.rolled_back),
++        }

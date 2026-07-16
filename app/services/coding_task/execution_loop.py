@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -121,19 +123,21 @@ def _run_git(cwd: Path, args: list[str], timeout: float = 30) -> tuple[int, str]
 
 
 def _create_branch(cwd: Path, run_id: str) -> str:
-    """Create and checkout a fresh branch for this execution run."""
+    """Create a legacy auto branch without switching the operator checkout."""
     branch = f"{_GIT_BRANCH_PREFIX}{run_id[:12]}"
-    code, _ = _run_git(cwd, ["checkout", "-b", branch])
+    code, out = _run_git(cwd, ["branch", branch, "HEAD"])
     if code != 0:
-        # Branch might already exist; try just checkout
-        _run_git(cwd, ["checkout", branch])
+        raise RuntimeError(f"Could not create isolated execution branch {branch}: {out}")
     return branch
 
 
 def _rollback_branch(cwd: Path, original_branch: str, auto_branch: str) -> None:
-    """Checkout the original branch and delete the auto branch."""
-    _run_git(cwd, ["checkout", original_branch])
-    _run_git(cwd, ["branch", "-D", auto_branch])
+    """Delete an unmerged legacy branch without switching or resetting checkout state."""
+    if _get_current_branch(cwd) == auto_branch:
+        raise RuntimeError("Refusing to delete the branch currently checked out by the operator.")
+    code, out = _run_git(cwd, ["branch", "-D", auto_branch])
+    if code != 0 and "not found" not in out.lower():
+        raise RuntimeError(f"Could not delete isolated execution branch {auto_branch}: {out}")
 
 
 def _get_current_branch(cwd: Path) -> str:
@@ -141,10 +145,79 @@ def _get_current_branch(cwd: Path) -> str:
     return out.strip() if code == 0 else "main"
 
 
+def _execution_worktree_path(run_id: str) -> Path:
+    root = (Path(tempfile.gettempdir()) / "chili-coding-execution").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root / run_id
+
+
+def _create_execution_worktree(cwd: Path, run_id: str) -> tuple[str, Path, str]:
+    """Create an isolated worktree at the operator checkout's current HEAD."""
+    base_code, base_out = _run_git(cwd, ["rev-parse", "HEAD"])
+    if base_code != 0:
+        raise RuntimeError(f"Could not resolve execution base SHA: {base_out}")
+    base_sha = base_out.strip()
+    branch = f"{_GIT_BRANCH_PREFIX}{run_id[:12]}"
+    worktree = _execution_worktree_path(run_id).resolve()
+    root = worktree.parent.resolve()
+    worktree.relative_to(root)
+    if worktree.exists():
+        _run_git(cwd, ["worktree", "remove", "--force", str(worktree)], timeout=60)
+        if worktree.exists():
+            shutil.rmtree(worktree)
+    _run_git(cwd, ["worktree", "prune"], timeout=30)
+    code, out = _run_git(cwd, ["worktree", "add", "-b", branch, str(worktree), base_sha], timeout=120)
+    if code != 0 or not worktree.is_dir():
+        raise RuntimeError(f"Could not create isolated execution worktree: {out}")
+    return branch, worktree, base_sha
+
+
+def _cleanup_execution_worktree(
+    repo_path: Path,
+    worktree: Path,
+    branch: str,
+    *,
+    delete_branch: bool,
+) -> None:
+    root = (Path(tempfile.gettempdir()) / "chili-coding-execution").resolve()
+    resolved = worktree.resolve()
+    resolved.relative_to(root)
+    _run_git(repo_path, ["worktree", "remove", "--force", str(resolved)], timeout=120)
+    if resolved.exists():
+        shutil.rmtree(resolved)
+    _run_git(repo_path, ["worktree", "prune"], timeout=30)
+    if delete_branch:
+        code, out = _run_git(repo_path, ["branch", "-D", branch], timeout=30)
+        if code != 0 and "not found" not in out.lower():
+            logger.warning("[execution_loop] could not delete failed branch %s: %s", branch, out)
+
+
+def _diff_target_paths(diffs: list[str]) -> list[str]:
+    paths: list[str] = []
+    for diff in diffs:
+        for match in re.finditer(r"^\+\+\+\s+(?:b/)?(.+?)\s*$", diff, re.MULTILINE):
+            raw = match.group(1).strip()
+            if raw == "/dev/null":
+                continue
+            path = Path(raw.replace("\\", "/"))
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"Unsafe generated patch path: {raw}")
+            normalized = path.as_posix()
+            if normalized and normalized not in paths:
+                paths.append(normalized)
+    if not paths:
+        raise ValueError("Generated patch did not declare a target path.")
+    return paths
+
+
 def _apply_diffs(cwd: Path, diffs: list[str]) -> tuple[bool, str]:
     """Apply unified diffs via git apply. Returns (success, message)."""
     if not diffs:
         return False, "No diffs to apply"
+    try:
+        target_paths = _diff_target_paths(diffs)
+    except ValueError as exc:
+        return False, str(exc)
     combined = "\n".join(d.strip("\n") + "\n" for d in diffs).encode("utf-8", "replace")
     # Dry-run first
     try:
@@ -172,10 +245,104 @@ def _apply_diffs(cwd: Path, diffs: list[str]) -> tuple[bool, str]:
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         return False, str(e)
 
-    # Stage and commit
-    _run_git(cwd, ["add", "-A"])
-    _run_git(cwd, ["commit", "-m", "chili: autonomous code change"])
-    return True, "Applied successfully"
+    return True, f"Applied successfully to {', '.join(target_paths)}"
+
+
+def _commit_reviewed_changes(cwd: Path, files_changed: list[str]) -> tuple[bool, str]:
+    reviewed = []
+    for raw in files_changed:
+        path = Path(str(raw).replace("\\", "/"))
+        if path.is_absolute() or ".." in path.parts:
+            return False, f"Unsafe reviewed path: {raw}"
+        rel = path.as_posix()
+        if rel and rel not in reviewed:
+            reviewed.append(rel)
+    if not reviewed:
+        return False, "No reviewed files to commit"
+    code, out = _run_git(cwd, ["add", "-A", "--", *reviewed], timeout=60)
+    if code != 0:
+        return False, f"Could not stage reviewed files: {out}"
+    code, _ = _run_git(cwd, ["diff", "--cached", "--quiet"], timeout=30)
+    if code == 0:
+        return False, "Reviewed patch did not produce a staged change"
+    code, out = _run_git(cwd, ["commit", "-m", "chili: autonomous code change"], timeout=60)
+    if code != 0:
+        return False, f"Could not commit reviewed files: {out}"
+    return True, "Committed validated reviewed files"
+
+
+def acceptance_preflight(
+    cwd: Path,
+    *,
+    run_id: str,
+    execution_metadata: dict[str, Any],
+    files_changed: list[str],
+    final_state: str,
+    test_exit_code: int | None,
+) -> dict[str, Any]:
+    """Fail-closed lineage check for the legacy developer-terminal branch."""
+    blockers: list[str] = []
+    if execution_metadata.get("schema") != "chili.coding-execution-trajectory.v1":
+        blockers.append("execution trajectory metadata is missing or unsupported")
+    if str(execution_metadata.get("run_id") or "") != run_id:
+        blockers.append("run id does not match the recorded execution trajectory")
+    if execution_metadata.get("worktree_isolated") is not True:
+        blockers.append("execution was not proven to run in an isolated worktree")
+    branch = str(execution_metadata.get("branch") or "")
+    expected_branch = f"{_GIT_BRANCH_PREFIX}{run_id[:12]}"
+    if branch != expected_branch:
+        blockers.append("branch does not match the recorded execution run")
+    base_branch = str(execution_metadata.get("base_branch") or "")
+    base_sha = str(execution_metadata.get("base_sha") or "")
+    if not base_branch or not base_sha:
+        blockers.append("base branch or base SHA is missing")
+    if str(final_state) != LoopState.DONE.value or test_exit_code != 0:
+        blockers.append("the latest execution attempt is not a validated success")
+
+    current_branch = _get_current_branch(cwd)
+    head_code, head_out = _run_git(cwd, ["rev-parse", "HEAD"])
+    current_head = head_out.strip() if head_code == 0 else ""
+    if base_branch and current_branch != base_branch:
+        blockers.append(f"operator checkout is on {current_branch!r}, expected {base_branch!r}")
+    if base_sha and current_head != base_sha:
+        blockers.append("operator checkout moved after the execution began")
+
+    branch_code, _ = _run_git(cwd, ["rev-parse", "--verify", branch]) if branch else (1, "")
+    if branch_code != 0:
+        blockers.append("validated execution branch no longer exists")
+    elif base_sha:
+        ancestor_code, _ = _run_git(cwd, ["merge-base", "--is-ancestor", base_sha, branch])
+        if ancestor_code != 0:
+            blockers.append("execution branch is not descended from the recorded base SHA")
+        diff_code, diff_out = _run_git(cwd, ["diff", "--name-only", f"{base_sha}..{branch}"])
+        actual_files = sorted(line.strip().replace("\\", "/") for line in diff_out.splitlines() if line.strip())
+        expected_files = sorted(dict.fromkeys(str(path).replace("\\", "/") for path in files_changed if str(path).strip()))
+        if diff_code != 0 or actual_files != expected_files:
+            blockers.append("execution branch file set no longer matches the validated attempt")
+
+    status_code, status_out = _run_git(cwd, ["status", "--porcelain"])
+    dirty_files = []
+    if status_code == 0:
+        for line in status_out.splitlines():
+            raw = line[3:].split(" -> ")[-1].strip() if len(line) >= 4 else ""
+            if raw:
+                dirty_files.append(raw.replace("\\", "/"))
+    overlap = sorted(set(dirty_files).intersection(str(path).replace("\\", "/") for path in files_changed))
+    if overlap:
+        blockers.append("operator checkout has dirty changes in the validated execution scope")
+
+    return {
+        "ok": not blockers,
+        "branch": branch,
+        "base_branch": base_branch,
+        "base_sha": base_sha,
+        "current_branch": current_branch,
+        "current_head": current_head,
+        "files_changed": sorted(dict.fromkeys(files_changed)),
+        "dirty_files": sorted(dict.fromkeys(dirty_files)),
+        "blockers": blockers,
+        "reason": "; ".join(blockers) if blockers else "Validated execution lineage is current and merge-ready.",
+    }
 
 
 def _diagnose_failure(
@@ -221,7 +388,7 @@ def _diagnose_failure(
 def _run_test_validation(cwd: Path, files_changed: list[str]) -> tuple[int, str]:
     """Run targeted tests for changed files, falling back to full suite."""
     # First: AST syntax check (fast)
-    ast_result = run_ast_syntax(cwd)
+    ast_result = run_ast_syntax(cwd, files_changed)
     if ast_result.exit_code != 0:
         return ast_result.exit_code, f"Syntax errors:\n{ast_result.stdout}"
 
@@ -235,6 +402,27 @@ def _run_test_validation(cwd: Path, files_changed: list[str]) -> tuple[int, str]
     output = test_result.stdout
     if test_result.stderr:
         output += "\n" + test_result.stderr
+    behavior_required = any(
+        Path(path).suffix.lower() in {".c", ".cc", ".cpp", ".dart", ".go", ".java", ".js", ".jsx", ".kt", ".py", ".rs", ".swift", ".ts", ".tsx"}
+        and not (
+            path.replace("\\", "/").lower().startswith("tests/")
+            or "/tests/" in path.replace("\\", "/").lower()
+            or Path(path).name.lower().startswith("test_")
+        )
+        for path in files_changed
+    )
+    metadata = test_result.metadata or {}
+    targeted_behavior_ran = bool(
+        not test_result.skipped
+        and metadata.get("targeted") is True
+        and metadata.get("fallback_collect_only") is not True
+        and metadata.get("test_files")
+    )
+    if behavior_required and not targeted_behavior_ran:
+        return 2, (
+            f"{output}\nTargeted behavior tests did not execute for the changed source files; "
+            "collect-only or skipped validation cannot establish autonomous success."
+        ).strip()
     return test_result.exit_code, output
 
 
@@ -299,14 +487,29 @@ def run_execution_loop(
     if not repo:
         return LoopResult(run_id=run_id, status="failed", summary="Repository not found or inactive")
 
-    cwd = Path(repo.path).resolve()
-    if not cwd.is_dir():
-        return LoopResult(run_id=run_id, status="failed", summary=f"Repository path not found: {cwd}")
+    repo_path = Path(repo.path).resolve()
+    if not repo_path.is_dir():
+        return LoopResult(run_id=run_id, status="failed", summary=f"Repository path not found: {repo_path}")
 
-    # Create isolated branch
-    original_branch = _get_current_branch(cwd)
-    branch = _create_branch(cwd, run_id)
-    emit("branch_created", {"branch": branch, "run_id": run_id})
+    original_branch = _get_current_branch(repo_path)
+    try:
+        branch, cwd, base_sha = _create_execution_worktree(repo_path, run_id)
+    except Exception as exc:
+        return LoopResult(
+            run_id=run_id,
+            status="failed",
+            summary=f"Could not create isolated execution worktree: {str(exc)[:500]}",
+        )
+    emit(
+        "worktree_created",
+        {
+            "branch": branch,
+            "run_id": run_id,
+            "base_branch": original_branch,
+            "base_sha": base_sha,
+            "worktree": str(cwd),
+        },
+    )
 
     result = LoopResult(run_id=run_id, status="running", branch_name=branch)
     current_prompt = prompt
@@ -336,6 +539,16 @@ def run_execution_loop(
             )
             plan_reply = plan_result.get("reply", "")
             plan_json = _parse_plan_json(plan_reply)
+            if isinstance(plan_json, dict):
+                plan_json["_execution"] = {
+                    "schema": "chili.coding-execution-trajectory.v1",
+                    "run_id": run_id,
+                    "repo_id": int(repo_id),
+                    "base_branch": original_branch,
+                    "base_sha": base_sha,
+                    "branch": branch,
+                    "worktree_isolated": True,
+                }
             iteration.model_used = plan_result.get("model", "unknown")
             iteration.plan_json = plan_json
 
@@ -360,7 +573,7 @@ def run_execution_loop(
                 ins["description"] for ins in context.get("insights", [])
                 if ins.get("category") in ("convention", "pattern")
             ][:5]
-            default_repo_path = repo.path
+            default_repo_path = str(cwd)
 
             iter_diffs: list[str] = []
             iter_files: list[str] = []
@@ -436,8 +649,6 @@ def run_execution_loop(
                 iteration.duration_ms = int((time.monotonic() - iter_start) * 1000)
                 _persist_iteration(db, run_id, iteration)
                 result.iterations.append(iteration)
-                # Rollback this iteration's commit
-                _run_git(cwd, ["reset", "--hard", "HEAD~1"])
                 if i == 0:
                     result.status = "failed"
                     result.summary = f"Diffs failed to apply: {apply_msg}"
@@ -455,7 +666,17 @@ def run_execution_loop(
             iteration.test_output = test_output
 
             if test_exit == 0:
-                # Success!
+                committed, commit_message = _commit_reviewed_changes(cwd, all_files_changed)
+                if not committed:
+                    iteration.state = LoopState.FAILED
+                    iteration.apply_status = "commit_failed"
+                    iteration.test_output = f"{test_output}\n{commit_message}".strip()
+                    iteration.duration_ms = int((time.monotonic() - iter_start) * 1000)
+                    _persist_iteration(db, run_id, iteration)
+                    result.iterations.append(iteration)
+                    result.status = "failed"
+                    result.summary = commit_message
+                    break
                 iteration.state = LoopState.DONE
                 iteration.duration_ms = int((time.monotonic() - iter_start) * 1000)
                 _persist_iteration(db, run_id, iteration)
@@ -511,10 +732,22 @@ def run_execution_loop(
     result.final_diffs = all_diffs
     result.final_files_changed = all_files_changed
 
-    # If failed, rollback to original branch
-    if result.status in ("failed", "max_iterations", "rolled_back"):
-        _run_git(cwd, ["checkout", original_branch])
-        emit("rolled_back", {"branch": original_branch})
+    delete_branch = result.status != "success"
+    try:
+        _cleanup_execution_worktree(
+            repo_path,
+            cwd,
+            branch,
+            delete_branch=delete_branch,
+        )
+    except Exception as exc:
+        logger.exception("[execution_loop] failed to clean worktree for run %s", run_id)
+        if result.status != "success":
+            result.summary = f"{result.summary}; cleanup failed: {str(exc)[:300]}".strip("; ")
+    if delete_branch:
+        emit("rolled_back", {"branch": original_branch, "operator_checkout_untouched": True})
+    else:
+        emit("validated_branch_ready", {"branch": branch, "base_sha": base_sha})
 
     db.commit()
     emit("loop_complete", {

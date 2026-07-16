@@ -1,0 +1,44 @@
+[
+  {
+    "attempt": 3,
+    "case_id": "real-chili-preflight-candidate-wins",
+    "reason": "behavior_tests_passed",
+    "response": "project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-coder-api-replay-repair-allcases-20260710\\real-chili-preflight-candidate-wins\\attempt3.response.txt",
+    "status": "passed"
+  },
+  {
+    "attempt": 3,
+    "case_id": "real-chili-runtime-control-partial-loses",
+    "reason": "apply_failed",
+    "response": "project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-coder-api-replay-repair-allcases-20260710\\real-chili-runtime-control-partial-loses\\attempt3.response.txt",
+    "status": "failed"
+  },
+  {
+    "attempt": 3,
+    "case_id": "real-chili-startup-static-partial-loses",
+    "reason": "invalid_diff",
+    "response": "project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-coder-api-replay-repair-allcases-20260710\\real-chili-startup-static-partial-loses\\attempt3.response.txt",
+    "status": "failed"
+  },
+  {
+    "attempt": 3,
+    "case_id": "real-chili-broker-timeout-partial-loses",
+    "reason": "behavior_tests_passed",
+    "response": "project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-coder-api-replay-repair-allcases-20260710\\real-chili-broker-timeout-partial-loses\\attempt3.response.txt",
+    "status": "passed"
+  },
+  {
+    "attempt": 3,
+    "case_id": "real-chili-runtime-control-no-evidence-loses",
+    "reason": "apply_failed",
+    "response": "project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-coder-api-replay-repair-allcases-20260710\\real-chili-runtime-control-no-evidence-loses\\attempt3.response.txt",
+    "status": "failed"
+  },
+  {
+    "attempt": 3,
+    "case_id": "real-chili-runtime-control-unscoped-loses",
+    "reason": "apply_failed",
+    "response": "project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-coder-api-replay-repair-allcases-20260710\\real-chili-runtime-control-unscoped-loses\\attempt3.response.txt",
+    "status": "failed"
+  }
+]

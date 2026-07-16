@@ -1,0 +1,64 @@
+Both Bash and Write are denied in this mode, so runtime verification in a scratch dir isn't possible — I desk-traced the implementation against both shown contract tests instead (m1 default call → `"planned"`; m2 unhealthy `api` → deploy `db`, deploy `api`, then rollback `api`, `db` with status `"rolled_back"`), and both pass by trace.
+
+Design decisions, briefly: the m1 test pins `execute_deployment(services)["status"] == "planned"`, so a call with no `deploy`/`healthy`/`rollback` callbacks stays a plan-only run (preserving m1 behavior exactly, including `state.plan`). Any callback provided switches to execution: deploy each wave in wave order, health-check every member of the wave (no short-circuit — the whole wave is checked), and on any unhealthy service roll back all deployed services in strict reverse deployment order, returning `"rolled_back"`; a clean run returns `"deployed"`. The result always carries the four contract keys (`status`, `waves`, `deployed`, `rolled_back`), `deployed` is the full deploy-order list so `rolled_back` is its exact reverse, and `DeploymentState`'s existing `record_deployed`/`record_failed`/`record_rolled_back` hooks are now driven by the executor when a state is passed. Only `app/executor.py` changes; `model.py`, `graph.py`, and `state.py` already satisfy their contracts and stay untouched.
+
+```diff
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,8 +1,53 @@
+ from app.graph import dependency_waves
+ 
+ 
+-def execute_deployment(services, deploy=lambda name: None, healthy=lambda name: True, rollback=lambda name: None, state=None):
++def _noop(name):
++    return None
++
++
++def _always_healthy(name):
++    return True
++
++
++def execute_deployment(services, deploy=None, healthy=None, rollback=None, state=None):
++    """Plan *services* into dependency waves and optionally execute them.
++
++    With none of *deploy*, *healthy*, or *rollback* provided the call is
++    plan-only and returns status "planned". Otherwise each wave is deployed
++    in deterministic order and health-checked as a whole; on any unhealthy
++    service every deployed service is rolled back in strict reverse order
++    (status "rolled_back"), else status is "deployed". Progress is recorded
++    on *state* when provided.
++    """
+     waves = dependency_waves(services)
+     if state is not None:
+         state.plan(waves)
+-    return {"status": "planned", "waves": waves}
++    result = {"status": "planned", "waves": waves, "deployed": [], "rolled_back": []}
++    if deploy is None and healthy is None and rollback is None:
++        return result
++    deploy = _noop if deploy is None else deploy
++    healthy = _always_healthy if healthy is None else healthy
++    rollback = _noop if rollback is None else rollback
++    deployed = result["deployed"]
++    rolled_back = result["rolled_back"]
++    for wave in waves:
++        for name in wave:
++            deploy(name)
++            deployed.append(name)
++            if state is not None:
++                state.record_deployed(name)
++        unhealthy = [name for name in wave if not healthy(name)]
++        if not unhealthy:
++            continue
++        if state is not None:
++            for name in unhealthy:
++                state.record_failed(name)
++        for name in reversed(deployed):
++            rollback(name)
++            rolled_back.append(name)
++            if state is not None:
++                state.record_rolled_back(name)
++        result["status"] = "rolled_back"
++        return result
++    result["status"] = "deployed"
++    return result
+```

@@ -1,0 +1,268 @@
+{
+  "artifact_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\system_level_tournaments\\meso\\meso-chili-codex56-fable5-budget10-20260711",
+  "collection_failures": [],
+  "evidence_mode": "real_artifacts",
+  "generated_utc": "2026-07-11T02:19:17.352514Z",
+  "model_names": {
+    "claude": "claude-fable-5",
+    "codex": "gpt-5.6-sol",
+    "local_model": "qwen2.5-coder:7b"
+  },
+  "premium_independent_local_results": 3,
+  "run_id": "meso-chili-codex56-fable5-budget10-20260711",
+  "runtime_measurements": {
+    "measured": 9,
+    "unmeasured": 0
+  },
+  "safety": "isolated temporary repositories only; premium frontier models are benchmark opponents; CHILI premium routes are fatal; no real source edit, git publication, deployment, database migration, broker, or live-trading action",
+  "schema": "chili.meso-project-workflow-tournament.v1",
+  "source_kinds": [
+    "local_model",
+    "codex",
+    "claude"
+  ],
+  "status": "passed",
+  "task_results": [
+    {
+      "results": [
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/api.py",
+            "app/paging.py",
+            "app/query.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 0.277,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "qwen2.5-coder:7b",
+          "premium_calls": 0,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "local_model",
+          "task_id": "one-based-page-envelope",
+          "tests_unchanged": true,
+          "validation_output": ".......                                                                  [100%]\n7 passed in 0.03s"
+        },
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/api.py",
+            "app/paging.py",
+            "app/query.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 15.171,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "gpt-5.6-sol",
+          "premium_calls": null,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "codex",
+          "task_id": "one-based-page-envelope",
+          "tests_unchanged": true,
+          "validation_output": ".......                                                                  [100%]\n7 passed in 0.03s"
+        },
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/api.py",
+            "app/paging.py",
+            "app/query.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 263.558,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "claude-fable-5",
+          "premium_calls": null,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "claude",
+          "task_id": "one-based-page-envelope",
+          "tests_unchanged": true,
+          "validation_output": ".......                                                                  [100%]\n7 passed in 0.04s"
+        }
+      ],
+      "task_id": "one-based-page-envelope",
+      "title": "One-based page envelope contract",
+      "winner": "local_model",
+      "winner_model": "qwen2.5-coder:7b",
+      "winner_reason": "correctness/safety quality; zero-premium tie-break; then measured runtime"
+    },
+    {
+      "results": [
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/backoff.py",
+            "app/config.py",
+            "app/worker.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 0.167,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "qwen2.5-coder:7b",
+          "premium_calls": 0,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "local_model",
+          "task_id": "bounded-retry-contract",
+          "tests_unchanged": true,
+          "validation_output": ".........                                                                [100%]\n9 passed in 0.05s"
+        },
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/backoff.py",
+            "app/config.py",
+            "app/worker.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 17.135,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "gpt-5.6-sol",
+          "premium_calls": null,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "codex",
+          "task_id": "bounded-retry-contract",
+          "tests_unchanged": true,
+          "validation_output": ".........                                                                [100%]\n9 passed in 0.04s"
+        },
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/backoff.py",
+            "app/config.py",
+            "app/worker.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 428.974,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "claude-fable-5",
+          "premium_calls": null,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "claude",
+          "task_id": "bounded-retry-contract",
+          "tests_unchanged": true,
+          "validation_output": ".........                                                                [100%]\n9 passed in 0.05s"
+        }
+      ],
+      "task_id": "bounded-retry-contract",
+      "title": "Bounded retry policy contract",
+      "winner": "local_model",
+      "winner_model": "qwen2.5-coder:7b",
+      "winner_reason": "correctness/safety quality; zero-premium tie-break; then measured runtime"
+    },
+    {
+      "results": [
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/model.py",
+            "app/service.py",
+            "app/store.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 0.198,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "qwen2.5-coder:7b",
+          "premium_calls": 0,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "local_model",
+          "task_id": "idempotent-ledger-event",
+          "tests_unchanged": true,
+          "validation_output": "......                                                                   [100%]\n6 passed in 0.04s"
+        },
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/model.py",
+            "app/service.py",
+            "app/store.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 20.606,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "gpt-5.6-sol",
+          "premium_calls": null,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "codex",
+          "task_id": "idempotent-ledger-event",
+          "tests_unchanged": true,
+          "validation_output": "......                                                                   [100%]\n6 passed in 0.04s"
+        },
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/model.py",
+            "app/service.py",
+            "app/store.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 185.732,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "claude-fable-5",
+          "premium_calls": null,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "claude",
+          "task_id": "idempotent-ledger-event",
+          "tests_unchanged": true,
+          "validation_output": "......                                                                   [100%]\n6 passed in 0.04s"
+        }
+      ],
+      "task_id": "idempotent-ledger-event",
+      "title": "Idempotent ledger event contract",
+      "winner": "local_model",
+      "winner_model": "qwen2.5-coder:7b",
+      "winner_reason": "correctness/safety quality; zero-premium tie-break; then measured runtime"
+    }
+  ],
+  "tasks": 3,
+  "winner_counts": {
+    "claude": 0,
+    "codex": 0,
+    "local_model": 3,
+    "none": 0
+  }
+}

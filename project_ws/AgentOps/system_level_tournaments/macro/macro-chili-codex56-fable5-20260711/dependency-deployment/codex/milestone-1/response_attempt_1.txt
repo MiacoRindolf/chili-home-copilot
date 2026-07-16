@@ -1,0 +1,86 @@
+```diff
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,2 +1,8 @@
++from app.graph import dependency_waves
++
++
+ def execute_deployment(services, deploy=lambda name: None, healthy=lambda name: True, rollback=lambda name: None, state=None):
+-    return {"status": "planned"}
++    return {
++        "status": "planned",
++        "waves": dependency_waves(services),
++    }
+diff --git a/app/graph.py b/app/graph.py
+--- a/app/graph.py
++++ b/app/graph.py
+@@ -1,2 +1,36 @@
+ def dependency_waves(services):
+-    return tuple((service.name,) for service in services)
++    services = tuple(services)
++    names = [service.name for service in services]
++
++    if len(names) != len(set(names)):
++        raise ValueError("invalid deployment graph")
++
++    known = set(names)
++    dependents = {name: set() for name in names}
++    remaining_dependencies = {}
++
++    for service in services:
++        dependencies = set(service.dependencies)
++        if (
++            service.name in dependencies
++            or not dependencies.issubset(known)
++        ):
++            raise ValueError("invalid deployment graph")
++
++        remaining_dependencies[service.name] = len(dependencies)
++        for dependency in dependencies:
++            dependents[dependency].add(service.name)
++
++    ready = sorted(
++        name for name, count in remaining_dependencies.items() if count == 0
++    )
++    waves = []
++    deployed = 0
++
++    while ready:
++        wave = tuple(ready)
++        waves.append(wave)
++        deployed += len(wave)
++        next_ready = []
++
++        for name in wave:
++            for dependent in dependents[name]:
++                remaining_dependencies[dependent] -= 1
++                if remaining_dependencies[dependent] == 0:
++                    next_ready.append(dependent)
++        ready = sorted(next_ready)
++
++    if deployed != len(names):
++        raise ValueError("invalid deployment graph")
++
++    return tuple(waves)
+diff --git a/app/model.py b/app/model.py
+--- a/app/model.py
++++ b/app/model.py
+@@ -5,3 +5,14 @@ from dataclasses import dataclass
+ class ServiceSpec:
+     name: str
+     dependencies: tuple[str, ...] = ()
++
++    def __post_init__(self):
++        if not isinstance(self.name, str) or not self.name.strip():
++            raise ValueError("invalid service name")
++        if not isinstance(self.dependencies, tuple):
++            raise ValueError("invalid service dependencies")
++        if any(
++            not isinstance(dependency, str) or not dependency.strip()
++            for dependency in self.dependencies
++        ):
++            raise ValueError("invalid service dependencies")
++        if len(self.dependencies) != len(set(self.dependencies)):
++            raise ValueError("invalid service dependencies")
+```

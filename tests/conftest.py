@@ -189,6 +189,7 @@ _PROJECT_DOMAIN_TARGETED_TESTS = (
     "test_brain_project_",
     "test_projects.py",
     "test_code_agent.py",
+    "test_workflow_state.py",
 )
 _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
     {
@@ -444,6 +445,8 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
         _evict_idle_in_transaction_peers()
         _terminate_stale_truncate_peers()
         with engine.begin() as conn:
+            if "coding_agent_suggestion_apply" in table_names:
+                conn.execute(text('DELETE FROM "coding_agent_suggestion_apply"'))
             for table in reversed(Base.metadata.sorted_tables):
                 if table.name in _skip_truncate or table.name not in table_names:
                     continue

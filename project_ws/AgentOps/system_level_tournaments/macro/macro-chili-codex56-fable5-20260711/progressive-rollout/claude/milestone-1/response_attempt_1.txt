@@ -1,0 +1,133 @@
+Shell execution (Bash/PowerShell) is denied in this mode, so I verified the implementation by careful line-by-line inspection instead of running pytest; the diff below is a full-file repair of the four approved files — strict `from_mapping` validation (explicit `true/false/1/0` booleans, integer percentage clamped to 0..100, non-blank salt, exact `ValueError('invalid rollout config')`), SHA-256 bucketing over `salt:subject_id` returning 0..99 with blank rejection, `decide_rollout` exposing `enabled`/`reason`/`bucket` (`disabled` short-circuits with a `None` bucket, cohort evaluation reports `cohort` and the computed bucket), and `evaluate_request` composing parse → decide.
+
+```diff
+diff --git a/app/cohort.py b/app/cohort.py
+--- a/app/cohort.py
++++ b/app/cohort.py
+@@ -1,2 +1,10 @@
+-def stable_bucket(subject_id: str, salt: str) -> int:
+-    return hash((subject_id, salt)) % 100
++import hashlib
++
++
++def stable_bucket(subject_id: str, salt: str) -> int:
++    if not isinstance(subject_id, str) or not subject_id.strip():
++        raise ValueError("subject_id must be a non-empty string")
++    if not isinstance(salt, str) or not salt.strip():
++        raise ValueError("salt must be a non-empty string")
++    digest = hashlib.sha256(f"{salt}:{subject_id}".encode("utf-8")).digest()
++    return int.from_bytes(digest, "big") % 100
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,13 +1,56 @@
+-from dataclasses import dataclass
+-from typing import Mapping
+-
+-
+-@dataclass(frozen=True)
+-class RolloutConfig:
+-    enabled: bool = False
+-    percentage: int = 0
+-    salt: str = ""
+-
+-    @classmethod
+-    def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
+-        return cls(bool(values.get("ENABLED")), int(values.get("PERCENTAGE", "0")), values.get("SALT", ""))
++from dataclasses import dataclass
++from typing import Any, Mapping
++
++_INVALID_CONFIG = "invalid rollout config"
++_TRUE_VALUES = frozenset({"true", "1"})
++_FALSE_VALUES = frozenset({"false", "0"})
++
++
++def _parse_enabled(value: Any) -> bool:
++    if isinstance(value, bool):
++        return value
++    if isinstance(value, str):
++        lowered = value.strip().lower()
++        if lowered in _TRUE_VALUES:
++            return True
++        if lowered in _FALSE_VALUES:
++            return False
++    raise ValueError(_INVALID_CONFIG)
++
++
++def _parse_percentage(value: Any) -> int:
++    if isinstance(value, bool):
++        raise ValueError(_INVALID_CONFIG)
++    if isinstance(value, int):
++        percentage = value
++    elif isinstance(value, str):
++        try:
++            percentage = int(value.strip())
++        except ValueError:
++            raise ValueError(_INVALID_CONFIG) from None
++    else:
++        raise ValueError(_INVALID_CONFIG)
++    if not 0 <= percentage <= 100:
++        raise ValueError(_INVALID_CONFIG)
++    return percentage
++
++
++def _parse_salt(value: Any) -> str:
++    if not isinstance(value, str) or not value.strip():
++        raise ValueError(_INVALID_CONFIG)
++    return value
++
++
++@dataclass(frozen=True)
++class RolloutConfig:
++    enabled: bool = False
++    percentage: int = 0
++    salt: str = ""
++
++    @classmethod
++    def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
++        return cls(
++            enabled=_parse_enabled(values.get("ENABLED")),
++            percentage=_parse_percentage(values.get("PERCENTAGE")),
++            salt=_parse_salt(values.get("SALT")),
++        )
+diff --git a/app/decision.py b/app/decision.py
+--- a/app/decision.py
++++ b/app/decision.py
+@@ -1,7 +1,11 @@
+-from typing import Any
+-
+-from app.config import RolloutConfig
+-
+-
+-def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
+-    return {"enabled": config.enabled}
++from typing import Any
++
++from app.cohort import stable_bucket
++from app.config import RolloutConfig
++
++
++def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
++    if not config.enabled:
++        return {"enabled": False, "reason": "disabled", "bucket": None}
++    bucket = stable_bucket(subject_id, config.salt)
++    return {"enabled": bucket < config.percentage, "reason": "cohort", "bucket": bucket}
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,5 +1,9 @@
+-from typing import Any, Mapping
+-
+-
+-def evaluate_request(subject_id: str, raw_config: Mapping[str, str]) -> dict[str, Any]:
+-    return {"enabled": False}
++from typing import Any, Mapping
++
++from app.config import RolloutConfig
++from app.decision import decide_rollout
++
++
++def evaluate_request(subject_id: str, raw_config: Mapping[str, str]) -> dict[str, Any]:
++    config = RolloutConfig.from_mapping(raw_config)
++    return decide_rollout(subject_id, config)
+```

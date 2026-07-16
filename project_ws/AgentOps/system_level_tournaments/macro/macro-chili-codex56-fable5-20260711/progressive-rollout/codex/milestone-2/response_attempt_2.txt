@@ -1,0 +1,14 @@
+```diff
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -22,7 +22,7 @@ class RolloutConfig:
+             else:
+                 raise ValueError
+ 
+-            percentage_value = values["PERCENTAGE"]
++            percentage_value = values.get("PERCENTAGE", "0")
+             if not isinstance(percentage_value, str):
+                 raise ValueError
+             percentage = int(percentage_value)
+```

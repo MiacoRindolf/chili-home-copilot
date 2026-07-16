@@ -1,0 +1,207 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Progressive rollout evolution
+Current milestone: milestone-3
+Completed milestones: milestone-1, milestone-2
+Goal: Milestone 3/3. Finish the workflow across app/config.py, app/cohort.py, app/decision.py, and app/service.py while preserving milestones 1 and 2. Add a kill switch with highest precedence and positive config_version. Every decision must include config_version and a deterministic decision_id derived without the salt. Add summarize_decisions for reason counts; audit data must remain secret-free. Preserve RolloutConfig, stable_bucket, decide_rollout, evaluate_request, and all tests.
+Approved source files: app/cohort.py, app/config.py, app/decision.py, app/service.py
+
+Current repository snapshot:
+### app/cohort.py
+```python
+import hashlib
+
+
+def stable_bucket(subject_id: str, salt: str) -> int:
+    if not isinstance(subject_id, str) or not subject_id.strip():
+        raise ValueError("subject_id and salt must be non-empty")
+    if not isinstance(salt, str) or not salt.strip():
+        raise ValueError("subject_id and salt must be non-empty")
+
+    digest = hashlib.sha256(f"{salt}:{subject_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big") % 100
+```
+
+### app/config.py
+```python
+from dataclasses import dataclass
+from typing import FrozenSet, Mapping
+
+
+@dataclass(frozen=True)
+class RolloutConfig:
+    enabled: bool = False
+    percentage: int = 0
+    salt: str = ""
+    allowlist: FrozenSet[str] = frozenset()
+    denylist: FrozenSet[str] = frozenset()
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
+        try:
+            enabled_value = values["ENABLED"]
+            if not isinstance(enabled_value, str):
+                raise ValueError
+
+            normalized_enabled = enabled_value.strip().lower()
+            if normalized_enabled == "true":
+                enabled = True
+            elif normalized_enabled == "false":
+                enabled = False
+            else:
+                raise ValueError
+
+            percentage_value = values.get("PERCENTAGE", "0")
+            if not isinstance(percentage_value, str):
+                raise ValueError
+            percentage = int(percentage_value)
+            if not 0 <= percentage <= 100:
+                raise ValueError
+
+            salt = values["SALT"]
+            if not isinstance(salt, str) or not salt.strip():
+                raise ValueError
+
+            allowlist = cls._parse_list(values.get("ALLOWLIST", ""))
+            denylist = cls._parse_list(values.get("DENYLIST", ""))
+            if allowlist & denylist:
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("invalid rollout config") from None
+
+        return cls(
+            enabled=enabled,
+            percentage=percentage,
+            salt=salt,
+            allowlist=allowlist,
+            denylist=denylist,
+        )
+
+    @staticmethod
+    def _parse_list(value: str) -> FrozenSet[str]:
+        if not isinstance(value, str):
+            raise ValueError
+        return frozenset(item.strip() for item in value.split(",") if item.strip())
+```
+
+### app/decision.py
+```python
+from typing import Any
+
+from app.cohort import stable_bucket
+from app.config import RolloutConfig
+
+
+def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
+    if subject_id in config.denylist:
+        return {"enabled": False, "reason": "denylist", "bucket": None}
+
+    if not config.enabled:
+        return {"enabled": False, "reason": "disabled", "bucket": None}
+
+    if subject_id in config.allowlist:
+        return {
+            "enabled": True,
+            "reason": "allowlist",
+            "bucket": None,
+        }
+
+    bucket = stable_bucket(subject_id, config.salt)
+    if bucket < config.percentage:
+        return {"enabled": True, "reason": "cohort", "bucket": bucket}
+
+    return {
+        "enabled": False,
+        "reason": "outside_cohort",
+        "bucket": bucket,
+    }
+```
+
+### app/service.py
+```python
+from typing import Any, Mapping
+
+from app.config import RolloutConfig
+from app.decision import decide_rollout
+
+
+def evaluate_request(
+    subject_id: str,
+    raw_config: Mapping[str, str],
+    audit: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    config = RolloutConfig.from_mapping(raw_config)
+    decision = decide_rollout(subject_id, config)
+    if audit is not None:
+        audit.append({"subject_id": subject_id, **decision})
+    return decision
+```
+
+### tests/test_rollout_contract_m1.py
+```python
+from app.cohort import stable_bucket
+from app.service import evaluate_request
+
+
+def test_rollout_is_stable_and_one_hundred_percent_enables():
+    raw = {"ENABLED": "true", "PERCENTAGE": "100", "SALT": "pepper"}
+    first = evaluate_request("acct-1", raw)
+    second = evaluate_request("acct-1", raw)
+    assert first == second
+    assert first["enabled"] is True
+    assert first["reason"] == "cohort"
+    assert first["bucket"] == stable_bucket("acct-1", "pepper")
+
+
+def test_disabled_rollout_has_no_bucket():
+    result = evaluate_request("acct-1", {"ENABLED": "false", "PERCENTAGE": "100", "SALT": "x"})
+    assert result["enabled"] is False
+    assert result["reason"] == "disabled"
+    assert result["bucket"] is None
+```
+
+### tests/test_rollout_contract_m2.py
+```python
+from app.service import evaluate_request
+
+
+def test_lists_have_explicit_precedence_and_audit_is_safe():
+    audit = []
+    raw = {
+        "ENABLED": "true",
+        "PERCENTAGE": "0",
+        "SALT": "secret-salt",
+        "ALLOWLIST": " allow ",
+        "DENYLIST": "deny",
+    }
+    assert evaluate_request("allow", raw, audit)["reason"] == "allowlist"
+    assert evaluate_request("deny", raw, audit)["reason"] == "denylist"
+    assert "secret-salt" not in repr(audit)
+```
+
+### tests/test_rollout_contract_m3.py
+```python
+from app.service import evaluate_request, summarize_decisions
+
+
+def test_kill_switch_and_versioned_decision_evidence():
+    audit = []
+    raw = {
+        "ENABLED": "true",
+        "PERCENTAGE": "100",
+        "SALT": "do-not-log",
+        "KILL_SWITCH": "true",
+        "CONFIG_VERSION": "7",
+    }
+    first = evaluate_request("acct", raw, audit)
+    second = evaluate_request("acct", raw)
+    assert first == second
+    assert first["reason"] == "kill_switch"
+    assert first["config_version"] == 7
+    assert len(first["decision_id"]) == 16
+    assert summarize_decisions(audit) == {"kill_switch": 1}
+```

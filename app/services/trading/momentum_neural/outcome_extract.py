@@ -163,6 +163,125 @@ def _governance_context_from_events(events: list[TradingAutomationEvent]) -> dic
     return out
 
 
+def _event_payload(ev: Any) -> dict[str, Any]:
+    payload = getattr(ev, "payload_json", None)
+    return payload if isinstance(payload, dict) else {}
+
+
+def derive_process_adherence_label(
+    extracted: dict[str, Any],
+    events: list[TradingAutomationEvent],
+) -> dict[str, Any]:
+    """Score rule/process adherence separately from PnL.
+
+    This is deliberately evidence-based and non-blocking: explicit violations
+    reduce the score, while missing legacy telemetry is surfaced as a warning
+    instead of being treated as proof of bad process.
+    """
+    entry_occurred = bool(extracted.get("entry_occurred"))
+    if not entry_occurred:
+        return {
+            "score": 1.0,
+            "label": "not_applicable_pre_entry",
+            "violations": [],
+            "warnings": ["no_entry_occurred"],
+            "checks": {"entry_occurred": False},
+        }
+
+    violations: list[str] = []
+    warnings: list[str] = []
+    checks: dict[str, Any] = {"entry_occurred": True}
+
+    packet_id = extracted.get("entry_decision_packet_id")
+    try:
+        packet_ok = packet_id is not None and int(packet_id) > 0
+    except (TypeError, ValueError):
+        packet_ok = False
+    checks["entry_decision_packet"] = packet_ok
+    if not packet_ok:
+        violations.append("missing_entry_decision_packet")
+
+    setup_evidence_seen = False
+    structural_ok = False
+    non_structural_seen = False
+    stale_pre_submit_seen = False
+    ross_universe_block_seen = False
+    hard_reducer_respected = False
+
+    for ev in events or []:
+        event_type = str(getattr(ev, "event_type", "") or "")
+        payload = _event_payload(ev)
+        reason = str(payload.get("reason") or payload.get("skipped") or "")
+        setup_coverage = str(
+            payload.get("setup_coverage")
+            or payload.get("entry_setup_coverage")
+            or payload.get("candidate_setup_coverage")
+            or ""
+        )
+        if setup_coverage:
+            setup_evidence_seen = True
+            if setup_coverage == "structural_a_setup":
+                structural_ok = True
+            if setup_coverage == "non_structural_volume_fallback":
+                non_structural_seen = True
+        for key in (
+            "structural_stop_covered",
+            "setup_structural_stop_covered",
+            "a_setup_floor_covered",
+            "setup_a_floor_covered",
+        ):
+            if key in payload:
+                setup_evidence_seen = True
+                if bool(payload.get(key)):
+                    structural_ok = True
+        if "stale_pre_submit" in reason or "stale_pre_submit" in event_type:
+            stale_pre_submit_seen = True
+        if "ross_universe" in reason and ("block" in reason or "reject" in reason):
+            ross_universe_block_seen = True
+        if "ross_universe_block" in event_type:
+            ross_universe_block_seen = True
+        if reason == "hard_reducer_respected" or bool(payload.get("hard_reducers")):
+            hard_reducer_respected = True
+
+    checks["setup_evidence_seen"] = setup_evidence_seen
+    checks["structural_setup_covered"] = structural_ok
+    checks["hard_reducer_respected"] = hard_reducer_respected
+
+    if non_structural_seen:
+        violations.append("non_structural_volume_fallback_entry")
+    if stale_pre_submit_seen:
+        violations.append("stale_pre_submit_entry_path")
+    if ross_universe_block_seen:
+        violations.append("ross_universe_blocked_entry_path")
+    if setup_evidence_seen and not structural_ok:
+        violations.append("setup_evidence_missing_structural_stop_or_floor")
+    if not setup_evidence_seen:
+        warnings.append("missing_setup_process_telemetry")
+
+    penalties = {
+        "missing_entry_decision_packet": 0.35,
+        "non_structural_volume_fallback_entry": 0.30,
+        "stale_pre_submit_entry_path": 0.35,
+        "ross_universe_blocked_entry_path": 0.50,
+        "setup_evidence_missing_structural_stop_or_floor": 0.25,
+    }
+    score = 1.0 - sum(penalties.get(reason, 0.10) for reason in set(violations))
+    score = max(0.0, min(1.0, score))
+    if violations:
+        label = "process_violation"
+    elif warnings:
+        label = "process_unknown"
+    else:
+        label = "process_clean"
+    return {
+        "score": round(score, 4),
+        "label": label,
+        "violations": sorted(set(violations)),
+        "warnings": sorted(set(warnings)),
+        "checks": checks,
+    }
+
+
 def extract_momentum_session_outcome(
     db: Session,
     sess: TradingAutomationSession,
@@ -375,6 +494,7 @@ def extract_momentum_session_outcome(
         "correlation_id": sess.correlation_id,
         "source_node_id": sess.source_node_id,
     }
+    extracted["process_adherence"] = derive_process_adherence_label(extracted, events)
     return extracted
 
 
@@ -564,6 +684,8 @@ def outcome_row_from_extracted(
         )
     }
     summary["evolution_credit"] = credit
+    if isinstance(extracted.get("process_adherence"), dict):
+        summary["process_adherence"] = dict(extracted["process_adherence"])
 
     return MomentumAutomationOutcome(
         session_id=int(extracted["session_id"]),

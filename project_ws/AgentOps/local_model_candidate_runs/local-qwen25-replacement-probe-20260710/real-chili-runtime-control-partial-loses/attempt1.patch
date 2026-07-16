@@ -1,0 +1,32 @@
+diff --git a/autopilot_prompt.py b/autopilot_prompt.py
+--- a/autopilot_prompt.py
++++ b/autopilot_prompt.py
+@@ -1,13 +1,19 @@
+ def looks_like_repo_edit(prompt: str) -> bool:
+     text = (prompt or '').lower()
+-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))
+-
+-
+-def classify_prompt(prompt: str) -> str:
+-    return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked'
+-
+-
+-def plan_if_repo_edit(prompt: str, planner):
++    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))def classify_prompt(prompt: str) -> str:
++    return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked'def plan_if_repo_edit(prompt: str, planner):
+     if classify_prompt(prompt) == 'repo_edit':
+         return planner(prompt)
+-    return {'status': 'blocked', 'reason': 'not_repo_edit'}
++    return {'status': 'blocked', 'reason': 'not_repo_edit'}from autopilot_prompt import plan_if_repo_editdef test_runtime_control_prompt_blocks_before_planner():
++    calls = []
++    def planner(prompt):
++        calls.append(prompt)
++        return {'status': 'planned'}
++    result = plan_if_repo_edit('docker compose restart chili and scheduler-worker', planner)
++    assert result['status'] == 'blocked'
++    assert calls == []def test_repo_edit_still_reaches_planner():
++    result = plan_if_repo_edit(
++        'update app/example.py to fix the button',
++        lambda prompt: {'status': 'planned'},
++    )
++    assert result['status'] == 'planned'

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
 from typing import Any, Iterable, Optional
 
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from ....config import settings
 from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
 from ..execution_family_registry import (
+    asset_class_of_execution_family,
     is_documented_execution_family,
     is_momentum_automation_implemented,
     normalize_execution_family,
@@ -17,12 +19,20 @@ from ..execution_family_registry import (
 )
 from ..governance import get_kill_switch_status, is_kill_switch_active
 from .market_profile import is_coinbase_spot_symbol
-from .live_fsm import LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY
+from .live_fsm import (
+    LIVE_POSITION_HOLDING_STATES,
+    LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
+    LIVE_WATCHING_PREFILL_STATES,
+    STATE_LIVE_COOLDOWN,
+    STATE_LIVE_EXITED,
+    STATE_LIVE_PENDING_ENTRY,
+)
 from .paper_fsm import LIVE_INTENT_STATES, PAPER_CONCURRENT_STATES
 from .risk_policy import (
     MomentumAutomationRiskPolicy,
     POLICY_VERSION,
     adaptive_max_spread_bps,
+    effective_position_cap,
     equity_relative_daily_loss_cap,
     resolve_effective_risk_policy,
 )
@@ -32,9 +42,86 @@ _CONCURRENT_STATES = (
     frozenset(PAPER_CONCURRENT_STATES) | frozenset(LIVE_INTENT_STATES) | frozenset(LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY)
 )
 
+_ROSS_RISK_SNAPSHOT_TS = 0.0
+_ROSS_RISK_SNAPSHOT_ROWS: dict[str, dict[str, Any]] = {}
+
 
 def _utcnow() -> datetime:
+    # REPLAY v3 P2: route through the SAME sim-clock chokepoint the live runner uses
+    # (``live_runner._SIM_NOW``) so the eligibility recency-grace age, the anchor age, and the
+    # viability-freshness age are all computed against the SIM clock under replay — otherwise
+    # they read the real wall clock and a replayed (historical) snapshot looks hours-stale, the
+    # anchor ages out of the grace window, and the grace can never fire (the entry-instant
+    # TOCTOU could never be reproduced). PROD: ``_SIM_NOW`` is None (only the replay harness
+    # sets it) ⇒ this returns ``datetime.utcnow()`` on the identical path — BYTE-IDENTICAL.
+    # Lazy import avoids the import cycle (live_runner imports this module at top level).
+    try:
+        from .live_runner import _SIM_NOW
+
+        v = _SIM_NOW.get()
+        if v is not None:
+            return v
+    except Exception:
+        pass
     return datetime.utcnow()
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _parse_utc_dt(raw: Any) -> datetime | None:
+    if raw is None:
+        return None
+    try:
+        if isinstance(raw, datetime):
+            return _naive_utc(raw)
+        s = str(raw).strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return _naive_utc(datetime.fromisoformat(s))
+    except Exception:
+        return None
+
+
+def _live_session_counts_for_concurrency(
+    sess: TradingAutomationSession,
+    *,
+    now: datetime,
+) -> bool:
+    """True when a live session should consume coarse arm-time capacity.
+
+    In decoupled watching mode, pre-fill watchers are $0-risk breadth and are
+    governed by the watch fanout, while real admission is enforced at submit by
+    position/risk-budget locks. This helper keeps stale/expired pre-entry rows and
+    post-exit cooldown rows from blocking fresh Ross-style starters.
+    """
+    st = str(getattr(sess, "state", "") or "")
+    if st in (STATE_LIVE_EXITED, STATE_LIVE_COOLDOWN):
+        return False
+    if st in LIVE_WATCHING_PREFILL_STATES:
+        snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+        le = snap.get("momentum_live_execution") if isinstance(snap.get("momentum_live_execution"), dict) else {}
+        exp = _parse_utc_dt(snap.get("expires_at_utc") or le.get("expires_at_utc"))
+        if exp is not None and exp <= now:
+            return False
+        created = sess.started_at or getattr(sess, "created_at", None) or sess.updated_at
+        try:
+            max_watch_s = max(
+                60,
+                int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800) or 1800),
+            )
+        except Exception:
+            max_watch_s = 1800
+        if exp is None and created is not None:
+            created_dt = _naive_utc(created)
+            if (now - created_dt).total_seconds() > max_watch_s:
+                return False
+    return True
 
 
 def _check(
@@ -48,6 +135,160 @@ def _check(
     return {"id": cid, "ok": ok, "severity": severity, "message": message, "detail": detail or {}}
 
 
+def _ross_lane_universe_required(*, mode: str, execution_family: str, symbol: str) -> bool:
+    """True when live equity admission is using the Ross equity lane.
+
+    The generic neural viability board may contain broad equities. In Ross equity
+    mode, that board is only an input; it cannot be the universe definition.
+    """
+    if str(mode or "").lower().strip() != "live":
+        return False
+    if not bool(getattr(settings, "chili_momentum_ross_equity_universe_required", True)):
+        return False
+    sym = str(symbol or "").strip().upper()
+    if not sym or "-USD" in sym:
+        return False
+    try:
+        return asset_class_of_execution_family(normalize_execution_family(execution_family)) == "equity"
+    except Exception:
+        return False
+
+
+def _ross_signal_from_viability(via: MomentumSymbolViability | None, symbol: str) -> dict[str, Any] | None:
+    if via is None:
+        return None
+    try:
+        from .tick_scalp import ross_signal_for_symbol
+
+        return ross_signal_for_symbol(via.execution_readiness_json, symbol)
+    except Exception:
+        return None
+
+
+def _ross_risk_snapshot_rows() -> dict[str, dict[str, Any]]:
+    """Cached Massive snapshot map for filling missing Ross universe fields."""
+    global _ROSS_RISK_SNAPSHOT_TS, _ROSS_RISK_SNAPSHOT_ROWS
+    try:
+        from .universe import EQUITY_ROSS_SMALLCAP
+
+        ttl = float(EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds or 300.0)
+    except Exception:
+        ttl = 300.0
+    now = time.monotonic()
+    if _ROSS_RISK_SNAPSHOT_ROWS and (now - _ROSS_RISK_SNAPSHOT_TS) <= ttl:
+        return _ROSS_RISK_SNAPSHOT_ROWS
+    try:
+        from ...massive_client import get_full_market_snapshot
+        from .universe import EQUITY_ROSS_SMALLCAP
+
+        snapshot = get_full_market_snapshot(
+            max_age_seconds=EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds
+        ) or []
+    except Exception:
+        return _ROSS_RISK_SNAPSHOT_ROWS
+    rows: dict[str, dict[str, Any]] = {}
+    for row in snapshot:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if ticker:
+            rows[ticker] = row
+    _ROSS_RISK_SNAPSHOT_ROWS = rows
+    _ROSS_RISK_SNAPSHOT_TS = now
+    return rows
+
+
+def _ross_lane_universe_check(symbol: str, via: MomentumSymbolViability | None) -> tuple[bool, str, dict[str, Any]]:
+    """Hard Ross equity instrument-class check for final live admission."""
+    try:
+        from .universe import ross_smallcap_profile_evidence
+
+        signal = _ross_signal_from_viability(via, symbol)
+        ok, reason, detail = ross_smallcap_profile_evidence(symbol, signal=signal)
+        if ok or reason not in {
+            "ross_universe_missing_price",
+            "ross_universe_missing_dollar_volume",
+            "ross_universe_missing_change_pct",
+        }:
+            return bool(ok), str(reason or ""), dict(detail or {})
+        snapshot_row = _ross_risk_snapshot_rows().get(str(symbol or "").strip().upper())
+        if snapshot_row:
+            ok, reason, detail = ross_smallcap_profile_evidence(
+                symbol,
+                signal=signal,
+                snapshot_row=snapshot_row,
+            )
+            detail = dict(detail or {})
+            detail["snapshot_backfill_used"] = True
+        return bool(ok), str(reason or ""), dict(detail or {})
+    except Exception as exc:
+        return False, "ross_universe_risk_check_error", {"error": str(exc)[:160]}
+
+
+def _ross_lane_universe_message(ok: bool, reason: str | None) -> str:
+    if ok:
+        return "Ross equity universe proof present."
+    r = str(reason or "").strip()
+    if r == "ross_universe_price_above_profile":
+        return "Ross equity lane blocks broad/mega-cap equity candidate."
+    if r == "ross_universe_price_below_profile":
+        return "Ross equity lane blocks sub-dollar/non-profile equity candidate."
+    if r in {"ross_universe_change_below_profile", "ross_universe_dollar_volume_below_profile"}:
+        return "Ross equity lane blocks faded/thin small-cap candidate below profile."
+    if r.startswith("ross_universe_missing_"):
+        return "Ross equity lane blocks candidate with incomplete Ross universe proof."
+    return "Ross equity lane blocks non-profile equity candidate."
+
+
+def aggregate_open_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[dict[str, Any]]]:
+    """Sum of entry-to-stop $ at-risk across OPEN live equity momentum positions.
+
+    The 2026-06-11 lesson: three 'independent' losses (CPSH/SNDG/INDP) were ONE
+    correlated regime trade trebled — per-trade risk caps don't see the pile-up.
+    At-risk counts only what can still be LOST below entry (a breakeven/locked
+    stop contributes 0), so winners being managed don't block new entries.
+    Returns (total_usd, per-position breakdown)."""
+    total = 0.0
+    rows: list[dict[str, Any]] = []
+    try:
+        held = (
+            db.query(TradingAutomationSession)
+            .filter(
+                TradingAutomationSession.user_id == int(user_id),
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(
+                    ("live_entered", "live_scaling_out", "live_trailing", "live_bailout")
+                ),
+                ~TradingAutomationSession.symbol.like("%-USD"),
+                # alpaca paper twin-soak = fake money; never consumes real risk budget
+                TradingAutomationSession.execution_family != "alpaca_spot",
+            )
+            .all()
+        )
+    except Exception:
+        return 0.0, rows
+    for sess in held:
+        try:
+            snap = sess.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            pos = (le or {}).get("position") if isinstance(le, dict) else None
+            if not isinstance(pos, dict):
+                continue
+            qty = float(pos.get("quantity") or 0.0)
+            entry = float(pos.get("avg_entry_price") or 0.0)
+            stop = float(pos.get("stop_price") or 0.0)
+            if qty <= 0 or entry <= 0 or stop <= 0:
+                continue
+            at_risk = max(0.0, (entry - stop)) * qty
+            if at_risk > 0:
+                total += at_risk
+                rows.append({"symbol": sess.symbol, "session_id": sess.id,
+                             "at_risk_usd": round(at_risk, 2)})
+        except (TypeError, ValueError):
+            continue
+    return total, rows
+
+
 def count_concurrent_automation_sessions(
     db: Session,
     *,
@@ -55,16 +296,219 @@ def count_concurrent_automation_sessions(
     mode: Optional[str] = None,
     exclude_session_id: Optional[int] = None,
 ) -> int:
-    """Active pre-runner sessions only (cancelled/archived/expired excluded by state set)."""
+    """Active pre-runner sessions only (cancelled/archived/expired excluded by state set).
+
+    Alpaca twin-soak sessions (execution_family=alpaca_spot, fake money against
+    the paper endpoint) are EXCLUDED: every real arm spawns a twin, so counting
+    them halves the lane's real capacity (2026-06-12 — 10 "live" slots were
+    only ~5 real names on IPO morning). Twins are bounded 1:1 by the real arms.
+    """
     q = db.query(TradingAutomationSession).filter(
         TradingAutomationSession.user_id == user_id,
         TradingAutomationSession.state.in_(_CONCURRENT_STATES),
+        TradingAutomationSession.execution_family != "alpaca_spot",
     )
     if mode in ("paper", "live"):
         q = q.filter(TradingAutomationSession.mode == mode)
     if exclude_session_id is not None:
         q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    if mode == "live" and bool(getattr(settings, "chili_momentum_decouple_watching_enabled", False)):
+        now = _naive_utc(_utcnow())
+        return int(
+            sum(
+                1
+                for sess in q.all()
+                if _live_session_counts_for_concurrency(sess, now=now)
+            )
+        )
     return int(q.count())
+
+
+def count_open_positions(
+    db: Session,
+    *,
+    user_id: int,
+    mode: str = "live",
+    crypto_only: Optional[bool] = None,
+) -> int:
+    """HELD positions only (``LIVE_POSITION_HOLDING_STATES`` = entered / scaling_out
+    / trailing / bailout — the states that hold capital + a live stop). The
+    decouple_watching position cap charges THESE; pre-fill watchers are $0-risk and
+    are governed by the watch-fanout cap instead. Alpaca twins excluded (1:1 bounded
+    by real arms; never consume a real position slot). ``crypto_only`` filters to /
+    out ``-USD`` for the crypto super-bucket + per-lane checks."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == int(user_id),
+        TradingAutomationSession.mode == mode,
+        TradingAutomationSession.state.in_(LIVE_POSITION_HOLDING_STATES),
+        TradingAutomationSession.execution_family != "alpaca_spot",
+    )
+    if crypto_only is True:
+        q = q.filter(TradingAutomationSession.symbol.like("%-USD"))
+    elif crypto_only is False:
+        q = q.filter(~TradingAutomationSession.symbol.like("%-USD"))
+    return int(q.count())
+
+
+def count_inflight_entry_orders(
+    db: Session,
+    *,
+    user_id: int,
+    crypto_only: Optional[bool] = None,
+    exclude_session_id: Optional[int] = None,
+) -> int:
+    """In-flight LIVE entry orders: submitted to the broker but not yet filled
+    (``state == live_pending_entry`` AND ``entry_submitted`` set in the live-exec
+    snapshot, no ``position`` yet). These are positions *born-but-not-yet-held* —
+    the resting order can fill into a held position at any instant.
+
+    The decouple_watching fill-boundary cap MUST count these alongside held
+    positions: a position only flips to a HOLDING state at fill (seconds after
+    submit), so a burst of K simultaneous submits would each read the same held
+    count and all fill → overshoot. The advisory lock serializes the
+    count-and-submit so each submitter sees the prior one's committed
+    ``entry_submitted=True`` here, making the cap exact (B1). ``entry_submitted``
+    lives in ``risk_snapshot_json`` (not a column) so this is JSON-inspected over
+    the small live-pending set. Alpaca twins excluded; ``exclude_session_id`` drops
+    the submitter's own row (defensive — it has not set ``entry_submitted`` yet)."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == int(user_id),
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state == STATE_LIVE_PENDING_ENTRY,
+        TradingAutomationSession.execution_family != "alpaca_spot",
+    )
+    if crypto_only is True:
+        q = q.filter(TradingAutomationSession.symbol.like("%-USD"))
+    elif crypto_only is False:
+        q = q.filter(~TradingAutomationSession.symbol.like("%-USD"))
+    if exclude_session_id is not None:
+        q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    n = 0
+    try:
+        rows = q.all()
+    except Exception:
+        return 0
+    for s in rows:
+        try:
+            snap = s.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            if isinstance(le, dict) and le.get("entry_submitted") and not le.get("position"):
+                n += 1
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return n
+
+
+def sum_inflight_entry_risk_usd(
+    db: Session,
+    *,
+    user_id: int,
+    per_trade_fallback_usd: float,
+    crypto_only: Optional[bool] = None,
+    exclude_session_id: Optional[int] = None,
+) -> float:
+    """In-flight (submitted-but-not-yet-held) entry $-at-risk for the dollar budget.
+
+    Mirrors :func:`count_inflight_entry_orders`'s SAME born-but-not-held set
+    (``state == live_pending_entry`` AND ``entry_submitted`` set AND no ``position``
+    yet) but sums the ACTUAL per-order risk the live runner persists onto each
+    session at submit time (``le['entry_inflight_risk_usd']`` = that order's real
+    shape-aware ``(entry-stop)*qty``, which already reflects the per-trade
+    multiplier). A flat ``count * per_trade_fallback`` under-charges a burst of
+    HIGH-multiplier entries; reading the persisted per-order risk makes the
+    in-flight charge multiplier-aware.
+
+    CONSERVATIVE FALLBACK: when a sibling has no persisted (positive, finite)
+    ``entry_inflight_risk_usd`` (a pre-submit race, or a session written by an
+    older image), charge the positive flat ``per_trade_fallback_usd`` estimate
+    instead — never $0 (an under-estimate would let a fill-burst slip dollars past
+    the ceiling; an over-estimate is the safe side). Same advisory-lock atomicity
+    contract as the count: the caller evaluates this INSIDE the per-(user,lane)
+    lock so each serialized submitter sees the prior one's committed risk."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == int(user_id),
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state == STATE_LIVE_PENDING_ENTRY,
+        TradingAutomationSession.execution_family != "alpaca_spot",
+    )
+    if crypto_only is True:
+        q = q.filter(TradingAutomationSession.symbol.like("%-USD"))
+    elif crypto_only is False:
+        q = q.filter(~TradingAutomationSession.symbol.like("%-USD"))
+    if exclude_session_id is not None:
+        q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    try:
+        fallback = float(per_trade_fallback_usd)
+    except (TypeError, ValueError):
+        fallback = 0.0
+    if not (fallback > 0):
+        fallback = 0.0
+    total = 0.0
+    try:
+        rows = q.all()
+    except Exception:
+        return 0.0
+    for s in rows:
+        try:
+            snap = s.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            if not (isinstance(le, dict) and le.get("entry_submitted") and not le.get("position")):
+                continue
+            try:
+                persisted = float(le.get("entry_inflight_risk_usd") or 0.0)
+            except (TypeError, ValueError):
+                persisted = 0.0
+            # Persisted real risk when present + sane; else the positive flat estimate.
+            total += persisted if persisted > 0 else fallback
+        except (TypeError, ValueError, AttributeError):
+            # An un-inspectable sibling still carries real risk — charge the floor.
+            total += fallback
+            continue
+    return total
+
+
+def aggregate_open_crypto_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[dict[str, Any]]]:
+    """Crypto mirror of :func:`aggregate_open_risk_usd` (which is equity-only —
+    it filters OUT ``-USD``). Sum of entry-to-stop $ at-risk across OPEN live
+    CRYPTO (-USD) positions, so the crypto lane has a dollar-precise correlated-
+    exposure backstop (decouple_watching B2: the count cap alone can't bound
+    dollars once crypto gaps through). Breakeven/locked stops contribute 0."""
+    total = 0.0
+    rows: list[dict[str, Any]] = []
+    try:
+        held = (
+            db.query(TradingAutomationSession)
+            .filter(
+                TradingAutomationSession.user_id == int(user_id),
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(LIVE_POSITION_HOLDING_STATES),
+                TradingAutomationSession.symbol.like("%-USD"),
+                TradingAutomationSession.execution_family != "alpaca_spot",
+            )
+            .all()
+        )
+    except Exception:
+        return 0.0, rows
+    for sess in held:
+        try:
+            snap = sess.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            pos = (le or {}).get("position") if isinstance(le, dict) else None
+            if not isinstance(pos, dict):
+                continue
+            qty = float(pos.get("quantity") or 0.0)
+            entry = float(pos.get("avg_entry_price") or 0.0)
+            stop = float(pos.get("stop_price") or 0.0)
+            if qty <= 0 or entry <= 0 or stop <= 0:
+                continue
+            at_risk = max(0.0, (entry - stop)) * qty
+            if at_risk > 0:
+                total += at_risk
+                rows.append({"symbol": sess.symbol, "session_id": sess.id,
+                             "at_risk_usd": round(at_risk, 2)})
+        except (TypeError, ValueError):
+            continue
+    return total, rows
 
 
 def _viability_age_seconds(via: MomentumSymbolViability) -> float:
@@ -74,6 +518,69 @@ def _viability_age_seconds(via: MomentumSymbolViability) -> float:
     if ts.tzinfo:
         ts = ts.replace(tzinfo=None)
     return max(0.0, (_utcnow() - ts).total_seconds())
+
+
+def _recent_eligible_age_seconds(recent_live_eligible_at_utc: Optional[str]) -> Optional[float]:
+    """Age (seconds) of the arm/confirm-time live-eligibility anchor, or None if it is
+    absent / unparseable. Pure + side-effect-free. FAIL-SAFE: any parse error returns
+    None so the caller keeps its conservative BLOCK (the recency grace only relaxes on a
+    positively-parsed, in-window anchor — never on a missing or garbage timestamp)."""
+    raw = (recent_live_eligible_at_utc or "").strip()
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if ts.tzinfo:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    age = (_utcnow() - ts).total_seconds()
+    # A future-dated anchor (clock skew) is treated as age 0 (still "recent"); a sane
+    # positive age flows through to the window comparison.
+    return max(0.0, age)
+
+
+def _live_eligible_recency_grace_active(
+    *,
+    policy: MomentumAutomationRiskPolicy,
+    recent_live_eligible_at_utc: Optional[str],
+    live_forward_momentum: Optional[bool],
+) -> tuple[bool, dict[str, Any]]:
+    """Decide whether a live_eligible=False FLICKER at the entry instant qualifies for the
+    adaptive recency grace. Returns ``(active, detail)``. ``active`` is True ONLY when ALL of:
+      * the grace flag is ON (flag OFF => byte-identical: never active);
+      * the session was live-eligible at ARM/CONFIRM within ``live_eligible_recency_grace_seconds``
+        (the anchor parses AND its age <= the window — ONE documented base);
+      * there is live FORWARD MOMENTUM (``live_forward_momentum`` is True — signed-tape accel>0
+        / OFI / price rising, computed by the runner).
+    FAIL-SAFE: a missing/unparseable anchor, an out-of-window anchor, or absent/false momentum
+    => ``active=False`` (keep today's BLOCK). Pure + side-effect-free.
+
+    NOTE on the anchor: it is PINNED to the arm/confirm instant and is NEVER refreshed at
+    runtime (only ``operator_actions.confirm_live_arm`` writes it; the runner does not re-stamp
+    it when live-eligibility is later observed True). This is deliberate and the SAFER
+    behavior — a fixed anchor means the grace window cannot creep, so a slow (> window)
+    arm-to-entry setup ages out and reverts to the conservative BLOCK."""
+    detail: dict[str, Any] = {
+        "grace_enabled": bool(policy.live_eligible_recency_grace_enabled),
+        "grace_window_s": float(policy.live_eligible_recency_grace_seconds),
+        "recent_eligible_age_s": None,
+        "recent_eligible_within_window": False,
+        "live_forward_momentum": (None if live_forward_momentum is None else bool(live_forward_momentum)),
+    }
+    if not policy.live_eligible_recency_grace_enabled:
+        return False, detail
+    age = _recent_eligible_age_seconds(recent_live_eligible_at_utc)
+    if age is None:
+        return False, detail
+    detail["recent_eligible_age_s"] = round(age, 3)
+    within = age <= float(policy.live_eligible_recency_grace_seconds)
+    detail["recent_eligible_within_window"] = bool(within)
+    if not within:
+        return False, detail
+    if not bool(live_forward_momentum):
+        return False, detail
+    return True, detail
 
 
 def _readiness_numbers(exec_json: dict[str, Any]) -> dict[str, Any]:
@@ -98,20 +605,35 @@ def _readiness_numbers(exec_json: dict[str, Any]) -> dict[str, Any]:
 
 
 def _daily_realized_pnl(db: Session, user_id: int) -> float:
-    """Sum realized_pnl_usd from all sessions that terminated today for this user."""
+    """Sum realized PnL from all sessions that terminated today for this user.
+
+    Routes through ``authoritative_label_for_outcome``: flag-OFF this is the legacy
+    ``realized_pnl_usd`` sum byte-for-byte (accessor returns legacy pnl,
+    is_reconciled=True). Flag-ON, the broker-true pnl is summed for reconciled rows
+    and unreconciled rows are EXCLUDED (not summed as $0) — ⚠️ this changes the
+    daily-loss-cap GATE input, a trading-behavior change to soak deploy-when-flat.
+    """
     from datetime import date
-    from sqlalchemy import func as sa_func
+
+    from .outcome_reconcile import authoritative_label_for_outcome
 
     today_start = datetime.combine(date.today(), datetime.min.time())
     rows = (
-        db.query(sa_func.coalesce(sa_func.sum(MomentumAutomationOutcome.realized_pnl_usd), 0.0))
+        db.query(MomentumAutomationOutcome)
         .filter(
             MomentumAutomationOutcome.user_id == user_id,
             MomentumAutomationOutcome.terminal_at >= today_start,
         )
-        .scalar()
+        .all()
     )
-    return float(rows or 0.0)
+    total = 0.0
+    for o in rows:
+        pnl, _bps, _win, is_rec = authoritative_label_for_outcome(o)
+        if not is_rec:
+            continue
+        if pnl is not None:
+            total += float(pnl)
+    return total
 
 
 def _running_peak_and_total(pnls: Iterable[float]) -> tuple[float, float]:
@@ -146,9 +668,11 @@ def _daily_realized_pnl_peak_and_current(db: Session, user_id: int) -> tuple[flo
     """
     from datetime import date
 
+    from .outcome_reconcile import authoritative_label_for_outcome
+
     today_start = datetime.combine(date.today(), datetime.min.time())
     rows = (
-        db.query(MomentumAutomationOutcome.realized_pnl_usd)
+        db.query(MomentumAutomationOutcome)
         .filter(
             MomentumAutomationOutcome.user_id == user_id,
             MomentumAutomationOutcome.terminal_at >= today_start,
@@ -159,7 +683,18 @@ def _daily_realized_pnl_peak_and_current(db: Session, user_id: int) -> tuple[flo
         )
         .all()
     )
-    return _running_peak_and_total(r[0] for r in rows)
+
+    # Flag-OFF: legacy realized_pnl_usd in terminal_at order, byte-identical.
+    # Flag-ON: broker-true pnl for reconciled rows; unreconciled EXCLUDED from the
+    # high-water walk (a $0 fill-in would distort the giveback peak).
+    def _ordered_pnls():
+        for o in rows:
+            pnl, _bps, _win, is_rec = authoritative_label_for_outcome(o)
+            if not is_rec:
+                continue
+            yield pnl
+
+    return _running_peak_and_total(_ordered_pnls())
 
 
 def evaluate_profit_giveback_halt(
@@ -214,6 +749,41 @@ def evaluate_profit_giveback_halt(
     }
 
 
+# A green day worth protecting from a FULL round-trip into the red: at least half the
+# day's max-tolerable RED (the equity-relative daily-loss cap). Deliberately SMALLER than
+# the profit-giveback activation (the full cap) so this catches the small green day the
+# giveback — whose floor sits ABOVE $0 — cannot. One documented base, equity-relative.
+_GREEN_TO_RED_ACTIVATION_FRAC = 0.5
+
+
+def evaluate_green_to_red_halt(
+    db: Session, *, user_id: int, execution_family: str = "coinbase_spot"
+) -> dict[str, Any]:
+    """Ross green-to-red session breaker (gap #8, videos 37/38): going from green on the
+    day back to <= $0 is the emotional-hijack trigger — walk away. The profit-giveback
+    halt's floor (``peak * (1 - frac)``) sits ABOVE $0, so a TRUE round-trip into the red
+    on a smaller green day is not caught. Once today's realized PnL has PEAKED above a
+    small equity-relative activation (half the daily-loss-cap magnitude — no second
+    fixed-$ knob) AND current realized PnL is <= 0, new live arming is blocked for the
+    rest of the daily window. Read-only; same ``date.today()`` window + two-layer pattern
+    as the giveback halt. [[feedback_adaptive_no_magic]]
+    """
+    activation = _GREEN_TO_RED_ACTIVATION_FRAC * equity_relative_daily_loss_cap(
+        float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
+        execution_family,
+    )
+    peak, current = _daily_realized_pnl_peak_and_current(db, int(user_id))
+    armed = bool(activation > 0.0 and peak >= activation)
+    halted = bool(armed and current <= 0.0)
+    return {
+        "halted": halted,
+        "armed": armed,
+        "peak_pnl_usd": round(float(peak), 2),
+        "daily_pnl_usd": round(float(current), 2),
+        "activation_threshold_usd": round(float(activation), 2),
+    }
+
+
 def evaluate_proposed_momentum_automation(
     db: Session,
     *,
@@ -224,12 +794,25 @@ def evaluate_proposed_momentum_automation(
     execution_family: str = "coinbase_spot",
     exclude_session_id: Optional[int] = None,
     expected_move_bps: Optional[float] = None,
+    recent_live_eligible_at_utc: Optional[str] = None,
+    live_forward_momentum: Optional[bool] = None,
 ) -> dict[str, Any]:
     """
     Server-side risk gate for operator flows (paper draft, live arm, confirm).
 
     Returns stable dict: allowed, severity, checks, warnings, errors, governance_state, ...
     Archived/expired/cancelled sessions do not count toward concurrency (query filter).
+
+    ``recent_live_eligible_at_utc`` / ``live_forward_momentum`` carry the live-eligibility
+    RECENCY-GRACE evidence (2026-06-29 UPC +500% miss). The runner passes the session's
+    arm/confirm-time eligibility anchor (an ISO-8601 UTC string proving the name WAS
+    live-eligible at arm/confirm) and a positive forward-momentum read (signed-tape accel > 0
+    / OFI / price rising). When ``via.live_eligible`` flickers False at the entry instant but
+    BOTH (a) the anchor is within the grace window AND (b) forward momentum is present, the
+    eligibility block is DOWNGRADED to a warn — a transient re-scoring flicker cannot terminally
+    veto a just-confirmed active mover. FAIL-SAFE: a missing/unparseable anchor or absent
+    momentum keeps today's BLOCK (the grace only relaxes on positive evidence, never widens
+    risk blindly). Both default ``None`` so non-runner callers are byte-identical.
     """
     policy = MomentumAutomationRiskPolicy.from_settings()
     sym = symbol.strip().upper()
@@ -243,7 +826,16 @@ def evaluate_proposed_momentum_automation(
     governance_state = {"kill_switch_active": bool(gov.get("active")), "kill_switch_reason": gov.get("reason")}
 
     # ── Governance / kill switch ──────────────────────────────────────
-    if is_kill_switch_active():
+    # A LEGACY single-global daily-loss breach is handled PER BROKER below
+    # (global_daily_loss_cap check) when per-broker is enabled, so it does NOT
+    # block here — only true-global halts (manual/emergency/price-monitor/backstop) do.
+    _ks_reason = str(gov.get("reason") or "")
+    _defer_daily_loss = (
+        bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True))
+        and _ks_reason.startswith("global_daily_loss_breach")
+        and "backstop" not in _ks_reason
+    )
+    if is_kill_switch_active() and not _defer_daily_loss:
         if m == "live" and policy.disable_live_if_governance_inhibit:
             checks.append(
                 _check(
@@ -313,28 +905,33 @@ def evaluate_proposed_momentum_automation(
 
     # The authoritative venue is symbol-routed (E1 per-symbol routing,
     # ``resolve_execution_family_for_symbol``): crypto BASE-USD -> coinbase_spot,
-    # equities -> robinhood_spot. The strategy variant carries a TEMPLATE
-    # execution_family (all current variants are coinbase_spot) that may legitimately
-    # differ from the symbol's venue — e.g. a coinbase_spot template applied to an
-    # equity that must route to robinhood_spot. So validate the REQUEST against the
-    # symbol-resolved venue, not the static variant. This both (a) unblocks the equity
-    # path and (b) is STRICTER than the old variant check: it blocks the dangerous
-    # "equity requested via coinbase_spot" case the variant check would have allowed.
+    # equities -> robinhood_spot (the DEFAULT). Validate the REQUEST against the symbol's
+    # ASSET CLASS, not the single default-resolved venue: an EQUITY may legitimately route to
+    # ANY equity venue — robinhood_spot OR alpaca_spot (the same-name A/B), or the sanctioned
+    # MCP rail — while the dangerous CROSS-CLASS case (an equity requested via the crypto
+    # venue coinbase_spot, or a crypto pair via an equity venue) is still BLOCKED. This is the
+    # bug a pre-flight caught: the old exact `ef != symbol_ef` blocked alpaca_spot for equities
+    # because the default resolves to robinhood_spot. (docs/DESIGN/ALPACA_LANE.md)
     symbol_ef = normalize_execution_family(resolve_execution_family_for_symbol(sym))
     v_row = (
         db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == int(variant_id)).one_or_none()
     )
     vef = normalize_execution_family(v_row.execution_family) if v_row is not None else None
-    if ef != symbol_ef:
+    _symbol_class = asset_class_of_execution_family(symbol_ef)
+    from ..execution_family_registry import execution_family_supports_asset_class
+
+    if not execution_family_supports_asset_class(ef, _symbol_class):
         checks.append(
             _check(
                 "execution_family_variant_alignment",
                 False,
                 severity="block",
-                message="Requested execution_family does not match the symbol-resolved venue.",
+                message="Requested execution_family is for a different ASSET CLASS than the symbol's venue.",
                 detail={
                     "request": ef,
+                    "request_asset_class": asset_class_of_execution_family(ef),
                     "symbol_resolved": symbol_ef,
+                    "symbol_asset_class": asset_class_of_execution_family(symbol_ef),
                     "variant_execution_family": vef,
                     "variant_id": int(variant_id),
                 },
@@ -437,14 +1034,69 @@ def evaluate_proposed_momentum_automation(
                 )
             ok_le = bool(via.live_eligible)
             if policy.require_live_eligible_for_live:
-                checks.append(
-                    _check(
-                        "live_eligible",
-                        ok_le,
-                        severity="block" if not ok_le else "ok",
-                        message="Live eligible" if ok_le else "Not live-eligible per neural viability.",
+                if ok_le:
+                    checks.append(
+                        _check("live_eligible", True, severity="ok", message="Live eligible")
                     )
-                )
+                else:
+                    ross_profile_live_ok = False
+                    ross_profile_detail: dict[str, Any] = {}
+                    if _ross_lane_universe_required(mode=m, execution_family=ef, symbol=sym):
+                        try:
+                            ross_profile_live_ok, _ross_profile_reason, ross_profile_detail = (
+                                _ross_lane_universe_check(sym, via)
+                            )
+                            ross_profile_detail = dict(ross_profile_detail or {})
+                            ross_profile_detail["ross_profile_live_eligible_backfill"] = True
+                        except Exception:
+                            ross_profile_live_ok = False
+                            ross_profile_detail = {}
+                    if ross_profile_live_ok:
+                        checks.append(
+                            _check(
+                                "live_eligible",
+                                True,
+                                severity="ok",
+                                message="Ross profile proof satisfies live eligibility.",
+                                detail=ross_profile_detail,
+                            )
+                        )
+                    else:
+                        # TOCTOU recency grace: a fast/thin premarket vertical can FLICKER
+                        # live_eligible False at the exact entry instant even though the name
+                        # armed+confirmed live-eligible seconds earlier (UPC +500%, 2026-06-29).
+                        # If the session was live-eligible at arm/confirm within the grace window
+                        # AND live forward momentum is present, DOWNGRADE the terminal block to a
+                        # warn so a transient flicker can't veto a just-confirmed active mover.
+                        # FAIL-SAFE: no recent-eligible evidence / no momentum => keep the block.
+                        grace_active, grace_detail = _live_eligible_recency_grace_active(
+                            policy=policy,
+                            recent_live_eligible_at_utc=recent_live_eligible_at_utc,
+                            live_forward_momentum=live_forward_momentum,
+                        )
+                        if grace_active:
+                            checks.append(
+                                _check(
+                                    "live_eligible",
+                                    True,
+                                    severity="warn",
+                                    message=(
+                                        "Live-eligibility FLICKER tolerated by recency grace "
+                                        "(recent-eligible at arm/confirm + live forward momentum)."
+                                    ),
+                                    detail=grace_detail,
+                                )
+                            )
+                        else:
+                            checks.append(
+                                _check(
+                                    "live_eligible",
+                                    False,
+                                    severity="block",
+                                    message="Not live-eligible per neural viability.",
+                                    detail=grace_detail,
+                                )
+                            )
             else:
                 checks.append(
                     _check(
@@ -452,6 +1104,18 @@ def evaluate_proposed_momentum_automation(
                         ok_le,
                         severity="warn" if not ok_le else "ok",
                         message="Live eligibility optional by policy.",
+                    )
+                )
+
+            if _ross_lane_universe_required(mode=m, execution_family=ef, symbol=sym):
+                ross_ok, ross_reason, ross_detail = _ross_lane_universe_check(sym, via)
+                checks.append(
+                    _check(
+                        "ross_equity_universe",
+                        ross_ok,
+                        severity="ok" if ross_ok else "block",
+                        message=_ross_lane_universe_message(ross_ok, ross_reason),
+                        detail={**dict(ross_detail or {}), "reason": ross_reason},
                     )
                 )
 
@@ -587,28 +1251,52 @@ def evaluate_proposed_momentum_automation(
                 )
 
     # ── Concurrency ─────────────────────────────────────────────────────
-    total_ct = count_concurrent_automation_sessions(db, user_id=user_id, exclude_session_id=exclude_session_id)
-    ok_tot = total_ct < policy.max_concurrent_sessions
+    # MODE-SCOPED count (2026-06-12 SpaceX-morning incident): the paper shadow
+    # mass (10 overnight crypto paper sessions) filled a mode-blind total cap
+    # and starved EVERY live arm through the premarket window. Paper sessions
+    # are free simulations — they must never consume the real-money budget.
+    # Live proposals are additionally bounded by the adaptive live cap below.
+    _decouple = bool(getattr(settings, "chili_momentum_decouple_watching_enabled", False))
+    total_ct = count_concurrent_automation_sessions(
+        db, user_id=user_id, mode=m, exclude_session_id=exclude_session_id
+    )
+    _max_total = policy.max_concurrent_sessions
+    if _decouple and m == "live":
+        # Decoupled: watchers fan out to watch_fanout_max, so the coarse all-states
+        # cap must clear (fanout + position cap + slack) or it would silently re-cap
+        # the funnel at the legacy 10. It remains a leak-catching backstop (a stuck
+        # live_cooldown pile-up still trips it), not the active constraint.
+        _fanout = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
+        _max_total = max(_max_total, _fanout + effective_position_cap(crypto=False) + 5)
+    ok_tot = total_ct < _max_total
     checks.append(
         _check(
             "max_concurrent_sessions",
             ok_tot,
             severity="block" if not ok_tot else "ok",
-            message=f"Concurrent sessions {total_ct} / max {policy.max_concurrent_sessions}.",
-            detail={"count": total_ct},
+            message=f"Concurrent {m} sessions {total_ct} / max {_max_total}.",
+            detail={"count": total_ct, "mode": m},
         )
     )
     if m == "live":
-        live_ct = count_concurrent_automation_sessions(
-            db, user_id=user_id, mode="live", exclude_session_id=exclude_session_id
-        )
-        ok_lv = live_ct < policy.max_concurrent_live_sessions
+        if _decouple:
+            # Charge the risk-budget cap against HELD positions only (watchers are
+            # $0-risk). This mirrors the authoritative advisory-locked fill-boundary
+            # cap in live_runner; here it is a coarse secondary check at arm time.
+            live_ct = count_open_positions(db, user_id=user_id, mode="live")
+            _live_cap = effective_position_cap(crypto=False)
+        else:
+            live_ct = count_concurrent_automation_sessions(
+                db, user_id=user_id, mode="live", exclude_session_id=exclude_session_id
+            )
+            _live_cap = policy.max_concurrent_live_sessions
+        ok_lv = live_ct < _live_cap
         checks.append(
             _check(
                 "max_concurrent_live_sessions",
                 ok_lv,
                 severity="block" if not ok_lv else "ok",
-                message=f"Concurrent live sessions {live_ct} / max {policy.max_concurrent_live_sessions}.",
+                message=f"Concurrent live sessions {live_ct} / max {_live_cap}.",
                 detail={"count": live_ct},
             )
         )
@@ -656,37 +1344,127 @@ def evaluate_proposed_momentum_automation(
         )
     )
 
+    # ── Green-to-red session breaker (Ross gap #8) ────────────────────────
+    # Stricter complement of the giveback halt: once the day PEAKED green above a small
+    # equity-relative activation and current realized PnL has round-tripped to <= $0,
+    # block new live arming (the green-to-red emotional-hijack walk-away the giveback's
+    # above-$0 floor misses). [[feedback_adaptive_no_magic]]
+    g2r = evaluate_green_to_red_halt(db, user_id=user_id, execution_family=ef)
+    checks.append(
+        _check(
+            "green_to_red",
+            not g2r["halted"],
+            severity="block" if g2r["halted"] and m == "live" else ("warn" if g2r["halted"] else "ok"),
+            message=(
+                f"Green-to-red halt: peaked ${g2r['peak_pnl_usd']:+.2f} (>= "
+                f"${g2r['activation_threshold_usd']:+.2f}) then round-tripped to "
+                f"${g2r['daily_pnl_usd']:+.2f} — walk away for the session."
+                if g2r["halted"]
+                else (
+                    f"Green-to-red ok (peak ${g2r['peak_pnl_usd']:+.2f}, "
+                    f"now ${g2r['daily_pnl_usd']:+.2f})."
+                )
+            ),
+            detail=g2r,
+        )
+    )
+
     # ── Global daily loss cap (P0.2 — spans autotrader + momentum) ────────
     # Read-only here: we block new entries if already breached, but do NOT
     # activate the kill switch from a pre-entry "what if" evaluation. The
     # post-close hooks (feedback_emit / auto_trader_monitor) do the actual
     # activation when a realized-loss event lands.
     try:
-        from ..governance import check_daily_loss_breach
-        gdl = check_daily_loss_breach(db, user_id=user_id, activate=False)
-        ok_gdl = not bool(gdl.get("breached"))
-        if gdl.get("source") != "none":
+        if bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+            # PER-BROKER: block this candidate only if ITS OWN broker breached its
+            # own real-equity cap — a Coinbase-sized breach can't block an RH arm
+            # (the literal 2026-06-15 incident). Read-only (activate=False).
+            from ..governance import _peek_broker_breach
+
+            _pb_breached, _pb = _peek_broker_breach(db, ef, user_id=user_id)
+            ok_gdl = not _pb_breached
             checks.append(
                 _check(
                     "global_daily_loss_cap",
                     ok_gdl,
                     severity="block" if not ok_gdl and m == "live" else ("warn" if not ok_gdl else "ok"),
                     message=(
-                        f"Global realized PnL ${float(gdl.get('realized_usd', 0.0)):+.2f} "
-                        f"vs cap -${float(gdl.get('limit_usd', 0.0)):.2f} "
-                        f"(src={gdl.get('source')})."
+                        f"Broker[{_pb.get('family')}] realized PnL "
+                        f"${float(_pb.get('realized', 0.0) or 0.0):+.2f} "
+                        f"vs cap -${float(_pb.get('limit', _pb.get('cap', 0.0)) or 0.0):.2f}."
                     ),
-                    detail={
-                        "realized_usd": gdl.get("realized_usd"),
-                        "limit_usd": gdl.get("limit_usd"),
-                        "source": gdl.get("source"),
-                        "breakdown": gdl.get("breakdown"),
-                    },
+                    detail=_pb,
                 )
             )
+        else:
+            from ..governance import check_daily_loss_breach
+            gdl = check_daily_loss_breach(db, user_id=user_id, activate=False)
+            ok_gdl = not bool(gdl.get("breached"))
+            if gdl.get("source") != "none":
+                checks.append(
+                    _check(
+                        "global_daily_loss_cap",
+                        ok_gdl,
+                        severity="block" if not ok_gdl and m == "live" else ("warn" if not ok_gdl else "ok"),
+                        message=(
+                            f"Global realized PnL ${float(gdl.get('realized_usd', 0.0)):+.2f} "
+                            f"vs cap -${float(gdl.get('limit_usd', 0.0)):.2f} "
+                            f"(src={gdl.get('source')})."
+                        ),
+                        detail={
+                            "realized_usd": gdl.get("realized_usd"),
+                            "limit_usd": gdl.get("limit_usd"),
+                            "source": gdl.get("source"),
+                            "breakdown": gdl.get("breakdown"),
+                        },
+                    )
+                )
     except Exception:
         # Non-fatal: the post-close hook is the real enforcement; this check
         # is additive / informational at pre-entry.
+        pass
+
+    # ── Aggregate open at-risk cap (correlation guard, 2026-06-11) ─────────
+    # Low-float momentum positions are REGIME-correlated: they fade together.
+    # Cap the SUM of entry-to-stop risk across open equity positions at an
+    # equity-relative ceiling; a new entry may not push the pile-up past it.
+    try:
+        _agg_pct = float(getattr(
+            settings, "chili_momentum_max_aggregate_risk_pct_of_equity", 0.03) or 0.0)
+        if _agg_pct > 0 and m == "live":
+            from .risk_policy import _account_equity_usd
+
+            _eq = _account_equity_usd()
+            if _eq and float(_eq) > 0:
+                _agg_cap = _agg_pct * float(_eq)
+                _open_risk, _open_rows = aggregate_open_risk_usd(db, user_id=user_id)
+                # the candidate entry's planned risk = the lane's per-trade loss cap
+                try:
+                    from .risk_policy import equity_relative_loss_cap
+
+                    _planned = float(equity_relative_loss_cap(0.0) or 0.0)
+                except Exception:
+                    _planned = 0.0
+                _ok_agg = (_open_risk + _planned) <= _agg_cap
+                checks.append(
+                    _check(
+                        "aggregate_open_risk_cap",
+                        _ok_agg,
+                        severity="block" if not _ok_agg else "ok",
+                        message=(
+                            f"Open at-risk ${_open_risk:,.0f} + planned ${_planned:,.0f} "
+                            f"vs cap ${_agg_cap:,.0f} ({_agg_pct:.1%} of equity)."
+                        ),
+                        detail={
+                            "open_risk_usd": round(_open_risk, 2),
+                            "planned_risk_usd": round(_planned, 2),
+                            "cap_usd": round(_agg_cap, 2),
+                            "positions": _open_rows,
+                        },
+                    )
+                )
+    except Exception:
+        # Additive guard: never brick entries on its own failure.
         pass
 
     # ── Portfolio drawdown breaker (Hard Rule 2 — spans every entry path) ──

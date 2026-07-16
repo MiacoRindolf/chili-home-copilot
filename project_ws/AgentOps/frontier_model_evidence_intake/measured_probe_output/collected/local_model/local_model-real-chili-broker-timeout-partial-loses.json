@@ -1,0 +1,31 @@
+{
+  "candidate_id": "local_model-real-chili-broker-timeout-partial-loses",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "collected_at": "2026-07-10T12:19:57.608667Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 80.26940799999284,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-broker-timeout-partial-loses.",
+  "patch_file": "real-chili-broker-timeout-partial-loses.patch",
+  "planned_file": "preflight.py",
+  "provenance": {
+    "collector": "autopilot_model_candidate_drop_collector",
+    "prompt_pack_file": "local-qwen25-measured-probe-20260710-051006.prompt-pack.md",
+    "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+    "prompt_pack_sha256": "cf6365ea57141b504f3da89eddac6e1e17120b55e35a8fda3405bb908f26605f",
+    "run_id": "local-qwen25-measured-probe-20260710-051006",
+    "schema": "chili.model-candidate-drop-provenance.v1",
+    "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses)",
+    "transcript_events": 3,
+    "transcript_file": "local-qwen25-measured-probe-20260710-051006.transcript.jsonl",
+    "transcript_sha256": "ffac5c95c11862896903175094af23f4ecf5341a8807aa38084b3a126c7c6556"
+  },
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

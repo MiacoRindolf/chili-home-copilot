@@ -1,0 +1,295 @@
+diff --git a/app/model.py b/app/model.py
+index 42f041c..5c3f796 100644
+--- a/app/model.py
++++ b/app/model.py
+@@ -7,3 +7,15 @@ class ImportItem:
+     item_id: str
+     sequence: int
+     payload: Mapping[str, Any]
++
++    @classmethod
++    def from_mapping(cls, value: Mapping[str, Any]) -> "ImportItem":
++        try:
++            item_id = str(value.get("item_id", "")).strip()
++            sequence = int(value.get("sequence", 0))
++            payload = value.get("payload") or {}
++        except (TypeError, ValueError):
++            raise ValueError("invalid import item") from None
++        if not item_id or sequence < 1 or not isinstance(payload, Mapping):
++            raise ValueError("invalid import item")
++        return cls(item_id=item_id, sequence=sequence, payload=payload)
+diff --git a/app/processor.py b/app/processor.py
+index de5826d..71e5250 100644
+--- a/app/processor.py
++++ b/app/processor.py
+@@ -1,2 +1,8 @@
+-def execute_handler(item, handler):
+-    return handler(item)
++from collections.abc import Callable
++
++from app.model import ImportItem
++
++
++def execute_handler(item: ImportItem, handler: Callable[[ImportItem], None]) -> int:
++    handler(item)
++    return 0
+diff --git a/app/service.py b/app/service.py
+index 0b7463f..851cb33 100644
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,4 +1,33 @@
+-def run_import(items, job_id, store, handler):
++from collections.abc import Callable, Sequence
++from typing import Any
++
++from app.model import ImportItem
++from app.processor import execute_handler
++from app.store import CheckpointStore
++
++
++def _validate_batch(job_id: str, items: Sequence[ImportItem]) -> None:
++    if not str(job_id).strip():
++        raise ValueError("invalid import batch")
++    sequences = [item.sequence for item in items]
++    if sequences != sorted(sequences) or len(set(sequences)) != len(sequences):
++        raise ValueError("invalid import batch")
++
++
++def run_import(
++    items: Sequence[ImportItem],
++    job_id: str,
++    store: CheckpointStore,
++    handler: Callable[[ImportItem], None],
++) -> dict[str, Any]:
++    _validate_batch(job_id, items)
++    processed = 0
++    skipped = 0
+     for item in items:
+-        handler(item)
+-    return {"processed": len(items)}
++        if item.sequence <= store.checkpoint(job_id) or store.was_processed(job_id, item.item_id):
++            skipped += 1
++            continue
++        execute_handler(item, handler)
++        store.mark_processed(job_id, item)
++        processed += 1
++    return {"processed": processed, "skipped": skipped, "checkpoint": store.checkpoint(job_id)}
+diff --git a/app/store.py b/app/store.py
+index 498831f..b23f2be 100644
+--- a/app/store.py
++++ b/app/store.py
+@@ -1,3 +1,17 @@
++from app.model import ImportItem
++
++
+ class CheckpointStore:
+     def __init__(self) -> None:
+-        self.value = 0
++        self.checkpoints: dict[str, int] = {}
++        self.processed: set[tuple[str, str]] = set()
++
++    def checkpoint(self, job_id: str) -> int:
++        return self.checkpoints.get(job_id, 0)
++
++    def was_processed(self, job_id: str, item_id: str) -> bool:
++        return (job_id, item_id) in self.processed
++
++    def mark_processed(self, job_id: str, item: ImportItem) -> None:
++        self.processed.add((job_id, item.item_id))
++        self.checkpoints[job_id] = max(self.checkpoint(job_id), item.sequence)
+diff --git a/app/processor.py b/app/processor.py
+index 71e5250..d8c276e 100644
+--- a/app/processor.py
++++ b/app/processor.py
+@@ -3,6 +3,31 @@ from collections.abc import Callable
+ from app.model import ImportItem
+ 
+ 
+-def execute_handler(item: ImportItem, handler: Callable[[ImportItem], None]) -> int:
+-    handler(item)
+-    return 0
++class TransientImportError(RuntimeError):
++    pass
++
++
++class PermanentImportError(RuntimeError):
++    pass
++
++
++def execute_handler(
++    item: ImportItem,
++    handler: Callable[[ImportItem], None],
++    *,
++    max_attempts: int = 3,
++    sleep: Callable[[float], None] = lambda _delay: None,
++) -> int:
++    if max_attempts < 1:
++        raise ValueError("invalid import retry policy")
++    retries = 0
++    for attempt in range(max_attempts):
++        try:
++            handler(item)
++            return retries
++        except TransientImportError:
++            if attempt >= max_attempts - 1:
++                raise
++            sleep(float(2 ** attempt))
++            retries += 1
++    raise AssertionError("unreachable import retry state")
+diff --git a/app/service.py b/app/service.py
+index 851cb33..c843af9 100644
+--- a/app/service.py
++++ b/app/service.py
+@@ -2,7 +2,7 @@ from collections.abc import Callable, Sequence
+ from typing import Any
+ 
+ from app.model import ImportItem
+-from app.processor import execute_handler
++from app.processor import PermanentImportError, execute_handler
+ from app.store import CheckpointStore
+ 
+ 
+@@ -19,15 +19,41 @@ def run_import(
+     job_id: str,
+     store: CheckpointStore,
+     handler: Callable[[ImportItem], None],
++    *,
++    max_attempts: int = 3,
++    sleep: Callable[[float], None] = lambda _delay: None,
+ ) -> dict[str, Any]:
+     _validate_batch(job_id, items)
+     processed = 0
+     skipped = 0
+-    for item in items:
+-        if item.sequence <= store.checkpoint(job_id) or store.was_processed(job_id, item.item_id):
+-            skipped += 1
+-            continue
+-        execute_handler(item, handler)
+-        store.mark_processed(job_id, item)
+-        processed += 1
+-    return {"processed": processed, "skipped": skipped, "checkpoint": store.checkpoint(job_id)}
++    retried = 0
++    dead_lettered = 0
++    try:
++        for item in items:
++            if item.sequence <= store.checkpoint(job_id) or store.was_processed(job_id, item.item_id):
++                skipped += 1
++                continue
++            try:
++                retried += execute_handler(
++                    item,
++                    handler,
++                    max_attempts=max_attempts,
++                    sleep=sleep,
++                )
++            except PermanentImportError as exc:
++                store.dead_letter(job_id, item, str(exc))
++                dead_lettered += 1
++                continue
++            store.mark_processed(job_id, item)
++            processed += 1
++        result = {
++            "processed": processed,
++            "skipped": skipped,
++            "checkpoint": store.checkpoint(job_id),
++            "retried": retried,
++            "dead_lettered": dead_lettered,
++        }
++
++        return result
++    finally:
++        pass
+diff --git a/app/store.py b/app/store.py
+index b23f2be..d1eecdd 100644
+--- a/app/store.py
++++ b/app/store.py
+@@ -1,3 +1,5 @@
++from typing import Any
++
+ from app.model import ImportItem
+ 
+ 
+@@ -5,6 +7,7 @@ class CheckpointStore:
+     def __init__(self) -> None:
+         self.checkpoints: dict[str, int] = {}
+         self.processed: set[tuple[str, str]] = set()
++        self.dead_letters: list[dict[str, Any]] = []
+ 
+     def checkpoint(self, job_id: str) -> int:
+         return self.checkpoints.get(job_id, 0)
+@@ -15,3 +18,7 @@ class CheckpointStore:
+     def mark_processed(self, job_id: str, item: ImportItem) -> None:
+         self.processed.add((job_id, item.item_id))
+         self.checkpoints[job_id] = max(self.checkpoint(job_id), item.sequence)
++
++    def dead_letter(self, job_id: str, item: ImportItem, reason: str) -> None:
++        self.dead_letters.append({"job_id": job_id, "item_id": item.item_id, "reason": reason})
++        self.checkpoints[job_id] = max(self.checkpoint(job_id), item.sequence)
+diff --git a/app/service.py b/app/service.py
+index c843af9..cf09db7 100644
+--- a/app/service.py
++++ b/app/service.py
+@@ -22,8 +22,14 @@ def run_import(
+     *,
+     max_attempts: int = 3,
+     sleep: Callable[[float], None] = lambda _delay: None,
++    owner: str = "local",
++    now: float = 0.0,
++    lease_ttl: float = 30.0,
+ ) -> dict[str, Any]:
+     _validate_batch(job_id, items)
++    if not store.acquire(job_id, owner, now, lease_ttl):
++        raise RuntimeError("import lease unavailable")
++
+     processed = 0
+     skipped = 0
+     retried = 0
+@@ -52,8 +58,16 @@ def run_import(
+             "checkpoint": store.checkpoint(job_id),
+             "retried": retried,
+             "dead_lettered": dead_lettered,
++            "status": "completed",
++            "owner": owner,
+         }
+ 
++        store.audit.append({
++            "job_id": job_id,
++            "status": result.get("status", "completed"),
++            "checkpoint": result["checkpoint"],
++        })
+         return result
++    
+     finally:
+-        pass
++        store.release(job_id, owner)
+diff --git a/app/store.py b/app/store.py
+index d1eecdd..20ff9fc 100644
+--- a/app/store.py
++++ b/app/store.py
+@@ -8,6 +8,8 @@ class CheckpointStore:
+         self.checkpoints: dict[str, int] = {}
+         self.processed: set[tuple[str, str]] = set()
+         self.dead_letters: list[dict[str, Any]] = []
++        self.leases: dict[str, tuple[str, float]] = {}
++        self.audit: list[dict[str, Any]] = []
+ 
+     def checkpoint(self, job_id: str) -> int:
+         return self.checkpoints.get(job_id, 0)
+@@ -22,3 +24,17 @@ class CheckpointStore:
+     def dead_letter(self, job_id: str, item: ImportItem, reason: str) -> None:
+         self.dead_letters.append({"job_id": job_id, "item_id": item.item_id, "reason": reason})
+         self.checkpoints[job_id] = max(self.checkpoint(job_id), item.sequence)
++
++    def acquire(self, job_id: str, owner: str, now: float, ttl: float) -> bool:
++        if not owner or ttl <= 0:
++            raise ValueError("invalid import lease")
++        current = self.leases.get(job_id)
++        if current is not None and current[0] != owner and current[1] > now:
++            return False
++        self.leases[job_id] = (owner, now + ttl)
++        return True
++
++    def release(self, job_id: str, owner: str) -> None:
++        current = self.leases.get(job_id)
++        if current is not None and current[0] == owner:
++            self.leases.pop(job_id, None)

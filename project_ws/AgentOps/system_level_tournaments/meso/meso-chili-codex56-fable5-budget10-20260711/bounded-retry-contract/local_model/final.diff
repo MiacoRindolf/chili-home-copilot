@@ -1,0 +1,66 @@
+diff --git a/app/backoff.py b/app/backoff.py
+index 786163b..2eb9d7f 100644
+--- a/app/backoff.py
++++ b/app/backoff.py
+@@ -2,4 +2,7 @@ from app.config import RetryPolicy
+ 
+ 
+ def retry_delays(policy: RetryPolicy) -> tuple[int, ...]:
+-    return tuple(policy.base_delay_ms * (2 ** attempt) for attempt in range(policy.max_attempts))
++                    return tuple(
++                        min(policy.base_delay_ms * (2 ** attempt), policy.max_delay_ms)
++                        for attempt in range(policy.max_attempts - 1)
++                    )
+diff --git a/app/config.py b/app/config.py
+index 9b5cae3..d208b67 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -10,8 +10,19 @@ class RetryPolicy:
+ 
+     @classmethod
+     def from_mapping(cls, values: Mapping[str, str]) -> "RetryPolicy":
+-        return cls(
+-            max_attempts=int(values.get("MAX_ATTEMPTS", "0")),
+-            base_delay_ms=int(values.get("BASE_DELAY_MS", "0")),
+-            max_delay_ms=int(values.get("MAX_DELAY_MS", "0")),
+-        )
++        try:
++            policy = cls(
++                max_attempts=int(values.get("MAX_ATTEMPTS", "3")),
++                base_delay_ms=int(values.get("BASE_DELAY_MS", "100")),
++                max_delay_ms=int(values.get("MAX_DELAY_MS", "1000")),
++            )
++        except (TypeError, ValueError):
++            raise ValueError("invalid retry policy") from None
++        if (
++            policy.max_attempts < 1
++            or policy.base_delay_ms < 1
++            or policy.max_delay_ms < 1
++            or policy.base_delay_ms > policy.max_delay_ms
++        ):
++            raise ValueError("invalid retry policy")
++        return policy
+diff --git a/app/worker.py b/app/worker.py
+index 25a0176..b5cd0f8 100644
+--- a/app/worker.py
++++ b/app/worker.py
+@@ -12,10 +12,12 @@ class TransientError(RuntimeError):
+ 
+ 
+ def run_with_retry(operation: Callable[[], T], policy: RetryPolicy, sleep: Callable[[float], None]) -> T:
+-    for delay_ms in retry_delays(policy):
+-        sleep(delay_ms / 1000)
+-        try:
+-            return operation()
+-        except Exception:
+-            continue
+-    return operation()
++                    delays = retry_delays(policy)
++                    for attempt in range(policy.max_attempts):
++                        try:
++                            return operation()
++                        except TransientError:
++                            if attempt >= policy.max_attempts - 1:
++                                raise
++                            sleep(delays[attempt] / 1000)
++                    raise AssertionError("unreachable retry state")

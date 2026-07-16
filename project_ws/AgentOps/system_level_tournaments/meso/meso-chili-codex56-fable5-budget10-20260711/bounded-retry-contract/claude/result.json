@@ -1,0 +1,23 @@
+{
+  "attempts": 1,
+  "behavior_passed": true,
+  "changed_files": [
+    "app/backoff.py",
+    "app/config.py",
+    "app/worker.py"
+  ],
+  "coordinated_files_changed": true,
+  "duration_seconds": 428.974,
+  "eligible": true,
+  "failure": "",
+  "model_events": [],
+  "model_name": "claude-fable-5",
+  "premium_calls": null,
+  "quality_score": 100,
+  "scope_valid": true,
+  "semantic_review_passed": true,
+  "source_kind": "claude",
+  "task_id": "bounded-retry-contract",
+  "tests_unchanged": true,
+  "validation_output": ".........                                                                [100%]\n9 passed in 0.05s"
+}

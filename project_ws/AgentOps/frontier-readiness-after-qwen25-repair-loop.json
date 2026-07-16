@@ -1,0 +1,219 @@
+﻿{
+  "blockers": 8,
+  "path": "D:/dev/chili-home-copilot/project_ws/AgentOps/FRONTIER_READINESS_AUDIT.md",
+  "readiness_score": 69,
+  "requirements": 26,
+  "results": [
+    {
+      "actual": "8.4.2",
+      "evidence": "D:\\dev\\chili-home-copilot\\.pytest_venv\\Scripts\\python.exe (.pytest_venv)",
+      "next_action": "none",
+      "required": "pytest>=8.2,<9",
+      "requirement": "runner_pytest_supported_version",
+      "status": "passed"
+    },
+    {
+      "actual": "isolated",
+      "evidence": "D:\\dev\\chili-home-copilot\\.pytest_venv\\Scripts\\python.exe (.pytest_venv)",
+      "next_action": "Run benchmark scenarios through the repo-local pytest runtime.",
+      "required": "isolated repo-local pytest runtime",
+      "requirement": "runner_pytest_runtime_isolation",
+      "status": "passed"
+    },
+    {
+      "actual": "none missing",
+      "evidence": "D:\\dev\\chili-home-copilot\\.pytest_venv\\Scripts\\python.exe (.pytest_venv)",
+      "next_action": "Install missing benchmark runner imports.",
+      "required": "all required pytest runtime imports available",
+      "requirement": "runner_pytest_required_imports",
+      "status": "passed"
+    },
+    {
+      "actual": "none missing",
+      "evidence": "scripts/autopilot_coding_benchmark.py scenario commands",
+      "next_action": "none",
+      "required": "all scenario command files exist",
+      "requirement": "coding_benchmark_harness_references",
+      "status": "passed"
+    },
+    {
+      "actual": "passed",
+      "evidence": "project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md",
+      "next_action": "Scorecard is source-current; proceed to frontier model evidence gates.",
+      "required": "passed",
+      "requirement": "coding_scorecard_status",
+      "status": "passed"
+    },
+    {
+      "actual": "100",
+      "evidence": "project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md Overall score",
+      "next_action": "none",
+      "required": ">=90",
+      "requirement": "coding_score",
+      "status": "passed"
+    },
+    {
+      "actual": "56",
+      "evidence": "project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md Scenarios",
+      "next_action": "none",
+      "required": ">=6",
+      "requirement": "coding_scenario_count",
+      "status": "passed"
+    },
+    {
+      "actual": "56/56",
+      "evidence": "project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md Pass rate",
+      "next_action": "none",
+      "required": "all scenarios passed",
+      "requirement": "coding_pass_rate",
+      "status": "passed"
+    },
+    {
+      "actual": "stable; changes=0",
+      "evidence": "project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md Source stability",
+      "next_action": "Scorecard is source-current; proceed to frontier model evidence gates.",
+      "required": "stable with 0 source changes",
+      "requirement": "source_stability",
+      "status": "passed"
+    },
+    {
+      "actual": "current; changes=0",
+      "evidence": "project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md Generated UTC; project_ws/AgentOps/SOURCE_CHURN_DIAGNOSTICS.md",
+      "next_action": "Latest diagnostic at project_ws/AgentOps/SOURCE_CHURN_DIAGNOSTICS.md: Scorecard is source-current; proceed to frontier model evidence gates. Refresh with python scripts/autopilot_source_churn_diagnostics.py --watch-seconds 30 --json if edits resume.",
+      "required": "no source/test files newer than Generated UTC",
+      "requirement": "coding_scorecard_current_source_freshness",
+      "status": "passed"
+    },
+    {
+      "actual": "none missing",
+      "evidence": "89 required capabilities",
+      "next_action": "none",
+      "required": "all required capabilities covered",
+      "requirement": "required_capability_coverage",
+      "status": "passed"
+    },
+    {
+      "actual": "passed",
+      "evidence": "project_ws/AgentOps/SYNTHETIC_REPO_REPAIR_BENCHMARK.md",
+      "next_action": "none",
+      "required": "passed",
+      "requirement": "synthetic_repo_repair_scorecard_status",
+      "status": "passed"
+    },
+    {
+      "actual": "passed",
+      "evidence": "project_ws/AgentOps/MODEL_PROMOTION_REPLAY_BENCHMARK.md",
+      "next_action": "none",
+      "required": "passed",
+      "requirement": "model_promotion_scorecard_status",
+      "status": "passed"
+    },
+    {
+      "actual": "local_model source drop imported",
+      "evidence": "project_ws/AgentOps/FRONTIER_MODEL_EVIDENCE_INTAKE.md",
+      "next_action": "none",
+      "required": "local_model source drop imported or candidate run promotion ready",
+      "requirement": "local_model_candidate_run_status",
+      "status": "passed"
+    },
+    {
+      "actual": "failed",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_SHADOW_EVIDENCE_BENCHMARK.md",
+      "next_action": "Current intake: ready sources 2/3; missing/incomplete sources: claude. Collect/import Codex, Claude, and local_model source drops with python scripts/autopilot_frontier_source_collection_packet.py --source-kind all --json; then close source intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "passed",
+      "requirement": "model_shadow_scorecard_status",
+      "status": "warning"
+    },
+    {
+      "actual": "7",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_SHADOW_EVIDENCE_BENCHMARK.md",
+      "next_action": "Current intake: ready sources 2/3; missing/incomplete sources: claude. Collect/import Codex, Claude, and local_model source drops with python scripts/autopilot_frontier_source_collection_packet.py --source-kind all --json; then close source intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "checks>=7",
+      "requirement": "model_shadow_check_count",
+      "status": "passed"
+    },
+    {
+      "actual": "partial_real_manifest",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_SHADOW_EVIDENCE_BENCHMARK.md",
+      "next_action": "Current intake: ready sources 2/3; missing/incomplete sources: claude. Collect/import Codex, Claude, and local_model source drops with python scripts/autopilot_frontier_source_collection_packet.py --source-kind all --json; then close source intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "real_manifest",
+      "requirement": "model_shadow_real_manifest_mode",
+      "status": "warning"
+    },
+    {
+      "actual": "failed",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md",
+      "next_action": "Current intake: ready sources 2/3; missing/incomplete sources: claude. Collect/import Codex, Claude, and local_model source drops with python scripts/autopilot_frontier_source_collection_packet.py --source-kind all --json; then close source intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "passed",
+      "requirement": "model_tournament_scorecard_status",
+      "status": "warning"
+    },
+    {
+      "actual": "6",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md",
+      "next_action": "Current intake: ready sources 2/3; missing/incomplete sources: claude. Collect/import Codex, Claude, and local_model source drops with python scripts/autopilot_frontier_source_collection_packet.py --source-kind all --json; then close source intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "cases>=6",
+      "requirement": "model_tournament_case_count",
+      "status": "passed"
+    },
+    {
+      "actual": "real_artifacts",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md",
+      "next_action": "Current intake: ready sources 2/3; missing/incomplete sources: claude. Collect/import Codex, Claude, and local_model source drops with python scripts/autopilot_frontier_source_collection_packet.py --source-kind all --json; then close source intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "real_artifacts",
+      "requirement": "model_tournament_real_artifacts_mode",
+      "status": "passed"
+    },
+    {
+      "actual": "present=6/6; passed=6/6; rejected=0",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md",
+      "next_action": "Current intake: ready sources 2/3; missing/incomplete sources: claude. Collect/import Codex, Claude, and local_model source drops with python scripts/autopilot_frontier_source_collection_packet.py --source-kind all --json; then close source intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "codex passes 6/6 tournament cases",
+      "requirement": "codex_tournament_case_pass_count",
+      "status": "passed"
+    },
+    {
+      "actual": "present=6/6; passed=2/6; rejected=4",
+      "evidence": "project_ws/AgentOps/frontier_model_evidence_intake/scorecards/MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md",
+      "next_action": "Run or import a stronger all-cases local-model response that applies cleanly with python scripts/autopilot_local_model_candidate_runner.py --all-cases --json; then rerun python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json.",
+      "required": "local_model passes 6/6 tournament cases",
+      "requirement": "local_model_tournament_case_pass_count",
+      "status": "warning"
+    },
+    {
+      "actual": "missing",
+      "evidence": "project_ws/AgentOps/HOSTED_PR_REPAIR_ARTIFACT_BENCHMARK.md",
+      "next_action": "Build a hosted PR evidence packet with python scripts/autopilot_hosted_pr_repair_collection_packet.py --json; collect review/publication/check receipts, assemble the artifact, then validate with python scripts/autopilot_hosted_pr_repair_artifact_benchmark.py --artifact-dir project_ws/AgentOps/hosted_pr_repair_evidence/<pr-slug>/artifact --json.",
+      "required": "passed",
+      "requirement": "hosted_pr_repair_scorecard_status",
+      "status": "warning"
+    },
+    {
+      "actual": "0",
+      "evidence": "project_ws/AgentOps/HOSTED_PR_REPAIR_ARTIFACT_BENCHMARK.md",
+      "next_action": "Build a hosted PR evidence packet with python scripts/autopilot_hosted_pr_repair_collection_packet.py --json; collect review/publication/check receipts, assemble the artifact, then validate with python scripts/autopilot_hosted_pr_repair_artifact_benchmark.py --artifact-dir project_ws/AgentOps/hosted_pr_repair_evidence/<pr-slug>/artifact --json.",
+      "required": "checks>=18",
+      "requirement": "hosted_pr_repair_check_count",
+      "status": "warning"
+    },
+    {
+      "actual": "missing",
+      "evidence": "project_ws/AgentOps/HOSTED_PR_REPAIR_ARTIFACT_BENCHMARK.md",
+      "next_action": "Build a hosted PR evidence packet with python scripts/autopilot_hosted_pr_repair_collection_packet.py --json; collect review/publication/check receipts, assemble the artifact, then validate with python scripts/autopilot_hosted_pr_repair_artifact_benchmark.py --artifact-dir project_ws/AgentOps/hosted_pr_repair_evidence/<pr-slug>/artifact --json.",
+      "required": "real_inventory",
+      "requirement": "hosted_pr_repair_real_inventory_mode",
+      "status": "warning"
+    },
+    {
+      "actual": "missing",
+      "evidence": "project_ws/AgentOps/HOSTED_PR_REPAIR_ARTIFACT_BENCHMARK.md promotion eligible",
+      "next_action": "Build a hosted PR evidence packet with python scripts/autopilot_hosted_pr_repair_collection_packet.py --json; collect review/publication/check receipts, assemble the artifact, then validate with python scripts/autopilot_hosted_pr_repair_artifact_benchmark.py --artifact-dir project_ws/AgentOps/hosted_pr_repair_evidence/<pr-slug>/artifact --json.",
+      "required": "true",
+      "requirement": "hosted_pr_repair_promotion_eligible",
+      "status": "warning"
+    }
+  ],
+  "schema": "chili.frontier-readiness-audit.v1",
+  "status": "warning",
+  "written": true
+}

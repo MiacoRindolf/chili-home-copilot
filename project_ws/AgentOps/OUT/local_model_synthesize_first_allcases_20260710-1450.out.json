@@ -1,0 +1,20 @@
+# CHILI Local Model Candidate Run
+
+- Schema: chili.local-model-candidate-runner.v1
+- Generated UTC: 2026-07-10T14:47:16.307454Z
+- Status: passed
+- Write mode: True
+- Case: all
+- Cases: 6
+- Model: qwen2.5-coder:7b
+- Run id: local-synthesize-first-allcases-20260710-1450
+- Promotion ready: False
+- Next action: Run frontier intake with allow-partial for inspection, or collect matching Codex and Claude evidence before publishing promotion scorecards.
+- Permission boundary: local model suite candidate collection only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading
+
+| Artifact | Path |
+| --- | --- |
+| prompt_pack | project_ws\AgentOps\frontier_model_evidence_intake\measured_synth_first_sources\local_model\prompt_pack.md |
+| full_prompt_pack | project_ws\AgentOps\local_model_candidate_runs\local-synthesize-first-allcases-20260710-1450\full_prompt_pack.md |
+| response | project_ws\AgentOps\local_model_candidate_runs\local-synthesize-first-allcases-20260710-1450\model_response.txt |
+| raw_files | 12 |

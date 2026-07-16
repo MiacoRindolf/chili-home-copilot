@@ -1,0 +1,485 @@
+{
+  "case_id": "all",
+  "case_ids": [
+    "real-chili-preflight-candidate-wins",
+    "real-chili-runtime-control-partial-loses",
+    "real-chili-startup-static-partial-loses",
+    "real-chili-broker-timeout-partial-loses",
+    "real-chili-runtime-control-no-evidence-loses",
+    "real-chili-runtime-control-unscoped-loses"
+  ],
+  "case_results": [
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 90.10586719994899,
+          "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-preflight-candidate-wins.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-real-chili-preflight-candidate-wins",
+            "changed_files": [
+              "preflight.py"
+            ],
+            "passed": false,
+            "reason": "behavior_tests_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "..F.                                                                     [100%] | ================================== FAILURES =================================== | ______________________ test_broker_timeout_fails_closed _______________________ | def test_broker_timeout_fails_closed(): | >       assert not can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | E       AssertionError: assert not True | E        +  where True = can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | test_preflight.py:13: AssertionError | =========================== short test summary info =========================== | FAILED test_preflight.py::test_broker_timeout_fails_closed - AssertionError: ... | 1 failed, 3 passed in 0.06s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-preflight-candidate-wins.response.txt",
+          "source_command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=1600 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api)",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 0.0005401999806053936,
+          "prompt": "",
+          "repair": true,
+          "replay": {
+            "candidate_id": "local_model-synth-fail-closed-real-chili-preflight-candidate-wins",
+            "changed_files": [
+              "preflight.py"
+            ],
+            "passed": true,
+            "reason": "behavior_tests_passed",
+            "score": 100,
+            "status": "passed",
+            "test_output": "....                                                                     [100%] | 4 passed in 0.01s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-preflight-candidate-wins.synth-repair.json",
+          "source_command": "chili replay-guided fail-closed guard synthesis",
+          "status": "validated",
+          "synthesized": true,
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-preflight-candidate-wins",
+      "duration_seconds": 90.1064073999296,
+      "error": "behavior_tests_failed: ..F.                                                                     [100%] | ================================== FAILURES =================================== | ______________________ test_broker_timeout_fails_closed _______________________ | def test_broker_timeout_fails_closed(): | >       assert not can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | E       AssertionError: assert not True | E        +  where True = can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | test_preflight.py:13: AssertionError | =========================== short test summary info =========================== | FAILED test_preflight.py::test_broker_timeout_fails_closed - AssertionError: ... | 1 failed, 3 passed in 0.06s",
+      "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-preflight-candidate-wins.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-synth-fail-closed-real-chili-preflight-candidate-wins",
+        "changed_files": [
+          "preflight.py"
+        ],
+        "passed": true,
+        "reason": "behavior_tests_passed",
+        "score": 100,
+        "status": "passed",
+        "test_output": "....                                                                     [100%] | 4 passed in 0.01s"
+      },
+      "replay_passed": true,
+      "replay_reason": "behavior_tests_passed",
+      "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-preflight-candidate-wins.synth-repair.json",
+      "source_command": "chili replay-guided fail-closed guard synthesis",
+      "status": "recorded",
+      "timeout_salvaged": false
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 98.60782299999846,
+          "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-partial-loses.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-real-chili-runtime-control-partial-loses",
+            "changed_files": [],
+            "passed": false,
+            "reason": "apply_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "error: patch failed: autopilot_prompt.py:7 | error: autopilot_prompt.py: patch does not apply"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-partial-loses.response.txt",
+          "source_command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=1600 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api)",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 4.080001963302493e-05,
+          "prompt": "",
+          "repair": true,
+          "replay": {
+            "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-partial-loses",
+            "changed_files": [
+              "autopilot_prompt.py"
+            ],
+            "passed": true,
+            "reason": "behavior_tests_passed",
+            "score": 100,
+            "status": "passed",
+            "test_output": "..                                                                       [100%] | 2 passed in 0.01s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-partial-loses.synth-repair.json",
+          "source_command": "chili replay-guided fail-closed guard synthesis",
+          "status": "validated",
+          "synthesized": true,
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-runtime-control-partial-loses",
+      "duration_seconds": 98.6078638000181,
+      "error": "apply_failed: error: patch failed: autopilot_prompt.py:7 | error: autopilot_prompt.py: patch does not apply",
+      "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-partial-loses.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-partial-loses",
+        "changed_files": [
+          "autopilot_prompt.py"
+        ],
+        "passed": true,
+        "reason": "behavior_tests_passed",
+        "score": 100,
+        "status": "passed",
+        "test_output": "..                                                                       [100%] | 2 passed in 0.01s"
+      },
+      "replay_passed": true,
+      "replay_reason": "behavior_tests_passed",
+      "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-partial-loses.synth-repair.json",
+      "source_command": "chili replay-guided fail-closed guard synthesis",
+      "status": "recorded",
+      "timeout_salvaged": false
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 130.83186350000324,
+          "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-startup-static-partial-loses.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+            "changed_files": [],
+            "passed": false,
+            "reason": "apply_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "error: corrupt patch at line 25"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-startup-static-partial-loses.response.txt",
+          "source_command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=1600 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api)",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 0.000576700025703758,
+          "prompt": "",
+          "repair": true,
+          "replay": {
+            "candidate_id": "local_model-synth-manifest-completion-real-chili-startup-static-partial-loses",
+            "changed_files": [
+              "startup_contracts.py"
+            ],
+            "passed": true,
+            "reason": "behavior_tests_passed",
+            "score": 100,
+            "status": "passed",
+            "test_output": "...                                                                      [100%] | 3 passed in 0.01s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-startup-static-partial-loses.synth-repair.json",
+          "source_command": "chili replay-guided fail-closed guard synthesis",
+          "status": "validated",
+          "synthesized": true,
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-startup-static-partial-loses",
+      "duration_seconds": 130.83244020002894,
+      "error": "apply_failed: error: corrupt patch at line 25",
+      "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-startup-static-partial-loses.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-synth-manifest-completion-real-chili-startup-static-partial-loses",
+        "changed_files": [
+          "startup_contracts.py"
+        ],
+        "passed": true,
+        "reason": "behavior_tests_passed",
+        "score": 100,
+        "status": "passed",
+        "test_output": "...                                                                      [100%] | 3 passed in 0.01s"
+      },
+      "replay_passed": true,
+      "replay_reason": "behavior_tests_passed",
+      "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-startup-static-partial-loses.synth-repair.json",
+      "source_command": "chili replay-guided fail-closed guard synthesis",
+      "status": "recorded",
+      "timeout_salvaged": false
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 90.22562959999777,
+          "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-broker-timeout-partial-loses.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-real-chili-broker-timeout-partial-loses",
+            "changed_files": [
+              "preflight.py"
+            ],
+            "passed": false,
+            "reason": "behavior_tests_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "..F.                                                                     [100%] | ================================== FAILURES =================================== | ______________________ test_broker_timeout_fails_closed _______________________ | def test_broker_timeout_fails_closed(): | >       assert not can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | E       AssertionError: assert not True | E        +  where True = can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | test_preflight.py:13: AssertionError | =========================== short test summary info =========================== | FAILED test_preflight.py::test_broker_timeout_fails_closed - AssertionError: ... | 1 failed, 3 passed in 0.06s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-broker-timeout-partial-loses.response.txt",
+          "source_command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=1600 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api)",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 0.0002586999908089638,
+          "prompt": "",
+          "repair": true,
+          "replay": {
+            "candidate_id": "local_model-synth-fail-closed-real-chili-broker-timeout-partial-loses",
+            "changed_files": [
+              "preflight.py"
+            ],
+            "passed": true,
+            "reason": "behavior_tests_passed",
+            "score": 100,
+            "status": "passed",
+            "test_output": "....                                                                     [100%] | 4 passed in 0.01s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-broker-timeout-partial-loses.synth-repair.json",
+          "source_command": "chili replay-guided fail-closed guard synthesis",
+          "status": "validated",
+          "synthesized": true,
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-broker-timeout-partial-loses",
+      "duration_seconds": 90.22588829998858,
+      "error": "behavior_tests_failed: ..F.                                                                     [100%] | ================================== FAILURES =================================== | ______________________ test_broker_timeout_fails_closed _______________________ | def test_broker_timeout_fails_closed(): | >       assert not can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | E       AssertionError: assert not True | E        +  where True = can_enter('BTC-USD', 0, 1000, 100, broker_timeout=True) | test_preflight.py:13: AssertionError | =========================== short test summary info =========================== | FAILED test_preflight.py::test_broker_timeout_fails_closed - AssertionError: ... | 1 failed, 3 passed in 0.06s",
+      "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-broker-timeout-partial-loses.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-synth-fail-closed-real-chili-broker-timeout-partial-loses",
+        "changed_files": [
+          "preflight.py"
+        ],
+        "passed": true,
+        "reason": "behavior_tests_passed",
+        "score": 100,
+        "status": "passed",
+        "test_output": "....                                                                     [100%] | 4 passed in 0.01s"
+      },
+      "replay_passed": true,
+      "replay_reason": "behavior_tests_passed",
+      "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-broker-timeout-partial-loses.synth-repair.json",
+      "source_command": "chili replay-guided fail-closed guard synthesis",
+      "status": "recorded",
+      "timeout_salvaged": false
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 95.61929539998528,
+          "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-no-evidence-loses.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-real-chili-runtime-control-no-evidence-loses",
+            "changed_files": [],
+            "passed": false,
+            "reason": "apply_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "error: patch failed: autopilot_prompt.py:7 | error: autopilot_prompt.py: patch does not apply"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-no-evidence-loses.response.txt",
+          "source_command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=1600 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api)",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 3.749999450519681e-05,
+          "prompt": "",
+          "repair": true,
+          "replay": {
+            "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-no-evidence-loses",
+            "changed_files": [
+              "autopilot_prompt.py"
+            ],
+            "passed": true,
+            "reason": "behavior_tests_passed",
+            "score": 100,
+            "status": "passed",
+            "test_output": "..                                                                       [100%] | 2 passed in 0.01s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-no-evidence-loses.synth-repair.json",
+          "source_command": "chili replay-guided fail-closed guard synthesis",
+          "status": "validated",
+          "synthesized": true,
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-runtime-control-no-evidence-loses",
+      "duration_seconds": 95.61933289997978,
+      "error": "apply_failed: error: patch failed: autopilot_prompt.py:7 | error: autopilot_prompt.py: patch does not apply",
+      "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-no-evidence-loses.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-no-evidence-loses",
+        "changed_files": [
+          "autopilot_prompt.py"
+        ],
+        "passed": true,
+        "reason": "behavior_tests_passed",
+        "score": 100,
+        "status": "passed",
+        "test_output": "..                                                                       [100%] | 2 passed in 0.01s"
+      },
+      "replay_passed": true,
+      "replay_reason": "behavior_tests_passed",
+      "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-no-evidence-loses.synth-repair.json",
+      "source_command": "chili replay-guided fail-closed guard synthesis",
+      "status": "recorded",
+      "timeout_salvaged": false
+    },
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 94.58708870003466,
+          "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-unscoped-loses.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-real-chili-runtime-control-unscoped-loses",
+            "changed_files": [],
+            "passed": false,
+            "reason": "apply_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "error: patch failed: autopilot_prompt.py:7 | error: autopilot_prompt.py: patch does not apply"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-unscoped-loses.response.txt",
+          "source_command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=1600 temperature=0 < compact_prompt_pack.md (CPU fallback after CHILI_OLLAMA_TRANSPORT=api)",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 2.889998722821474e-05,
+          "prompt": "",
+          "repair": true,
+          "replay": {
+            "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-unscoped-loses",
+            "changed_files": [
+              "autopilot_prompt.py"
+            ],
+            "passed": true,
+            "reason": "behavior_tests_passed",
+            "score": 100,
+            "status": "passed",
+            "test_output": "..                                                                       [100%] | 2 passed in 0.01s"
+          },
+          "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-unscoped-loses.synth-repair.json",
+          "source_command": "chili replay-guided fail-closed guard synthesis",
+          "status": "validated",
+          "synthesized": true,
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-runtime-control-unscoped-loses",
+      "duration_seconds": 94.58711760002188,
+      "error": "apply_failed: error: patch failed: autopilot_prompt.py:7 | error: autopilot_prompt.py: patch does not apply",
+      "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-unscoped-loses.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-unscoped-loses",
+        "changed_files": [
+          "autopilot_prompt.py"
+        ],
+        "passed": true,
+        "reason": "behavior_tests_passed",
+        "score": 100,
+        "status": "passed",
+        "test_output": "..                                                                       [100%] | 2 passed in 0.01s"
+      },
+      "replay_passed": true,
+      "replay_reason": "behavior_tests_passed",
+      "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\cases\\real-chili-runtime-control-unscoped-loses.synth-repair.json",
+      "source_command": "chili replay-guided fail-closed guard synthesis",
+      "status": "recorded",
+      "timeout_salvaged": false
+    }
+  ],
+  "cases": 6,
+  "compact_prompt_pack": "",
+  "full_prompt_pack": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\full_prompt_pack.md",
+  "generated_utc": "2026-07-10T14:12:09.551154Z",
+  "max_repair_attempts": 0,
+  "model_name": "qwen2.5-coder:7b",
+  "next_action": "Run frontier intake with allow-partial for inspection, or collect matching Codex and Claude evidence before publishing promotion scorecards.",
+  "permission_boundary": "local model suite candidate collection only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading",
+  "promotion_ready": false,
+  "prompt_pack": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model\\prompt_pack.md",
+  "raw_files": [
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-preflight-candidate-wins.json",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-preflight-candidate-wins.patch",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-runtime-control-partial-loses.json",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-runtime-control-partial-loses.patch",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-startup-static-partial-loses.json",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-startup-static-partial-loses.patch",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-broker-timeout-partial-loses.json",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-broker-timeout-partial-loses.patch",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-runtime-control-no-evidence-loses.json",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-runtime-control-no-evidence-loses.patch",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-runtime-control-unscoped-loses.json",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw\\real-chili-runtime-control-unscoped-loses.patch"
+  ],
+  "ready_source_count_delta": 0,
+  "recorder": {
+    "cases": 6,
+    "drop_dir": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\raw",
+    "generated_utc": "2026-07-10T14:12:09.551048Z",
+    "input_prompt_pack": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\full_prompt_pack.md",
+    "metadata": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model\\metadata.json",
+    "model_name": "qwen2.5-coder:7b",
+    "next_action": "Record matching Codex and Claude drops, then run scripts/autopilot_frontier_model_evidence_intake.py --publish-scorecards.",
+    "permission_boundary": "records and validates local-model evidence only; it does not run models, edit source/tests, restart runtime, use git/PR tools, deploy, or touch live trading",
+    "promotion_ready": false,
+    "prompt_pack": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model\\prompt_pack.md",
+    "prompt_pack_sha256": "fe8b90a7574627f0e079495312893c90393d6cfe655ba2bd43ef015aa4b8e0d0",
+    "raw_dir": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model\\raw",
+    "raw_file_count": 12,
+    "raw_files": [
+      "real-chili-broker-timeout-partial-loses.json",
+      "real-chili-broker-timeout-partial-loses.patch",
+      "real-chili-preflight-candidate-wins.json",
+      "real-chili-preflight-candidate-wins.patch",
+      "real-chili-runtime-control-no-evidence-loses.json",
+      "real-chili-runtime-control-no-evidence-loses.patch",
+      "real-chili-runtime-control-partial-loses.json",
+      "real-chili-runtime-control-partial-loses.patch",
+      "real-chili-runtime-control-unscoped-loses.json",
+      "real-chili-runtime-control-unscoped-loses.patch",
+      "real-chili-startup-static-partial-loses.json",
+      "real-chili-startup-static-partial-loses.patch"
+    ],
+    "run_id": "local-qwen25-allcases-synth-probe-20260710-070150",
+    "schema": "chili.local-model-evidence-recorder.v1",
+    "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses)",
+    "source_dir": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model",
+    "source_kind": "local_model",
+    "status": "passed",
+    "transcript": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model\\transcript.jsonl",
+    "validated_with_provenance": true,
+    "write": false
+  },
+  "repair_attempted_cases": [],
+  "response": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150\\model_response.txt",
+  "run_dir": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-allcases-synth-probe-20260710-070150",
+  "run_id": "local-qwen25-allcases-synth-probe-20260710-070150",
+  "schema": "chili.local-model-candidate-runner.v1",
+  "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses)",
+  "status": "passed",
+  "timeout_salvaged_cases": [],
+  "write": false
+}

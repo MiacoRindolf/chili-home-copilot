@@ -1,0 +1,64 @@
+diff --git a/app/model.py b/app/model.py
+--- a/app/model.py
++++ b/app/model.py
+@@ -12,8 +12,20 @@ class Event:
+ 
+     @classmethod
+     def from_payload(cls, payload: Mapping[str, Any]) -> "Event":
+-        return cls(
+-            event_id=str(payload.get("event_id", "")),
+-            account_id=str(payload.get("account_id", "")),
+-            amount=Decimal(payload.get("amount", 0)),
+-        )
++        event_id = str(payload.get("event_id", "")).strip()
++        account_id = str(payload.get("account_id", "")).strip()
++
++        try:
++            amount = Decimal(str(payload.get("amount", 0)))
++        except (ArithmeticError, ValueError):
++            raise ValueError("invalid event") from None
++
++        if (
++            not event_id
++            or not account_id
++            or not amount.is_finite()
++            or amount <= 0
++        ):
++            raise ValueError("invalid event")
++
++        return cls(event_id=event_id, account_id=account_id, amount=amount)
+diff --git a/app/store.py b/app/store.py
+--- a/app/store.py
++++ b/app/store.py
+@@ -9,8 +9,14 @@ class LedgerStore:
+         self.events: list[Event] = []
+ 
+     def add_once(self, event: Event) -> bool:
++        key = (event.account_id, event.event_id)
++        if any((item.account_id, item.event_id) == key for item in self.events):
++            return False
+         self.events.append(event)
+         return True
+ 
+     def balance(self, account_id: str) -> Decimal:
+-        return sum((event.amount for event in self.events), Decimal("0"))
++        return sum(
++            (event.amount for event in self.events if event.account_id == account_id),
++            Decimal("0"),
++        )
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -6,5 +6,10 @@ from app.store import LedgerStore
+ 
+ def record_event(payload: Mapping[str, Any], store: LedgerStore) -> dict[str, Any]:
+     event = Event.from_payload(payload)
+-    store.add_once(event)
+-    return {"balance": str(store.balance(event.account_id))}
++    accepted = store.add_once(event)
++    return {
++        "accepted": accepted,
++        "event_id": event.event_id,
++        "account_id": event.account_id,
++        "balance": format(store.balance(event.account_id), ".2f"),
++    }

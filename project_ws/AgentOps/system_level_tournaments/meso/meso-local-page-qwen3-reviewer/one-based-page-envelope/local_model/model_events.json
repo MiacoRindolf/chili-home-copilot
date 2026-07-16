@@ -1,0 +1,16 @@
+[
+  {
+    "error": "",
+    "latency_ms": 24130,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "{\n  \"files\": [\n    {\n      \"path\": \"app/api.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import Any\n\nfrom app.paging import page_slice\nfrom app.query import parse_page\n\n\ndef build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n    page = parse_page(raw_page)\n    if page < 1:\n        raise ValueError('page must be a positive integer')\n    return {\"page\": page, \"items\": page_slice(items, page - 1, page_size)}\n\"\"\"\n    },\n    {\n      \"path\": \"app/paging.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import TypeVar\n\nT = TypeVar(\"T\")\n\n\ndef page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n    if page < 1:\n        raise ValueError('page must be positive')\n    start = (page - 1) * page_size\n    return list(items[start : start + page_size])\n\"\"\"\n    },\n    {\n      \"path\": \"app/query.py\",\n      \"content\": \"\"\"\ndef parse_page(raw: str | None) -> int:\n    if raw is None or raw.strip() == \"\":\n        return 1\n    try:\n        page = int(raw)\n        if page < 1:\n            raise ValueError('page must be a positive integer')\n        return page\n    except ValueError as e:\n        raise ValueError('page must be a positive integer') from e\n\"\"\"\n    }\n  ]\n}"
+  },
+  {
+    "error": "",
+    "latency_ms": 28488,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```json\n{\n  \"files\": [\n    {\n      \"path\": \"app/api.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import Any\n\nfrom app.paging import page_slice\nfrom app.query import parse_page\n\n\ndef build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n    page = parse_page(raw_page)\n    if page < 1:\n        raise ValueError('page must be a positive integer')\n    return {\n        \"page\": page,\n        \"items\": page_slice(items, page - 1, page_size),\n        \"has_next\": len(items) > page * page_size,\n        \"next_page\": page + 1 if len(items) > page * page_size else None\n    }\n\"\"\"\n    },\n    {\n      \"path\": \"app/paging.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import TypeVar\n\nT = TypeVar(\"T\")\n\n\ndef page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n    if page < 1:\n        raise ValueError('page must be positive')\n    start = (page - 1) * page_size\n    return list(items[start : start + page_size])\n\"\"\"\n    },\n    {\n      \"path\": \"app/query.py\",\n      \"content\": \"\"\"\ndef parse_page(raw: str | None) -> int:\n    if raw is None or raw.strip() == \"\":\n        return 1\n    try:\n        page = int(raw)\n        if page < 1:\n            raise ValueError('page must be a positive integer')\n        return page\n    except ValueError as e:\n        raise ValueError('page must be a positive integer') from e\n\"\"\"\n    }\n  ]\n}\n```"
+  }
+]

@@ -1,0 +1,12 @@
+diff --git a/preflight.py b/preflight.py
+--- a/preflight.py
++++ b/preflight.py
+@@ -6,6 +6,8 @@ def can_enter(
+     *,
+     broker_timeout: bool = False,
+ ) -> bool:
++    if broker_timeout:
++        return False
+     if broker_position_qty > 0:
+         return False
+     if buying_power < required_cash:

@@ -1,0 +1,9 @@
+﻿{
+    "url":  "https://github.com/MiacoRindolf/chili-home-copilot/actions/runs/29075349301/job/86305663655",
+    "conclusion":  "success",
+    "provider":  "github_actions_job",
+    "check_name":  "hosted-pr-repair-proof",
+    "workflow_run_id":  "29075349301",
+    "head_sha":  "7737c7e08585dcdcab75cde391c8cd9c091eefd4",
+    "run_id":  "86305663655"
+}

@@ -249,39 +249,85 @@ def api_dev_accept(body: DevAcceptRequest, request: Request, db: Session = Depen
     rows = (
         db.query(CodingExecutionIteration)
         .filter(CodingExecutionIteration.run_id == body.run_id)
+        .order_by(CodingExecutionIteration.iteration.asc(), CodingExecutionIteration.id.asc())
         .all()
     )
     if not rows:
         return JSONResponse({"ok": False, "error": "Run not found"}, status_code=404)
 
-    repo = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).first()
+    execution_metadata = {}
+    for row in rows:
+        try:
+            plan = json.loads(row.plan_json) if row.plan_json else {}
+        except (TypeError, ValueError):
+            plan = {}
+        if isinstance(plan, dict) and isinstance(plan.get("_execution"), dict):
+            execution_metadata = plan["_execution"]
+            break
+    try:
+        recorded_repo_id = int(execution_metadata.get("repo_id"))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "This legacy run has no repo-bound execution lineage and cannot be merged safely. Re-run it in Project Autopilot.",
+            },
+            status_code=409,
+        )
+    repo_query = db.query(CodeRepo).filter(CodeRepo.id == recorded_repo_id, CodeRepo.active.is_(True))
+    if ctx.get("user_id") is not None:
+        repo_query = repo_query.filter(
+            (CodeRepo.user_id == ctx["user_id"]) | (CodeRepo.user_id.is_(None))
+        )
+    repo = repo_query.first()
     if not repo:
-        return JSONResponse({"ok": False, "error": "No active repo"}, status_code=400)
+        return JSONResponse({"ok": False, "error": "Recorded execution repo is unavailable"}, status_code=400)
 
-    from ..services.coding_task.execution_loop import _run_git, _get_current_branch
+    from ..services.coding_task.execution_loop import acceptance_preflight, _run_git, _get_current_branch
     from pathlib import Path
 
     cwd = Path(repo.path).resolve()
-    branch = f"chili/auto/{body.run_id[:12]}"
+    branch = str(execution_metadata.get("branch") or "")
     current = _get_current_branch(cwd)
+    files_changed = sorted(
+        dict.fromkeys(
+            str(path)
+            for row in rows
+            for path in (json.loads(row.files_changed_json) if row.files_changed_json else [])
+            if str(path).strip()
+        )
+    )
+    latest = rows[-1]
 
     if body.action == "accept":
-        # Merge the auto branch into the current branch
-        if current == branch:
-            # Already on the branch, nothing to merge
-            return JSONResponse({"ok": True, "message": "Already on the auto branch"})
-        code, out = _run_git(cwd, ["merge", branch, "--no-ff", "-m", f"chili: accept autonomous run {body.run_id[:12]}"])
+        preflight = acceptance_preflight(
+            cwd,
+            run_id=body.run_id,
+            execution_metadata=execution_metadata,
+            files_changed=files_changed,
+            final_state=str(latest.state or ""),
+            test_exit_code=latest.test_exit_code,
+        )
+        if not preflight["ok"]:
+            return JSONResponse(
+                {"ok": False, "error": preflight["reason"], "preflight": preflight},
+                status_code=409,
+            )
+        code, out = _run_git(cwd, ["merge", "--ff-only", branch])
         if code != 0:
             return JSONResponse({"ok": False, "error": f"Merge failed: {out}"}, status_code=400)
-        # Clean up the branch
         _run_git(cwd, ["branch", "-d", branch])
         return JSONResponse({"ok": True, "message": "Changes merged successfully"})
 
     elif body.action == "reject":
-        # Delete the auto branch
         if current == branch:
-            _run_git(cwd, ["checkout", "-"])
-        _run_git(cwd, ["branch", "-D", branch])
+            return JSONResponse(
+                {"ok": False, "error": "Refusing to delete the branch currently checked out by the operator."},
+                status_code=409,
+            )
+        code, out = _run_git(cwd, ["branch", "-D", branch])
+        if code != 0:
+            return JSONResponse({"ok": False, "error": f"Reject failed: {out}"}, status_code=400)
         return JSONResponse({"ok": True, "message": "Changes rejected and branch deleted"})
 
     return JSONResponse({"ok": False, "error": f"Unknown action: {body.action}"}, status_code=400)

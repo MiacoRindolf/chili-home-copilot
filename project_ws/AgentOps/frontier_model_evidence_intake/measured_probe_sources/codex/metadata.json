@@ -1,0 +1,12 @@
+{
+  "model_name": "gpt-5.5",
+  "prompt_pack_file": "prompt_pack.md",
+  "prompt_pack_sha256": "5e927a48d3757fe3a3cb7535b3e0081b854846ef88c32983b5d97f41a2c4b1f1",
+  "raw_dir": "raw",
+  "recorded_at": "2026-07-03T23:32:02.852467Z",
+  "recorder": "autopilot_frontier_source_evidence_recorder",
+  "run_id": "codex-gpt-5.5-thread-20260703-frontier-evidence",
+  "source_command": "Codex Desktop thread 019e84ac-de67-75b1-93a6-bb523c3c1914 response-only frontier evidence import",
+  "source_kind": "codex",
+  "transcript_file": "transcript.jsonl"
+}

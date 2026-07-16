@@ -1,0 +1,7823 @@
+"""Background scheduler for continuous trading AI learning.
+
+Runs learning cycles (scan → snapshot → backfill → mine → journal)
+automatically on a schedule so the AI Brain is always growing.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import func
+
+from .trading.alert_formatter import (
+    format_crypto_breakout,
+    format_momentum,
+    format_stock_breakout,
+)
+
+logger = logging.getLogger(__name__)
+
+_scheduler: BackgroundScheduler | None = None
+_lock = threading.Lock()
+
+_VIABILITY_BRIDGE_MAX_TICKERS = 30
+# Uncapped-bridge chunk size: the pipeline tick caps each call's symbols at 32
+# (raising that cap = an OHLCV-fetch storm), so the uncapped bridge instead
+# processes the full universe in CHUNKS of this size, committing PER CHUNK to
+# avoid the long idle-in-transaction / deadlock class (#561/#610 lessons).
+_VIABILITY_BRIDGE_CHUNK = 32
+_BASELINE_AUDIT_SKIP_JOB_IDS = frozenset({"neural_mesh_drain"})
+
+# ── S1 event-driven feeder state (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5) ────────
+# In-process high-water mark for the tape-delta ignite job: only tape rows with
+# observed_at > this are read each run (an incremental DELTA, NOT a full rescan).
+# The job advances it to the max observed_at it saw. A small CACHED field snapshot
+# (the last batch's {symbol: ross_signal} dict) preserves percentile context when a
+# single crosser is scored. Guarded by a lock; module-local so a restart resets it
+# (first run after restart reads from the lookback floor, not the whole table).
+_tape_delta_state_lock = threading.Lock()
+_tape_delta_hwm: "datetime | None" = None
+_tape_delta_last_run_monotonic: float = 0.0
+_tape_delta_field_snapshot: dict = {}
+
+
+def _tape_delta_set_field_snapshot(signals: dict) -> None:
+    """Cache the last batch's {symbol: ross_signal} dict so the tape-delta ignite job
+    can score a single crosser against the SAME field for percentile context. Called by
+    the equity viability-refresh batch (the field source). Best-effort; bounded copy."""
+    if not isinstance(signals, dict) or not signals:
+        return
+    try:
+        snap = {str(k).strip().upper(): v for k, v in signals.items() if k}
+    except Exception:
+        return
+    with _tape_delta_state_lock:
+        global _tape_delta_field_snapshot
+        _tape_delta_field_snapshot = snap
+
+
+def _should_write_scheduler_baseline_audit(job_id: str) -> bool:
+    return str(job_id or "").strip() not in _BASELINE_AUDIT_SKIP_JOB_IDS
+
+
+def _memory_watcher_interval_seconds(settings_obj) -> int:
+    return max(60, int(getattr(settings_obj, "chili_memory_watcher_interval_s", 300)))
+
+
+def _learning_status_blocks_market_snapshots(
+    status: dict,
+    settings_obj,
+) -> tuple[bool, str]:
+    """Return whether a reported learning cycle should defer OHLCV snapshots."""
+    if not status.get("running"):
+        return False, "learning_idle"
+
+    stale_s = max(
+        300,
+        int(getattr(settings_obj, "learning_cycle_stale_seconds", 10800) or 10800),
+    )
+    started_raw = status.get("started_at")
+    if not started_raw:
+        return True, "learning_running_without_started_at"
+
+    try:
+        started = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()
+    except Exception:
+        return True, "learning_running_unparseable_started_at"
+
+    if age_s > stale_s:
+        return False, f"stale_learning_running_age_s={int(age_s)}"
+    return True, f"learning_running_age_s={int(age_s)}"
+
+
+def _record_batch_job_failure_resilient(
+    db,
+    *,
+    session_factory: Callable[[], object],
+    finish_fn: Callable[..., None],
+    job_id: str,
+    error: BaseException | str,
+    log_label: str,
+) -> str:
+    """Record batch-job failure after a job may have poisoned its DB session.
+
+    Long scanner jobs can lose their Postgres socket mid-transaction. SQLAlchemy
+    then requires a rollback before any reconnect attempt; if that primary
+    session cannot recover, use a fresh session so ops still gets a failure row.
+    """
+    from ..db import recover_session_after_db_error
+
+    err_text = str(error)[:2000]
+    recover_session_after_db_error(
+        db,
+        error if isinstance(error, BaseException) else None,
+        logger=logger,
+        context=f"[scheduler] {log_label} primary",
+    )
+
+    try:
+        finish_fn(db, job_id, ok=False, error=err_text)
+        db.commit()
+        return "primary_session"
+    except Exception as primary_exc:
+        logger.exception(
+            "[scheduler] Failed to record %s batch job failure on primary session",
+            log_label,
+        )
+        recover_session_after_db_error(
+            db,
+            primary_exc,
+            logger=logger,
+            context=f"[scheduler] {log_label} primary failure-record",
+        )
+
+    fallback_db = None
+    try:
+        fallback_db = session_factory()
+        finish_fn(fallback_db, job_id, ok=False, error=err_text)
+        fallback_db.commit()
+        return "fresh_session"
+    except Exception:
+        logger.exception(
+            "[scheduler] Failed to record %s batch job failure on fresh session",
+            log_label,
+        )
+        if fallback_db is not None:
+            try:
+                fallback_db.rollback()
+            except Exception:
+                logger.debug(
+                    "[scheduler] %s fresh-session rollback failed",
+                    log_label,
+                    exc_info=True,
+                )
+        return "failed"
+    finally:
+        if fallback_db is not None:
+            try:
+                fallback_db.close()
+            except Exception:
+                pass
+
+
+def _finish_wrapper_batch_job_resilient(
+    db,
+    *,
+    session_factory: Callable[[], object],
+    finish_fn: Callable[..., None],
+    job_id: str,
+    ok: bool,
+    error: str | None = None,
+    meta: dict | None = None,
+    log_label: str,
+) -> str:
+    """Finish a scheduler-wrapper batch row even after the primary DB session breaks."""
+    from ..db import recover_session_after_db_error
+
+    meta_payload = dict(meta or {})
+    try:
+        finish_fn(db, job_id, ok=ok, error=error, meta=meta_payload)
+        db.commit()
+        return "primary_session"
+    except Exception as primary_exc:
+        logger.debug(
+            "[scheduler_job] %s primary batch_job_finish failed; retrying fresh session",
+            log_label,
+            exc_info=True,
+        )
+        recover_session_after_db_error(
+            db,
+            primary_exc,
+            logger=logger,
+            context=f"[scheduler_job] {log_label} primary finish",
+        )
+
+    fallback_db = None
+    try:
+        fallback_db = session_factory()
+        fallback_meta = dict(meta_payload)
+        fallback_meta["finish_session"] = "fresh_session"
+        finish_fn(fallback_db, job_id, ok=ok, error=error, meta=fallback_meta)
+        fallback_db.commit()
+        return "fresh_session"
+    except Exception:
+        logger.warning(
+            "[scheduler_job] %s fresh-session batch_job_finish failed",
+            log_label,
+            exc_info=True,
+        )
+        if fallback_db is not None:
+            try:
+                fallback_db.rollback()
+            except Exception:
+                logger.debug(
+                    "[scheduler_job] %s fresh-session rollback failed",
+                    log_label,
+                    exc_info=True,
+                )
+        return "failed"
+    finally:
+        if fallback_db is not None:
+            try:
+                fallback_db.close()
+            except Exception:
+                pass
+
+
+def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
+    """Run a scheduler callback with structured logs + brain_batch_jobs row;
+    swallow exceptions after logging.
+
+    APScheduler must not crash the process on job failure; failures are recorded
+    with ``logger.exception`` and a duration field for ops triage.
+
+    FIX (round 10, 2026-04-30): every guarded job now writes a baseline
+    brain_batch_jobs row (job_type=job_id) with status=ok/failed and
+    duration. Audit found 31 of 39 scheduled jobs were running but had
+    no operator-visible audit row. This wrapper closes the gap for all
+    of them in one place. Jobs that ALSO call brain_batch_job_begin/finish
+    inside _work() will write a second, richer row -- harmless duplication.
+
+    The batch_job write is fenced so a DB error never blocks the job
+    itself. Per the no-hardcoded-fallback rule: failure to record the
+    audit row is logged but not surfaced as a job failure.
+    """
+    import gc
+
+    t0 = time.monotonic()
+    logger.info("[scheduler_job] job_id=%s phase=start", job_id)
+
+    # Open a baseline batch_job row for ops visibility. Best-effort.
+    _wrapper_jid = None
+    _wrapper_db = None
+    if _should_write_scheduler_baseline_audit(job_id):
+        try:
+            from ..db import SessionLocal as _SL
+            from .trading.brain_batch_job_log import (
+                brain_batch_job_begin as _bbj_begin,
+                brain_batch_job_finish as _bbj_finish,
+            )
+            from ..config import settings as _s
+            _uid = getattr(_s, "brain_default_user_id", None)
+            _wrapper_db = _SL()
+            _wrapper_jid = _bbj_begin(_wrapper_db, job_id, user_id=_uid)
+            _wrapper_db.commit()
+        except Exception:
+            logger.debug(
+                "[scheduler_job] job_id=%s baseline batch_job_begin failed; "
+                "job will run without operator-visible audit row",
+                job_id,
+                exc_info=True,
+            )
+            if _wrapper_db is not None:
+                try:
+                    _wrapper_db.close()
+                except Exception:
+                    pass
+                _wrapper_db = None
+            _wrapper_jid = None
+    else:
+        logger.debug(
+            "[scheduler_job] job_id=%s baseline batch_job skipped reason=high_frequency",
+            job_id,
+        )
+
+    try:
+        fn()
+    except Exception as exc:
+        dur_ms = int((time.monotonic() - t0) * 1000)
+        logger.exception(
+            "[scheduler_job] job_id=%s phase=fail duration_ms=%s",
+            job_id,
+            dur_ms,
+        )
+        if _wrapper_jid is not None and _wrapper_db is not None:
+            _finish_wrapper_batch_job_resilient(
+                _wrapper_db,
+                session_factory=_SL,
+                finish_fn=_bbj_finish,
+                job_id=_wrapper_jid,
+                ok=False,
+                error=str(exc)[:500],
+                meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
+                log_label=f"job_id={job_id} finish_failed",
+            )
+        if _wrapper_db is not None:
+            try:
+                _wrapper_db.close()
+            except Exception:
+                pass
+        gc.collect()
+        return
+    dur_ms = int((time.monotonic() - t0) * 1000)
+    logger.info(
+        "[scheduler_job] job_id=%s phase=ok duration_ms=%s",
+        job_id,
+        dur_ms,
+    )
+    if _wrapper_jid is not None and _wrapper_db is not None:
+        _finish_wrapper_batch_job_resilient(
+            _wrapper_db,
+            session_factory=_SL,
+            finish_fn=_bbj_finish,
+            job_id=_wrapper_jid,
+            ok=True,
+            meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
+            log_label=f"job_id={job_id} finish_ok",
+        )
+    if _wrapper_db is not None:
+        try:
+            _wrapper_db.close()
+        except Exception:
+            pass
+    gc.collect()
+
+
+def _run_daily_prescreen_job():
+    """Persist global prescreen candidates (~2 AM America/Los_Angeles)."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "brain_prescreen_scheduler_enabled", True):
+        return
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.prescreen_job import run_daily_prescreen_job as _prescreen_run
+
+        db = SessionLocal()
+        try:
+            result = _prescreen_run(db)
+            logger.info("[scheduler] Daily prescreen result: %s", result)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("daily_prescreen", _work)
+
+
+def _run_nightly_replay_regression_job():
+    """Nightly replay regression tripwire (~18:00 America/Los_Angeles, after the
+    data session ends): re-run TODAY through the replay engine on tonight's code
+    and diff vs what the live lane actually did — catches "we broke entries"
+    the evening BEFORE the next open instead of during it."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "chili_momentum_replay_regression_enabled", True):
+        return
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.momentum_neural.replay_regression import run_nightly_replay_regression
+
+        db = SessionLocal()
+        try:
+            report = run_nightly_replay_regression(db)
+            logger.info("[scheduler] nightly replay regression: flags=%s", report.get("flags"))
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("nightly_replay_regression", _work)
+
+
+def _run_daily_trading_brief_job():
+    """Generate + persist per-user daily trading brief (~17:00 America/Los_Angeles).
+
+    Read-only/report job: reuses the on-demand brief stack
+    (trading_summary -> trading_brief -> visual_report) to write one HTML file
+    per user. Dormant unless chili_daily_trading_brief_enabled. Touches no broker
+    or live trading state; per-user fault isolation lives in the brief module.
+    """
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "chili_daily_trading_brief_enabled", False):
+        return
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.daily_trading_brief import run_daily_brief_for_all_users
+
+        out_dir = getattr(_settings, "chili_daily_trading_brief_dir", "data/briefs")
+        try:
+            window = max(1, int(getattr(_settings, "chili_daily_trading_brief_window_hours", 24)))
+        except (TypeError, ValueError):
+            window = 24
+        db = SessionLocal()
+        try:
+            result = run_daily_brief_for_all_users(db, out_dir, window_hours=window)
+            logger.info("[scheduler] Daily trading brief result: %s", result)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("daily_trading_brief", _work)
+
+
+def _run_daily_market_scan_job():
+    """Full market scan over prescreen DB rows (~2:30 AM America/Los_Angeles)."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "brain_daily_market_scan_scheduler_enabled", True):
+        return
+
+    from ..db import SessionLocal
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import clear_scanner_caches, run_full_market_scan
+
+    def _work() -> None:
+        db = SessionLocal()
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        job_id = brain_batch_job_begin(db, "daily_market_scan", user_id=_uid)
+        db.commit()
+        try:
+            results = run_full_market_scan(db, _uid, use_full_universe=True)
+            brain_batch_job_finish(
+                db,
+                job_id,
+                ok=True,
+                meta={
+                    "tickers_scored": len(results),
+                    "user_id": _uid,
+                },
+            )
+            db.commit()
+            logger.info("[scheduler] Daily market scan done: %s scored", len(results))
+        except Exception as e:
+            logger.exception("[scheduler] Daily market scan failed")
+            record_mode = _record_batch_job_failure_resilient(
+                db,
+                session_factory=SessionLocal,
+                finish_fn=brain_batch_job_finish,
+                job_id=job_id,
+                error=e,
+                log_label="daily_market_scan",
+            )
+            logger.info(
+                "[scheduler] Daily market scan failure record mode=%s job_id=%s",
+                record_mode,
+                job_id,
+            )
+            raise
+        finally:
+            clear_scanner_caches()
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("daily_market_scan", _work)
+
+
+def _run_brain_market_snapshot_job():
+    """Write daily + intraday ``trading_snapshots`` (decoupled from ``run_learning_cycle`` by default)."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "brain_market_snapshot_scheduler_enabled", True):
+        return
+
+    if getattr(_settings, "brain_market_snapshot_defer_while_learning_running", True):
+        try:
+            from .trading.learning import get_learning_status
+
+            _st = get_learning_status()
+            blocks_snapshots, block_reason = _learning_status_blocks_market_snapshots(
+                _st, _settings,
+            )
+            if blocks_snapshots:
+                logger.info(
+                    "[scheduler] brain_market_snapshots deferred: learning cycle running "
+                    "(%s; avoid parallel OHLCV with brain-worker; next interval will retry)",
+                    block_reason,
+                )
+                return
+            if str(block_reason).startswith("stale_learning_running"):
+                logger.warning(
+                    "[scheduler] brain_market_snapshots proceeding despite stale learning-live flag: %s",
+                    block_reason,
+                )
+        except Exception as _def_e:
+            logger.debug("[scheduler] snapshot defer check skipped: %s", _def_e)
+
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_BRAIN_MARKET_SNAPSHOTS
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading import learning as _learning
+
+    def _work() -> None:
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        db = SessionLocal()
+        jid = None
+        try:
+            jid = brain_batch_job_begin(db, JOB_BRAIN_MARKET_SNAPSHOTS, user_id=_uid)
+            db.commit()
+            out = _learning.run_scheduled_market_snapshots(db, _uid)
+            brain_batch_job_finish(db, jid, ok=True, payload_json=out, meta={})
+            try:
+                from .trading.brain_neural_mesh.publisher import publish_market_snapshots_refreshed
+
+                _snap_tickers = out.get("tickers") or []
+                publish_market_snapshots_refreshed(
+                    db,
+                    meta={
+                        "daily": out.get("snapshots_taken_daily"),
+                        "intraday": out.get("intraday_snapshots_taken"),
+                        "tickers": _snap_tickers[:_VIABILITY_BRIDGE_MAX_TICKERS],
+                    },
+                )
+            except Exception as _nm_e:
+                logger.debug("[scheduler] neural mesh snapshot publish skipped: %s", _nm_e)
+            if getattr(_settings, "brain_work_snapshots_outcome_enabled", True):
+                try:
+                    from .trading.brain_work.emitters import emit_market_snapshots_batch_outcome
+
+                    emit_market_snapshots_batch_outcome(
+                        db,
+                        daily=int(out.get("snapshots_taken_daily") or 0),
+                        intraday=int(out.get("intraday_snapshots_taken") or 0),
+                        universe_size=int(out.get("universe_size") or 0),
+                        job_id=str(jid) if jid is not None else None,
+                        snapshot_driver=out.get("snapshot_driver"),
+                    )
+                except Exception as _le:
+                    logger.debug("[scheduler] work ledger snapshot outcome skipped: %s", _le)
+            db.commit()
+            logger.info(
+                "[scheduler] brain_market_snapshots ok daily=%s intra=%s universe=%s",
+                out.get("snapshots_taken_daily"),
+                out.get("intraday_snapshots_taken"),
+                out.get("universe_size"),
+            )
+        except Exception as e:
+            logger.warning("[scheduler] brain_market_snapshots failed: %s", e, exc_info=True)
+            if jid:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] brain_market_snapshots batch finish failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("brain_market_snapshots", _work)
+
+
+def _detect_work_ledger_stalls(
+    db, thr_min: int, min_pending: int
+) -> "list[tuple[str, int, int]]":
+    """Return ``[(event_type, overdue_pending, oldest_pending_min)]`` for work types
+    whose processor has gone SILENT — overdue pending work AND zero processing in the
+    threshold window — i.e. the owning worker is dead/absent. A live handler (recent
+    ``done``) is never returned, so benign starvation of old/superseded events does
+    NOT false-positive. Pure read; easy to unit-test."""
+    from sqlalchemy import text
+
+    rows = db.execute(
+        text(
+            """
+            SELECT event_type,
+                   count(*) FILTER (
+                       WHERE status='pending'
+                         AND next_run_at < now() - make_interval(mins => :thr)
+                   ) AS overdue_pending,
+                   count(*) FILTER (
+                       WHERE status='done'
+                         AND processed_at > now() - make_interval(mins => :thr)
+                   ) AS done_recent,
+                   count(*) FILTER (WHERE status='done') AS done_ever,
+                   round(extract(epoch FROM now() - min(next_run_at)
+                         FILTER (WHERE status='pending')) / 60.0)::int AS oldest_min
+            FROM brain_work_events
+            GROUP BY event_type
+            """
+        ),
+        {"thr": int(thr_min)},
+    ).fetchall()
+    return [
+        (str(r[0]), int(r[1] or 0), int(r[4] or 0))
+        for r in rows
+        # dead processor: a historically-real type with overdue pending but ZERO
+        # processing in the window.
+        if int(r[1] or 0) >= min_pending
+        and int(r[2] or 0) == 0
+        and int(r[3] or 0) > 10
+    ]
+
+
+def _run_work_ledger_stall_watchdog_job():
+    """Catch work-ledger processors that have gone silent (dead/absent) — the failure
+    mode that stalled the backtest pipeline for 46h unnoticed (a dedicated worker
+    died on a DB hiccup with no restart policy). Surfaces LOUD (logger.error) + a
+    LearningEvent so a stall is visible in minutes, not hours."""
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from ..config import settings
+        from .trading.learning_events import log_learning_event
+
+        thr = max(15, int(getattr(settings, "chili_work_ledger_stall_threshold_minutes", 120) or 120))
+        min_pending = max(1, int(getattr(settings, "chili_work_ledger_stall_min_pending", 5) or 5))
+        db = SessionLocal()
+        try:
+            stalls = _detect_work_ledger_stalls(db, thr, min_pending)
+            if stalls:
+                detail = "; ".join(f"{t}: overdue={n} oldest={age}min" for t, n, age in stalls)
+                logger.error(
+                    "[work_ledger_watchdog] STALL DETECTED — processor(s) SILENT "
+                    "(dead/absent) for >%dmin: %s — a pipeline stage is stalled; "
+                    "check the owning worker container",
+                    thr, detail,
+                )
+                try:
+                    log_learning_event(
+                        db, None, "work_ledger_stall",
+                        f"Work-ledger stall: {detail} (no processing in {thr}min). "
+                        "A dedicated worker may be dead/absent.",
+                    )
+                except Exception:
+                    logger.debug("[work_ledger_watchdog] LearningEvent emit failed", exc_info=True)
+            else:
+                logger.info("[work_ledger_watchdog] ok — all work-ledger processors live")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("work_ledger_stall_watchdog", _work)
+
+
+def _run_paper_trade_check_job():
+    """Check open paper trades for stop/target/expiry exits, plus live exit engine recommendations."""
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.paper_trading import check_paper_exits_isolated
+
+        result = check_paper_exits_isolated(SessionLocal)
+        if result.get("closed", 0) > 0:
+            logger.info("[scheduler] Paper trades: checked %d, closed %d",
+                        result["checked"], result["closed"])
+        # Also run the live exit engine for pattern-based exit recommendations.
+        # Each helper owns short-lived sessions so quote/API loops do not keep a
+        # single scheduler transaction open across the full sweep.
+        try:
+            from .trading.live_exit_engine import run_exit_engine_isolated
+            from .trading.paper_trading import place_partial_close
+            from ..models.trading import PaperTrade as _PT
+            exit_results = run_exit_engine_isolated(SessionLocal)
+            exits = exit_results.get("actions", [])
+            if exits:
+                logger.info("[scheduler] Live exit engine: %d recommendations", len(exits))
+            # Partial-profit consumer (migration 226 wiring). The
+            # canonical evaluator emits ``action="partial"`` when a
+            # position has reached 1R, hasn't already partialed, and
+            # no terminal exit would fire. ``run_exit_engine`` routes
+            # those into a separate bucket so terminal-close logic
+            # stays unchanged.
+            for partial_rec in exit_results.get("partial_actions", []):
+                pos_id = partial_rec.get("position_id")
+                if pos_id is None:
+                    continue
+                db = SessionLocal()
+                try:
+                    pos = db.query(_PT).get(pos_id)
+                    if pos is None or pos.partial_taken:
+                        continue
+                    fraction = float(partial_rec.get("partial_close_fraction", 0.5))
+                    outcome = place_partial_close(
+                        db,
+                        pos,
+                        fraction,
+                        current_price=partial_rec.get("current_price"),
+                    )
+                    if outcome.get("ok"):
+                        logger.info(
+                            "[partial_profit_ops] position_id=%s ticker=%s "
+                            "fraction=%.2f r_multiple=%s qty=%.4f price=%.4f",
+                            pos.id, pos.ticker, fraction,
+                            partial_rec.get("r_multiple"),
+                            outcome.get("quantity"), outcome.get("price"),
+                        )
+                    else:
+                        logger.warning(
+                            "[partial_profit_ops] FAILED position_id=%s ticker=%s reason=%s",
+                            pos.id, pos.ticker, outcome.get("error"),
+                        )
+                finally:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    db.close()
+        except Exception:
+            logger.debug("[scheduler] live_exit_engine error", exc_info=True)
+
+    run_scheduler_job_guarded("paper_trade_check", _work)
+
+
+def _run_momentum_paper_runner_batch_job():
+    """Advance queued/active momentum *paper* automation sessions (simulated only; Phase 7).
+
+    Same per-tick session isolation as the live runner to avoid holding a pooled
+    connection across 30 ticks of quote fetches.
+    """
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        from .trading.momentum_neural.paper_runner import (
+            list_runnable_paper_sessions,
+            tick_paper_session,
+        )
+
+        if not _settings.chili_momentum_paper_runner_enabled:
+            return
+        if not _settings.chili_momentum_paper_runner_scheduler_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            session_ids = [int(s.id) for s in list_runnable_paper_sessions(db, limit=30)]
+        except Exception:
+            logger.warning("[scheduler] paper runner: failed to list runnable sessions", exc_info=True)
+            return
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+        if not session_ids:
+            return
+
+        ticked = 0
+        for sid in session_ids:
+            db = SessionLocal()
+            try:
+                tick_paper_session(db, sid)
+                db.commit()
+                ticked += 1
+            except Exception:
+                db.rollback()
+                logger.warning("[scheduler] paper runner tick failed session=%s", sid, exc_info=True)
+            finally:
+                # FIX 46 pattern (rollback before close).
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                db.close()
+
+        if ticked:
+            logger.info("[scheduler] Momentum paper runner: ticked %d session(s)", ticked)
+
+    run_scheduler_job_guarded("momentum_paper_runner_batch", _work)
+
+
+def _dispatch_live_runner_ticks(
+    session_ids: list[int],
+    *,
+    workers: int,
+    tick_one: Callable[[int], tuple[bool, int]],
+) -> tuple[int, dict[int, int]]:
+    """Run ``tick_one(sid) -> (ok, dur_ms)`` over *session_ids* on a bounded pool.
+
+    Each live session is network-bound (Coinbase quote/product + OHLCV
+    entry-trigger fetch, ~seconds each). The legacy implementation ticked them
+    in a serial loop, so a batch took the SERIAL SUM of those latencies and
+    overran the 30s cadence once several live sessions were open. This fans the
+    ticks out across a small pool so the batch wall-time is ~the slowest single
+    session instead of the sum.
+
+    Safety: ``tick_one`` constructs its OWN DB Session + venue adapter per call
+    (so nothing SQLAlchemy/adapter-stateful is shared across threads), the shared
+    Coinbase REST client authenticates per-request over a thread-safe connection
+    pool, and the per-session ``with_for_update(nowait=True)`` row lock inside
+    ``tick_live_session`` still prevents double-processing. This changes ONLY how
+    many sessions advance per wall-clock second — never any entry/exit/risk
+    decision for an individual session. [[project_momentum_lane]]
+
+    With ``workers <= 1`` (or a single session) this degrades to a plain serial
+    loop, byte-identical to the legacy behaviour (pinned by the parity test).
+
+    Returns ``(ticked_count, {sid: dur_ms})``. ``tick_one`` is expected to swallow
+    its own exceptions and report ``ok=False``; a stray raise is contained here so
+    one bad session can never abort the rest of the batch.
+    """
+    results: dict[int, tuple[bool, int]] = {}
+    if workers <= 1 or len(session_ids) <= 1:
+        for sid in session_ids:
+            try:
+                results[sid] = tick_one(sid)
+            except Exception:
+                results[sid] = (False, 0)
+    else:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as _ex:
+            _futs = {_ex.submit(tick_one, sid): sid for sid in session_ids}
+            for _fut in concurrent.futures.as_completed(_futs):
+                _sid = _futs[_fut]
+                try:
+                    results[_sid] = _fut.result()
+                except Exception:
+                    results[_sid] = (False, 0)
+    ticked = sum(1 for _ok, _ in results.values() if _ok)
+    timings = {sid: ms for sid, (_ok, ms) in results.items()}
+    return ticked, timings
+
+
+def _run_momentum_live_runner_batch_job():
+    """Advance queued/active momentum *live* automation sessions (real Coinbase orders — Phase 8).
+
+    Each tick gets its own DB session so Coinbase API latency doesn't hold a
+    pooled connection for the entire batch (prevents QueuePool exhaustion). The
+    ticks run on a small bounded pool (see ``_dispatch_live_runner_ticks``) so a
+    fleeting Ross break/exit is caught within the 30s cadence even with several
+    live sessions open.
+    """
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        from .trading.momentum_neural.live_runner import (
+            cleanup_leaked_lane_locks,
+            plan_live_runner_batch_sessions,
+            tick_live_session,
+        )
+
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+        if not _settings.chili_momentum_live_runner_scheduler_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            # Once-per-batch janitor: reap any momentum-lane advisory lock orphaned by
+            # a force-killed worker (decouple B1). Only the decoupled path takes that
+            # lock, so this is a no-op when the flag is off. Runs on the short-lived
+            # listing session before the SELECT; best-effort, never raises.
+            if bool(getattr(_settings, "chili_momentum_decouple_watching_enabled", False)):
+                try:
+                    cleanup_leaked_lane_locks(db)
+                except Exception:
+                    logger.debug("[scheduler] lane-lock janitor failed", exc_info=True)
+            # Fetch limit. Legacy = 15 (byte-identical). Decoupled: the funnel fans
+            # out to watch_fanout_max WATCHERS, and every HELD position must also be
+            # ticked (its stop/trail is managed in tick_live_session) — so the limit
+            # must clear fanout + the held-position ceiling + slack, or a held name
+            # would silently stop being managed. This only widens the SELECT; tick
+            # PARALLELISM stays bounded by the worker pool below (the 429 throttle).
+            if bool(getattr(_settings, "chili_momentum_decouple_watching_enabled", False)):
+                _entry_cap = int(getattr(_settings, "chili_momentum_risk_max_concurrent_live_sessions", 5) or 5)
+                _rl = (
+                    int(getattr(_settings, "chili_momentum_watch_fanout_max", 15) or 15)
+                    + int(getattr(_settings, "chili_momentum_max_open_positions_ceiling", 20) or 20)
+                    + max(1, _entry_cap)
+                )
+            else:
+                _rl = 15
+            _plan = plan_live_runner_batch_sessions(db, limit=_rl)
+            if _plan.get("prefilter_results"):
+                db.commit()
+            session_ids = [int(sid) for sid in _plan.get("session_ids", [])]
+            session_syms = {str(sym).upper() for sym in _plan.get("symbols", []) if sym}
+            prefiltered = len(_plan.get("prefilter_results", []) or [])
+            candidates_seen = int(_plan.get("candidate_count", len(session_ids)) or 0)
+        except Exception:
+            logger.warning("[scheduler] live runner: failed to list runnable sessions", exc_info=True)
+            return
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+        if not session_ids:
+            if prefiltered:
+                logger.info(
+                    "[scheduler] Momentum live runner: prefiltered %d/%d dead pre-entry row(s); "
+                    "no useful session consumed capacity",
+                    prefiltered,
+                    candidates_seen,
+                )
+            return
+
+        # Keep the real-time feed pointed at what we're actually trading: subscribe
+        # every runnable symbol on the price bus (stocks -> Massive WS, crypto ->
+        # Coinbase WS). Idempotent + best-effort; no-op when the WS isn't running.
+        try:
+            from .trading.price_bus import get_price_bus
+
+            _pb = get_price_bus()
+            for _sym in session_syms:
+                _pb.subscribe_symbol(_sym)
+        except Exception:
+            pass
+
+        # Bound the pool by the live concurrency cap — no second magic number; an
+        # explicit override knob wins when > 0. Never more workers than sessions.
+        _cap = int(getattr(_settings, "chili_momentum_live_runner_batch_workers", 0) or 0)
+        if _cap <= 0:
+            _cap = int(getattr(_settings, "chili_momentum_risk_max_concurrent_live_sessions", 5) or 5)
+        workers = max(1, min(_cap, len(session_ids)))
+
+        def _tick_one(sid: int) -> tuple[bool, int]:
+            """Tick one live session on its OWN DB Session. Returns (ok, dur_ms)."""
+            _t0 = time.monotonic()
+            db_s = SessionLocal()
+            ok = False
+            try:
+                tick_live_session(db_s, sid)
+                db_s.commit()
+                ok = True
+            except Exception:
+                db_s.rollback()
+                logger.warning("[scheduler] live runner tick failed session=%s", sid, exc_info=True)
+            finally:
+                # FIX 46 pattern (rollback before close).
+                try:
+                    db_s.rollback()
+                except Exception:
+                    pass
+                db_s.close()
+            return ok, int((time.monotonic() - _t0) * 1000)
+
+        _wall0 = time.monotonic()
+        ticked, timings = _dispatch_live_runner_ticks(
+            session_ids, workers=workers, tick_one=_tick_one
+        )
+        _wall_ms = int((time.monotonic() - _wall0) * 1000)
+
+        if timings:
+            # Profiling-grade, ONE line per batch (no per-session spam): wall is the
+            # batch wall-clock; work_sum is what the OLD serial loop would have cost;
+            # slowest is the single tail session. Healthy parallelism => wall ~ slowest
+            # << work_sum. Makes a 30s overrun visible the moment it returns.
+            _work_sum = sum(timings.values())
+            _slowest_sid = max(timings, key=timings.get)
+            logger.info(
+                "[scheduler] Momentum live runner: ticked %d/%d session(s) "
+                "wall=%dms work_sum=%dms slowest=%dms(sid=%s) workers=%d prefiltered=%d candidates=%d",
+                ticked,
+                len(session_ids),
+                _wall_ms,
+                _work_sum,
+                timings[_slowest_sid],
+                _slowest_sid,
+                workers,
+                prefiltered,
+                candidates_seen,
+            )
+
+    run_scheduler_job_guarded("momentum_live_runner_batch", _work)
+
+
+def _run_nbbo_spread_sample_job():
+    """Persist the CLEAN consolidated bid/ask (Massive snapshot lastQuote) for the
+    Ross universe into the NBBO spread tape, so the spread-sensitive replay uses REAL
+    spreads, not a proxy (the proxy read PAVS at 53bps vs the 317bps the lane saw).
+    RTH-gated + best-effort inside the sampler; own DB session. (nbbo_tape.py)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        if not getattr(_settings, "chili_momentum_nbbo_tape_enabled", True):
+            return
+        from .trading.momentum_neural.nbbo_tape import sample_universe_nbbo_spreads
+        db = SessionLocal()
+        try:
+            sample_universe_nbbo_spreads(db)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_nbbo_sample", _work)
+
+
+def _run_nbbo_spread_prune_job():
+    """Trim NBBO-tape rows older than the retention window (the exit_parity_log bloat
+    lesson). Cheap via the observed_at index; own DB session; best-effort."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        if not getattr(_settings, "chili_momentum_nbbo_tape_enabled", True):
+            return
+        from .trading.momentum_neural.nbbo_tape import prune_nbbo_tape
+        db = SessionLocal()
+        try:
+            prune_nbbo_tape(db)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_nbbo_prune", _work)
+
+
+# Change-only dedupe for auto-arm SKIP logging: the arm pass runs every 30s, so
+# logging every no-trade tick would audit-spam. We surface a compact line only
+# when the skip decision's SHAPE shifts — making "why isn't the Ross lane
+# trading?" observable without the noise. Process-local; resets on restart.
+_auto_arm_last_skip_sig: "str | None" = None
+
+
+def _run_momentum_auto_arm_live_job():
+    """Autonomously arm ONE live momentum session for the candidate whose entry
+    trigger is firing now (Ross-style), fully guarded via the operator arm flow.
+    (trading.momentum_neural.auto_arm.run_auto_arm_pass)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_momentum_auto_arm_live_enabled", True):
+            return
+        if not getattr(_settings, "chili_momentum_auto_arm_live_scheduler_enabled", True):
+            return
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.auto_arm import run_auto_arm_pass
+            from .trading.momentum_neural.lane_health import record_auto_arm_run
+
+            # Heartbeat: prove the pass actually executed so lane-health can tell a
+            # wedged/dead auto-arm job from a legitimately quiet market.
+            record_auto_arm_run()
+            summary = run_auto_arm_pass(db)
+            db.commit()
+            if summary.get("armed") or summary.get("begin_error") or summary.get("confirm_error"):
+                logger.info("[scheduler] auto_arm: %s", summary)
+            else:
+                # Observability: surface WHY the lane isn't arming (no_active_trigger
+                # / busy / faded / daily_loss_cap / ...) — the #1 question when tuning
+                # the Ross lane — but change-only so steady "nothing to do" ticks stay
+                # quiet. Emits on every transition (counts or skip-reason shift).
+                global _auto_arm_last_skip_sig
+                _sig = "|".join(
+                    str(summary.get(k))
+                    for k in ("skipped", "scanned", "busy_skipped", "faded_skipped", "chosen_firing")
+                )
+                if _sig != _auto_arm_last_skip_sig:
+                    _auto_arm_last_skip_sig = _sig
+                    logger.info(
+                        "[scheduler] auto_arm skip=%s scanned=%s busy=%s faded=%s near_score=%s firing=%s",
+                        summary.get("skipped"),
+                        summary.get("scanned"),
+                        summary.get("busy_skipped"),
+                        summary.get("faded_skipped"),
+                        summary.get("chosen_fresh_score"),
+                        summary.get("chosen_firing"),
+                    )
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] auto_arm pass failed", exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_auto_arm_live", _work)
+
+
+def _run_lane_health_check_job():
+    """Watch the momentum lane for a SILENT freeze (the 2026-06-15 incident: the global
+    daily-loss kill switch tripped at 05:18 ET and the lane sat empty ~8h before the
+    operator noticed). When a safety breaker has held the lane idle past the adaptive
+    grace window, emit a LOUD signal — logger.critical + a cockpit banner (via the P&L
+    rollup) + an audit row — so a tripped breaker is never silent.
+    (trading.momentum_neural.lane_health.run_lane_health_check)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_lane_health_alert_enabled", True):
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.lane_health import run_lane_health_check
+
+            run_lane_health_check(db)
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] lane_health check failed", exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("lane_health_check", _work)
+
+
+def _run_momentum_post_exit_excursion_job():
+    """Label recently-closed momentum trades against their post-exit price path so
+    the learner sees CORRECT data (shake-out vs thesis-fail), not a shallow loss.
+    (trading.momentum_neural.post_exit_excursion.run_post_exit_excursion_pass)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.post_exit_excursion import run_post_exit_excursion_pass
+
+            summary = run_post_exit_excursion_pass(db)
+            # Surface whenever the pass touched OR retired a marker (not only on a
+            # successful label) so a silent stall — markers checked/expired/errored
+            # but never labeled — is observable instead of invisible.
+            if any(summary.get(k) for k in ("labeled", "shakeouts", "checked", "expired", "errors")):
+                logger.info("[scheduler] post_exit_excursion: %s", summary)
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] post_exit_excursion pass failed", exc_info=True)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_post_exit_excursion", _work)
+
+
+def _run_neural_mesh_drain_job():
+    """Drain the neural-mesh activation queue.
+
+    Without this, enqueued events (stop_eval, pattern_health, learning-cycle
+    completions, brain_work_outcome, …) pile up until MAX_PENDING_QUEUE_DEPTH
+    (500) is reached, at which point every subsequent enqueue is rejected and
+    the mesh stops receiving signals. The runner was previously only reachable
+    via POST /api/trading/brain/graph/propagate, so in practice nothing drained
+    it and the queue saturated within ~36h of live traffic.
+    """
+
+    def _work() -> None:
+        from sqlalchemy import text
+
+        from ..db import SessionLocal
+        from .trading.brain_neural_mesh.activation_runner import run_activation_batch
+
+        db = SessionLocal()
+        try:
+            # Recover orphaned 'processing' rows (claimed by a worker that
+            # crashed before marking them done). Without this, a process
+            # crash permanently removes events from circulation.
+            orphaned = db.execute(
+                text(
+                    "UPDATE brain_activation_events "
+                    "SET status='pending' "
+                    "WHERE status='processing' "
+                    "  AND created_at < now() - interval '10 minutes'"
+                )
+            ).rowcount
+            if orphaned:
+                logger.warning(
+                    "[scheduler] neural_mesh_drain: recovered %d orphaned processing rows",
+                    orphaned,
+                )
+                db.commit()
+
+            summary = run_activation_batch(db, time_budget_sec=3.0, max_events=32)
+            db.commit()
+            if summary.get("processed", 0) > 0:
+                logger.info(
+                    "[scheduler] neural_mesh_drain: processed=%d fires=%d inhibitions=%d "
+                    "downstream=%d took_ms=%.1f",
+                    summary.get("processed", 0),
+                    summary.get("fires", 0),
+                    summary.get("inhibitions", 0),
+                    summary.get("downstream", 0),
+                    float(summary.get("elapsed_sec", 0.0)) * 1000.0,
+                )
+        except Exception:
+            logger.exception("[scheduler] neural_mesh_drain failed")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("neural_mesh_drain", _work)
+
+
+def _run_bracket_reconciliation_job():
+    """Phase G - periodic shadow-mode bracket reconciliation sweep."""
+
+    def _work() -> None:
+        from ..config import settings as _cfg
+        mode = (getattr(_cfg, "brain_live_brackets_mode", "off") or "off").lower()
+        if mode == "off":
+            return
+        # Round 23 (2026-04-30): authoritative mode is now permitted; the
+        # service-layer run_reconciliation_sweep enforces the
+        # chili_bracket_sweep_writer_enabled gate and falls back to shadow
+        # when the writer flag is off. Phase G.2 wiring is live.
+        from ..db import SessionLocal
+        from .trading.bracket_reconciliation_service import (
+            broker_manager_view_fn,
+            run_reconciliation_sweep,
+        )
+
+        db = SessionLocal()
+        try:
+            summary = run_reconciliation_sweep(db, broker_view_fn=broker_manager_view_fn)
+            logger.info(
+                "[scheduler] bracket_reconciliation sweep done: "
+                "trades=%d brackets=%d agree=%d drift=%d took_ms=%.1f",
+                summary.trades_scanned,
+                summary.brackets_checked,
+                summary.agree,
+                (
+                    summary.orphan_stop + summary.missing_stop + summary.qty_drift
+                    + summary.state_drift + summary.price_drift + summary.broker_down
+                    + summary.unreconciled
+                ),
+                summary.took_ms,
+            )
+        except Exception:
+            logger.exception("[scheduler] bracket_reconciliation sweep failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("bracket_reconciliation", _work)
+
+
+def _run_capital_reweight_weekly_job():
+    """Phase I - weekly capital re-weight sweep (shadow mode only).
+
+    Gated by ``brain_capital_reweight_mode != off`` and hard-refused
+    when the mode is ``authoritative`` (Phase I.2 will open that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+
+        mode = (getattr(settings, "brain_capital_reweight_mode", "off") or "off").lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] capital_reweight_weekly skipped: mode=authoritative "
+                    "(Phase I is shadow-only; Phase I.2 required to enable)",
+                )
+            return
+        from datetime import date as _date
+        from ..db import SessionLocal
+        from .trading.capital_reweight_model import BucketContext
+        from .trading.capital_reweight_service import run_sweep
+        from .trading.risk_dial_service import get_latest_dial
+
+        db = SessionLocal()
+        try:
+            # Shadow sweep: one global row per week using active-user
+            # snapshot. Per-user fan-out is Phase I.2. We still use the
+            # risk-dial read path so the sweep is tilted by the current
+            # dial when it is active.
+            from sqlalchemy import text as _text
+
+            rows = db.execute(_text("""
+                SELECT
+                    CASE
+                        WHEN UPPER(ticker) LIKE '%-USD'
+                          OR UPPER(ticker) LIKE '%USD'
+                          OR UPPER(ticker) LIKE '%USDT'
+                          OR UPPER(ticker) LIKE '%USDC'
+                        THEN 'crypto:majors'
+                        ELSE 'equity:default'
+                    END AS bucket,
+                    COALESCE(SUM(entry_price * quantity), 0) AS notional
+                FROM trading_paper_trades
+                WHERE status = 'open'
+                GROUP BY 1
+            """)).fetchall()
+            buckets = tuple(
+                BucketContext(
+                    name=str(r[0]),
+                    current_notional=float(r[1] or 0.0),
+                    volatility=1.0 if str(r[0]).startswith("equity") else 2.0,
+                )
+                for r in rows
+            )
+            if not buckets:
+                logger.info("[scheduler] capital_reweight_weekly: no open buckets")
+                return
+            total_capital = float(
+                getattr(settings, "brain_capital_reweight_total_capital_default", 100_000.0)
+            )
+            dial = get_latest_dial(db, user_id=None, default=1.0)
+            res = run_sweep(
+                db,
+                user_id=None,
+                as_of_date=_date.today(),
+                total_capital=total_capital,
+                regime=None,
+                dial_value=float(dial),
+                buckets=buckets,
+            )
+            if res is None:
+                logger.info("[scheduler] capital_reweight_weekly: mode=off, skipped")
+                return
+            logger.info(
+                "[scheduler] capital_reweight_weekly sweep done: "
+                "reweight_id=%s mode=%s mean_drift_bps=%.1f p90_drift_bps=%.1f",
+                res.reweight_id,
+                res.mode,
+                res.mean_drift_bps,
+                res.p90_drift_bps,
+            )
+        except Exception:
+            logger.exception("[scheduler] capital_reweight_weekly sweep failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("capital_reweight_weekly", _work)
+
+
+def _run_drift_monitor_daily_job():
+    """Phase J - daily drift-monitor sweep (shadow mode only).
+
+    Iterates active ``scan_patterns`` (lifecycle in ``promoted`` /
+    ``live``) and, for each, reads the baseline win-probability from
+    ``oos_win_rate`` (fallback ``win_rate``) and the recent closed
+    paper-trade sample (bucketed by ``pnl > 0`` → 1 else 0). Writes
+    one row per pattern to ``trading_pattern_drift_log`` and, when
+    the row is ``red`` severity and the re-cert queue is active,
+    one row to ``trading_pattern_recert_log``.
+
+    Gated by ``brain_drift_monitor_mode != off`` and hard-refused
+    when the mode is ``authoritative`` (Phase J.2 will open that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (getattr(settings, "brain_drift_monitor_mode", "off") or "off").lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] drift_monitor_daily skipped: mode=authoritative "
+                    "(Phase J is shadow-only; Phase J.2 required to enable)",
+                )
+            return
+        from datetime import date as _date
+        from ..db import SessionLocal, rollback_if_poisoned
+        from .trading.drift_monitor_service import (
+            DriftInputBundle,
+            run_sweep as _drift_run_sweep,
+        )
+        from .trading.recert_queue_service import (
+            mode_is_active as _recert_mode_is_active,
+            queue_from_drift,
+        )
+        from .trading.drift_monitor_model import (
+            DriftMonitorInput,
+            compute_drift,
+        )
+
+        db = SessionLocal()
+        try:
+            from sqlalchemy import text as _text
+            lookback_days = int(
+                getattr(settings, "brain_drift_monitor_sample_lookback_days", 30)
+            )
+            patterns = db.execute(_text("""
+                SELECT id, name,
+                       COALESCE(oos_win_rate, win_rate) AS baseline
+                FROM scan_patterns
+                WHERE active = TRUE
+                  AND lifecycle_stage IN ('promoted', 'live')
+                  AND COALESCE(oos_win_rate, win_rate) IS NOT NULL
+            """)).fetchall()
+            if not patterns:
+                logger.info("[scheduler] drift_monitor_daily: no eligible patterns")
+                return
+
+            bundles: list[DriftInputBundle] = []
+            for pid, pname, baseline in patterns:
+                sample_rows = db.execute(_text("""
+                    SELECT CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END
+                    FROM trading_paper_trades
+                    WHERE scan_pattern_id = :pid
+                      AND status = 'closed'
+                      AND exit_date IS NOT NULL
+                      AND exit_date >= NOW() - (:ld || ' days')::INTERVAL
+                    ORDER BY exit_date ASC
+                """), {"pid": int(pid), "ld": int(lookback_days)}).fetchall()
+                outcomes = [int(r[0] or 0) for r in sample_rows]
+                bundles.append(DriftInputBundle(
+                    scan_pattern_id=int(pid),
+                    pattern_name=pname,
+                    baseline_win_prob=float(baseline) if baseline is not None else None,
+                    outcomes=outcomes,
+                ))
+
+            today = _date.today()
+            rows = _drift_run_sweep(
+                db, bundles=bundles, as_of_date=today,
+            )
+            red_count = sum(1 for r in rows if r.severity == "red")
+            logger.info(
+                "[scheduler] drift_monitor_daily sweep done: "
+                "patterns=%d rows_written=%d red=%d mode=%s",
+                len(bundles), len(rows), red_count, mode,
+            )
+
+            # Fan out red rows to the re-cert queue when it is active.
+            if _recert_mode_is_active():
+                for r in rows:
+                    if r.severity != "red":
+                        continue
+                    # Re-derive the pure output for the proposal path so
+                    # we can pass it to queue_from_drift without re-reading
+                    # the row.
+                    bundle = next(
+                        (b for b in bundles if b.scan_pattern_id == r.scan_pattern_id),
+                        None,
+                    )
+                    if bundle is None:
+                        continue
+                    drift_out = compute_drift(DriftMonitorInput(
+                        scan_pattern_id=bundle.scan_pattern_id,
+                        pattern_name=bundle.pattern_name,
+                        baseline_win_prob=bundle.baseline_win_prob,
+                        outcomes=tuple(bundle.outcomes),
+                        as_of_key=today.isoformat(),
+                    ))
+                    try:
+                        queue_from_drift(
+                            db, drift_out,
+                            as_of_date=today,
+                            drift_log_id=r.log_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[scheduler] drift_monitor_daily queue_from_drift failed",
+                        )
+                        # Recover a session poisoned by a mid-transaction
+                        # disconnect so the next red row doesn't cascade with
+                        # PendingRollbackError.
+                        rollback_if_poisoned(db)
+        except Exception:
+            logger.exception("[scheduler] drift_monitor_daily sweep failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("drift_monitor_daily", _work)
+
+
+def _run_recert_queue_dispatch_job():
+    """Dispatch proposed recert rows into the backtest priority queue."""
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.recert_queue_consumer import dispatch_due_recerts
+
+        db = SessionLocal()
+        try:
+            out = dispatch_due_recerts(db)
+            if not out.get("skipped"):
+                logger.info("[scheduler] recert_queue_dispatch result=%s", out)
+        except Exception:
+            logger.exception("[scheduler] recert_queue_dispatch failed")
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("recert_queue_dispatch", _work)
+
+
+def _run_divergence_sweep_daily_job():
+    """Phase K - daily divergence-panel sweep (shadow mode only).
+
+    Discovers patterns with at least one signal in the last
+    ``brain_divergence_scorer_lookback_days`` across the five substrate
+    log tables (Phase A ledger parity, Phase B exit parity, Phase F
+    venue truth, Phase G bracket reconciliation, Phase H position
+    sizer), gathers per-layer signals for each, and writes one row to
+    ``trading_pattern_divergence_log`` per pattern.
+
+    Gated by ``brain_divergence_scorer_mode != off`` and hard-refused
+    when the mode is ``authoritative`` (Phase K.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_divergence_scorer_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] divergence_sweep_daily skipped: "
+                    "mode=authoritative (Phase K is shadow-only; "
+                    "Phase K.2 required to enable)",
+                )
+            return
+        from datetime import date as _date
+        from ..db import SessionLocal
+        from .trading.divergence_service import (
+            DivergenceInputBundle,
+            discover_active_patterns,
+            gather_signals_for_pattern,
+            run_sweep as _div_run_sweep,
+        )
+
+        db = SessionLocal()
+        try:
+            lookback_days = int(
+                getattr(
+                    settings, "brain_divergence_scorer_lookback_days", 7,
+                )
+            )
+            patterns = discover_active_patterns(
+                db, lookback_days=lookback_days,
+            )
+            if not patterns:
+                logger.info(
+                    "[scheduler] divergence_sweep_daily: no eligible patterns",
+                )
+                return
+
+            bundles: list[DivergenceInputBundle] = []
+            for pid, pname in patterns:
+                signals = gather_signals_for_pattern(
+                    db,
+                    scan_pattern_id=int(pid),
+                    lookback_days=lookback_days,
+                )
+                bundles.append(DivergenceInputBundle(
+                    scan_pattern_id=int(pid),
+                    pattern_name=pname,
+                    signals=signals,
+                ))
+
+            today = _date.today()
+            rows = _div_run_sweep(db, bundles=bundles, as_of_date=today)
+            red_count = sum(1 for r in rows if r.severity == "red")
+            yellow_count = sum(1 for r in rows if r.severity == "yellow")
+            logger.info(
+                "[scheduler] divergence_sweep_daily sweep done: "
+                "patterns=%d rows_written=%d red=%d yellow=%d mode=%s",
+                len(bundles), len(rows), red_count, yellow_count, mode,
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] divergence_sweep_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("divergence_sweep_daily", _work)
+
+
+def _run_weekly_regime_retrain_job():
+    """Fit / decode 3-state HMM regimes (Q1.T2); gated by ``chili_regime_classifier_enabled``."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "chili_regime_classifier_enabled", False):
+        return
+
+    from ..db import SessionLocal
+    from .trading.regime_classifier import run_weekly_regime_retrain
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            out = run_weekly_regime_retrain(db)
+            logger.info("[scheduler] regime_classifier_weekly: %s", out)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("regime_classifier_weekly", _work)
+
+
+def _run_macro_regime_daily_job():
+    """Phase L.17 - daily macro-regime snapshot sweep (shadow mode only).
+
+    Fetches OHLCV trends for the rates/credit/USD ETF basket
+    (IEF/SHY/TLT/HYG/LQD/UUP), combines with the existing equity regime
+    composite, and writes one row to ``trading_macro_regime_snapshots``.
+
+    Gated by ``brain_macro_regime_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.17.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_macro_regime_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] macro_regime_daily skipped: "
+                    "mode=authoritative (Phase L.17 is shadow-only; "
+                    "Phase L.17.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.macro_regime_service import compute_and_persist
+
+        # FIX F-3 (2026-04-29 third-pass audit): wrap with batch_job so
+        # failures are visible. Audit found macro_regime stale 2 days
+        # because the daily INSERT failed silently with
+        # StringDataRightTruncation on credit_regime varchar(16) and the
+        # job never wrote a brain_batch_jobs row to surface the failure.
+        # Mig 209 widens the columns; this wrapper makes future silent
+        # failures impossible.
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+        db = SessionLocal()
+        _uid = getattr(settings, "brain_default_user_id", None)
+        jid = None
+        try:
+            jid = brain_batch_job_begin(db, "macro_regime_daily", user_id=_uid)
+            db.commit()
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] macro_regime_daily: skipped "
+                    "(off / coverage_below_min)",
+                )
+                brain_batch_job_finish(
+                    db, jid, ok=True, meta={"skipped": "coverage_below_min"},
+                )
+            else:
+                logger.info(
+                    "[scheduler] macro_regime_daily done: "
+                    "regime_id=%s label=%s coverage=%.2f mode=%s",
+                    row.regime_id, row.macro_label,
+                    float(row.coverage_score), mode,
+                )
+                brain_batch_job_finish(
+                    db, jid, ok=True,
+                    meta={
+                        "regime_id": row.regime_id,
+                        "macro_label": row.macro_label,
+                        "coverage_score": float(row.coverage_score),
+                        "mode": mode,
+                    },
+                )
+            db.commit()
+        except Exception as exc:
+            logger.exception(
+                "[scheduler] macro_regime_daily sweep failed",
+            )
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception(
+                        "[scheduler] macro_regime_daily batch_job_finish failed"
+                    )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("macro_regime_daily", _work)
+
+
+def _run_fred_yield_curve_daily_job():
+    """A4 — daily FRED DGS10/DGS2 ingestion.
+
+    Fetches DGS10 and DGS2 from FRED's public CSV endpoint, computes the
+    real yield curve slope, and updates today's macro_regime_snapshot row
+    with `dgs10_real`/`dgs2_real`. The regime classifier feature pipeline
+    prefers this over `yield_curve_slope_proxy` when both are present.
+
+    Best-effort: silently no-ops on network/parse failure (proxy continues
+    being used). One row per series per day in `macro_fred_fetch_log`.
+    """
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.fred_yield_curve import run_weekly_fred_yield_ingestion
+
+        db = SessionLocal()
+        try:
+            res = run_weekly_fred_yield_ingestion(db)
+            logger.info("[scheduler] fred_yield_curve_daily: %s", res)
+        except Exception:
+            logger.exception("[scheduler] fred_yield_curve_daily failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("fred_yield_curve_daily", _work)
+
+
+def _run_breadth_relstr_daily_job():
+    """Phase L.18 - daily breadth + RS snapshot sweep (shadow mode only).
+
+    Fetches OHLCV trends for the fixed reference basket (11 sector SPDRs
+    plus SPY / QQQ / IWM), computes the ETF-basket advance/decline proxy
+    + per-sector relative strength vs SPY + size/style tilts, and writes
+    one row to ``trading_breadth_relstr_snapshots``.
+
+    Gated by ``brain_breadth_relstr_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.18.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_breadth_relstr_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] breadth_relstr_daily skipped: "
+                    "mode=authoritative (Phase L.18 is shadow-only; "
+                    "Phase L.18.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.breadth_relstr_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] breadth_relstr_daily: skipped "
+                    "(off / coverage_below_min)",
+                )
+            else:
+                logger.info(
+                    "[scheduler] breadth_relstr_daily done: "
+                    "snapshot_id=%s label=%s advance_ratio=%.2f "
+                    "coverage=%.2f mode=%s",
+                    row.snapshot_id, row.breadth_label,
+                    float(row.advance_ratio),
+                    float(row.coverage_score), mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] breadth_relstr_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("breadth_relstr_daily", _work)
+
+
+def _run_cross_asset_daily_job():
+    """Phase L.19 - daily cross-asset signals sweep (shadow mode only).
+
+    Fetches OHLCV for the fixed lead/lag basket (SPY, TLT, HYG, LQD,
+    UUP, BTC-USD, ETH-USD), reads Phase L.17 macro_label and Phase L.18
+    advance_ratio/breadth_label for context, pulls VIX from
+    ``get_market_regime()``, computes the bond-equity / credit-equity /
+    USD-crypto leads + VIX-breadth divergence + BTC-SPY beta, and
+    writes one row to ``trading_cross_asset_snapshots``.
+
+    Gated by ``brain_cross_asset_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.19.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_cross_asset_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] cross_asset_daily skipped: "
+                    "mode=authoritative (Phase L.19 is shadow-only; "
+                    "Phase L.19.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.cross_asset_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] cross_asset_daily: skipped "
+                    "(off / coverage_below_min)",
+                )
+            else:
+                logger.info(
+                    "[scheduler] cross_asset_daily done: "
+                    "snapshot_id=%s label=%s coverage=%.2f mode=%s",
+                    row.snapshot_id, row.cross_asset_label,
+                    float(row.coverage_score), mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] cross_asset_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("cross_asset_daily", _work)
+
+
+def _run_ticker_regime_daily_job():
+    """Phase L.20 - daily per-ticker mean-reversion vs trend sweep (shadow).
+
+    Iterates over the snapshot-universe (scan + watchlist, bounded by
+    ``brain_ticker_regime_max_tickers``), fetches daily OHLCV per
+    ticker, and writes one row per eligible ticker to
+    ``trading_ticker_regime_snapshots``. Gated by
+    ``brain_ticker_regime_mode != off`` and hard-refused when the mode
+    is ``authoritative`` (Phase L.20.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_ticker_regime_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] ticker_regime_daily skipped: "
+                    "mode=authoritative (Phase L.20 is shadow-only; "
+                    "Phase L.20.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.ticker_regime_service import compute_and_persist_sweep
+
+        db = SessionLocal()
+        try:
+            result = compute_and_persist_sweep(db)
+            logger.info(
+                "[scheduler] ticker_regime_daily done: "
+                "attempted=%d persisted=%d skipped=%d mode=%s",
+                int(result.tickers_attempted),
+                int(result.tickers_persisted),
+                int(result.tickers_skipped),
+                mode,
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] ticker_regime_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("ticker_regime_daily", _work)
+
+
+def _run_vol_dispersion_daily_job():
+    """Phase L.21 - daily volatility term structure + cross-sectional
+    dispersion snapshot (shadow).
+
+    Fetches VIXY/VIXM/VXZ/SPY + 11 sector SPDRs + a capped slice of
+    the snapshot universe, computes the pure model, and writes one row
+    to ``trading_vol_dispersion_snapshots``. Gated by
+    ``brain_vol_dispersion_mode != off`` and hard-refused when the
+    mode is ``authoritative`` (Phase L.21.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_vol_dispersion_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] vol_dispersion_daily skipped: "
+                    "mode=authoritative (Phase L.21 is shadow-only; "
+                    "Phase L.21.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.vol_dispersion_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] vol_dispersion_daily done: "
+                    "no_row_persisted mode=%s", mode,
+                )
+            else:
+                logger.info(
+                    "[scheduler] vol_dispersion_daily done: "
+                    "snapshot_id=%s vol=%s disp=%s corr=%s cov=%.4f mode=%s",
+                    row.snapshot_id,
+                    row.vol_regime_label,
+                    row.dispersion_label,
+                    row.correlation_label,
+                    float(row.coverage_score),
+                    mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] vol_dispersion_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("vol_dispersion_daily", _work)
+
+
+def _run_intraday_session_daily_job():
+    """Phase L.22 - daily intraday session regime snapshot (shadow).
+
+    Fetches SPY 5-minute bars for the current trading day (in
+    US/Eastern), computes the pure model (opening range, midday
+    compression, power hour, gap dynamics, composite label), and
+    writes one row to ``trading_intraday_session_snapshots``. Gated
+    by ``brain_intraday_session_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.22.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_intraday_session_mode", "off")
+            or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] intraday_session_daily skipped: "
+                    "mode=authoritative (Phase L.22 is shadow-only; "
+                    "Phase L.22.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.intraday_session_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] intraday_session_daily done: "
+                    "no_row_persisted mode=%s", mode,
+                )
+            else:
+                logger.info(
+                    "[scheduler] intraday_session_daily done: "
+                    "snapshot_id=%s label=%s numeric=%d cov=%.4f mode=%s",
+                    row.snapshot_id,
+                    row.session_label,
+                    int(row.session_numeric),
+                    float(row.coverage_score),
+                    mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] intraday_session_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("intraday_session_daily", _work)
+
+
+def _run_pattern_regime_perf_daily_job():
+    """Phase M.1 - daily pattern x regime performance ledger (shadow).
+
+    First consumer of the L.17-L.22 regime snapshot stack. Joins
+    closed paper trades in the rolling window against the latest
+    regime label per dimension at each trade's entry_date, then
+    writes one aggregate row per (pattern_id, regime_dimension,
+    regime_label) to ``trading_pattern_regime_performance_daily``.
+    Gated by ``brain_pattern_regime_perf_mode != off`` and hard-
+    refused when the mode is ``authoritative`` (Phase M.2 opens
+    that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_pattern_regime_perf_mode", "off")
+            or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] pattern_regime_perf_daily skipped: "
+                    "mode=authoritative (Phase M.1 is shadow-only; "
+                    "Phase M.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_performance_service import (
+            compute_and_persist,
+        )
+
+        db = SessionLocal()
+        try:
+            run_ref = compute_and_persist(db)
+            if run_ref is None:
+                logger.info(
+                    "[scheduler] pattern_regime_perf_daily done: "
+                    "no_cells_persisted mode=%s", mode,
+                )
+            else:
+                logger.info(
+                    "[scheduler] pattern_regime_perf_daily done: "
+                    "ledger_run_id=%s cells=%d window_days=%d mode=%s",
+                    run_ref.ledger_run_id,
+                    run_ref.cells_persisted,
+                    run_ref.window_days,
+                    run_ref.mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_perf_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_perf_daily", _work)
+
+
+def _run_pattern_regime_killswitch_daily_job():
+    """Phase M.2.c — daily pattern x regime kill-switch / auto-quarantine sweep.
+
+    Iterates promoted / live patterns and evaluates them against the
+    M.1 ledger. Shadow / compare / authoritative gated by
+    ``brain_pattern_regime_killswitch_mode``. Authoritative mode
+    requires a live approval row in ``trading_governance_approvals``
+    (``action_type='pattern_regime_killswitch'``); without one, the
+    service emits ``killswitch_refused_authoritative`` ops lines.
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_pattern_regime_killswitch_mode", "off")
+            or "off"
+        ).lower()
+        if mode == "off":
+            return
+        if bool(getattr(settings, "brain_pattern_regime_killswitch_kill", False)):
+            logger.warning(
+                "[scheduler] pattern_regime_killswitch_daily skipped: kill flag set",
+            )
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_killswitch_service import run_daily_sweep
+
+        db = SessionLocal()
+        try:
+            out = run_daily_sweep(db)
+            logger.info(
+                "[scheduler] pattern_regime_killswitch_daily done: "
+                "mode=%s evaluated=%s quarantined=%s refused=%s",
+                out.get("mode"),
+                out.get("patterns_evaluated"),
+                out.get("patterns_quarantined"),
+                out.get("refused_authoritative"),
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_killswitch_daily sweep failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_killswitch_daily", _work)
+
+
+def _run_pattern_regime_autopilot_tick_job():
+    """Phase M.2-autopilot — daily advance/hold/revert tick.
+
+    Gated by ``brain_pattern_regime_autopilot_enabled``. Writes runtime
+    mode overrides into ``trading_brain_runtime_modes`` and audit rows
+    into ``trading_pattern_regime_autopilot_log``. Never raises.
+    """
+
+    def _work() -> None:
+        from ..config import settings as _s
+
+        if not bool(getattr(_s, "brain_pattern_regime_autopilot_enabled", False)):
+            return
+        if bool(getattr(_s, "brain_pattern_regime_autopilot_kill", False)):
+            logger.warning(
+                "[scheduler] pattern_regime_autopilot_tick skipped: kill flag set",
+            )
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_autopilot_service import run_autopilot_tick
+
+        db = SessionLocal()
+        try:
+            out = run_autopilot_tick(db)
+            logger.info(
+                "[scheduler] pattern_regime_autopilot_tick done: enabled=%s slices=%s",
+                out.get("enabled"),
+                list((out.get("slices") or {}).keys()),
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_autopilot_tick failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_autopilot_tick", _work)
+
+
+def _run_pattern_regime_autopilot_weekly_job():
+    """Phase M.2-autopilot — Monday 09:00 weekly summary."""
+
+    def _work() -> None:
+        from ..config import settings as _s
+
+        if not bool(getattr(_s, "brain_pattern_regime_autopilot_enabled", False)):
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_autopilot_service import run_weekly_summary
+
+        db = SessionLocal()
+        try:
+            run_weekly_summary(db)
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_autopilot_weekly failed",
+            )
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_autopilot_weekly", _work)
+
+
+def _run_data_retention_job():
+    """Daily sweep: archive old snapshots, prune stale batch job payloads."""
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.data_retention import run_retention_policy
+
+        logger.info("[scheduler] Data retention sweep starting")
+        db = SessionLocal()
+        try:
+            results = run_retention_policy(db)
+            logger.info("[scheduler] Data retention done: %s", results)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("data_retention", _work)
+
+
+def _run_realized_ev_demote_pass_job():
+    """Daily realized-EV demote pass over all promoted patterns.
+
+    FIX B-1 (2026-04-29 third-pass audit): re-applies the realized-EV gate
+    to every ``lifecycle_stage='promoted'`` pattern; demotes any that fail
+    outside the configured settle-in window. See
+    :mod:`app.services.trading.realized_ev_demote_pass`.
+
+    FIX (round 9): wrap with brain_batch_job_begin/finish so the run
+    appears in brain_batch_jobs alongside other scheduler outputs --
+    operator-visibility parity with daily_market_scan, etc.
+    """
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+        from .trading.realized_ev_demote_pass import run_realized_ev_demote_pass
+
+        from ..config import settings as _settings
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        logger.info("[scheduler] Realized-EV demote pass starting")
+        db = SessionLocal()
+        jid = None
+        try:
+            jid = brain_batch_job_begin(db, "realized_ev_demote_pass", user_id=_uid)
+            db.commit()
+            summary = run_realized_ev_demote_pass(db)
+            logger.info("[scheduler] Realized-EV demote pass done: %s", summary)
+            brain_batch_job_finish(db, jid, ok=True, meta=summary)
+            db.commit()
+        except Exception as exc:
+            logger.exception("[scheduler] realized_ev_demote_pass failed")
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] realized_ev_demote_pass batch_job_finish failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("realized_ev_demote_pass", _work)
+
+
+def _run_realized_pnl_promotion_job():
+    """Daily realized-PnL promotion pass: graduate not-yet-promoted patterns that
+    prove themselves on CLEAN realized PnL even when their backtest CPCV/OOS gates
+    disagree (operator 2026-06-05: rank by realized PnL). The kill switch /
+    drawdown breaker still gate the actual trade at execution time. See
+    :mod:`app.services.trading.realized_pnl_promotion`."""
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+        from .trading.realized_pnl_promotion import run_realized_pnl_promotion_pass
+
+        from ..config import settings as _settings
+        _uid = getattr(_settings, "brain_default_user_id", None)
+
+        db = SessionLocal()
+        jid = None
+        try:
+            jid = brain_batch_job_begin(db, "realized_pnl_promotion", user_id=_uid)
+            db.commit()
+            summary = run_realized_pnl_promotion_pass(db)
+            logger.info("[scheduler] Realized-PnL promotion pass done: %s", summary)
+            brain_batch_job_finish(db, jid, ok=True, meta=summary)
+            db.commit()
+        except Exception as exc:
+            logger.exception("[scheduler] realized_pnl_promotion failed")
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] realized_pnl_promotion batch_job_finish failed")
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("realized_pnl_promotion", _work)
+
+
+def _run_breaker_heartbeat_job():
+    """Daily drawdown-breaker liveness snapshot.
+
+    FIX G-1 (2026-04-29 third-pass audit): writes one row to
+    ``trading_risk_state`` with ``regime='breaker_heartbeat'`` so ops can
+    distinguish "breaker is alive and not tripped" from "breaker writer
+    is dead". The breaker itself is event-driven (only persists on
+    trip/reset); this is observability-only.
+
+    FIX (round 9): wrap with brain_batch_job_begin/finish for
+    operator-visibility parity with other scheduler outputs.
+    """
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+        from .trading.portfolio_risk import write_daily_breaker_liveness_snapshot
+
+        from ..config import settings as _settings
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        db = SessionLocal()
+        jid = None
+        try:
+            jid = brain_batch_job_begin(db, "breaker_heartbeat", user_id=_uid)
+            db.commit()
+            snap = write_daily_breaker_liveness_snapshot(db)
+            brain_batch_job_finish(db, jid, ok=True, meta=snap)
+            db.commit()
+        except Exception as exc:
+            logger.exception("[scheduler] breaker_heartbeat failed")
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] breaker_heartbeat batch_job_finish failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("breaker_heartbeat", _work)
+
+
+def _run_backtest_priority_scorer_job():
+    """Daily backtest_priority scorer for scan_patterns.
+
+    FIX (round 12, 2026-04-30): the queue worker orders by priority
+    DESC but 726 of 732 patterns had priority=0, so the queue was
+    effectively FIFO. This job rescores all patterns based on
+    lifecycle / staleness / evidence-gap signals so the next batch
+    pulls the most-needed patterns first. See
+    :mod:`app.services.trading.backtest_queue_priority`.
+    """
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        if not bool(getattr(_settings, "chili_backtest_priority_scorer_enabled", True)):
+            logger.info("[scheduler] backtest_priority_scorer disabled via setting")
+            return
+        from ..db import SessionLocal
+        from .trading.backtest_queue_priority import run_priority_scoring
+
+        db = SessionLocal()
+        try:
+            summary = run_priority_scoring(db)
+            logger.info("[scheduler] backtest_priority_scorer done: %s", summary)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("backtest_priority_scorer", _work)
+
+
+def _run_weekly_review_job():
+    """Weekly performance review job."""
+    from ..db import SessionLocal
+    from .trading.public_api import weekly_performance_review as _weekly_review
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting weekly review")
+        db = SessionLocal()
+        try:
+            _weekly_review(db, user_id=None)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("weekly_review", _work)
+
+
+def _run_stale_promoted_sweep_job():
+    """f-cron-stale-promoted (2026-05-06): weekly sweep that
+    re-evaluates the realized-EV gate on promoted patterns whose
+    trades have stopped firing entirely. Catches the gap left by the
+    per-trade-close demote handler (which only fires on active
+    patterns)."""
+    from ..db import SessionLocal
+    from .trading.cron_jobs.stale_promoted_sweep import run_stale_promoted_sweep
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting stale-promoted-pattern sweep")
+        with SessionLocal() as db:
+            try:
+                result = run_stale_promoted_sweep(db)
+                logger.info(
+                    "[scheduler] stale_promoted_sweep result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] stale_promoted_sweep failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("stale_promoted_sweep", _work)
+
+
+def _run_pg_stat_snapshot_job():
+    """f-add-pg-stat-snapshot-logger (2026-05-06): 5-minute snapshot of
+    pg_stat_activity. Forensic trail for the next leak."""
+    from ..db import SessionLocal
+    from .trading.cron_jobs.pg_stat_snapshot import run_pg_stat_snapshot
+
+    def _work() -> None:
+        with SessionLocal() as db:
+            try:
+                result = run_pg_stat_snapshot(db)
+                logger.debug(
+                    "[scheduler] pg_stat_snapshot result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] pg_stat_snapshot failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("pg_stat_snapshot", _work)
+
+
+def _run_validate_evolve_job():
+    """f-handler-validate-evolve (2026-05-06): 6-hourly hypothesis-
+    weight evolution. Wraps the legacy run_learning_cycle's
+    validate_and_evolve step. Cron not event-handler because the
+    function mines 500 tickers of OHLCV per run -- heavy, broad-market
+    work."""
+    from ..db import SessionLocal
+    from .trading.cron_jobs.validate_evolve import run_validate_evolve
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting validate_and_evolve cycle")
+        with SessionLocal() as db:
+            try:
+                result = run_validate_evolve(db, user_id=None)
+                logger.info(
+                    "[scheduler] validate_evolve result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] validate_evolve failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("validate_evolve", _work)
+
+
+def _run_triple_barrier_label_job():
+    """f-triple-barrier-activation (2026-05-14, Phase C of
+    f-evidence-fidelity-architecture): 4-hourly batch that labels
+    recent MarketSnapshots against the triple-barrier (TP/SL/timeout)
+    rule. Wraps ``triple_barrier_labeler.label_snapshots`` which is
+    mode-gated on ``brain_triple_barrier_mode`` (defaults to
+    ``shadow`` -- writes rows but does not feed downstream gates).
+    Cron not event-handler because labeling needs ``min_lookback_days``
+    of forward bars; the trigger is "enough time has passed."
+    """
+    from ..db import SessionLocal
+    from .trading.cron_jobs.triple_barrier_label import (
+        run_triple_barrier_label_cycle,
+    )
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting triple_barrier_label cycle")
+        with SessionLocal() as db:
+            try:
+                result = run_triple_barrier_label_cycle(db)
+                logger.info(
+                    "[scheduler] triple_barrier_label result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] triple_barrier_label failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("triple_barrier_label", _work)
+
+
+def _run_broker_connectivity_watch_job():
+    """Broker-connectivity alarm: loud alert when a configured broker stays
+    disconnected past the threshold (the RH token died silently for ~7 weeks —
+    post-mortem 2026-06-10). Cheap status reads; no broker mutations."""
+
+    def _work() -> None:
+        from .trading.broker_connectivity_watch import run_broker_connectivity_watch
+
+        summary = run_broker_connectivity_watch()
+        if summary.get("down") or summary.get("alerted") or summary.get("resolved"):
+            logger.info("[scheduler] broker_connectivity_watch: %s", summary)
+
+    run_scheduler_job_guarded("broker_connectivity_watch", _work)
+
+
+def _run_broker_sync_job():
+    """Sync Robinhood + Coinbase orders and positions for the session owner.
+
+    Previously this job iterated over ``distinct(Trade.user_id)`` of open
+    trades, which self-perpetuates duplicate rows when the scheduler writes
+    position copies under every user that ever had an open trade. The RH
+    session is tied to a single account (``broker_sessions.username``), so
+    all broker-sourced rows must be attributed to that one user.
+    """
+    from . import broker_service, coinbase_service
+
+    def _resolve_rh_user_id(db) -> int | None:
+        """Return the user_id that owns the live RH session, or None."""
+        from sqlalchemy import text
+        try:
+            row = db.execute(
+                text(
+                    "SELECT u.id FROM broker_sessions bs "
+                    "JOIN users u ON lower(u.email) = lower(bs.username) "
+                    "WHERE bs.broker = 'robinhood' "
+                    "ORDER BY bs.updated_at DESC LIMIT 1"
+                )
+            ).fetchone()
+            return int(row[0]) if row else None
+        except Exception:
+            logger.debug("[scheduler] broker_sync: RH user lookup failed", exc_info=True)
+            return None
+
+    def _resolve_cb_user_id(db) -> int | None:
+        """Return the user_id that has live Coinbase credentials, or None."""
+        from sqlalchemy import text
+        try:
+            row = db.execute(
+                text(
+                    "SELECT user_id FROM broker_credentials "
+                    "WHERE broker = 'coinbase' "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                )
+            ).fetchone()
+            return int(row[0]) if row else None
+        except Exception:
+            logger.debug("[scheduler] broker_sync: CB user lookup failed", exc_info=True)
+            return None
+
+    def _work() -> None:
+        from ..db import SessionLocal
+
+        db = SessionLocal()
+        try:
+            if broker_service.is_connected():
+                rh_uid = _resolve_rh_user_id(db)
+                if rh_uid is None:
+                    logger.warning(
+                        "[scheduler] RH sync skipped: no broker_sessions row maps to a known user"
+                    )
+                else:
+                    logger.info("[scheduler] RH sync for user_id=%s (session owner)", rh_uid)
+                    order_result = broker_service.sync_orders_to_db(db, user_id=rh_uid)
+                    logger.info("[scheduler] RH order sync (user=%s): %s", rh_uid, order_result)
+                    pos_result = broker_service.sync_positions_to_db(db, user_id=rh_uid)
+                    logger.info("[scheduler] RH position sync (user=%s): %s", rh_uid, pos_result)
+
+            if coinbase_service.is_connected():
+                cb_uid = _resolve_cb_user_id(db)
+                if cb_uid is None:
+                    logger.warning(
+                        "[scheduler] CB sync skipped: no broker_credentials row for coinbase"
+                    )
+                else:
+                    logger.info("[scheduler] CB sync for user_id=%s (credential owner)", cb_uid)
+                    cb_order = coinbase_service.sync_orders_to_db(db, user_id=cb_uid)
+                    logger.info("[scheduler] CB order sync (user=%s): %s", cb_uid, cb_order)
+                    cb_pos = coinbase_service.sync_positions_to_db(db, user_id=cb_uid)
+                    logger.info("[scheduler] CB position sync (user=%s): %s", cb_uid, cb_pos)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("broker_sync", _work)
+
+
+def _run_price_monitor_job():
+    """Check positions/breakouts/picks and dispatch alerts for all users with open trades.
+
+    Also triggers event-driven pattern monitor for tickers where alerts fired.
+    """
+    from ..db import SessionLocal, rollback_if_poisoned
+    from .trading.alerts import run_price_monitor
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting price monitor check")
+        db = SessionLocal()
+        alerted_tickers: list[str] = []
+        try:
+            from ..models.trading import Trade
+            from sqlalchemy import distinct
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(Trade.status == "open", Trade.user_id.isnot(None))
+                .all()
+            ]
+            if not user_ids:
+                user_ids = [None]
+            for uid in user_ids:
+                try:
+                    result = run_price_monitor(db, user_id=uid)
+                    logger.info(f"[scheduler] Price monitor user_id={uid}: {result}")
+                    if isinstance(result, dict):
+                        alerted_tickers.extend(result.get("alerted_tickers", []))
+                except Exception:
+                    logger.warning(f"[scheduler] Price monitor failed for user_id={uid}", exc_info=True)
+                    # Recover a session poisoned by a mid-transaction disconnect
+                    # so the next user (and the pattern-ticker query below) don't
+                    # cascade with PendingRollbackError.
+                    rollback_if_poisoned(db)
+
+            # Trigger event-driven pattern monitor for all open pattern-linked tickers
+            pattern_tickers = [
+                r[0] for r in db.query(distinct(Trade.ticker))
+                .filter(
+                    Trade.status == "open",
+                    Trade.related_alert_id.isnot(None),
+                )
+                .all()
+            ]
+            if pattern_tickers:
+                trigger_pattern_monitor_for_tickers(pattern_tickers, reason="price_monitor")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("price_monitor", _work)
+
+
+def _run_broker_position_price_monitor_job():
+    """24/7 broker-source price checks for live broker-backed positions.
+
+    Regular ``price_monitor`` is intentionally broad and still runs on its
+    human-alert cadence. This lane is narrower: only positions with a live
+    ``broker_source`` are evaluated, and ``stop_engine`` resolves quotes from
+    that broker first. That keeps overnight-eligible positions monitored
+    without pulling paper/manual watchlists through broker APIs all night.
+    """
+    from ..db import SessionLocal
+    from ..models.trading import Trade
+    from .trading.broker_position_truth import BROKER_POSITION_TRUTH_SOURCES
+    from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
+    from sqlalchemy import distinct, func
+
+    def _work() -> None:
+        db = SessionLocal()
+        pattern_tickers: list[str] = []
+        try:
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    func.lower(Trade.broker_source).in_(
+                        list(BROKER_POSITION_TRUTH_SOURCES)
+                    ),
+                )
+                .all()
+            ]
+            if not user_ids:
+                return
+            for uid in user_ids:
+                try:
+                    result = evaluate_all(
+                        db,
+                        uid,
+                        broker_sources=BROKER_POSITION_TRUTH_SOURCES,
+                    )
+                    dispatched = dispatch_stop_alerts(db, uid, result)
+                    if dispatched or result.get("targets_hit") or result.get("stops_hit"):
+                        logger.info(
+                            "[scheduler] broker_position_price_monitor uid=%s: %s "
+                            "dispatched=%s",
+                            uid,
+                            result,
+                            dispatched,
+                        )
+                except Exception:
+                    db.rollback()
+                    logger.warning(
+                        "[scheduler] broker position price monitor failed for uid=%s",
+                        uid,
+                        exc_info=True,
+                    )
+
+            pattern_tickers = [
+                r[0] for r in db.query(distinct(Trade.ticker))
+                .filter(
+                    Trade.status == "open",
+                    Trade.related_alert_id.isnot(None),
+                    func.lower(Trade.broker_source).in_(
+                        list(BROKER_POSITION_TRUTH_SOURCES)
+                    ),
+                )
+                .all()
+            ]
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+        if pattern_tickers:
+            trigger_pattern_monitor_for_tickers(
+                pattern_tickers,
+                reason="broker_position_price_monitor",
+            )
+
+    run_scheduler_job_guarded("broker_position_price_monitor", _work)
+
+
+def _run_daytrade_fast_monitor_job():
+    """1-minute fast check for day-trade and scalp positions (tighter exit timing)."""
+    from ..db import SessionLocal
+    from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
+    from ..models.trading import Trade
+    from sqlalchemy import distinct
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            daytrade_types = ("scalp", "daytrade", "breakout", "momentum")
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    Trade.trade_type.in_(daytrade_types),
+                )
+                .all()
+            ]
+            if not user_ids:
+                return
+            for uid in user_ids:
+                try:
+                    results = evaluate_all(db, uid, staleness_secs=120)
+                    dispatch_stop_alerts(db, uid, results)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.debug("[scheduler] daytrade fast monitor failed for uid=%s", uid, exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("daytrade_fast_monitor", _work)
+
+
+def _run_stop_alert_dispatch_job():
+    """Stop-alert dispatch for crypto positions (every 2 minutes, 24/7).
+
+    R30 cleanup (2026-04-30): renamed from ``_run_crypto_stop_monitor_job``.
+    The original name implied this job acts on stops (places sells when
+    triggered), but it actually only DISPATCHES alerts -- Telegram +
+    neural-mesh sensor events. Real crypto exit execution lives in
+    ``run_crypto_exit_pass`` called every 30s from
+    ``tick_auto_trader_monitor``. The two paths used to share an
+    auto-execute path via ``_try_auto_execute_stop`` (gated by
+    ``chili_auto_execute_stops=False``); that has been removed in R30
+    so the autotrader monitor is the single source of truth for exit
+    execution.
+
+    Job ID is intentionally kept as ``crypto_stop_monitor`` so
+    ``brain_batch_jobs`` history continuity is preserved.
+    """
+    from ..db import SessionLocal, rollback_if_poisoned
+    from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
+    from ..models.trading import Trade
+    from sqlalchemy import distinct
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    Trade.ticker.like("%-USD"),
+                )
+                .all()
+            ]
+            if not user_ids:
+                return
+            for uid in user_ids:
+                try:
+                    crypto_trades = db.query(Trade).filter(
+                        Trade.status == "open",
+                        Trade.user_id == uid,
+                        Trade.ticker.like("%-USD"),
+                    ).all()
+                    if not crypto_trades:
+                        continue
+                    summary = evaluate_all(db, uid)
+                    dispatched = dispatch_stop_alerts(db, uid, summary)
+                    if dispatched:
+                        logger.info("[scheduler] stop_alert_dispatch uid=%s: %d alerts dispatched", uid, dispatched)
+                except Exception:
+                    logger.warning("[scheduler] stop_alert_dispatch failed for uid=%s", uid, exc_info=True)
+                    # Recover a session poisoned by a mid-transaction disconnect
+                    # so the next user doesn't cascade with PendingRollbackError.
+                    rollback_if_poisoned(db)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("crypto_stop_monitor", _work)
+
+
+def _run_pattern_position_monitor_job():
+    """Heartbeat: evaluate pattern-linked positions (event-driven mode).
+
+    Runs less frequently (30-min heartbeat) as the primary evaluation path
+    is now event-driven via the price monitor and broker sync callbacks.
+    """
+    from ..db import SessionLocal, rollback_if_poisoned
+    from ..models.trading import Trade
+    from sqlalchemy import and_, distinct, or_
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            from .trading.pattern_position_monitor import run_pattern_position_monitor
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    or_(
+                        Trade.related_alert_id.isnot(None),
+                        and_(
+                            Trade.related_alert_id.is_(None),
+                            or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
+                        ),
+                    ),
+                )
+                .all()
+            ]
+            for uid in user_ids:
+                try:
+                    run_pattern_position_monitor(db, uid, event_driven=True)
+                except Exception:
+                    logger.warning("[scheduler] pattern_position_monitor failed uid=%s", uid, exc_info=True)
+                    # Recover a session poisoned by a mid-transaction disconnect
+                    # so the next user doesn't cascade with PendingRollbackError.
+                    rollback_if_poisoned(db)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_position_monitor", _work)
+
+
+def trigger_pattern_monitor_for_tickers(tickers: list[str], reason: str = "event") -> None:
+    """Event-driven trigger: evaluate pattern-linked positions for specific tickers.
+
+    Called by the price monitor and broker sync when a material change is detected.
+    """
+    from ..db import SessionLocal
+    from ..models.trading import Trade
+
+    db = SessionLocal()
+    try:
+        from sqlalchemy import and_, or_
+
+        from .trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
+
+        trades = (
+            db.query(Trade)
+            .filter(
+                Trade.status == "open",
+                Trade.ticker.in_(tickers),
+                or_(
+                    Trade.related_alert_id.isnot(None),
+                    and_(
+                        Trade.related_alert_id.is_(None),
+                        or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
+                    ),
+                ),
+            )
+            .all()
+        )
+        if not trades:
+            return
+
+        logger.info(
+            "[scheduler] Event-driven pattern monitor for %d trades (%s): %s",
+            len(trades), reason, [t.ticker for t in trades],
+        )
+        run_pattern_position_monitor_for_trades(db, trades, event_driven=True)
+        db.commit()
+    except Exception:
+        logger.warning("[scheduler] Event-driven pattern monitor failed", exc_info=True)
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_pattern_imminent_job():
+    """Scan active ScanPatterns for near-complete setups; alert within configured ETA window.
+
+    Crypto-friendly patterns run 24/7; stock patterns only during US equity session
+    (handled inside ``run_pattern_imminent_scan``).
+    """
+    import time as _t
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_PATTERN_IMMINENT_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.pattern_imminent_alerts import run_pattern_imminent_scan
+
+    if not getattr(_settings, "pattern_imminent_alert_enabled", True):
+        return
+
+    def _work() -> None:
+        logger.info("[scheduler] Pattern imminent breakout scan starting")
+        db = SessionLocal()
+        jid = None
+        t_wall = _t.time()
+        try:
+            _uid = getattr(_settings, "brain_default_user_id", None)
+            jid = brain_batch_job_begin(db, JOB_PATTERN_IMMINENT_SCANNER, _uid)
+            db.commit()
+
+            result = run_pattern_imminent_scan(db, user_id=_uid)
+            logger.info("[scheduler] Pattern imminent result: %s", result)
+
+            duration = round(_t.time() - t_wall, 1)
+            if not result.get("ok", True):
+                brain_batch_job_finish(
+                    db,
+                    jid,
+                    ok=False,
+                    error=str(result.get("reason") or "pattern imminent failed"),
+                    meta={"duration_s": duration},
+                    payload_json=dict(result),
+                )
+                db.commit()
+                return
+
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=True,
+                meta={
+                    "duration_s": duration,
+                    "alerts_sent": result.get("alerts_sent", 0),
+                    "tickers_scored": result.get("tickers_scored", 0),
+                    "candidates": result.get("candidates", 0),
+                },
+                payload_json=dict(result),
+            )
+            db.commit()
+        except Exception as e:
+            logger.error("[scheduler] Pattern imminent scan failed: %s", e)
+            if jid:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] pattern_imminent batch_job_finish failed")
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_imminent_scanner", _work)
+
+
+def _run_pattern_imminent_fast_job():
+    """FAST tier of the imminent scan: short-timeframe (1m/5m) patterns only,
+    every ~60s. A 15-min sweep cannot catch a 1m/5m setup — many bars elapse
+    between looks — so these patterns are detected at their own cadence. Crypto
+    runs 24/7; stock is gated to US hours inside ``run_pattern_imminent_scan``.
+
+    Intentionally does NOT write a brain_batch_jobs row per run: at 60s cadence
+    that is ~1440 rows/day of churn. Observability is the concise logger line.
+    """
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.pattern_imminent_alerts import run_pattern_imminent_scan
+
+    if not getattr(_settings, "pattern_imminent_alert_enabled", True):
+        return
+    if not getattr(_settings, "pattern_imminent_fast_enabled", True):
+        return
+
+    _tf_raw = str(getattr(_settings, "pattern_imminent_fast_timeframes", "1m,5m") or "")
+    fast_timeframes = frozenset(t.strip().lower() for t in _tf_raw.split(",") if t.strip())
+    if not fast_timeframes:
+        return
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            _uid = getattr(_settings, "brain_default_user_id", None)
+            result = run_pattern_imminent_scan(
+                db, user_id=_uid, timeframe_in=fast_timeframes
+            )
+            db.commit()
+            logger.info(
+                "[scheduler] Pattern imminent FAST tier (tf=%s): "
+                "candidates=%s alerts_sent=%s shadow=%s tickers_scored=%s elapsed=%ss",
+                ",".join(sorted(fast_timeframes)),
+                result.get("candidates", 0),
+                result.get("alerts_sent", 0),
+                result.get("shadow_alerts_sent", 0),
+                result.get("tickers_scored", 0),
+                result.get("score_elapsed_seconds", "?"),
+            )
+        except Exception as e:
+            logger.error("[scheduler] Pattern imminent FAST scan failed: %s", e)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_imminent_fast_scanner", _work)
+
+
+def _run_auto_trader_tick_job():
+    """Run the autotrader tick. Inner broker calls are individually
+    wrapped in ``_call_with_timeout`` so they can't hang indefinitely.
+
+    FIX 33b (deep audit 2026-04-28): the previous ``ThreadPoolExecutor``
+    + 45s outer timeout pattern abandoned worker threads on timeout
+    (``ex._threads.clear()`` + ``concurrent.futures.thread._threads_
+    queues.clear()``), and the abandoned threads kept their
+    ``db = SessionLocal()`` open until eventual completion. Result: 63
+    idle-in-tx scheduler sessions piled up at peak (verified post-FIX
+    32). The watchdog (FIX 32 + FIX 5) eventually killed them at 600s
+    but new ones spawned faster.
+
+    The outer timeout is unnecessary defense-in-depth: every slow path
+    in the tick (broker quote, broker equity, broker order placement)
+    is already wrapped with ``_call_with_timeout`` at the call site.
+    APScheduler's ``max_instances=1`` (set in FIX 33's docker-compose
+    env) already prevents pile-up — if a tick legitimately runs long,
+    the next scheduled tick is skipped, not queued.
+
+    Removing the outer timeout means:
+      * No abandoned threads, no leaked sessions.
+      * If a future code path is added that hangs without a timeout,
+        the SLOT is held but no session leak. APScheduler's misfire
+        handling + ``max_instances`` still keep the system healthy.
+      * The session is guaranteed to close via ``finally``.
+    """
+    from ..config import (
+        AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+        AUTOTRADER_MIN_TICK_MAX_SECONDS,
+        settings as _settings,
+    )
+    from ..db import SessionLocal
+    from .trading.auto_trader import run_auto_trader_tick
+
+    if not getattr(_settings, "chili_autotrader_enabled", False):
+        return
+
+    started = time.monotonic()
+    db = SessionLocal()
+    try:
+        run_auto_trader_tick(db)
+    except Exception:
+        logger.exception("[scheduler] auto_trader tick failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+        dur = time.monotonic() - started
+        # Keep the slow-tick warning so operator still sees when a
+        # tick takes longer than expected; the budget setting is now
+        # purely advisory (no abandon).
+        budget_s = max(
+            AUTOTRADER_MIN_TICK_MAX_SECONDS,
+            int(
+                getattr(
+                    _settings,
+                    "chili_autotrader_tick_max_seconds",
+                    AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+                )
+            ),
+        )
+        if dur > budget_s:
+            logger.warning(
+                "[scheduler] auto_trader tick slow: took %.1fs (advisory budget=%ss); "
+                "next tick will run normally — session was closed cleanly",
+                dur, budget_s,
+            )
+
+
+def _run_auto_trader_monitor_job():
+    from ..config import settings as _settings
+    from ..db import SessionLocal, rollback_if_poisoned
+    from .trading.auto_trader_monitor import tick_auto_trader_monitor
+
+    if not getattr(_settings, "chili_autotrader_enabled", False):
+        return
+
+    db = SessionLocal()
+    try:
+        tick_auto_trader_monitor(db)
+        # Task PP Phase 5 — option-aware exit pass. Runs at the same
+        # cadence as the equity exit monitor; flag-gated internally so
+        # this is a no-op when chili_autotrader_options_exit_monitor_enabled
+        # is OFF. Independent of the equity monitor — option Trade rows
+        # carry option_meta in indicator_snapshot and need different
+        # exit logic (DTE / premium-based, not stop_loss / take_profit
+        # on the underlying).
+        try:
+            from .trading.options.exit_monitor import run_options_exit_pass
+            opt_summary = run_options_exit_pass(db)
+            if opt_summary.get("triggered", 0) > 0 or opt_summary.get("errors", 0) > 0:
+                logger.info("[scheduler] options_exit_pass: %s", opt_summary)
+        except Exception:
+            logger.exception("[scheduler] options_exit_pass failed (non-fatal)")
+            # The crypto pass below shares this session. If a DB-error
+            # (mid-transaction disconnect) poisoned it, roll back so the crypto
+            # pass doesn't cascade with PendingRollbackError.
+            rollback_if_poisoned(db)
+        # HHH -- crypto-aware exit monitor, parallel to options. Equity
+        # monitor skips robinhood -USD tickers; without this pass the
+        # stop/target on crypto Trade rows never fires.
+        try:
+            from .trading.crypto.exit_monitor import run_crypto_exit_pass
+            crypto_summary = run_crypto_exit_pass(db)
+            if crypto_summary.get("closed", 0) > 0 or len(crypto_summary.get("errors", []) or []) > 0:
+                logger.info("[scheduler] crypto_exit_pass: %s", crypto_summary)
+        except Exception:
+            logger.exception("[scheduler] crypto_exit_pass failed (non-fatal)")
+            rollback_if_poisoned(db)
+    except Exception:
+        logger.exception("[scheduler] auto_trader monitor failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_stuck_order_watchdog_job():
+    """P0.7 — cancel orders stuck in non-terminal broker states past timeout.
+
+    Standalone from the autotrader gates since it also covers trades from
+    broker_sync / manual sources, not just AutoTrader v1.
+    """
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.stuck_order_watchdog import tick_stuck_order_watchdog
+
+    if not getattr(_settings, "chili_stuck_order_watchdog_enabled", True):
+        return
+
+    db = SessionLocal()
+    try:
+        tick_stuck_order_watchdog(db)
+    except Exception:
+        logger.exception("[scheduler] stuck_order_watchdog tick failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_execution_event_lag_job():
+    """P0.6 — execution-event lag gauge (recorded_at - event_at P95)."""
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.execution_event_lag import run_execution_event_lag_tick
+
+    if not getattr(_settings, "chili_execution_event_lag_enabled", True):
+        return
+
+    db = SessionLocal()
+    try:
+        run_execution_event_lag_tick(db)
+    except Exception:
+        logger.exception("[scheduler] execution_event_lag tick failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_drift_escalation_watchdog_job():
+    """P0.8 — alert when the same intent has been in the same non-agree
+    kind for N consecutive sweeps. Opt-in via feature flag."""
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.drift_escalation_watchdog import run_drift_escalation_watchdog
+
+    if not getattr(_settings, "chili_drift_escalation_enabled", False):
+        return
+
+    db = SessionLocal()
+    try:
+        run_drift_escalation_watchdog(db)
+    except Exception:
+        logger.exception("[scheduler] drift_escalation_watchdog tick failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+# Tracks the previous heap snapshot so the watcher can log DELTAS — that's
+# what surfaces a leak (steady positive growth in some object type), not the
+# instantaneous count. Wrapped in a single-element list so the diagnostics
+# module's tick function can mutate it across calls (FIX 49 / FIX 50 was
+# inline here; f-leak-2 lifted it to app.services.diagnostics.mem_watcher
+# so the chili web container can call it from its lifespan path too).
+_mem_watcher_prev_counts: list[dict[str, int]] = [{}]
+
+
+def _run_memory_watcher_job():
+    """APScheduler entry-point (FIX 49 / FIX 50).
+
+    Thin shim — actual logic lives in
+    ``app.services.diagnostics.mem_watcher.run_memory_watcher_tick``
+    so chili's lifespan can call the same code without importing the
+    whole scheduler module.
+    """
+    from .diagnostics.mem_watcher import run_memory_watcher_tick
+    run_memory_watcher_tick(_mem_watcher_prev_counts)
+
+
+_crypto_alert_cooldown: dict[str, float] = {}
+_stock_alert_cooldown: dict[str, float] = {}
+
+
+def _record_breakout_alert(
+    setup: dict, alert_tier: str, asset_type: str,
+    scan_cycle_id: str | None = None,
+    timeframe: str | None = None,
+) -> None:
+    """Legacy no-op.
+
+    Generic breakout scanners were CHILI v1 heuristics. They are retired as
+    active signal sources; ScanPattern-driven imminent alerts remain on their
+    own path because current trades still reference those rows.
+    """
+    logger.info(
+        "[scheduler] legacy breakout alert persistence retired; skipped ticker=%s tier=%s",
+        setup.get("ticker") or setup.get("symbol"),
+        alert_tier,
+    )
+    return
+    import json as _json
+    try:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        from ..models.trading import BreakoutAlert
+        from .trading.market_data import get_market_regime
+
+        _regime = "unknown"
+        try:
+            _regime = get_market_regime().get("regime", "unknown")
+        except Exception:
+            pass
+
+        _sector = setup.get("sector") or ("crypto" if asset_type == "crypto" else None)
+        _news_sent = setup.get("news_sentiment")
+        _uid = setup.get("user_id") or getattr(_settings, "brain_default_user_id", None)
+
+        # Extract best scan_pattern_id from pattern engine matches if available
+        _spid: int | None = setup.get("scan_pattern_id")
+        if not _spid:
+            _pe_matches = setup.get("pattern_engine_matches") or []
+            if _pe_matches:
+                _spid = _pe_matches[0].get("pattern_id")
+
+        db = SessionLocal()
+        try:
+            row = BreakoutAlert(
+                ticker=setup.get("ticker", ""),
+                asset_type=asset_type,
+                alert_tier=alert_tier,
+                score_at_alert=setup.get("score", 0),
+                indicator_snapshot=_json.dumps(setup.get("indicators", {})),
+                price_at_alert=setup.get("price", 0),
+                entry_price=setup.get("entry_price"),
+                stop_loss=setup.get("stop_loss"),
+                target_price=setup.get("take_profit"),
+                signals_snapshot=_json.dumps(setup.get("signals", [])[:10]),
+                outcome="pending",
+                regime_at_alert=_regime,
+                scan_cycle_id=scan_cycle_id,
+                timeframe=timeframe,
+                sector=_sector,
+                news_sentiment_at_alert=_news_sent,
+                user_id=_uid,
+                scan_pattern_id=_spid,
+            )
+            db.add(row)
+            db.flush()
+            try:
+                from .trading.contracts.signal_emit import emit_signal_for_breakout_alert
+
+                emit_signal_for_breakout_alert(
+                    db,
+                    row,
+                    scanner=f"scheduler_{alert_tier}",
+                    strategy_family=str(setup.get("sector") or "breakout_scan"),
+                    commit=False,
+                )
+            except Exception as _use:
+                logger.debug(
+                    "[unified_signal] scheduler breakout emit skipped: %s",
+                    _use,
+                    exc_info=True,
+                )
+            db.commit()
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+    except Exception as e:
+        logger.warning(f"[scheduler] Failed to record breakout alert: {e}", exc_info=True)
+
+
+# Ross pillars score_universe / _extract_pillars can read off a scanner signal dict
+# (rvol / gap / daily-change). A signal must carry at least one to be RANKABLE — a
+# signal with none would land at a flat 0 score, re-introducing the very flat-equity
+# problem this bridge exists to fix, so we require one.
+_ROSS_PILLAR_KEYS = (
+    "rvol",
+    "vol_ratio",
+    "volume_ratio",
+    "gap_pct",
+    "daily_change_pct",
+    "change_pct",
+    "change_24h",
+)
+
+
+def _equity_movers_for_ross_bridge(sweep_out: dict) -> list[dict]:
+    """LONG equity movers from an intraday-signal sweep that carry a readable Ross
+    pillar (RVOL / gap / daily-change), for the equity Ross-screening bridge.
+
+    The momentum lane is LONG-only, so short ORB breakdowns are dropped; a missing
+    ``direction`` defaults to a long mover (premarket gap-ups). Only signals with a
+    pillar score_universe can rank are kept, so the bridge differentiates equities by
+    momentum quality instead of leaving them at the flat default viability.
+    """
+    if not isinstance(sweep_out, dict):
+        return []
+    movers = (
+        list(sweep_out.get("premarket_gaps") or [])
+        + list(sweep_out.get("orb_signals") or [])
+        + list(sweep_out.get("momentum_signals") or [])
+    )
+    out: list[dict] = []
+    for s in movers:
+        if not isinstance(s, dict):
+            continue
+        if not (s.get("ticker") or s.get("symbol")):
+            continue
+        if str(s.get("direction") or "up").strip().lower() not in ("up", "long", "bull", ""):
+            continue
+        if not any(s.get(k) is not None for k in _ROSS_PILLAR_KEYS):
+            continue
+        out.append(s)
+    return out
+
+
+def _bridge_scanner_to_viability(
+    db: "Session",
+    results: list[dict],
+    *,
+    source: str = "scanner",
+) -> None:
+    """Run momentum neural tick directly for scanner-discovered tickers.
+
+    Writes symbol-level viability rows synchronously so the Autopilot board sees them
+    on the next poll.  Uses run_momentum_neural_tick (same path as _auto_assess_scan_only
+    in opportunities.py) instead of enqueueing activation events — avoids stale pending
+    events that trigger the "viability pipeline stale" warning when the brain worker is
+    slow or not running.
+    """
+    # M4: process the most EXPLOSIVE instruments first. Ross trades the leading
+    # movers, not an arbitrary slice — so rank the full universe by Ross momentum
+    # quality (RVOL + already-moving) and reorder before the cap below picks the
+    # top _VIABILITY_BRIDGE_MAX_TICKERS. No-op on failure (keeps original order).
+    # See docs/DESIGN/MOMENTUM_LANE.md.
+    try:
+        from .trading.momentum_neural.ross_momentum import (
+            ROSS_PILLAR_WEIGHTS_ATTENTION,
+            ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+            score_universe as _ross_su,
+        )
+
+        def _bsym(_r: dict) -> str:
+            return str(_r.get("ticker") or _r.get("symbol") or "").strip().upper()
+
+        # Equity signals from the intraday sweep carry no turnover field; enrich with
+        # the snapshot dollar-volume so the tradeable_liquidity pillar has data
+        # (crypto already carries quote_volume_24h). Fail-open: missing symbols are
+        # simply absent and the pillar weight renormalises away for them.
+        try:
+            from .trading.momentum_neural.universe import snapshot_dollar_volumes
+
+            _need_dv = [
+                _bsym(r) for r in results
+                if _bsym(r) and not any(
+                    (r or {}).get(k) for k in ("dollar_volume", "quote_volume_24h", "turnover")
+                )
+            ]
+            if _need_dv:
+                _dvols = snapshot_dollar_volumes(_need_dv)
+                for r in results:
+                    _s = _bsym(r)
+                    if _s in _dvols and not (r or {}).get("dollar_volume"):
+                        r["dollar_volume"] = float(_dvols[_s])
+        except Exception:
+            logger.debug("[scheduler] ross dollar-volume enrichment skipped", exc_info=True)
+
+        # Liquidity-BIASED ranking (same weights as the pipeline tilt): prefer movers
+        # the lane can actually FILL, not only the most explosive spread-gated names.
+        # Validated on the 11-day previous-days A/B replay: +6 fills, +$914 PnL vs
+        # baseline (scripts/_sim_liquidity_selection.py, 2026-06-10).
+        _ross_weights = ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
+        try:
+            from ..config import settings as _att_settings
+            _att_on = bool(getattr(_att_settings, "chili_momentum_attention_leadership_enabled", True))
+        except Exception:
+            _att_on = False
+        if _att_on:
+            # ATTENTION-LEADERSHIP (2026-06-22 Ross study — the TRUE winner/loser separator,
+            # NOT position): stamp each EQUITY mover's amplitude-leadership share+rank over the
+            # FULL field, computed HERE (pre-chunk — pipeline.py only sees a 32-symbol chunk, so
+            # a market-wide measure must be computed at this site). The winners (NXTS, CRMT) were
+            # rank #1 owning ~30-36% of the field's amplitude; every loser was a follower. A
+            # re-rank PILLAR, never a veto → a fresh-breakout leader near VWAP still scores HIGH
+            # (no winner-kill) and the #2-#5 movers still rank (breadth kept). Equity-only; fail-open.
+            try:
+                _amps = []
+                for r in results:
+                    _su = _bsym(r)
+                    if not _su or _su.endswith("-USD"):
+                        continue  # equity-only; crypto field amplitude semantics differ (24h)
+                    try:
+                        _a = max(0.0, float(r.get("daily_change_pct") or r.get("change_pct") or 0.0))
+                    except (TypeError, ValueError):
+                        _a = 0.0
+                    if _a > 0:
+                        _amps.append((r, _a))
+                if len(_amps) >= 2:
+                    _field = sorted((a for _, a in _amps), reverse=True)
+                    _total = float(sum(_field))
+                    _n = len(_field)
+                    _max_share = (_field[0] / _total) if _total > 0 else 0.0
+                    for r, a in _amps:
+                        _rank = _field.index(a) + 1  # 1 = field leader (ties share the top rank)
+                        _grp = (1.0 - (_rank - 1) / (_n - 1)) if _n > 1 else 1.0
+                        _share_norm = ((a / _total) / _max_share) if (_total > 0 and _max_share > 0) else 0.0
+                        r["attention_leadership"] = round(_grp * (0.5 + 0.5 * _share_norm), 4)
+                        try:  # dormant->explosive: today's vol vs the name's OWN prior-day baseline (best-effort)
+                            _dv = float(r.get("volume") or r.get("day_volume") or 0.0)
+                            _pv = float(r.get("prev_day_volume") or r.get("prev_volume") or r.get("prevDayVolume") or 0.0)
+                            if _dv > 0 and _pv > 0:
+                                r["dormant_rvol"] = round(_dv / _pv, 4)
+                        except (TypeError, ValueError):
+                            pass
+                    _ross_weights = ROSS_PILLAR_WEIGHTS_ATTENTION
+            except Exception:
+                logger.debug("[scheduler] attention-leadership field compute skipped", exc_info=True)
+        _ross_ranked = _ross_su(
+            {_bsym(r): r for r in results if _bsym(r)},
+            weights=_ross_weights,
+        )
+        results = sorted(
+            results,
+            key=lambda r: (
+                _ross_ranked[_bsym(r)].rank if _bsym(r) in _ross_ranked else 10**9
+            ),
+        )
+    except Exception:
+        logger.debug("[scheduler] ross momentum universe sort skipped", exc_info=True)
+
+    # UNCAPPED bridge (2026-06-15): when the universe is uncapped, build the FULL
+    # Ross-ranked tickers list (no top-30 truncation) — the chunked tick below
+    # scores every screened mover into viability (CUPR-class names that ranked out
+    # of the old top-30 batch now get a row). OFF ⇒ the historical top-30 cut
+    # (single capped call), byte-identical to current.
+    try:
+        from ..config import settings as _bridge_settings
+
+        _bridge_uncapped = bool(
+            getattr(_bridge_settings, "chili_momentum_universe_uncapped_enabled", False)
+        )
+    except Exception:
+        _bridge_uncapped = False
+
+    tickers: list[str] = []
+    ross_signals: dict[str, dict] = {}
+    for r in results:
+        t = str(r.get("ticker") or r.get("symbol") or "").strip().upper()
+        if t and t not in tickers:
+            tickers.append(t)
+            # M2: forward the Ross pillars (RVOL/gap/daily-change/float) the
+            # scanner already computed instead of discarding them — the momentum
+            # lane ranks explosive instruments from these (docs/DESIGN/MOMENTUM_LANE.md).
+            ross_signals[t] = r
+        if not _bridge_uncapped and len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
+            break
+
+    # ROSS "RUNNING UP" FEEDER (2026-06-11, the SKYQ gap): the ranking above is a
+    # Top Gainers clone (day change), so a name bursting NOW from a flat day —
+    # SKYQ +2% on the day yet firing pullback_break_ok with 2,163% 5-min RVOL on
+    # Ross's Running Up scanner — never earns a fresh viability row and can never
+    # arm. Our own NBBO tape already samples these names every minute: lift the
+    # fastest mid-bursts of the last few minutes into the batch (the pin block
+    # below then prepends armed sessions ahead of them, so the head order is
+    # pins -> bursts -> ranked, all inside the pipeline's 32-symbol cut).
+    try:
+        from .trading.momentum_neural.nbbo_tape import tape_running_up_symbols
+
+        _bursts = tape_running_up_symbols(db)
+        if _bursts:
+            tickers = _bursts + [t for t in tickers if t not in _bursts]
+            logger.info(
+                "[scheduler] running-up feeder lifted %d burst symbol(s): %s",
+                len(_bursts), ",".join(_bursts),
+            )
+    except Exception:
+        logger.debug("[scheduler] running-up feeder failed", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # ARMED-SESSION PIN (2026-06-11, the EDHL kill): an armed symbol that rotates
+    # OUT of the scanner's top batch stops getting viability refreshes, its
+    # snapshot ages past the 600s freshness gate, and our own staleness check
+    # then blocks every entry until the session dies — EDHL was armed at 11:33Z,
+    # never refreshed again, and got strangled (stale 1887s) while Ross banked
+    # +$782 on the same chart (also killed UEC today and AAOG on 06-10). Active
+    # live sessions' symbols are ALWAYS pinned into the refresh batch.
+    try:
+        from .trading.momentum_neural.live_fsm import LIVE_RUNNER_RUNNABLE_STATES
+        from ..models.trading import TradingAutomationSession
+
+        _armed_rows = (
+            db.query(TradingAutomationSession.symbol)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
+                ~TradingAutomationSession.symbol.like("%-USD"),
+            )
+            .distinct()
+            .all()
+        )
+        _pins = []
+        for (_sym,) in _armed_rows:
+            _su = str(_sym or "").strip().upper()
+            if _su and _su not in _pins:
+                _pins.append(_su)
+        if _pins:
+            # PREPEND the pins: the downstream pipeline caps symbols at 32, so
+            # armed names must sit at the HEAD of the list to survive the cut.
+            tickers = _pins + [t for t in tickers if t not in _pins]
+    except Exception:
+        logger.debug("[scheduler] armed-session viability pin failed", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    if not tickers:
+        return
+    # S1 EVENT FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §5): cache this EQUITY batch's
+    # ross_signals so the tape-delta ignite job can score a single crosser against the
+    # SAME field for percentile context. Equity refresh only (crypto has its own field
+    # semantics); best-effort + never affects the bridge write.
+    if source in ("equity_viability_refresh", "equity_momentum"):
+        try:
+            _tape_delta_set_field_snapshot(ross_signals)
+        except Exception:
+            logger.debug("[momentum_event_select] field snapshot cache skipped", exc_info=True)
+    try:
+        from .trading.momentum_neural.pipeline import run_momentum_neural_tick
+
+        if _bridge_uncapped and len(tickers) > _VIABILITY_BRIDGE_CHUNK:
+            # UNCAPPED: the pipeline tick caps symbols at 32 internally, so feed the
+            # full universe through in chunks of _VIABILITY_BRIDGE_CHUNK and COMMIT
+            # PER CHUNK — commit-between-chunks is mandatory (the idle-in-transaction
+            # / deadlock guard; #561/#610). A failed chunk is rolled back and skipped
+            # so one bad symbol can't sink the rest of the universe.
+            _chunks = 0
+            for _i in range(0, len(tickers), _VIABILITY_BRIDGE_CHUNK):
+                _chunk = tickers[_i : _i + _VIABILITY_BRIDGE_CHUNK]
+                _chunk_signals = {t: ross_signals[t] for t in _chunk if t in ross_signals}
+                try:
+                    # A prior read probe can leave the Session in PendingRollbackError
+                    # state without any intended bridge writes. Clear it before the
+                    # scorer starts so one dead read transaction does not skip a fresh
+                    # crosser/armed symbol.
+                    db.rollback()
+                    run_momentum_neural_tick(
+                        db, meta={"tickers": _chunk, "ross_signals": _chunk_signals}
+                    )
+                    db.commit()
+                    _chunks += 1
+                except Exception as _ce:
+                    logger.warning(
+                        "[scheduler] viability bridge (%s) chunk %d failed: %s",
+                        source, (_i // _VIABILITY_BRIDGE_CHUNK), _ce,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+            logger.info(
+                "[scheduler] viability bridge (%s): %d tickers in %d chunk(s) → direct tick ok",
+                source, len(tickers), _chunks,
+            )
+        else:
+            db.rollback()
+            run_momentum_neural_tick(
+                db, meta={"tickers": tickers, "ross_signals": ross_signals}
+            )
+            db.commit()
+            logger.info(
+                "[scheduler] viability bridge (%s): %d tickers → direct tick ok",
+                source, len(tickers),
+            )
+    except Exception as e:
+        logger.warning("[scheduler] viability bridge (%s) failed: %s", source, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _run_crypto_breakout_job():
+    """24/7 crypto breakout scanner: detect intraday setups on 15m candles.
+
+    Alerts BEFORE breakouts happen -- prioritises pre-breakout precursors:
+      1. BB squeeze + ATR compressed (coiled spring)
+      2. BB squeeze firing (squeeze just releasing)
+      3. BB squeeze + bullish EMA stack + rising volume
+      4. ATR compressed with strong momentum setup
+      5. High-score pre-breakout with volume
+      6. Freshly confirmed breakout (still actionable with tighter stop)
+
+    All thresholds are brain-adaptive and evolve via the learning cycle.
+    """
+    logger.info("[scheduler] legacy crypto breakout scanner retired; skipped")
+    return
+    import time as _t
+    import uuid as _uuid
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_CRYPTO_BREAKOUT_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import (
+        _crypto_breakout_payload_from_run,
+        get_adaptive_weight,
+        run_crypto_breakout_scan,
+    )
+    from .trading.alerts import dispatch_alert
+
+    logger.info("[scheduler] Running crypto breakout scanner")
+    db = SessionLocal()
+    jid = None
+    t_wall = _t.time()
+    try:
+        jid = brain_batch_job_begin(
+            db,
+            JOB_CRYPTO_BREAKOUT_SCANNER,
+            getattr(_settings, "brain_default_user_id", None),
+        )
+        db.commit()
+
+        result = run_crypto_breakout_scan(
+            max_results=20,
+            batch_job_id=jid,
+            skip_db_ttl_check=True,
+        )
+        now = _t.time()
+        _cycle_id = str(_uuid.uuid4())[:12]
+
+        # BTC dump filter — reduce alert volume when BTC is crashing
+        _btc_dump_halve = False
+        try:
+            from .trading.market_data import get_btc_state
+            _btc = get_btc_state()
+            if (_btc.get("btc_change_pct") or 0) < -5:
+                _btc_dump_halve = True
+                logger.info("[scheduler] BTC dumping >5% — halving crypto alert cap")
+        except Exception:
+            pass
+
+        stale = [k for k, v in _crypto_alert_cooldown.items() if now - v > 7200]
+        for k in stale:
+            del _crypto_alert_cooldown[k]
+
+        t_coiled = get_adaptive_weight("crypto_alert_coiled_spring_min")
+        t_squeeze = get_adaptive_weight("crypto_alert_squeeze_firing_min")
+        t_building = get_adaptive_weight("crypto_alert_building_min")
+        t_range = get_adaptive_weight("crypto_alert_range_tight_min")
+        t_high = get_adaptive_weight("crypto_alert_high_score_min")
+        rvol_building = get_adaptive_weight("crypto_alert_rvol_building_min")
+        rvol_high = get_adaptive_weight("crypto_alert_rvol_high_score_min")
+
+        all_results = list(result.get("all_results") or result.get("results") or [])
+
+        # Diagnostic: score distribution
+        score_buckets = {"8+": 0, "7-8": 0, "6-7": 0, "5-6": 0, "<5": 0}
+        for r in all_results:
+            s = r.get("score", 0)
+            if s >= 8:
+                score_buckets["8+"] += 1
+            elif s >= 7:
+                score_buckets["7-8"] += 1
+            elif s >= 6:
+                score_buckets["6-7"] += 1
+            elif s >= 5:
+                score_buckets["5-6"] += 1
+            else:
+                score_buckets["<5"] += 1
+
+        logger.info(
+            f"[scheduler] Crypto score distribution: "
+            + ", ".join(f"{k}={v}" for k, v in score_buckets.items())
+        )
+
+        # Diagnostic: log top 3 setups regardless of alert qualification
+        for i, r in enumerate(all_results[:3]):
+            logger.info(
+                f"[scheduler] Top-{i+1}: {r['ticker']} score={r['score']} "
+                f"squeeze={r.get('bb_squeeze')} firing={r.get('bb_squeeze_firing')} "
+                f"atr={r.get('atr_state')} ema={r.get('ema_alignment')} "
+                f"rvol={r.get('rvol')} confirmed={r.get('breakout_confirmed')} "
+                f"sigs={r.get('signals', [])[:3]}"
+            )
+
+        alertable: list[tuple[dict, str, str]] = []
+        for r in all_results:
+            score = r.get("score", 0)
+            squeeze = r.get("bb_squeeze", False)
+            squeeze_firing = r.get("bb_squeeze_firing", False)
+            atr = r.get("atr_state", "normal")
+            ema = r.get("ema_alignment", "neutral")
+            rvol = r.get("rvol", 1.0)
+            confirmed = r.get("breakout_confirmed", False)
+
+            # Tier 1: Coiled spring -- squeeze + ATR compressed (highest edge)
+            if not confirmed and squeeze and atr == "compressed" and score >= t_coiled:
+                alertable.append((r, "COILED SPRING", "crypto_squeeze_firing"))
+
+            # Tier 2: Squeeze just releasing -- imminent move
+            elif not confirmed and squeeze_firing and score >= t_squeeze:
+                alertable.append((r, "SQUEEZE FIRING", "crypto_squeeze_firing"))
+
+            # Tier 3: Squeeze + bullish alignment + volume picking up
+            elif not confirmed and squeeze and ema in ("bullish_stack", "bullish") and rvol >= rvol_building and score >= t_building:
+                alertable.append((r, "BREAKOUT BUILDING", "crypto_breakout"))
+
+            # Tier 4: ATR compressed with strong momentum setup
+            elif not confirmed and atr == "compressed" and score >= t_range:
+                alertable.append((r, "RANGE TIGHTENING", "crypto_breakout"))
+
+            # Tier 5: High-score pre-breakout with volume
+            elif not confirmed and score >= t_high and rvol >= rvol_high:
+                alertable.append((r, "HIGH-SCORE SETUP", "crypto_breakout"))
+
+            # Tier 6: Freshly confirmed breakout (still actionable)
+            elif confirmed and score >= t_high and rvol >= rvol_high:
+                alertable.append((r, "BREAKOUT CONFIRMED", "crypto_breakout"))
+
+        sent = 0
+        cooldown_skipped = 0
+        _max_alerts = int(get_adaptive_weight("crypto_alert_max_per_cycle"))
+        if _btc_dump_halve:
+            _max_alerts = max(1, _max_alerts // 2)
+
+        _sector_counts: dict[str, int] = {}
+        _sector_cap = int(get_adaptive_weight("alert_max_per_sector"))
+
+        for setup, prefix, alert_type in alertable[:_max_alerts * 2]:
+            if sent >= _max_alerts:
+                break
+            ticker = setup["ticker"]
+            last_sent = _crypto_alert_cooldown.get(ticker, 0)
+            if now - last_sent < get_adaptive_weight("crypto_alert_cooldown_s"):
+                cooldown_skipped += 1
+                logger.debug(f"[scheduler] {ticker} skipped (cooldown)")
+                continue
+
+            _sect = setup.get("sector") or "crypto_other"
+            if _sector_counts.get(_sect, 0) >= _sector_cap:
+                continue
+            _sector_counts[_sect] = _sector_counts.get(_sect, 0) + 1
+
+            flags = []
+            if setup.get("bb_squeeze"):
+                flags.append("BB squeeze")
+            if setup.get("bb_squeeze_firing"):
+                flags.append("squeeze releasing")
+            if setup.get("atr_state") == "compressed":
+                flags.append("ATR compressed")
+            if setup.get("ema_alignment") in ("bullish_stack",):
+                flags.append("full EMA stack")
+
+            flag_line = " + ".join(flags) if flags else ""
+            sig_text = "; ".join(setup.get("signals", [])[:3])
+
+            _hold_est = setup.get("hold_estimate") or {}
+            _hold = _hold_est.get("label", "")
+            from .trading.scanner import classify_trade_type
+            _tc = classify_trade_type(
+                setup.get("signals", []), _hold_est,
+                setup, is_crypto=True,
+            )
+            msg = format_crypto_breakout(
+                ticker=ticker,
+                trade_label=_tc["label"],
+                score=setup["score"],
+                price=setup["price"],
+                change_24h=setup.get("change_24h", 0),
+                rvol=setup.get("rvol", 0),
+                ema_alignment=setup.get("ema_alignment", "n/a"),
+                flag_line=flag_line,
+                entry_price=setup.get("entry_price"),
+                stop_loss=setup.get("stop_loss"),
+                take_profit=setup.get("take_profit"),
+                duration=_tc["duration"] or "",
+                sig_text=sig_text,
+            )
+
+            dispatch_alert(
+                ticker=ticker,
+                alert_type=alert_type,
+                message=msg,
+                price=setup["price"],
+                trade_type=_tc["type"],
+                duration_estimate=_tc["duration"] or None,
+            )
+            _crypto_alert_cooldown[ticker] = now
+            _record_breakout_alert(setup, prefix, "crypto",
+                                   scan_cycle_id=_cycle_id, timeframe="15m")
+            sent += 1
+
+        logger.info(
+            f"[scheduler] Crypto breakout scan done: "
+            f"{result.get('total_scanned', 0)} scanned, "
+            f"{len(all_results)} scored, "
+            f"{len(alertable)} alertable ({cooldown_skipped} cooldown-skipped), "
+            f"{sent} alerts sent"
+        )
+
+        duration = round(_t.time() - t_wall, 1)
+        if not result.get("ok", True):
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=False,
+                error=str(result.get("error") or "scan failed"),
+                meta={"duration_s": duration},
+            )
+            db.commit()
+            return
+
+        payload = _crypto_breakout_payload_from_run(
+            all_results,
+            total=int(result.get("total_scanned") or 0),
+            scan_time_iso=str(result.get("scan_time") or ""),
+            elapsed_s=float(result.get("elapsed_s") or 0),
+            errors=int(result.get("errors") or 0),
+        )
+        brain_batch_job_finish(
+            db,
+            jid,
+            ok=True,
+            meta={
+                "duration_s": duration,
+                "total_scanned": result.get("total_scanned", 0),
+                "scored": len(all_results),
+                "score_buckets": score_buckets,
+                "alerts_sent": sent,
+                "alertable": len(alertable),
+            },
+            payload_json=payload,
+        )
+        db.commit()
+
+        _bridge_scanner_to_viability(db, all_results, source="crypto_breakout")
+    except Exception as e:
+        logger.error(f"[scheduler] Crypto breakout scan failed: {e}")
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] crypto breakout batch_job_finish failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_stock_breakout_job():
+    """Stock breakout scanner: detect consolidation-to-breakout setups during market hours.
+
+    Uses the same tier logic as crypto but with stock-specific thresholds.
+    All thresholds are brain-adaptive.
+    """
+    logger.info("[scheduler] legacy stock breakout scanner retired; skipped")
+    return
+    import time as _t
+    import uuid as _uuid
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_STOCK_BREAKOUT_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import _stock_breakout_payload_from_run, get_adaptive_weight, run_breakout_scan
+    from .trading.alerts import dispatch_alert
+
+    logger.info("[scheduler] Running stock breakout scanner")
+    db = SessionLocal()
+    jid = None
+    t_wall = _t.time()
+    try:
+        jid = brain_batch_job_begin(
+            db,
+            JOB_STOCK_BREAKOUT_SCANNER,
+            getattr(_settings, "brain_default_user_id", None),
+        )
+        db.commit()
+
+        result = run_breakout_scan(max_results=20, batch_job_id=jid, skip_db_ttl_check=True)
+        now = _t.time()
+        _cycle_id = str(_uuid.uuid4())[:12]
+
+        stale = [k for k, v in _stock_alert_cooldown.items() if now - v > 7200]
+        for k in stale:
+            del _stock_alert_cooldown[k]
+
+        t_coiled = get_adaptive_weight("stock_alert_coiled_spring_min")
+        t_squeeze = get_adaptive_weight("stock_alert_squeeze_firing_min")
+        t_high = get_adaptive_weight("stock_alert_high_score_min")
+
+        all_results = list(result.get("all_results") or result.get("results") or [])
+        logger.info(
+            f"[scheduler] Stock breakout scan: {result.get('candidates_scanned', 0)} scanned, "
+            f"{len(all_results)} scored"
+        )
+
+        alertable: list[tuple[dict, str, str]] = []
+        for r in all_results:
+            score = r.get("score", 0)
+            squeeze = r.get("bb_squeeze", False)
+            status = r.get("status", "wait")
+            adx = r.get("adx")
+            adx_low = adx is not None and adx < 20
+
+            if squeeze and adx_low and score >= t_coiled:
+                alertable.append((r, "STOCK COILED SPRING", "stock_breakout"))
+            elif status == "breaking_out" and score >= t_squeeze:
+                alertable.append((r, "STOCK BREAKOUT", "stock_breakout"))
+            elif squeeze and score >= t_squeeze:
+                alertable.append((r, "STOCK SQUEEZE SETUP", "stock_breakout"))
+            elif score >= t_high:
+                alertable.append((r, "STOCK HIGH-SCORE SETUP", "stock_breakout"))
+
+        sent = 0
+        cooldown_skipped = 0
+        _max_alerts = int(get_adaptive_weight("stock_alert_max_per_cycle"))
+        _sector_counts: dict[str, int] = {}
+        _sector_cap = int(get_adaptive_weight("alert_max_per_sector"))
+
+        for setup, prefix, alert_type in alertable[:_max_alerts * 2]:
+            if sent >= _max_alerts:
+                break
+            ticker = setup["ticker"]
+            last_sent = _stock_alert_cooldown.get(ticker, 0)
+            if now - last_sent < get_adaptive_weight("stock_alert_cooldown_s"):
+                cooldown_skipped += 1
+                continue
+
+            _sect = setup.get("sector") or "unknown"
+            if _sector_counts.get(_sect, 0) >= _sector_cap:
+                continue
+            _sector_counts[_sect] = _sector_counts.get(_sect, 0) + 1
+
+            flags = []
+            if setup.get("bb_squeeze"):
+                flags.append("BB squeeze")
+            if setup.get("adx") and setup["adx"] < 20:
+                flags.append(f"ADX {setup['adx']:.0f}")
+            flag_line = " + ".join(flags) if flags else ""
+            sig_text = "; ".join(setup.get("signals", [])[:3])
+
+            _hold_est = setup.get("hold_estimate") or {}
+            _hold = _hold_est.get("label", "")
+            from .trading.scanner import classify_trade_type
+            _tc = classify_trade_type(
+                setup.get("signals", []), _hold_est,
+                setup, is_crypto=False,
+            )
+            msg = format_stock_breakout(
+                ticker=ticker,
+                trade_label=_tc["label"],
+                score=setup["score"],
+                price=setup["price"],
+                dist_to_breakout=setup.get("dist_to_breakout", 0),
+                flag_line=flag_line,
+                entry_price=setup.get("entry_price"),
+                stop_loss=setup.get("stop_loss"),
+                take_profit=setup.get("take_profit"),
+                duration=_tc["duration"] or "",
+                sig_text=sig_text,
+            )
+
+            dispatch_alert(
+                ticker=ticker,
+                alert_type=alert_type,
+                message=msg,
+                price=setup["price"],
+                trade_type=_tc["type"],
+                duration_estimate=_tc["duration"] or None,
+            )
+            _stock_alert_cooldown[ticker] = now
+            _record_breakout_alert(setup, prefix, "stock",
+                                   scan_cycle_id=_cycle_id, timeframe="1d")
+            sent += 1
+
+        logger.info(
+            f"[scheduler] Stock breakout scan done: "
+            f"{len(alertable)} alertable ({cooldown_skipped} cooldown-skipped), "
+            f"{sent} alerts sent"
+        )
+
+        duration = round(_t.time() - t_wall, 1)
+        if not result.get("ok", True):
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=False,
+                error="stock breakout scan failed",
+                meta={"duration_s": duration},
+            )
+            db.commit()
+            return
+
+        payload = _stock_breakout_payload_from_run(
+            all_results,
+            candidates_scanned=int(result.get("candidates_scanned") or 0),
+            total_sourced=int(result.get("total_sourced") or 0),
+            elapsed_s=float(result.get("elapsed_s") or 0),
+        )
+        brain_batch_job_finish(
+            db,
+            jid,
+            ok=True,
+            meta={
+                "duration_s": duration,
+                "alerts_sent": sent,
+                "alertable": len(alertable),
+                "scored": len(all_results),
+            },
+            payload_json=payload,
+        )
+        db.commit()
+    except Exception as e:
+        logger.error(f"[scheduler] Stock breakout scan failed: {e}")
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] stock breakout batch_job_finish failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_momentum_scanner_job():
+    """Active momentum scanner: find immaculate day-trade setups and alert."""
+    import time as _t
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_MOMENTUM_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import _momentum_payload_from_run, get_adaptive_weight, run_momentum_scanner
+    from .trading.alerts import dispatch_alert
+
+    logger.info("[scheduler] Running momentum scanner")
+    db = SessionLocal()
+    jid = None
+    t_wall = _t.time()
+    try:
+        jid = brain_batch_job_begin(
+            db,
+            JOB_MOMENTUM_SCANNER,
+            getattr(_settings, "brain_default_user_id", None),
+        )
+        db.commit()
+
+        result = run_momentum_scanner(
+            max_results=int(get_adaptive_weight("momentum_max_results")),
+            batch_job_id=jid,
+            skip_db_ttl_check=True,
+        )
+        immaculate = [r for r in result.get("results", []) if r.get("immaculate")]
+        if immaculate:
+            for setup in immaculate:
+                from .trading.scanner import classify_trade_type
+                _hold_est = setup.get("hold_estimate") or {}
+                _tc = classify_trade_type(
+                    setup.get("signals", []), _hold_est, setup,
+                )
+                msg = format_momentum(
+                    ticker=setup["ticker"],
+                    trade_label=_tc["label"],
+                    score=setup["score"],
+                    price=setup["price"],
+                    vol_ratio=setup.get("vol_ratio", 0),
+                    risk_reward=setup.get("risk_reward", 0),
+                    duration=_tc["duration"] or "",
+                    signals=", ".join(setup.get("signals", [])[:3]),
+                )
+                dispatch_alert(
+                    ticker=setup["ticker"],
+                    alert_type="momentum_immaculate",
+                    message=msg,
+                    price=setup["price"],
+                    trade_type=_tc["type"],
+                    duration_estimate=_tc["duration"] or None,
+                )
+            logger.info(
+                f"[scheduler] Momentum scanner found {len(immaculate)} immaculate setup(s)"
+            )
+        else:
+            logger.info(
+                f"[scheduler] Momentum scanner: {result.get('matches', 0)} decent, 0 immaculate"
+            )
+
+        duration = round(_t.time() - t_wall, 1)
+        if not result.get("ok", True):
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=False,
+                error="momentum scan failed",
+                meta={"duration_s": duration},
+            )
+            db.commit()
+            return
+
+        res_list = result.get("results") or []
+        payload = _momentum_payload_from_run(
+            res_list,
+            candidates_scanned=int(result.get("candidates_scanned") or 0),
+            total_sourced=int(result.get("total_sourced") or 0),
+            elapsed_s=float(result.get("elapsed_s") or 0),
+            immaculate_count=int(result.get("immaculate_count") or 0),
+        )
+        brain_batch_job_finish(
+            db,
+            jid,
+            ok=True,
+            meta={
+                "duration_s": duration,
+                "immaculate_count": len(immaculate),
+                "matches": result.get("matches", 0),
+            },
+            payload_json=payload,
+        )
+        db.commit()
+
+        # The broad momentum scanner is an ALERT tool over a WIDE universe (incl.
+        # large-caps / ETFs like AAPL / GDXJ). It must NOT feed the momentum LANE
+        # viability — that is fed exclusively by the Ross-screened sources (the
+        # equity Ross-universe refresh + the crypto venue feed) so the lane only ever
+        # evaluates Ross-class small-caps, not mega-caps at a flat default score that
+        # dilute selection. (Removed the cross-feed; alerts above are unaffected.)
+        # docs/DESIGN/MOMENTUM_LANE.md
+    except Exception as e:
+        logger.error(f"[scheduler] Momentum scanner failed: {e}")
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] momentum batch_job_finish failed")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_fast_path_universe_rotator_job():
+    """f-fastpath-universe-rotation (2026-05-07): hourly mid-tier rotator.
+
+    Scans Coinbase USD products, applies admission gates, scores by
+    opportunity/volatility/depth, applies hysteresis, and writes top-N
+    to ``fast_path_universe``. New entrants land in ``status='shadow'``;
+    promotion to ``status='active'`` requires both the shadow window
+    and learned decay evidence clearing configured execution cost.
+
+    No-op when ``settings.universe_rotation_enabled`` is False (the
+    flag's default). Failures log + return; never raises into the
+    scheduler.
+    """
+    from ..db import SessionLocal
+    from .trading.fast_path import settings as fp_settings_mod
+    from .trading.fast_path.universe_rotator import run_rotation_pass
+
+    fp_settings = fp_settings_mod.load()
+    if not fp_settings.universe_rotation_enabled:
+        logger.debug(
+            "[scheduler] fast-path universe rotator: skipped "
+            "(universe_rotation_enabled=False)"
+        )
+        return
+
+    logger.info("[scheduler] Running fast-path universe rotator")
+    db = SessionLocal()
+    try:
+        out = run_rotation_pass(db, settings=fp_settings)
+        logger.info(
+            "[scheduler] fast-path universe rotator pass complete: %s", out
+        )
+    except Exception as e:
+        logger.warning("[scheduler] fast-path universe rotator failed: %s", e)
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _build_crypto_momentum_universe() -> list[dict]:
+    """Live crypto momentum universe from the venue's own 24h stats.
+
+    The legacy crypto breakout scanner was removed, which left the momentum lane
+    with NO live viability source (its cache went stale past the live freshness
+    gate, blocking every guarded-live crypto entry). This rebuilds the feed
+    directly from the trade venue: a single Coinbase ``get_products()`` call
+    returns every spot product with 24h stats, which map cleanly onto the three
+    Ross pillars the viability scorer consumes:
+
+      * ``price_percentage_change_24h`` -> momentum (already-moving)
+      * ``volume_percentage_change_24h`` -> relative volume (RVOL proxy: a +150%
+        volume day is ~2.5x normal)
+      * ``approximate_quote_24h_volume`` -> liquidity (USD turnover)
+
+    USD/USDC spot only, tradable, real price + turnover. We return the full
+    qualifying set; ``_bridge_scanner_to_viability`` ranks it by Ross momentum
+    quality (percentile, no hardcoded thresholds) and keeps the explosive leaders.
+    docs/DESIGN/MOMENTUM_LANE.md
+    """
+    from .trading.execution_family_registry import (
+        EXECUTION_FAMILY_COINBASE_SPOT,
+        resolve_live_spot_adapter_factory,
+    )
+
+    def _f(v):
+        try:
+            if v is None or v == "":
+                return None
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    factory = resolve_live_spot_adapter_factory(EXECUTION_FAMILY_COINBASE_SPOT)
+    adapter = factory()
+    products, _fr = adapter.get_products()
+    out: list[dict] = []
+    seen_base: dict[str, int] = {}  # base currency -> index in out (USD/USDC dedupe)
+    for p in products:
+        try:
+            if (getattr(p, "quote_currency", "") or "").upper() not in ("USD", "USDC"):
+                continue
+            if not p.tradable_for_spot_momentum():
+                continue
+            raw = p.raw or {}
+            price = _f(raw.get("price"))
+            chg = _f(raw.get("price_percentage_change_24h"))
+            vol_pct = _f(raw.get("volume_percentage_change_24h"))
+            qvol = _f(raw.get("approximate_quote_24h_volume") or raw.get("quote_volume_24h"))
+            bvol = _f(raw.get("volume_24h") or raw.get("base_volume_24h"))
+            if price is None or price <= 0:
+                continue
+            if qvol is None or qvol <= 0:  # no turnover signal -> not a momentum candidate
+                continue
+            # RVOL proxy from the venue's own 24h volume %change: +150% vol => ~2.5x.
+            rvol = (1.0 + vol_pct / 100.0) if vol_pct is not None else None
+            base = (getattr(p, "base_currency", "") or "").upper()
+            quote = (getattr(p, "quote_currency", "") or "").upper()
+            entry = {
+                "symbol": p.product_id,
+                "price": price,
+                "change_24h": chg,        # momentum pillar (scorer reads change_24h)
+                "daily_change_pct": chg,  # alias the scorer also accepts
+                "rvol": rvol,             # relative-volume pillar (scorer reads rvol)
+                "quote_volume_24h": qvol,  # liquidity pillar
+                "volume_24h": bvol,
+                "source": "coinbase_products_24h",
+            }
+            # Dedupe a coin's USD/USDC books so the bridge top-N cap covers N
+            # DISTINCT movers; prefer the -USD book.
+            if base and base in seen_base:
+                ex_idx = seen_base[base]
+                if quote == "USD" and not str(out[ex_idx]["symbol"]).endswith("-USD"):
+                    out[ex_idx] = entry
+                continue
+            if base:
+                seen_base[base] = len(out)
+            out.append(entry)
+        except Exception:
+            continue
+    return out
+
+
+def _presubscribe_crypto_l2(db) -> int:
+    """Warm Coinbase Level-2 books for fresh live-eligible crypto candidates so
+    ``book_imbalance`` is populated at SCORING / arm time — not only for symbols that
+    already hold a running session. Equity gets 5-level depth via
+    ``iqfeed_depth_snapshots``; this gives the crypto lane the same microstructure
+    input from the Coinbase WS the scheduler already runs (pipeline._live_book_imbalance
+    reads the microstructure ring that ``_handle_l2`` fills for every subscribed product).
+
+    Uses ``cb_ws.subscribe()`` DIRECTLY: it is idempotent (skips already-subscribed
+    pids via ``_subscribed``) and the L2 ring is fed by ``_handle_l2`` for every
+    subscribed product regardless of tick listeners. It deliberately does NOT use
+    ``price_bus.subscribe_symbol`` here, which re-appends a tick closure on every call
+    (the ``_on_cb_tick`` growth) — book warming needs the level2 channel, not a quote
+    listener. Bounded by the system's OWN live-eligibility set (~the liquidity-floored
+    whitelist), so there is no magic-N and no unbounded 429 exposure. Best-effort +
+    fail-open: a WS or DB hiccup must never break the viability refresh. Crypto-only
+    (``-USD`` filter) — equity behaviour is untouched. Returns the count warmed.
+    """
+    try:
+        # Shared eligibility filter (same one the Phase-0 crypto L2 drain uses),
+        # so the warmed set and the drained set never drift.
+        from .trading.fast_path.crypto_l2_drain import eligible_crypto_symbols
+        from .trading.venue.coinbase_spot import get_coinbase_ws
+
+        elig = eligible_crypto_symbols(db)
+        if not elig:
+            return 0
+        get_coinbase_ws().subscribe(elig)
+        logger.info("[scheduler] crypto L2 pre-subscribe: %d live-eligible candidates warmed", len(elig))
+        return len(elig)
+    except Exception as e:
+        logger.debug("[scheduler] crypto L2 pre-subscribe skipped: %s", e)
+        return 0
+
+
+def _run_crypto_viability_refresh_job():
+    """24/7 crypto viability refresh: pull a FRESH crypto momentum universe from the
+    live venue (Coinbase products + 24h stats) and bridge it to viability.
+
+    Replaces the removed legacy breakout-scanner cache (which left viability stale
+    past the 600s live freshness gate, blocking all live crypto entries). The
+    refresh interval is tied to that freshness gate at registration so viability
+    stays fresh enough for the guarded live runner. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    from ..db import SessionLocal
+
+    logger.info("[scheduler] Running crypto viability refresh (live venue feed)")
+    db = SessionLocal()
+    try:
+        results = _build_crypto_momentum_universe()
+        if results:
+            _bridge_scanner_to_viability(db, results, source="crypto_viability_refresh")
+            # Warm L2 books for the now-eligible crypto candidates (book_imbalance
+            # parity with equity's iqfeed depth). Best-effort; never blocks refresh.
+            _presubscribe_crypto_l2(db)
+        else:
+            logger.warning("[scheduler] crypto viability refresh: empty venue universe (adapter off?)")
+    except Exception as e:
+        logger.warning("[scheduler] crypto viability refresh failed: %s", e)
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _merge_equity_refresh_universe(ross_tickers, active_session_symbols) -> list[str]:
+    """Pure: build the equity-refresh scan list = the screened Ross movers UNION the
+    EQUITY symbols of currently-active live sessions, de-duped + uppercased + sorted.
+
+    The active-session symbols are folded in so a name that is being WATCHED but has
+    rotated out of the day's top-mover screen still gets re-scored every cycle — its
+    viability snapshot stays fresh and the live boundary gate stops rejecting it as
+    "Viability snapshot stale" (the #1 fill-blocker). Crypto ``-USD`` pairs are
+    excluded (they have their own fast venue feed and are not equity-scanned).
+    Caller maps ``[]`` -> ``None`` (scans fall back to their default universe)."""
+    active_eq = {
+        str(s).upper()
+        for s in (active_session_symbols or [])
+        if s and not str(s).upper().endswith("-USD")
+    }
+    screened = {str(t).upper() for t in (ross_tickers or []) if t}
+    return sorted(screened | active_eq)
+
+
+def _run_equity_viability_refresh_job():
+    """Equity PARITY with crypto: refresh equity momentum viability on its OWN fast
+    job at the SAME cadence as the crypto venue feed (``_run_crypto_viability_refresh_job``),
+    NOT riding the slow 15min intraday sweep. The Ross-screening bridge needs the
+    equity movers (RVOL/gap) re-scored within the live-entry freshness gate or equity
+    entries are blocked "Viability snapshot stale"; this keeps equities exactly as
+    fresh as crypto (both at ~half the gate). Light: just the equity momentum-continuation
+    + premarket-gap scans (the same movers the sweep finds), bridged. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    from ..config import settings
+    from ..db import SessionLocal
+    from .trading.intraday_signals import scan_momentum_continuation, scan_premarket_gaps
+    from .trading.momentum_neural.universe import EQUITY_ROSS_SMALLCAP, build_equity_universe
+
+    # Tailor the equity universe to the Ross small-cap PROFILE (low-priced, in-play,
+    # liquid-enough movers screened from the full-market snapshot) instead of the
+    # static large-cap DEFAULT_SCAN_TICKERS the scans default to. Those mega-caps
+    # (KLAC ~$2,100 / MU ~$950) move 2-8%; Ross trades $1-$20 names moving 20-100%+.
+    # The universe is part of the strategy: build_equity_universe resolves the
+    # profile against the live snapshot; the per-ticker enrichment below + the Ross
+    # score then rank within it. Fail-safe: empty -> tickers=None -> scans use their
+    # own default universe (no regression). docs/DESIGN/MOMENTUM_LANE.md
+    try:
+        ross_tickers = build_equity_universe(EQUITY_ROSS_SMALLCAP)
+    except Exception:
+        ross_tickers = []
+
+    # ALSO always re-score the EQUITY symbols of currently-active live momentum
+    # sessions. The live boundary-risk gate REJECTS an entry when the viability
+    # snapshot is older than the freshness window; the refresh otherwise re-scores
+    # only the day's top movers, so a name that is actively WATCHED but has rotated
+    # out of the top-mover list goes stale and EVERY entry on it is blocked
+    # ("Viability snapshot stale" — ~100% of boundary-risk blocks at the open).
+    # Keeping watched symbols in the scan keeps their snapshot fresh so a setup-in-
+    # progress can actually reach entry. Equity-only (crypto "-USD" has its own fast
+    # venue feed). Fail-open: a query hiccup must never break the refresh.
+    # docs/DESIGN/MOMENTUM_LANE.md
+    _active: set[str] = set()
+    try:
+        from .trading.momentum_neural.auto_arm import _symbols_with_active_live_session
+
+        _ses = SessionLocal()
+        try:
+            _active = _symbols_with_active_live_session(_ses, user_id=None)
+        finally:
+            try:
+                _ses.rollback()
+            except Exception:
+                pass
+            _ses.close()
+    except Exception:
+        _active = set()
+
+    merged = _merge_equity_refresh_universe(ross_tickers, _active)
+    scan_tickers = merged or None
+    if merged:
+        logger.info(
+            "[scheduler] equity Ross universe: %d screened + watched-session symbols -> %d scanned fresh",
+            len(ross_tickers or []), len(merged),
+        )
+
+    # The equity momentum scan does per-ticker OHLCV fetches and can run for minutes.
+    # Holding ONE db across the scan AND the bridge write left the connection
+    # idle-in-transaction long enough for PG to drop it ("server closed the connection
+    # unexpectedly"), so the bridge write failed and equities went stale. So: scan on a
+    # short-lived session that is RELEASED before the write, then bridge on a FRESH
+    # connection (the scan's may already be dead). docs/DESIGN/MOMENTUM_LANE.md
+    # Premarket-gap output cap: the input ``scan_tickers`` is ALREADY the screened
+    # Ross pool, so cap the gap scan to that pool's size — every screened gapper
+    # reaches the Ross percentile re-rank (which makes the real selection) instead
+    # of the fixed top-15-by-raw-gap-magnitude truncating fresh-catalyst mid-gap
+    # runners (a +7% low-float 8AM-catalyst name) out behind already-extended +200%
+    # gappers, leaving them with no fresh viability score → never armable. Adaptive
+    # (no new magic number); kill-switch default-ON; None ⇒ historical fixed cap.
+    # docs/DESIGN/MOMENTUM_LANE.md
+    _pm_gap_cap = (
+        len(scan_tickers)
+        if (
+            scan_tickers
+            and bool(getattr(settings, "chili_momentum_premarket_gap_full_universe_enabled", True))
+        )
+        else None
+    )
+    sweep: dict[str, Any] = {"momentum_signals": [], "premarket_gaps": []}
+    scan_db = SessionLocal()
+    try:
+        try:
+            sweep["momentum_signals"] = list(
+                scan_momentum_continuation(tickers=scan_tickers, db=scan_db) or []
+            )
+        except Exception:
+            sweep["momentum_signals"] = []
+        try:
+            sweep["premarket_gaps"] = list(
+                scan_premarket_gaps(tickers=scan_tickers, max_signals=_pm_gap_cap) or []
+            )
+        except Exception:
+            sweep["premarket_gaps"] = []
+    finally:
+        try:
+            scan_db.rollback()
+        except Exception:
+            pass
+        scan_db.close()
+
+    movers = _equity_movers_for_ross_bridge(sweep)
+    if not movers:
+        return
+    write_db = SessionLocal()  # FRESH connection for the write (the scan's may be dead)
+    try:
+        _bridge_scanner_to_viability(write_db, movers, source="equity_viability_refresh")
+        logger.info(
+            "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
+            len(movers),
+        )
+        # S1 INSTRUMENT (docs/DESIGN/MOMENTUM_ENGINE.md §5): the batch path is the BASELINE
+        # ignite latency the event feeder is measured against (~half the 600s gate). Logging
+        # it here lets the tape-delta path's per-symbol lead-time be compared apples-to-apples.
+        try:
+            from ..config import settings as _evs_settings
+
+            _batch_period_ms = max(
+                60_000.0,
+                float(getattr(_evs_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0)) / 2.0 * 1000.0,
+            )
+            logger.info(
+                "[momentum_event_select] path=batch movers=%d batch_period_ms=%.0f "
+                "(baseline ignite_to_viability the event feeder beats)",
+                len(movers), _batch_period_ms,
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning("[scheduler] equity viability refresh bridge failed: %s", e)
+    finally:
+        try:
+            write_db.rollback()
+        except Exception:
+            pass
+        write_db.close()
+
+
+def _run_tape_delta_ignite_job():
+    """S1 EVENT-DRIVEN FEEDER — Trigger B (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5).
+
+    A fast, price-bus-INDEPENDENT job: read ONLY tape rows newer than an in-process
+    high-water mark (an incremental DELTA, not a full rescan), apply _ross_threshold_crossed,
+    and score each crosser straight into momentum_symbol_viability (freshness_ts=now) via the
+    SAME single-symbol run_momentum_neural_tick path the ignition loop + scanner bridge use —
+    so a cold new explosive mover reaches live_eligible in ~5-15s instead of waiting for the
+    ~300s batch (which keeps running as the backstop).
+
+    Byte-identical-OFF: when chili_momentum_tape_delta_ignite_enabled is False this returns
+    immediately (a no-op). The master flag chili_momentum_event_select_primary_enabled gates
+    REGISTRATION (the job is only added when the master is on).
+
+    Session hygiene (#561/#610 idle-in-transaction guard): its OWN short-lived SessionLocal,
+    commit on success, rollback-in-finally before close. Adaptive self-throttle to
+    clamp(p50 tape inter-row gap, floor, 15s) so a dense tape isn't hammered and a sparse one
+    isn't lagged — the APScheduler interval is registered at the floor and the job skips a run
+    that arrived sooner than the measured cadence.
+    """
+    from ..config import settings
+    from ..db import SessionLocal
+    from .trading.momentum_neural.nbbo_tape import (
+        tape_delta_threshold_crossers,
+        tape_inter_row_gap_p50_seconds,
+    )
+
+    if not bool(getattr(settings, "chili_momentum_tape_delta_ignite_enabled", True)):
+        return  # byte-identical-off: the registered job is a no-op
+
+    global _tape_delta_hwm, _tape_delta_last_run_monotonic
+
+    # The ONE documented floor (seconds); cadence = clamp(p50 tape gap, floor, 15).
+    try:
+        _floor = float(getattr(settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0)
+    except (TypeError, ValueError):
+        _floor = 5.0
+    _floor = max(1.0, _floor)
+
+    now_mono = time.monotonic()
+    now_utc = datetime.now(timezone.utc)
+
+    db = SessionLocal()
+    crossers: list[dict] = []
+    new_hwm = None
+    try:
+        # Adaptive cadence: measure how fast the tape fills, clamp to [floor, 15].
+        _p50 = tape_inter_row_gap_p50_seconds(db, now_utc=now_utc)
+        _cadence = _floor if _p50 is None else min(15.0, max(_floor, float(_p50)))
+        with _tape_delta_state_lock:
+            _last = _tape_delta_last_run_monotonic
+            _hwm = _tape_delta_hwm
+        if _last and (now_mono - _last) < _cadence:
+            return  # arrived sooner than the adaptive cadence — self-throttle (skip)
+        # First run after a (re)start: seed the hwm from the lookback floor so we read a
+        # bounded recent slice, not the whole table.
+        if _hwm is None:
+            _lookback_min = float(
+                getattr(settings, "chili_momentum_running_up_lookback_min", 5.0) or 5.0
+            )
+            _hwm = now_utc - timedelta(minutes=_lookback_min)
+
+        crossers, new_hwm = tape_delta_threshold_crossers(db, since=_hwm, now_utc=now_utc)
+        # Advance the hwm + stamp the run time regardless of crossers (so an empty delta
+        # still moves the window forward and doesn't re-scan the same rows next run).
+        with _tape_delta_state_lock:
+            _tape_delta_last_run_monotonic = now_mono
+            if new_hwm is not None:
+                if _tape_delta_hwm is None or new_hwm > _tape_delta_hwm:
+                    _tape_delta_hwm = new_hwm
+
+        if not crossers:
+            return
+
+        # Score each crosser via the SAME single-symbol path, against the CACHED field
+        # snapshot (percentile context preserved). One symbol per tick; the FULL cached
+        # field is passed as the ranking universe so the crosser is percentile-ranked
+        # within the real batch — `tickers` (which symbol gets a viability row) and
+        # `ross_signals` (the ranking universe) are decoupled, so only the crosser's own
+        # row is written.
+        with _tape_delta_state_lock:
+            _field = dict(_tape_delta_field_snapshot)
+
+        from .trading.momentum_neural.pipeline import run_momentum_neural_tick
+
+        _scored = 0
+        for c in crossers:
+            sym = c["symbol"]
+            # Build the single-symbol ross_signals: prefer the cached batch signal (full
+            # pillars), else a minimal tape-derived dict (move% as the momentum axis) —
+            # identical SHAPE to the ignition loop's emit so the scorer reads it.
+            _base = _field.get(sym)
+            if isinstance(_base, dict):
+                _sig = dict(_base)
+                _sig.setdefault("ticker", sym)
+                _sig.setdefault("direction", "long")
+            else:
+                _sig = {
+                    "ticker": sym,
+                    "direction": "long",
+                    "todays_change_perc": float(c.get("move_pct") or 0.0),
+                    "signal_type": "tape_delta_ignite",
+                    "source": "tape_delta_ignite",
+                }
+                if c.get("last_mid"):
+                    _sig["price"] = float(c["last_mid"])
+                if c.get("day_volume"):
+                    _sig["volume"] = float(c["day_volume"])
+            # Score it against the FULL field (percentile context) but persist ONLY the
+            # crosser's viability row. ross_signals = the real ranked universe (cached
+            # field + this crosser, which overrides any stale cached entry for `sym`);
+            # tickers = [sym] so only its row is written. Own commit; idempotent
+            # (symbol,variant_id) upsert downstream.
+            _universe = dict(_field)
+            _universe[sym] = _sig
+            try:
+                # Defensive session hygiene: tape reads are complete and all scoring
+                # inputs are detached Python dicts now. Roll back any failed implicit
+                # read transaction before the scorer writes viability so a previous
+                # DB hiccup does not turn a valid crosser into a dark skip.
+                db.rollback()
+                run_momentum_neural_tick(
+                    db, meta={"tickers": [sym], "ross_signals": _universe}
+                )
+                db.commit()
+                _scored += 1
+                # S1 INSTRUMENT: the event path put a name on the board within one cadence.
+                logger.info(
+                    "[momentum_event_select] path=tape_delta symbol=%s move_pct=%.2f "
+                    "cadence_s=%.1f field_ctx=%s ignited_to_viability=ok",
+                    sym, float(c.get("move_pct") or 0.0), _cadence,
+                    bool(isinstance(_base, dict)),
+                )
+            except Exception as _se:
+                logger.warning(
+                    "[momentum_event_select] tape-delta score %s failed: %s", sym, _se
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        if _scored:
+            logger.info(
+                "[momentum_event_select] path=tape_delta scored=%d/%d crossers (cadence=%.1fs)",
+                _scored, len(crossers), _cadence,
+            )
+    except Exception as e:
+        logger.warning("[momentum_event_select] tape-delta ignite job failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        # idle-in-transaction guard: rollback-in-finally before close.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_intraday_signal_sweep_job():
+    """Run intraday signal sweep and optionally route into paper automation."""
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.intraday_signals import run_intraday_signal_sweep
+
+    logger.info("[scheduler] Running intraday signal sweep")
+    db = SessionLocal()
+    try:
+        uid = getattr(_settings, "brain_default_user_id", None)
+        auto_paper = bool(
+            getattr(_settings, "chili_momentum_paper_runner_enabled", False)
+            and getattr(_settings, "chili_momentum_paper_runner_scheduler_enabled", False)
+        )
+        out = run_intraday_signal_sweep(db, user_id=uid, auto_paper=auto_paper)
+        db.commit()
+        logger.info("[scheduler] Intraday signal sweep result: %s", out)
+        # Equity Ross-screening bridge (docs/DESIGN/MOMENTUM_LANE.md): route the
+        # explosive equity movers the sweep just found (gappers / ORB-ups / momentum-
+        # continuation, LONG bias) through the SAME Ross-momentum viability pipeline as
+        # crypto, so equities get real ross_scores from their RVOL/gap pillars instead
+        # of the flat default. Without this every equity sits at one flat viability with
+        # NO ross_score, so the momentum lane cannot SELECT explosive equity movers
+        # Ross-style — it would arm equities arbitrarily once crypto_only is lifted.
+        # Fail-open: a bridge hiccup must never break the sweep.
+        try:
+            _equity_movers = _equity_movers_for_ross_bridge(out)
+            if _equity_movers:
+                _bridge_scanner_to_viability(db, _equity_movers, source="equity_momentum")
+                logger.info(
+                    "[scheduler] equity ross-screening bridge: %d long movers -> viability",
+                    len(_equity_movers),
+                )
+        except Exception:
+            logger.debug("[scheduler] equity ross-screening bridge skipped", exc_info=True)
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+
+def _run_brain_batch_reconciler_job() -> None:
+    """Periodic sweep of stale brain_batch_jobs (orphaned 'running' rows).
+
+    See ``app/services/trading/brain_batch_reconciler.py``. Runs every 5 min in
+    the scheduler-worker container. Idempotent and cheap (single UPDATE per
+    case, indexed on the predicate columns).
+    """
+    try:
+        from ..db import SessionLocal
+        from .trading.brain_batch_reconciler import reconcile_stale_batch_jobs
+        sess = SessionLocal()
+        try:
+            reconcile_stale_batch_jobs(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+    except Exception as e:
+        logger.warning("[scheduler_job] brain_batch_reconciler failed: %s", e)
+
+
+def _run_pattern_quality_score_refresh_job() -> None:
+    """f-promotion-pipeline-rebalance Phase 4: nightly composite quality
+    score refresh.
+
+    Computes and persists ``scan_patterns.quality_composite_score`` for
+    all active patterns. ALWAYS runs (no kill switch) — the score is
+    informational. Operators can ``SELECT id, name, quality_composite_score
+    FROM scan_patterns ORDER BY quality_composite_score DESC LIMIT 20``
+    to dry-run-inspect what the cohort-promote job would select before
+    flipping ``CHILI_COHORT_PROMOTE_ENABLED``.
+    """
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_quality_score import compute_and_persist_scores
+        sess = SessionLocal()
+        try:
+            compute_and_persist_scores(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_quality_score_refresh", _work)
+
+
+def _run_meta_label_retrain_job() -> None:
+    """Momentum LEARNING step (2026-06-23): DATA-DRIVEN re-train of the adaptive meta-label
+    de-rate. maybe_retrain_meta_label re-fits ONLY when new contributing outcomes have accrued
+    (not a clock) and is cheap (<1s); the live sizing reads the saved model -> it AUTO-UPDATES
+    as trades accumulate. Integrated into the lane's learning cadence (NOT a standalone cron),
+    so it self-improves alongside the rest of the neural learning. Best-effort."""
+    from ..db import SessionLocal
+    from .trading.momentum_neural.meta_label import maybe_retrain_meta_label
+
+    db = SessionLocal()
+    try:
+        out = maybe_retrain_meta_label(db)
+        if out.get("status") == "retrained":
+            logger.info(
+                "[scheduler] meta-label re-trained: n=%s grew_from=%s confidence=%s status=%s",
+                out.get("n"), out.get("grew_from"), out.get("confidence"), out.get("model_status"),
+            )
+    except Exception:
+        logger.exception("[scheduler] meta-label re-train job failed")
+    finally:
+        db.close()
+
+
+def _run_learning_self_critic_job() -> None:
+    """SELF-CRITIC / gap-analyst step (2026-06-23, operator's "open-minded critical thinker"):
+    a data-driven critical review of the momentum lane's LEARNING health — finds gaps (feature
+    coverage holes / capture bugs, dataset thinness, not-yet-significant weights per the
+    data-snooping discipline, confidence stalls) and logs concrete enhancement proposals. The
+    report is also saved to /app/data/_learning_self_report.json. Best-effort, offline."""
+    from ..db import SessionLocal
+    from .trading.momentum_neural.meta_label import analyze_learning_gaps
+
+    db = SessionLocal()
+    try:
+        rep = analyze_learning_gaps(db)
+        _dg = rep.get("diagnostics") or {}
+        logger.info(
+            "[scheduler] learning self-critic: n=%s positives=%s confidence=%s (Δ=%s) n_eff=%s gaps=%s",
+            rep.get("n_samples"), rep.get("positives"), rep.get("confidence"),
+            rep.get("confidence_trend"), _dg.get("n_eff_report"), rep.get("n_gaps"),
+        )
+        for g in (rep.get("gaps") or [])[:6]:
+            logger.info("[scheduler] learning GAP -> %s", g)
+        for p in (rep.get("proposals") or [])[:3]:
+            logger.info("[scheduler] learning PROPOSAL -> %s", p)
+        # RESEARCHER phase: PROPOSE-only (operator launches; never auto-spent here)
+        _ag = rep.get("research_agenda") or {}
+        if _ag.get("top"):
+            logger.info("[scheduler] learning RESEARCH-AGENDA (propose-only, operator-gated) -> top(p%s): %s | open=%s new=%s",
+                        (_ag["top"] or {}).get("priority"), (_ag["top"] or {}).get("research_question"),
+                        _ag.get("n_open"), _ag.get("n_new"))
+    except Exception:
+        logger.exception("[scheduler] learning self-critic job failed")
+    finally:
+        db.close()
+
+
+def _run_realized_stats_sync_job() -> None:
+    """Refresh raw realized EV so paper/pilot outcomes can clear gate debt."""
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_realized_sync_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.realized_stats_sync import sync_realized_stats
+
+        sess = SessionLocal()
+        try:
+            out = sync_realized_stats(sess, dry_run=False)
+            logger.info("[scheduler] realized_stats_sync result=%s", out)
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("realized_stats_sync", _work)
+
+
+def _run_cash_deployment_work_producer_job() -> None:
+    """Queue targeted profitability work from the cash-deployment funnel."""
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "brain_work_cash_deployment_producer_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.cash_deployment import enqueue_cash_deployment_work
+
+        sess = SessionLocal()
+        try:
+            out = enqueue_cash_deployment_work(
+                sess,
+                window_days=max(
+                    1,
+                    int(getattr(_settings, "brain_work_cash_deployment_producer_window_days", 30) or 30),
+                ),
+                limit=max(
+                    1,
+                    int(getattr(_settings, "brain_work_cash_deployment_producer_limit", 25) or 25),
+                ),
+                use_snapshots=True,
+            )
+            sess.commit()
+            logger.info("[scheduler] cash_deployment_work_producer result=%s", out)
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("cash_deployment_work_producer", _work)
+
+
+def _run_pattern_cohort_promote_job() -> None:
+    """f-promotion-pipeline-rebalance Phase 4: weekly cohort
+    auto-promote.
+
+    Selects adaptive-passed eligible patterns and advances all of them to
+    broker-blocked ``shadow_promoted`` observation. Pilot/full promotion still
+    uses the adaptive roster target downstream.
+
+    Flag-disable via ``CHILI_COHORT_PROMOTE_ENABLED=false``.
+    """
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_cohort_promote_enabled", False)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_cohort_promote import run_cohort_promote_cycle
+        sess = SessionLocal()
+        try:
+            run_cohort_promote_cycle(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_cohort_promote", _work)
+
+
+def _run_alpha_portfolio_gate_maintenance_job() -> None:
+    """Persist alpha gate state and auto-queue pattern certification work."""
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_alpha_portfolio_gate_enabled", False)):
+        return
+    if not bool(getattr(_settings, "chili_alpha_portfolio_maintenance_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.alpha_portfolio_gate import run_alpha_portfolio_maintenance
+
+        sess = SessionLocal()
+        try:
+            out = run_alpha_portfolio_maintenance(sess)
+            logger.info("[scheduler] alpha_portfolio_gate_maintenance result=%s", out)
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("alpha_portfolio_gate_maintenance", _work)
+
+
+def _run_pattern_shadow_vetting_job() -> None:
+    """Finalize fully vetted ``shadow_promoted`` patterns.
+
+    The cohort job moves CPCV-passed candidates into broker-blocked shadow
+    observation. This job closes that loop: once directional EV outcomes are
+    mature enough to produce ``quality_composite_score`` and the score clears
+    the adaptive top-pool policy, the pattern advances to normal
+    ``promoted``.
+    """
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_shadow_vetting_finalize_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_shadow_vetting import run_shadow_vetting_cycle
+
+        sess = SessionLocal()
+        try:
+            run_shadow_vetting_cycle(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_shadow_vetting_finalizer", _work)
+
+
+def _run_pattern_directional_outcome_evaluator_job() -> None:
+    """f-promotion-pipeline-rebalance Phase 2: evaluate directional
+    correctness for closed-window pattern_breakout_imminent alerts.
+
+    Runs every 30 minutes (after most hold windows close) and inserts
+    one row per evaluated alert into ``pattern_alert_directional_outcome``.
+    The rolling-30 directional WR view feeds Phase 4's composite
+    quality scoring. Pure-write of the new table; no effect on
+    existing pattern stats or autotrader behavior.
+
+    Flag-disable via ``CHILI_PATTERN_DIRECTIONAL_OUTCOME_ENABLED=false``.
+    """
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_pattern_directional_outcome_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_directional_outcome import (
+            evaluate_directional_outcomes,
+        )
+        sess = SessionLocal()
+        try:
+            evaluate_directional_outcomes(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_directional_outcome_evaluator", _work)
+
+
+def _run_promotion_evidence_audit_job() -> None:
+    """Daily promotion-evidence audit (logs summary; auto-demote is opt-in).
+
+    See ``app/services/trading/promotion_evidence_audit.py``. Pure-read by
+    default. Set ``CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE=true`` to actually
+    demote evidence-incomplete promoted patterns; ``CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE_DRY_RUN=true``
+    logs what would be demoted without applying.
+    """
+    from ..config import settings
+
+    if not bool(getattr(settings, "chili_pattern_evidence_audit_enabled", True)):
+        return
+    try:
+        from ..db import SessionLocal
+        from .trading.promotion_evidence_audit import run_promotion_evidence_audit
+        sess = SessionLocal()
+        try:
+            run_promotion_evidence_audit(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+    except Exception as e:
+        logger.warning("[scheduler_job] promotion_evidence_audit failed: %s", e)
+
+def _run_monitor_decision_review_job():
+    """Hourly: fill price_after_1h/4h and was_beneficial on pattern monitor decisions."""
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            from .trading.pattern_position_monitor import review_monitor_decisions
+            result = review_monitor_decisions(db)
+            if result.get("filled_1h") or result.get("filled_4h"):
+                logger.info("[scheduler] monitor decision review: %s", result)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("monitor_decision_review", _work)
+
+
+def _check_breakout_outcomes():
+    """Legacy no-op; generic breakout outcome learning is retired."""
+    logger.info("[scheduler] legacy breakout outcome checker retired; skipped")
+    return
+    from datetime import timedelta
+    import time as _t
+    from ..db import SessionLocal
+    from ..models.trading import BreakoutAlert
+    from .trading.market_data import fetch_quote
+
+    logger.info("[scheduler] Checking breakout alert outcomes")
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        pending = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome == "pending",
+        ).all()
+
+        if not pending:
+            logger.info("[scheduler] No pending breakout alerts to check")
+            return
+
+        from .trading.market_data import fetch_quotes_batch
+        unique_tickers = list({a.ticker for a in pending})
+        try:
+            quotes_map = fetch_quotes_batch(unique_tickers)
+        except Exception:
+            quotes_map = {}
+
+        updated = 0
+        closed = 0
+        for alert in pending:
+            age = now - alert.alerted_at
+            age_hours = age.total_seconds() / 3600
+
+            q = quotes_map.get(alert.ticker)
+            current_price = q.get("price") if q else None
+
+            if current_price is None:
+                continue
+
+            if alert.price_at_alert <= 0:
+                continue
+
+            gain_pct = (current_price - alert.price_at_alert) / alert.price_at_alert * 100
+
+            prev_max_gain = alert.max_gain_pct
+            if alert.max_gain_pct is None:
+                alert.max_gain_pct = max(0, gain_pct)
+            else:
+                alert.max_gain_pct = max(alert.max_gain_pct, gain_pct)
+
+            if alert.max_drawdown_pct is None:
+                alert.max_drawdown_pct = min(0, gain_pct)
+            else:
+                alert.max_drawdown_pct = min(alert.max_drawdown_pct, gain_pct)
+
+            # Track time-to-peak: update when new high is set
+            if alert.max_gain_pct > (prev_max_gain or 0):
+                alert.time_to_peak_hours = round(age_hours, 2)
+                alert.price_at_peak = current_price
+
+            # Track time-to-stop: when drawdown first crosses stop distance
+            if alert.time_to_stop_hours is None and alert.stop_loss is not None:
+                stop_dist_pct = (alert.price_at_alert - alert.stop_loss) / alert.price_at_alert * 100
+                if alert.max_drawdown_pct <= -stop_dist_pct:
+                    alert.time_to_stop_hours = round(age_hours, 2)
+
+            # Trailing stop simulation: 50% of gain as trailing stop
+            if alert.max_gain_pct and alert.max_gain_pct > 0.5:
+                trailing_exit = alert.max_gain_pct * 0.5
+                if gain_pct <= trailing_exit and (alert.optimal_exit_pct is None or alert.max_gain_pct > alert.optimal_exit_pct):
+                    alert.optimal_exit_pct = round(alert.max_gain_pct * 0.75, 2)
+
+            if age_hours >= 1 and alert.price_1h is None:
+                alert.price_1h = current_price
+                updated += 1
+
+            if age_hours >= 4 and alert.price_4h is None:
+                alert.price_4h = current_price
+                updated += 1
+
+            if age_hours >= 24:
+                alert.price_24h = current_price
+                alert.outcome_checked_at = now
+
+                hit_target = (
+                    alert.target_price is not None
+                    and alert.max_gain_pct >= (
+                        (alert.target_price - alert.price_at_alert) / alert.price_at_alert * 100
+                    ) * 0.5
+                )
+                hit_stop = (
+                    alert.stop_loss is not None
+                    and alert.max_drawdown_pct <= -(
+                        (alert.price_at_alert - alert.stop_loss) / alert.price_at_alert * 100
+                    )
+                )
+
+                if hit_target or alert.max_gain_pct >= 2.0:
+                    alert.outcome = "winner"
+                    alert.breakout_occurred = True
+                elif hit_stop:
+                    alert.outcome = "loser"
+                    alert.breakout_occurred = False
+                elif alert.max_gain_pct >= 1.0 and gain_pct < 0:
+                    alert.outcome = "fakeout"
+                    alert.breakout_occurred = False
+                elif gain_pct > 0:
+                    alert.outcome = "winner"
+                    alert.breakout_occurred = True
+                else:
+                    alert.outcome = "loser"
+                    alert.breakout_occurred = False
+
+                closed += 1
+                updated += 1
+
+        # Expire permanently-pending alerts older than 48h (e.g. no quote data)
+        cutoff_expire = now - timedelta(hours=48)
+        stale = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome == "pending",
+            BreakoutAlert.alerted_at < cutoff_expire,
+        ).all()
+        for alert in stale:
+            alert.outcome = "expired"
+            alert.outcome_checked_at = now
+            alert.outcome_notes = (alert.outcome_notes or "") + " [auto-expired: no resolution within 48h]"
+            updated += 1
+
+        db.commit()
+        logger.info(
+            f"[scheduler] Breakout outcome check: {len(pending)} pending, "
+            f"{updated} updated, {closed} closed"
+        )
+
+        # f-handler-breakout-outcomes (2026-05-06): emit one event per
+        # newly-resolved alert so the breakout_outcomes handler can
+        # update pattern evidence from accumulated outcomes (secondary-
+        # evidence path for patterns with no closed trades yet).
+        # Per-alert try/except so a broken emit can't poison the rest
+        # of the resolution sweep.
+        try:
+            from .trading.brain_work.emitters import (
+                emit_breakout_alert_resolved_outcome,
+            )
+            for alert in pending:
+                if alert.outcome and alert.outcome != "pending":
+                    try:
+                        emit_breakout_alert_resolved_outcome(
+                            db,
+                            alert_id=int(alert.id),
+                            scan_pattern_id=getattr(alert, "scan_pattern_id", None),
+                            ticker=(alert.ticker or "").upper(),
+                            outcome=alert.outcome,
+                            user_id=getattr(alert, "user_id", None),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[scheduler] emit_breakout_alert_resolved failed "
+                            "alert_id=%s", alert.id, exc_info=True,
+                        )
+            for alert in stale:
+                try:
+                    emit_breakout_alert_resolved_outcome(
+                        db,
+                        alert_id=int(alert.id),
+                        scan_pattern_id=getattr(alert, "scan_pattern_id", None),
+                        ticker=(alert.ticker or "").upper(),
+                        outcome="expired",
+                        user_id=getattr(alert, "user_id", None),
+                    )
+                except Exception:
+                    logger.debug(
+                        "[scheduler] emit_breakout_alert_resolved (stale) "
+                        "failed alert_id=%s", alert.id, exc_info=True,
+                    )
+            db.commit()
+        except Exception:
+            logger.debug(
+                "[scheduler] breakout-resolved emit batch failed",
+                exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"[scheduler] Breakout outcome check failed: {e}")
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_promoted_fast_eval_job():
+    """Refresh prediction cache using promoted ScanPatterns only (no full learning cycle)."""
+    from ..config import settings
+    from ..db import SessionLocal
+    from .trading.learning import run_promoted_pattern_fast_eval
+
+    if not getattr(settings, "brain_fast_eval_enabled", True):
+        return
+    logger.info("[scheduler] Promoted-pattern fast eval starting")
+    db = SessionLocal()
+    try:
+        result = run_promoted_pattern_fast_eval(db)
+        logger.info("[scheduler] Promoted fast eval result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Promoted fast eval failed: %s", e, exc_info=True)
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+
+def _run_code_learning_job():
+    """Executed by APScheduler: Code Brain learning cycle."""
+    from ..db import SessionLocal
+    from .code_brain.learning import run_code_learning_cycle
+
+    logger.info("[scheduler] Starting Code Brain learning cycle")
+    db = SessionLocal()
+    try:
+        result = run_code_learning_cycle(db, user_id=None)
+        logger.info("[scheduler] Code Brain learning result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Code Brain learning failed: %s", e)
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_reasoning_learning_job():
+    """Executed by APScheduler: Reasoning Brain cycle for the primary user (if any)."""
+    from ..db import SessionLocal
+    from ..models import User
+    from .reasoning_brain.learning import run_reasoning_cycle
+    from ..config import settings as _settings
+
+    if not _settings.reasoning_enabled:
+        return
+
+    logger.info("[scheduler] Starting Reasoning Brain cycle")
+    db = SessionLocal()
+    try:
+        user = db.query(User).order_by(User.id.asc()).first()
+        if not user:
+            logger.info("[scheduler] No users found; skipping Reasoning Brain cycle")
+            return
+        result = run_reasoning_cycle(db, user.id, trace_id="scheduler")
+        logger.info("[scheduler] Reasoning Brain result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Reasoning Brain failed: %s", e)
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_project_brain_job():
+    """Run all active Project Brain agent cycles."""
+    from ..db import SessionLocal
+    from ..models import User
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "project_brain_enabled", True):
+        return
+
+    logger.info("[scheduler] Starting Project Brain cycle")
+    db = SessionLocal()
+    try:
+        user = db.query(User).order_by(User.id.asc()).first()
+        if not user:
+            logger.info("[scheduler] No users found; skipping Project Brain cycle")
+            return
+        from .project_brain.learning import run_project_brain_cycle
+        result = run_project_brain_cycle(db, user.id)
+        logger.info("[scheduler] Project Brain result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Project Brain failed: %s", e)
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_scheduler_worker_heartbeat():
+    """Record liveness for Jobs UI (scheduler-worker container)."""
+    from datetime import datetime as _dt
+
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_SCHEDULER_WORKER_HEARTBEAT
+    from .trading.brain_batch_job_log import brain_batch_job_record_completed
+
+    db = SessionLocal()
+    try:
+        brain_batch_job_record_completed(
+            db,
+            JOB_SCHEDULER_WORKER_HEARTBEAT,
+            ok=True,
+            meta={"ts": _dt.utcnow().isoformat() + "Z"},
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning("[scheduler] heartbeat failed: %s", e)
+        db.rollback()
+    finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_weekly_cpcv_backfill_job() -> None:
+    """Sunday 04:00 America/New_York: CPCV backfill with ``--commit`` (canonical ``DATABASE_URL``).
+
+    Gated by ``chili_cpcv_weekly_backfill_enabled`` (job is only registered when True).
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    def _work() -> None:
+        root = Path(__file__).resolve().parents[2]
+        script = root / "scripts" / "backfill_cpcv_metrics.py"
+        logger.info("[cpcv_weekly_backfill] phase=started script=%s", script)
+        proc = subprocess.run(
+            [sys.executable, "-u", str(script), "--commit"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=7200,
+            env=os.environ.copy(),
+        )
+        logger.info(
+            "[cpcv_weekly_backfill] phase=summary exit_code=%s",
+            proc.returncode,
+        )
+        if proc.stdout:
+            tail_lines = proc.stdout.strip().splitlines()[-12:]
+            logger.info(
+                "[cpcv_weekly_backfill] log_tail=%s",
+                " | ".join(tail_lines)[:2400],
+            )
+        if proc.stderr and proc.returncode != 0:
+            logger.warning(
+                "[cpcv_weekly_backfill] stderr_tail=%s",
+                proc.stderr[-2400:],
+            )
+        logger.info(
+            "[cpcv_weekly_backfill] phase=finished exit_code=%s",
+            proc.returncode,
+        )
+
+    run_scheduler_job_guarded("weekly_cpcv_backfill", _work)
+
+
+def start_scheduler():
+    """Start the background scheduler. Safe to call multiple times."""
+    global _scheduler
+    with _lock:
+        if _scheduler is not None:
+            return
+
+        import os
+
+        from ..config import settings
+
+        role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
+        if role == "none":
+            logger.info(
+                "[scheduler] Role=none — APScheduler disabled (CHILI_SCHEDULER_ROLE env=%r parsed=%r)",
+                os.environ.get("CHILI_SCHEDULER_ROLE"),
+                role,
+            )
+            return
+        # FIX 45a/b (2026-04-29): added 'autotrader_only', 'cron_only', and
+        # 'broker_sync_only' for the container-isolation refactor. Goal: the
+        # scheduler's heterogeneous workload is split by domain so each
+        # container has its own crash domain, memory profile, and network
+        # egress accounting. The 8.9GB scheduler-worker memory bloat was
+        # driven by autotrader (10s broker calls), broker_sync (every 2min),
+        # bracket reconciliation, etc. all sharing one heap with 4-minute
+        # scanners + momentum runners.
+        if role not in (
+            "all", "web", "worker",
+            "autotrader_only", "cron_only", "broker_sync_only",
+            "market_snapshot_only", "momentum_exec_only", "rnd_only",
+        ):
+            logger.warning(
+                "[scheduler] invalid CHILI_SCHEDULER_ROLE=%r; using 'all' "
+                "(if you meant API-only web, set none and rebuild image — see docker-compose.yml)",
+                role,
+            )
+            role = "all"
+        # cron_only = legacy 'worker' role minus autotrader minus broker_sync
+        # (so scheduler-worker container drops both hot-loop call paths).
+        include_heavy = role in ("all", "worker", "cron_only", "rnd_only")
+        # The minimal market-snapshot lane is a mesh producer. It also needs a
+        # bounded drain so stale imminent_eval chatter cannot starve fresh
+        # market/momentum context when heavy workers are offline.
+        include_neural_mesh_drain = include_heavy or role == "market_snapshot_only"
+        include_web_light = role in ("all", "web", "cron_only", "rnd_only")
+        # Market snapshots feed HRP/cash deployment, pattern mining, and
+        # vitals. Keep them available in the minimal trading stack without
+        # requiring the full heavy scheduler/profile.
+        include_market_snapshots = role in (
+            "all", "worker", "cron_only", "market_snapshot_only", "rnd_only",
+        )
+        include_cash_deployment_work = role in (
+            "all", "web", "cron_only", "market_snapshot_only", "rnd_only",
+        )
+        include_batch_reconciler = role in (
+            "all", "web", "worker", "cron_only", "market_snapshot_only", "rnd_only",
+        )
+        # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
+        # include them (legacy behavior preserved). 'cron_only' excludes them.
+        include_autotrader = role in ("all", "worker", "autotrader_only")
+        # FIX 45b (2026-04-29): broker-sync jobs (RH order sync, bracket
+        # reconciliation, stuck-order watchdog, exec lag gauge, drift escalation,
+        # daytrade fast monitor, crypto stop monitor) are network-heavy and
+        # share fate with autotrader. Pulled into their own container so a
+        # broker-call storm only affects this lane.
+        include_broker_sync = role in ("all", "web", "worker", "broker_sync_only")
+        # SCHEDULER SPLIT (2026-06-11, operator-approved): the EXEC-CRITICAL
+        # momentum set (live runner ticks, auto-arm, NBBO sampler, WS rails)
+        # gets its own role so R&D deploys never restart the process holding
+        # live positions. 'rnd_only' = cron_only MINUS this set; legacy roles
+        # keep everything (safe fallback). docs/DESIGN/SCHEDULER_SPLIT.md
+        include_momentum_exec = role in (
+            "all", "web", "worker", "cron_only", "momentum_exec_only",
+        )
+        _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
+        # FIX C5 (2026-04-29 third-pass audit): the container-split (FIX 45a/b)
+        # introduced role='cron_only' for the scheduler-worker container and
+        # set CHILI_SCHEDULER_EMIT_HEARTBEAT=1 there, but this gate was not
+        # updated to recognise that role. Result: scheduler_worker_heartbeat
+        # stopped firing 10h+ before the audit because its registration block
+        # below silently skipped. Make the env var authoritative when set
+        # truthy and include 'cron_only' / 'worker' / 'all' in the role-based
+        # default so the heartbeat fires from any scheduler-bearing container.
+        _hb_env_truthy = _hb_env in ("1", "true", "yes", "on")
+        _hb_env_falsy = _hb_env in ("0", "false", "no", "off")
+        if _hb_env_truthy:
+            emit_worker_heartbeat = True
+        elif _hb_env_falsy:
+            emit_worker_heartbeat = False
+        else:
+            emit_worker_heartbeat = role in (
+                "worker", "cron_only", "market_snapshot_only", "all",
+            )
+
+        _scheduler = BackgroundScheduler(daemon=True)
+        _bus_on = bool(settings.chili_autopilot_price_bus_enabled)
+        logger.info(
+            "[scheduler] Role=%s (heavy_scan_jobs=%s web_jobs=%s emit_heartbeat=%s)",
+            role,
+            include_heavy,
+            include_web_light,
+            emit_worker_heartbeat,
+        )
+
+        # Hard Rule 1/2: restore persisted kill-switch state before the first
+        # job runs. Without this, a tripped breaker silently disarms on every
+        # process restart — opposite of the intended safety guarantee.
+        try:
+            from .trading.governance import (
+                get_kill_switch_status,
+                restore_kill_switch_from_db,
+            )
+            restore_kill_switch_from_db()
+            _ks = get_kill_switch_status()
+            if _ks.get("active"):
+                logger.warning(
+                    "[scheduler] Kill switch restored ACTIVE: %s — autotrader blocked until manual reset",
+                    _ks.get("reason"),
+                )
+            else:
+                logger.info("[scheduler] Kill switch restored: inactive")
+        except Exception:
+            logger.warning("[scheduler] Kill-switch restore failed", exc_info=True)
+
+        try:
+            from .trading.portfolio_risk import (
+                get_breaker_status,
+                restore_breaker_from_db,
+            )
+            restore_breaker_from_db()
+            _breaker = get_breaker_status()
+            if _breaker.get("tripped"):
+                logger.warning(
+                    "[scheduler] Circuit breaker restored ACTIVE: %s - autotrader blocked until manual reset",
+                    _breaker.get("reason"),
+                )
+            else:
+                logger.info("[scheduler] Circuit breaker restored: inactive")
+        except Exception:
+            logger.warning("[scheduler] Circuit-breaker restore failed", exc_info=True)
+
+        if include_web_light and getattr(settings, "brain_prescreen_scheduler_enabled", True):
+            _scheduler.add_job(
+                _run_daily_prescreen_job,
+                trigger=CronTrigger(hour=2, minute=0, timezone="America/Los_Angeles"),
+                id="daily_prescreen",
+                name="Daily prescreen (2:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=25),
+            )
+
+        if include_web_light and getattr(settings, "chili_momentum_replay_regression_enabled", True):
+            _scheduler.add_job(
+                _run_nightly_replay_regression_job,
+                trigger=CronTrigger(hour=18, minute=0, timezone="America/Los_Angeles"),
+                id="nightly_replay_regression",
+                name="Nightly replay regression tripwire (18:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        if include_web_light and getattr(settings, "brain_daily_market_scan_scheduler_enabled", True):
+            _scheduler.add_job(
+                _run_daily_market_scan_job,
+                trigger=CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"),
+                id="daily_market_scan",
+                name="Daily market scan (2:30 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=35),
+            )
+
+        if include_web_light and getattr(settings, "chili_daily_trading_brief_enabled", False):
+            _scheduler.add_job(
+                _run_daily_trading_brief_job,
+                trigger=CronTrigger(
+                    hour=int(getattr(settings, "chili_daily_trading_brief_hour_pt", 17)),
+                    minute=0,
+                    timezone="America/Los_Angeles",
+                ),
+                id="daily_trading_brief",
+                name="Daily trading brief (17:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        if (
+            include_market_snapshots
+            and getattr(settings, "brain_market_snapshot_scheduler_enabled", True)
+        ):
+            _bsm = max(5, int(getattr(settings, "brain_market_snapshot_interval_minutes", 15)))
+            _scheduler.add_job(
+                _run_brain_market_snapshot_job,
+                trigger=IntervalTrigger(minutes=_bsm),
+                id="brain_market_snapshots",
+                name=f"Brain market snapshots (every {_bsm}min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=45),
+            )
+
+        # FIX 45b (2026-04-29): broker-related jobs (broker_sync, daytrade_fast,
+        # crypto_stop) are gated on include_broker_sync so they migrate to the
+        # broker-sync-worker container. Non-broker jobs (weekly_review,
+        # price_monitor) stay on include_web_light. The outer disjunction
+        # ensures broker_sync_only role still enters this block.
+        if (
+            include_web_light
+            or include_broker_sync
+            or include_cash_deployment_work
+            or include_batch_reconciler
+        ):
+            if include_web_light:
+                _scheduler.add_job(
+                    _run_weekly_review_job,
+                    trigger=CronTrigger(day_of_week="sun", hour=18, minute=0),
+                    id="weekly_review",
+                    name="Weekly performance review",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # f-cron-stale-promoted (2026-05-06): weekly sweep of
+                # promoted patterns whose trades have stopped firing.
+                # The per-trade-close demote handler covers the active
+                # case; this catches the stale-promoted gap that was
+                # previously handled by the legacy run_learning_cycle's
+                # depromotion step (now gated off via
+                # CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0).
+                _scheduler.add_job(
+                    _run_stale_promoted_sweep_job,
+                    trigger=CronTrigger(day_of_week="sun", hour=2, minute=0),
+                    id="stale_promoted_sweep",
+                    name="Weekly stale-promoted-pattern sweep (Sun 2am UTC)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # f-handler-validate-evolve (2026-05-06): 6-hourly
+                # hypothesis-weight evolution. Wraps the legacy cycle's
+                # validate_and_evolve step. Cron not handler because
+                # the function mines 500 tickers of OHLCV per run.
+                _scheduler.add_job(
+                    _run_validate_evolve_job,
+                    trigger=CronTrigger(hour="*/6", minute=15),
+                    id="validate_evolve",
+                    name="Hypothesis-weight evolution (every 6h at :15)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # f-triple-barrier-activation (Phase C of
+                # f-evidence-fidelity-architecture, 2026-05-14):
+                # 4-hourly batch labels recent MarketSnapshots against
+                # TP/SL/timeout barriers and writes to
+                # trading_triple_barrier_labels. Mode-gated on
+                # settings.brain_triple_barrier_mode (default: shadow).
+                # See docs/runbooks/TRIPLE_BARRIER_LABELING.md.
+                _scheduler.add_job(
+                    _run_triple_barrier_label_job,
+                    trigger=IntervalTrigger(hours=4),
+                    id="triple_barrier_label_cycle",
+                    name="Triple-barrier labeling (every 4h)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                )
+
+                # f-add-pg-stat-snapshot-logger (2026-05-06): 5-minute
+                # forensic snapshot of pg_stat_activity to
+                # scripts/_pg_stat_log/<iso>.txt. Trail for the next
+                # leak so it can be diagnosed retrospectively.
+                _scheduler.add_job(
+                    _run_pg_stat_snapshot_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="pg_stat_snapshot",
+                    name="pg_stat_activity forensic snapshot (every 5min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+            if include_broker_sync:
+                # CRYPTO-24/7 FIX (2026-06-06): crypto fills happen 24/7 — overnight
+                # and on weekends — but this position+order sync was gated to
+                # mon-fri 8am-8pm ET (stock market hours, inherited from the stock
+                # use case). A resting crypto stop/target that fills Friday night or
+                # over the weekend therefore went UNRECONCILED for up to ~60h: the
+                # local Trade row stayed "open" while the broker no longer held the
+                # position (observed 2026-06-06 with ETC-USD + SHIB-USD, sold
+                # overnight, still showing "open" in CHILI's monitoring tab). Run
+                # 24/7 so crypto exits reconcile within ~2min. Stock sync outside
+                # market hours is a cheap no-op (held names stay in rh_tickers; the
+                # R32-empty / missing-streak / confirm-window guards already prevent
+                # transient partial-list false closes).
+                _scheduler.add_job(
+                    _run_broker_sync_job,
+                    trigger=IntervalTrigger(minutes=2),
+                    id="broker_sync",
+                    name="Robinhood order+position sync (24/7 every 2min — crypto fills 24/7)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # Broker-connectivity alarm: a configured-but-disconnected broker must
+                # alert loudly (not just log spam) — RH died silently for ~7 weeks.
+                _scheduler.add_job(
+                    _run_broker_connectivity_watch_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="broker_connectivity_watch",
+                    name="Broker connectivity alarm (every 5min; alert past sustained-disconnect threshold)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                if getattr(settings, "chili_broker_position_price_monitor_enabled", True):
+                    _bppm_m = max(
+                        1,
+                        int(getattr(
+                            settings,
+                            "chili_broker_position_price_monitor_interval_minutes",
+                            5,
+                        )),
+                    )
+                    _scheduler.add_job(
+                        _run_broker_position_price_monitor_job,
+                        trigger=IntervalTrigger(minutes=_bppm_m),
+                        id="broker_position_price_monitor",
+                        name=(
+                            "Broker-backed position price monitor "
+                            f"(every {_bppm_m}min, 24/7)"
+                        ),
+                        replace_existing=True,
+                        max_instances=1,
+                        next_run_time=datetime.now() + timedelta(seconds=40),
+                    )
+
+            if include_web_light:
+                _scheduler.add_job(
+                    _run_price_monitor_job,
+                    trigger=CronTrigger(
+                        day_of_week="mon-fri",
+                        hour="8-20",
+                        minute="*/5",
+                        timezone="US/Eastern",
+                    ),
+                    id="price_monitor",
+                    name="Price monitor & alerts (ET 8am-8pm every 5min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+            if include_broker_sync:
+                _scheduler.add_job(
+                    _run_daytrade_fast_monitor_job,
+                    trigger=CronTrigger(
+                        day_of_week="mon-fri",
+                        hour="9-16",
+                        minute="*/1",
+                    ),
+                    id="daytrade_fast_monitor",
+                    name="Day-trade fast stop/exit monitor (market hours every 1min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                _scheduler.add_job(
+                    _run_stop_alert_dispatch_job,
+                    trigger=IntervalTrigger(minutes=2),
+                    id="crypto_stop_monitor",
+                    name="Crypto stop-loss monitor (every 2min, 24/7)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=30),
+                )
+
+            if include_cash_deployment_work:
+                _cd_interval = max(
+                    15,
+                    int(getattr(
+                        settings,
+                        "brain_work_cash_deployment_producer_interval_minutes",
+                        30,
+                    ) or 30),
+                )
+                _scheduler.add_job(
+                    _run_cash_deployment_work_producer_job,
+                    trigger=IntervalTrigger(minutes=_cd_interval),
+                    id="cash_deployment_work_producer",
+                    name=(
+                        "Cash-deployment profitability work producer "
+                        f"(every {_cd_interval}min)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=90),
+                )
+
+            if include_batch_reconciler:
+                _scheduler.add_job(
+                    _run_brain_batch_reconciler_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="brain_batch_reconciler",
+                    name="Stale brain_batch_jobs reconciler (every 5min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=20),
+                )
+
+            # FIX 45b: remaining non-broker jobs in this block stay gated on
+            # include_web_light so they don't fire for broker_sync_only role.
+            if include_web_light:
+                _scheduler.add_job(
+                    _run_pattern_position_monitor_job,
+                    trigger=IntervalTrigger(minutes=30),
+                    id="pattern_position_monitor",
+                    name="Pattern position monitor heartbeat (every 30min, event-driven primary)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
+                )
+
+                # Equity momentum viability freshness is handled by the dedicated
+                # _run_equity_viability_refresh_job (crypto-parity cadence); this sweep
+                # only feeds the equity paper/ORB strategies, so it stays on the slower
+                # 15min cadence.
+                _scheduler.add_job(
+                    _run_intraday_signal_sweep_job,
+                    trigger=IntervalTrigger(minutes=15),
+                    id="intraday_signal_sweep",
+                    name="Intraday signal sweep (every 15min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=55),
+                )
+
+                # Adaptive meta-label de-rate re-train (2026-06-23): a 20min CHECK cadence; the
+                # job itself is DATA-DRIVEN (re-fits only when new contributing outcomes accrued),
+                # so this integrates the self-improving de-rate into the lane's learning loop
+                # (not a standalone cron). Cheap + best-effort; the live sizing auto-reads the model.
+                _scheduler.add_job(
+                    _run_meta_label_retrain_job,
+                    trigger=IntervalTrigger(minutes=20),
+                    id="meta_label_retrain",
+                    name="Meta-label de-rate re-train (data-driven, every 20min check)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=90),
+                )
+                # Self-critic / gap-analyst: a data-driven critical review of the lane's learning
+                # health (gaps + enhancement proposals). Every 4h — it's an analysis, not time-critical.
+                _scheduler.add_job(
+                    _run_learning_self_critic_job,
+                    trigger=IntervalTrigger(hours=4),
+                    id="learning_self_critic",
+                    name="Learning self-critic / gap-analyst (every 4h)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=120),
+                )
+
+                _scheduler.add_job(
+                    _run_promotion_evidence_audit_job,
+                    trigger=CronTrigger(hour=2, minute=15, timezone="America/Los_Angeles"),
+                    id="promotion_evidence_audit",
+                    name="Promotion-evidence audit (daily, 02:15 PT)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
+                # gate-noise-free directional-correctness eval.
+                _scheduler.add_job(
+                    _run_pattern_directional_outcome_evaluator_job,
+                    trigger=IntervalTrigger(minutes=30),
+                    id="pattern_directional_outcome_evaluator",
+                    name="Pattern directional-correctness evaluator (every 30min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=75),
+                )
+
+                # f-promotion-pipeline-rebalance Phase 4 (2026-05-10):
+                # nightly composite quality score refresh + weekly
+                # cohort auto-promote to shadow_promoted.
+                _scheduler.add_job(
+                    _run_pattern_quality_score_refresh_job,
+                    trigger=CronTrigger(
+                        hour=23, minute=30,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_quality_score_refresh",
+                    name="Pattern quality composite score refresh (daily 23:30 PT)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                _rs_interval = max(
+                    15,
+                    int(getattr(
+                        settings,
+                        "chili_realized_sync_interval_minutes",
+                        30,
+                    ) or 30),
+                )
+                _scheduler.add_job(
+                    _run_realized_stats_sync_job,
+                    trigger=IntervalTrigger(minutes=_rs_interval),
+                    id="realized_stats_sync",
+                    name=f"Pattern realized stats sync (every {_rs_interval}min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=85),
+                )
+                _scheduler.add_job(
+                    _run_pattern_cohort_promote_job,
+                    trigger=CronTrigger(
+                        day_of_week="sun", hour=22, minute=0,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_cohort_promote",
+                    name="Pattern cohort auto-promote to shadow_promoted (Sun 22:00 PT)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                _apg_interval = max(
+                    15,
+                    int(getattr(
+                        settings,
+                        "chili_alpha_portfolio_maintenance_interval_minutes",
+                        30,
+                    ) or 30),
+                )
+                _scheduler.add_job(
+                    _run_alpha_portfolio_gate_maintenance_job,
+                    trigger=IntervalTrigger(minutes=_apg_interval),
+                    id="alpha_portfolio_gate_maintenance",
+                    name=(
+                        "Alpha portfolio gate maintenance "
+                        f"(every {_apg_interval}min)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=95),
+                )
+                _scheduler.add_job(
+                    _run_pattern_shadow_vetting_job,
+                    trigger=IntervalTrigger(minutes=30),
+                    id="pattern_shadow_vetting_finalizer",
+                    name="Pattern shadow vetting finalizer (every 30min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=105),
+                )
+
+        if include_heavy:
+            _scheduler.add_job(
+                _run_momentum_scanner_job,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-10",
+                    minute="*/15",
+                    timezone="US/Eastern",
+                ),
+                id="momentum_scanner",
+                name="Momentum scanner (9:30-11AM ET every 15min)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            # Reliability: detect a work-ledger processor going silent (dead/absent)
+            # within minutes instead of hours — the failure mode that stalled the
+            # backtest pipeline for 46h (a dedicated worker died with no restart policy).
+            _scheduler.add_job(
+                _run_work_ledger_stall_watchdog_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="work_ledger_stall_watchdog",
+                name="Work-ledger stall watchdog (every 15min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=90),
+            )
+
+            # Refresh faster than the live runner's viability freshness gate so live
+            # crypto sessions always see fresh viability (else they error "stale").
+            # Interval derived from the gate (no magic): half the max age, 60s floor.
+            from ..config import settings as _cvr_settings
+            try:
+                _cvr_max_age = float(
+                    getattr(_cvr_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0)
+                )
+            except (TypeError, ValueError):
+                _cvr_max_age = 600.0
+            _cvr_secs = max(60, int(_cvr_max_age / 2))
+            _scheduler.add_job(
+                _run_crypto_viability_refresh_job,
+                trigger=IntervalTrigger(seconds=_cvr_secs),
+                id="crypto_viability_refresh",
+                name="Crypto viability refresh (live venue feed, ~half freshness gate, 24/7)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+
+            # Equity parity: refresh equity momentum viability on the SAME fast cadence
+            # as crypto (_cvr_secs, ~half the freshness gate) via its own dedicated job,
+            # so Ross-screened equities stay exactly as fresh as crypto for the live
+            # entry gate — instead of riding the slow intraday sweep. (MOMENTUM_LANE.md)
+            _scheduler.add_job(
+                _run_equity_viability_refresh_job,
+                trigger=IntervalTrigger(seconds=_cvr_secs),
+                id="equity_viability_refresh",
+                name="Equity viability refresh (momentum movers, crypto-parity cadence)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=35),
+            )
+
+            # S1 EVENT-DRIVEN FEEDER — Trigger B (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5):
+            # a fast tape-delta ignite job so a cold new explosive mover reaches
+            # live_eligible in ~5-15s instead of waiting ~300s for the batch above (which
+            # stays as the backstop). REGISTERED only when the MASTER flag is on; the job
+            # itself is a byte-identical no-op when chili_momentum_tape_delta_ignite_enabled
+            # is off. Interval is registered at the documented floor; the job self-throttles
+            # UP to clamp(p50 tape gap, floor, 15s) adaptively. max_instances=1 + coalesce
+            # so a slow run can never stack; its own short-lived rollback-in-finally session.
+            if bool(
+                getattr(_cvr_settings, "chili_momentum_event_select_primary_enabled", True)
+            ):
+                try:
+                    _tdi_floor = float(
+                        getattr(_cvr_settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0
+                    )
+                except (TypeError, ValueError):
+                    _tdi_floor = 5.0
+                _tdi_secs = max(1.0, _tdi_floor)
+                _scheduler.add_job(
+                    _run_tape_delta_ignite_job,
+                    trigger=IntervalTrigger(seconds=_tdi_secs),
+                    id="tape_delta_ignite",
+                    name="S1 tape-delta event feeder (cold mover -> viability in ~5-15s)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=5,
+                    next_run_time=datetime.now() + timedelta(seconds=40),
+                )
+
+            # Phase 0 crypto L2 writer: persist the warmed Coinbase full-book ring
+            # -> fast_orderbook (crypto only; nothing else writes crypto L2). Feeds
+            # the Phase-1 log-only signal layer + Phase-2 forward-return backfill.
+            from .trading.fast_path.crypto_l2_drain import run_crypto_l2_drain_job
+
+            _cld_secs = max(
+                1.0, float(getattr(_cvr_settings, "chili_crypto_l2_drain_seconds", 5.0) or 5.0)
+            )
+            _scheduler.add_job(
+                run_crypto_l2_drain_job,
+                trigger=IntervalTrigger(seconds=_cld_secs),
+                id="crypto_l2_drain",
+                name="Crypto L2 ring drain -> fast_orderbook (log-only persistence)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=2,
+                next_run_time=datetime.now() + timedelta(seconds=30),
+            )
+
+            # Phase 1 (1a): LOG-ONLY L2 signal layer -> trading_microstructure_log.
+            # Computes OFI/micro-price/ask-eaten/hidden-seller/spoof from the ring
+            # (zero DB in the hot path). NO decision wiring — calibration data only.
+            from .trading.fast_path.microstructure_log import (
+                run_microstructure_log_drain_job,
+                run_microstructure_log_prune_job,
+            )
+
+            _mld_secs = max(
+                1.0, float(getattr(_cvr_settings, "chili_micro_log_drain_seconds", 5.0) or 5.0)
+            )
+            _scheduler.add_job(
+                run_microstructure_log_drain_job,
+                trigger=IntervalTrigger(seconds=_mld_secs),
+                id="microstructure_log_drain",
+                name="Microstructure log drain (LOG-ONLY signals)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=5,
+                next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+            _scheduler.add_job(
+                run_microstructure_log_prune_job,
+                trigger=IntervalTrigger(hours=6),
+                id="microstructure_log_prune",
+                name="Microstructure log prune (partition-drop retention)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=90),
+            )
+
+            # Phase 1 (10s): LOG-ONLY 10-second candle pattern layer ->
+            # trading_tenbeat_candle_log. Aggregates the per-tick mid into 10s candles
+            # + runs ABCD / flat-top SHAPE detectors + leak-free forward-returns. NO
+            # decision wiring — calibration data only (crypto-first; equity dark).
+            if bool(getattr(_cvr_settings, "chili_tenbeat_candle_enabled", True)):
+                from .trading.fast_path.tenbeat_candle_log import (
+                    run_tenbeat_candle_backfill_job,
+                    run_tenbeat_candle_drain_job,
+                    run_tenbeat_candle_prune_job,
+                )
+
+                _tb_secs = max(
+                    10.0, float(getattr(_cvr_settings, "chili_tenbeat_candle_drain_seconds", 10) or 10)
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_drain_job,
+                    trigger=IntervalTrigger(seconds=_tb_secs),
+                    id="tenbeat_candle_drain",
+                    name="10s-candle pattern drain (LOG-ONLY)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    misfire_grace_time=5,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_backfill_job,
+                    trigger=IntervalTrigger(minutes=10),
+                    id="tenbeat_candle_backfill",
+                    name="10s-candle forward-return backfill (LOG-ONLY)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=120),
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_prune_job,
+                    trigger=IntervalTrigger(hours=6),
+                    id="tenbeat_candle_prune",
+                    name="10s-candle log prune (partition-drop retention)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=150),
+                )
+
+            _scheduler.add_job(
+                _run_fast_path_universe_rotator_job,
+                trigger=IntervalTrigger(minutes=60),
+                id="fast_path_universe_rotator",
+                name="Fast-path universe rotator (every 60min, 24/7)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=120),
+            )
+
+            _scheduler.add_job(
+                _run_pattern_imminent_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="pattern_imminent_scanner",
+                name="ScanPattern imminent breakout alerts (every 15min; stocks US hours only)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+
+            # Timeframe-tiered FAST pass: short-timeframe (1m/5m) patterns at
+            # their own cadence (~60s), 24/7. A 15-min sweep structurally misses
+            # 1m/5m setups (many bars elapse between looks). ON by default; the
+            # 15-min sweep above still covers every timeframe as a safe baseline.
+            if bool(getattr(settings, "pattern_imminent_fast_enabled", True)):
+                _pi_fast_s = max(
+                    15, int(getattr(settings, "pattern_imminent_fast_interval_seconds", 60))
+                )
+                _scheduler.add_job(
+                    _run_pattern_imminent_fast_job,
+                    trigger=IntervalTrigger(seconds=_pi_fast_s),
+                    id="pattern_imminent_fast_scanner",
+                    name=(
+                        "ScanPattern imminent FAST tier "
+                        "(1m/5m patterns, ~60s, 24/7 crypto + US-hrs stock)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=35),
+                )
+
+        # FIX 45a (2026-04-29): autotrader tick + monitor carved out under
+        # their own flag so the autotrader-worker container can register them
+        # in isolation while scheduler-worker (cron_only role) skips them.
+        if include_autotrader:
+            _at_tick_s = max(5, int(getattr(settings, "chili_autotrader_tick_interval_seconds", 10)))
+            _at_mon_s = max(5, int(getattr(settings, "chili_autotrader_monitor_interval_seconds", 30)))
+            # XX — autotrader tick / monitor allow concurrent instances so a
+            # slow tick (e.g. a flapping broker call before the timeout
+            # wrapper kicks in) doesn't suppress the queue. Per-alert
+            # advisory locks (``_try_claim_alert``) prevent two concurrent
+            # ticks from racing on the same alert; the audit-row check
+            # (``breakout_alert_already_processed``) is the second line of
+            # defense. ``misfire_grace_time`` lets a missed schedule still
+            # fire if it's only a few seconds late.
+            _at_max_inst = max(1, int(getattr(settings, "chili_autotrader_tick_max_instances", 3)))
+            _at_misfire = max(0, int(getattr(settings, "chili_autotrader_tick_misfire_grace_s", 30)))
+            _scheduler.add_job(
+                _run_auto_trader_tick_job,
+                trigger=IntervalTrigger(seconds=_at_tick_s),
+                id="auto_trader_tick",
+                name=f"AutoTrader v1 tick (every {_at_tick_s}s)",
+                replace_existing=True,
+                max_instances=_at_max_inst,
+                misfire_grace_time=_at_misfire,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=25),
+            )
+            _scheduler.add_job(
+                _run_auto_trader_monitor_job,
+                trigger=IntervalTrigger(seconds=_at_mon_s),
+                id="auto_trader_monitor",
+                name=f"AutoTrader v1 monitor (every {_at_mon_s}s)",
+                replace_existing=True,
+                max_instances=_at_max_inst,
+                misfire_grace_time=_at_misfire,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=30),
+            )
+
+        # FIX 45b (2026-04-29): stuck-order / execution-event-lag / drift-
+        # escalation are broker-adjacent watchdogs and now live in
+        # broker-sync-worker (role=broker_sync_only). They have their own
+        # connection pool to broker APIs and share fate with broker_sync +
+        # bracket reconciliation. Gated on include_broker_sync so cron_only
+        # role doesn't register them.
+        if include_broker_sync:
+            _stuck_s = max(
+                15,
+                int(getattr(settings, "chili_stuck_order_watchdog_interval_seconds", 60)),
+            )
+            _scheduler.add_job(
+                _run_stuck_order_watchdog_job,
+                trigger=IntervalTrigger(seconds=_stuck_s),
+                id="stuck_order_watchdog",
+                name=f"Stuck-order watchdog (every {_stuck_s}s)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=45),
+            )
+
+            _eel_s = max(
+                15,
+                int(getattr(settings, "chili_execution_event_lag_interval_seconds", 60)),
+            )
+            _scheduler.add_job(
+                _run_execution_event_lag_job,
+                trigger=IntervalTrigger(seconds=_eel_s),
+                id="execution_event_lag",
+                name=f"Execution-event lag gauge (every {_eel_s}s)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=50),
+            )
+
+            _de_s = max(
+                30,
+                int(getattr(settings, "chili_drift_escalation_interval_seconds", 120)),
+            )
+            _scheduler.add_job(
+                _run_drift_escalation_watchdog_job,
+                trigger=IntervalTrigger(seconds=_de_s),
+                id="drift_escalation_watchdog",
+                name=f"Drift escalation watchdog (every {_de_s}s)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=90),
+            )
+
+        if include_web_light:
+            _scheduler.add_job(
+                _run_monitor_decision_review_job,
+                trigger=IntervalTrigger(hours=1),
+                id="monitor_decision_review",
+                name="Pattern monitor decision review (hourly)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        if include_web_light:
+            _fe_m = max(1, int(getattr(settings, "brain_fast_eval_interval_minutes", 10)))
+            if getattr(settings, "brain_fast_eval_enabled", True) and getattr(
+                settings, "brain_fast_eval_scheduler_enabled", False
+            ):
+                _scheduler.add_job(
+                    _run_promoted_fast_eval_job,
+                    trigger=IntervalTrigger(minutes=_fe_m),
+                    id="promoted_pattern_fast_eval",
+                    name=f"Promoted pattern prediction refresh (every {_fe_m}m)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
+                )
+
+            _code_hours = max(1, settings.code_brain_interval_hours)
+            _scheduler.add_job(
+                _run_code_learning_job,
+                trigger=IntervalTrigger(hours=_code_hours),
+                id="code_learning_cycle",
+                name=f"Code Brain learning cycle (every {_code_hours}h)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _reasoning_hours = max(1, settings.reasoning_interval_hours)
+            _scheduler.add_job(
+                _run_reasoning_learning_job,
+                trigger=IntervalTrigger(hours=_reasoning_hours),
+                id="reasoning_cycle",
+                name=f"Reasoning Brain cycle (every {_reasoning_hours}h)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _pb_minutes = max(15, getattr(settings, "project_brain_auto_cycle_minutes", 60))
+            if getattr(settings, "project_brain_enabled", True) and getattr(
+                settings, "project_brain_scheduler_enabled", False
+            ):
+                _scheduler.add_job(
+                    _run_project_brain_job,
+                    trigger=IntervalTrigger(minutes=_pb_minutes),
+                    id="project_brain_cycle",
+                    name=f"Project Brain cycle (every {_pb_minutes}min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        else:
+            _code_hours = max(1, settings.code_brain_interval_hours)
+            _reasoning_hours = max(1, settings.reasoning_interval_hours)
+            _pb_minutes = max(15, getattr(settings, "project_brain_auto_cycle_minutes", 60))
+
+        if emit_worker_heartbeat:
+            _scheduler.add_job(
+                _run_scheduler_worker_heartbeat,
+                trigger=IntervalTrigger(minutes=5),
+                id="scheduler_worker_heartbeat",
+                name="Scheduler worker heartbeat (every 5min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=5),
+            )
+
+        # Paper trade exit checking: every 15 min during market hours
+        if include_web_light:
+            _scheduler.add_job(
+                _run_paper_trade_check_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="paper_trade_check",
+                name="Paper trade exit check (every 15min)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        if (
+            include_web_light
+            and settings.chili_momentum_paper_runner_enabled
+            and settings.chili_momentum_paper_runner_scheduler_enabled
+        ):
+            _pr_m = 1 if _bus_on else max(2, int(settings.chili_momentum_paper_runner_scheduler_interval_minutes))
+            _scheduler.add_job(
+                _run_momentum_paper_runner_batch_job,
+                trigger=IntervalTrigger(minutes=_pr_m),
+                id="momentum_paper_runner_batch",
+                name=f"Momentum paper automation runner (every {_pr_m}min, {'heartbeat' if _bus_on else 'simulated'})",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=55),
+            )
+            if _bus_on:
+                try:
+                    from .trading.momentum_neural.paper_runner_loop import start_runner_loop
+                    start_runner_loop()
+                    logger.info("[scheduler] Event-driven paper runner loop started (price bus active)")
+                except Exception as e:
+                    logger.warning("[scheduler] Event-driven runner loop failed to start: %s", e)
+
+        if (
+            include_momentum_exec
+            and settings.chili_momentum_live_runner_enabled
+            and settings.chili_momentum_live_runner_scheduler_enabled
+        ):
+            # Ross-style fast cadence: prefer the SECONDS knob (>0) so a fleeting
+            # momentum break is caught within ~30s instead of up to 2min. coalesce
+            # + max_instances=1 collapse any overlap if a run runs long.
+            _lr_secs = int(getattr(settings, "chili_momentum_live_runner_scheduler_interval_seconds", 0) or 0)
+            if _lr_secs > 0:
+                _lr_secs = max(10, _lr_secs)
+                _lr_trigger = IntervalTrigger(seconds=_lr_secs)
+                _lr_label = f"{_lr_secs}s"
+            else:
+                _lr_m = max(2, int(settings.chili_momentum_live_runner_scheduler_interval_minutes))
+                _lr_trigger = IntervalTrigger(minutes=_lr_m)
+                _lr_label = f"{_lr_m}min"
+            _scheduler.add_job(
+                _run_momentum_live_runner_batch_job,
+                trigger=_lr_trigger,
+                id="momentum_live_runner_batch",
+                name=f"Momentum live automation runner (every {_lr_label}; real orders)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+            if _bus_on:
+                # Stage 2 websocket rail: event-driven EXITS — a price-bus tick that
+                # breaches a tracked stop/target ticks the session IMMEDIATELY (the
+                # batch above stays as the heartbeat; FOR-UPDATE-nowait makes the
+                # overlap a no-op).
+                try:
+                    from .trading.momentum_neural.live_runner_loop import start_live_runner_loop
+                    start_live_runner_loop()
+                    logger.info("[scheduler] Event-driven LIVE runner loop started (exit-speed ticks)")
+                except Exception as e:
+                    logger.warning("[scheduler] Event-driven LIVE runner loop failed to start: %s", e)
+                try:
+                    from .trading.momentum_neural.tape_ws_recorder import start_tape_ws_recorder
+                    start_tape_ws_recorder()
+                    logger.info("[scheduler] WS tape recorder started (second-scale NBBO for traded names)")
+                except Exception as e:
+                    logger.warning("[scheduler] WS tape recorder failed to start: %s", e)
+                # WS ignition scorer: subscribe the (uncapped) equity universe and
+                # score a name DIRECTLY into viability the instant a tick shows it
+                # igniting — surfaces vertical movers (RGNT-class) the EMA9
+                # continuation gate emits nothing for. Additive; flag-gated.
+                if settings.chili_momentum_ws_ignition_enabled:
+                    try:
+                        from .trading.momentum_neural.ignition_loop import start_ignition_loop
+                        start_ignition_loop()
+                        logger.info("[scheduler] WS ignition scorer started")
+                    except Exception as e:
+                        logger.warning("[scheduler] WS ignition scorer failed to start: %s", e)
+
+        # Auto-arm-live: autonomously arm the surging Ross candidate (one live
+        # session at a time). Only runs when the live runner is also on (no point
+        # arming a session nothing will process). Guards live in the arm flow.
+        if (
+            include_momentum_exec
+            and settings.chili_momentum_live_runner_enabled
+            and settings.chili_momentum_live_runner_scheduler_enabled
+            and getattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+            and getattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True)
+        ):
+            _aa_secs = max(10, int(getattr(settings, "chili_momentum_auto_arm_live_scheduler_interval_seconds", 30)))
+            _scheduler.add_job(
+                _run_momentum_auto_arm_live_job,
+                trigger=IntervalTrigger(seconds=_aa_secs),
+                id="momentum_auto_arm_live",
+                name=f"Momentum auto-arm-live (every {_aa_secs}s; arms one Ross candidate)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+
+            # Lane-health FROZEN watch: a tripped safety breaker silently empties the
+            # lane (the 06-15 ~8h frozen-lane incident). Runs at the lane's own cadence
+            # (the auto-arm interval — no new magic number); evaluates against the
+            # adaptive grace window and emits critical+banner+audit row when frozen.
+            # Gated on the same lane-on condition as auto-arm + its own kill-switch flag.
+            if getattr(settings, "chili_lane_health_alert_enabled", True):
+                _scheduler.add_job(
+                    _run_lane_health_check_job,
+                    trigger=IntervalTrigger(seconds=_aa_secs),
+                    id="lane_health_check",
+                    name=f"Lane-health FROZEN watch (every {_aa_secs}s; alerts on a stuck safety breaker)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=55),
+                )
+
+        # NBBO spread tape: persist the clean consolidated bid/ask (Massive snapshot
+        # lastQuote) for the Ross universe each RTH cycle, so the spread-sensitive
+        # replay uses REAL spreads (the proxy read PAVS at 53bps vs the 317bps the
+        # lane saw). Independent of live trading (useful in paper/observation too);
+        # RTH-gating + best-effort live in the sampler. (nbbo_tape.py)
+        if include_momentum_exec and getattr(settings, "chili_momentum_nbbo_tape_enabled", True):
+            _nbbo_secs = max(15, int(getattr(settings, "chili_momentum_nbbo_tape_sample_seconds", 60) or 60))
+            _scheduler.add_job(
+                _run_nbbo_spread_sample_job,
+                trigger=IntervalTrigger(seconds=_nbbo_secs),
+                id="momentum_nbbo_sample",
+                name=f"NBBO spread tape sampler (every {_nbbo_secs}s, RTH-gated)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=50),
+            )
+            _scheduler.add_job(
+                _run_nbbo_spread_prune_job,
+                trigger=IntervalTrigger(hours=6),
+                id="momentum_nbbo_prune",
+                name="NBBO spread tape prune (every 6h)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=130),
+            )
+
+        # Shake-out learning: label closed momentum trades vs their post-exit path
+        # (was the stop too tight?) so the learner sees correct data, not a loss.
+        if (
+            include_web_light
+            and settings.chili_momentum_live_runner_enabled
+        ):
+            _scheduler.add_job(
+                _run_momentum_post_exit_excursion_job,
+                trigger=IntervalTrigger(minutes=2),
+                id="momentum_post_exit_excursion",
+                name="Momentum post-exit excursion labeler (every 2min; shake-out detection)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=110),
+            )
+
+        # Data retention: archive old snapshots, prune payloads daily at 3:30 AM
+        if include_web_light:
+            _scheduler.add_job(
+                _run_data_retention_job,
+                trigger=CronTrigger(hour=3, minute=30, timezone="America/Los_Angeles"),
+                id="data_retention",
+                name="Data retention sweep (daily 3:30AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # FIX B-1 (2026-04-29 third-pass audit): daily realized-EV demote
+        # pass. The audit found 10/12 promoted patterns had trade_count=0
+        # and pattern 860 was promoted with WR=0/n=2 -- the gate was only
+        # checked at promotion time. This job re-runs the gate every 24h
+        # over all promoted patterns and demotes any that fail outside
+        # the configured settle window. Mig 206 is the one-time
+        # retroactive sweep; this is the going-forward enforcement.
+        if include_web_light and bool(
+            getattr(settings, "chili_realized_ev_demote_pass_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_realized_ev_demote_pass_job,
+                trigger=CronTrigger(hour=4, minute=0, timezone="America/Los_Angeles"),
+                id="realized_ev_demote_pass",
+                name="Realized-EV demote pass (daily 4:00AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # 2026-06-05 (rank by realized PnL): daily realized-PnL promotion pass --
+        # graduate not-yet-promoted patterns proving themselves on clean realized
+        # PnL even when their backtest CPCV/OOS gates disagree. Runs just after the
+        # demote pass so the promoted set is freshly reconciled first.
+        if include_web_light and bool(
+            getattr(settings, "chili_realized_pnl_promotion_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_realized_pnl_promotion_job,
+                trigger=CronTrigger(hour=4, minute=30, timezone="America/Los_Angeles"),
+                id="realized_pnl_promotion",
+                name="Realized-PnL promotion pass (daily 4:30AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # FIX G-1 (2026-04-29 third-pass audit): daily breaker liveness
+        # snapshot to trading_risk_state. The audit found 'last write
+        # 2026-04-27, 2 days stale' and worried Hard Rule 2 was silently
+        # permissive. The breaker itself is event-driven and runs on
+        # every entry via unified_risk_check; this snapshot is purely
+        # an observability heartbeat so ops can tell "alive" from "dead".
+        if include_web_light:
+            _scheduler.add_job(
+                _run_breaker_heartbeat_job,
+                trigger=CronTrigger(hour=5, minute=0, timezone="America/Los_Angeles"),
+                id="breaker_heartbeat",
+                name="Drawdown-breaker liveness snapshot (daily 5:00AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # FIX (round 12, 2026-04-30): backtest priority scorer at 6:00 AM PT.
+        # Runs after breaker heartbeat (5 AM) and before market open (6:30 AM PT)
+        # so the queue is freshly prioritized when overnight throughput is still
+        # peaking (the 16:00-22:00 UTC dead zone is past then).
+        if include_web_light and bool(
+            getattr(settings, "chili_backtest_priority_scorer_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_backtest_priority_scorer_job,
+                trigger=CronTrigger(hour=6, minute=0, timezone="America/Los_Angeles"),
+                id="backtest_priority_scorer",
+                name="Backtest priority scorer (daily 6:00AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # Neural-mesh activation queue drain. The runner was previously only
+        # reachable via HTTP; without this job the pending queue saturates at
+        # 500 and every enqueue is rejected (stop_eval, pattern_health,
+        # learning-cycle signals all silently dropped).
+        try:
+            if include_neural_mesh_drain:
+                _scheduler.add_job(
+                    _run_neural_mesh_drain_job,
+                    trigger=IntervalTrigger(seconds=30),
+                    id="neural_mesh_drain",
+                    name="Neural mesh activation drain (every 30s)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=10),
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register neural_mesh_drain job")
+
+        # FIX 49 (2026-04-29): in-process memory watcher. Logs heap fingerprint
+        # + delta vs previous tick every 5 minutes. Registered for ALL roles
+        # so we can compare scheduler-cron vs autotrader-worker vs broker-sync-
+        # worker memory profiles independently. Cheap (~50ms per tick).
+        try:
+            _mw_interval_s = _memory_watcher_interval_seconds(settings)
+            _scheduler.add_job(
+                _run_memory_watcher_job,
+                trigger=IntervalTrigger(seconds=_mw_interval_s),
+                id="memory_watcher",
+                name=f"Memory watcher (every {_mw_interval_s}s, in-process)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=120),
+            )
+        except Exception:
+            logger.exception("[scheduler] failed to register memory_watcher job")
+
+        # Phase G: bracket reconciliation sweep (shadow mode only).
+        # Gated by brain_live_brackets_mode != off; authoritative is blocked
+        # inside the job itself (Phase G is observability-only).
+        try:
+            _brk_mode = (getattr(settings, "brain_live_brackets_mode", "off") or "off").lower()
+            _brk_interval_s = int(getattr(settings, "brain_live_brackets_reconciliation_interval_s", 60) or 60)
+            # FIX 45b (2026-04-29): bracket reconciliation belongs to broker-
+            # sync-worker — it sweeps broker order state and is part of the
+            # broker-call surface area we want isolated.
+            # Round 23: register on shadow|compare|authoritative; the
+            # service-layer + sweep_writer flag gate authoritative mode.
+            if include_broker_sync and _brk_mode != "off":
+                _scheduler.add_job(
+                    _run_bracket_reconciliation_job,
+                    trigger=IntervalTrigger(seconds=_brk_interval_s),
+                    id="bracket_reconciliation",
+                    name=f"Bracket reconciliation sweep (every {_brk_interval_s}s; mode={_brk_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=30),
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register bracket_reconciliation job")
+
+        # Phase I: weekly capital re-weight sweep (shadow mode only).
+        try:
+            _cr_mode = (getattr(settings, "brain_capital_reweight_mode", "off") or "off").lower()
+            if include_web_light and _cr_mode not in ("off", "authoritative"):
+                _cr_dow = str(getattr(settings, "brain_capital_reweight_cron_day_of_week", "sun") or "sun")
+                _cr_hour = int(getattr(settings, "brain_capital_reweight_cron_hour", 18) or 18)
+                _scheduler.add_job(
+                    _run_capital_reweight_weekly_job,
+                    trigger=CronTrigger(day_of_week=_cr_dow, hour=_cr_hour, minute=30),
+                    id="capital_reweight_weekly",
+                    name=f"Capital re-weight weekly ({_cr_dow} {_cr_hour:02d}:30; mode={_cr_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register capital_reweight_weekly job")
+
+        # Phase J: daily drift-monitor sweep (shadow mode only).
+        try:
+            _dm_mode = (getattr(settings, "brain_drift_monitor_mode", "off") or "off").lower()
+            if include_web_light and _dm_mode not in ("off", "authoritative"):
+                _dm_hour = int(getattr(settings, "brain_drift_monitor_cron_hour", 5) or 5)
+                _dm_minute = int(getattr(settings, "brain_drift_monitor_cron_minute", 30) or 30)
+                _scheduler.add_job(
+                    _run_drift_monitor_daily_job,
+                    trigger=CronTrigger(hour=_dm_hour, minute=_dm_minute),
+                    id="drift_monitor_daily",
+                    name=f"Drift monitor daily ({_dm_hour:02d}:{_dm_minute:02d}; mode={_dm_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register drift_monitor_daily job")
+
+        # Phase J.2-lite: recert proposals should not sit inert; dispatch
+        # them into the existing backtest priority queue in shadow/compare.
+        try:
+            _rq_mode = (getattr(settings, "brain_recert_queue_mode", "off") or "off").lower()
+            if include_web_light and _rq_mode not in ("off", "authoritative"):
+                _rq_interval = max(
+                    15,
+                    int(getattr(settings, "brain_recert_queue_dispatch_interval_minutes", 60) or 60),
+                )
+                _scheduler.add_job(
+                    _run_recert_queue_dispatch_job,
+                    trigger=IntervalTrigger(minutes=_rq_interval),
+                    id="recert_queue_dispatch",
+                    name=f"Recert queue dispatch (every {_rq_interval}min; mode={_rq_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=150),
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register recert_queue_dispatch job")
+
+        # Phase K: daily divergence panel sweep (shadow mode only).
+        try:
+            _dv_mode = (
+                getattr(settings, "brain_divergence_scorer_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _dv_mode not in ("off", "authoritative"):
+                _dv_hour = int(
+                    getattr(settings, "brain_divergence_scorer_cron_hour", 6) or 6
+                )
+                _dv_minute = int(
+                    getattr(settings, "brain_divergence_scorer_cron_minute", 15) or 15
+                )
+                _scheduler.add_job(
+                    _run_divergence_sweep_daily_job,
+                    trigger=CronTrigger(hour=_dv_hour, minute=_dv_minute),
+                    id="divergence_sweep_daily",
+                    name=(
+                        f"Divergence panel daily ({_dv_hour:02d}:{_dv_minute:02d}; "
+                        f"mode={_dv_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register divergence_sweep_daily job"
+            )
+
+        # Q1.T2: weekly Gaussian HMM regime retrain (gated).
+        try:
+            if include_web_light and getattr(
+                settings, "chili_regime_classifier_enabled", False
+            ):
+                _rg_dow = str(
+                    getattr(settings, "chili_regime_classifier_weekly_cron_dow", "sun")
+                    or "sun"
+                )
+                _rg_hour = int(
+                    getattr(settings, "chili_regime_classifier_weekly_cron_hour", 4) or 4
+                )
+                _rg_minute = int(
+                    getattr(
+                        settings, "chili_regime_classifier_weekly_cron_minute", 15
+                    )
+                    or 15
+                )
+                _scheduler.add_job(
+                    _run_weekly_regime_retrain_job,
+                    trigger=CronTrigger(
+                        day_of_week=_rg_dow, hour=_rg_hour, minute=_rg_minute
+                    ),
+                    id="regime_classifier_weekly",
+                    name=(
+                        f"Regime HMM weekly ({_rg_dow} {_rg_hour:02d}:{_rg_minute:02d})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register regime_classifier_weekly job")
+
+        # Q1.T1: weekly CPCV backfill on heavy workers (Sun 04:00 ET; subprocess ``--commit``).
+        try:
+            if include_heavy and getattr(
+                settings, "chili_cpcv_weekly_backfill_enabled", False
+            ):
+                _scheduler.add_job(
+                    _run_weekly_cpcv_backfill_job,
+                    trigger=CronTrigger(
+                        day_of_week="sun",
+                        hour=4,
+                        minute=0,
+                        timezone="America/New_York",
+                    ),
+                    id="weekly_cpcv_backfill",
+                    name="Weekly CPCV backfill (Sun 04:00 America/New_York; --commit)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register weekly_cpcv_backfill job")
+
+        # Phase L.17: daily macro-regime snapshot sweep (shadow mode only).
+        try:
+            _mr_mode = (
+                getattr(settings, "brain_macro_regime_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _mr_mode not in ("off", "authoritative"):
+                _mr_hour = int(
+                    getattr(settings, "brain_macro_regime_cron_hour", 6) or 6
+                )
+                _mr_minute = int(
+                    getattr(settings, "brain_macro_regime_cron_minute", 30) or 30
+                )
+                _scheduler.add_job(
+                    _run_macro_regime_daily_job,
+                    trigger=CronTrigger(hour=_mr_hour, minute=_mr_minute),
+                    id="macro_regime_daily",
+                    name=(
+                        f"Macro regime daily ({_mr_hour:02d}:{_mr_minute:02d}; "
+                        f"mode={_mr_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                # A4 — FRED DGS10/DGS2 ingestion 5 minutes after macro snapshot
+                # so we can attach the real yield curve slope to the same row.
+                _fred_minute = (_mr_minute + 5) % 60
+                _fred_hour = _mr_hour + (1 if _mr_minute + 5 >= 60 else 0)
+                _scheduler.add_job(
+                    _run_fred_yield_curve_daily_job,
+                    trigger=CronTrigger(hour=_fred_hour, minute=_fred_minute),
+                    id="fred_yield_curve_daily",
+                    name=(
+                        f"FRED DGS10/DGS2 daily ({_fred_hour:02d}:{_fred_minute:02d})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register macro_regime_daily job"
+            )
+
+        # Phase L.18: daily breadth + RS snapshot sweep (shadow mode only).
+        try:
+            _br_mode = (
+                getattr(settings, "brain_breadth_relstr_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _br_mode not in ("off", "authoritative"):
+                _br_hour = int(
+                    getattr(settings, "brain_breadth_relstr_cron_hour", 6) or 6
+                )
+                _br_minute = int(
+                    getattr(settings, "brain_breadth_relstr_cron_minute", 45)
+                    or 45
+                )
+                _scheduler.add_job(
+                    _run_breadth_relstr_daily_job,
+                    trigger=CronTrigger(hour=_br_hour, minute=_br_minute),
+                    id="breadth_relstr_daily",
+                    name=(
+                        f"Breadth + RS daily ({_br_hour:02d}:"
+                        f"{_br_minute:02d}; mode={_br_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register breadth_relstr_daily job"
+            )
+
+        # Phase L.19: daily cross-asset signals sweep (shadow mode only).
+        try:
+            _ca_mode = (
+                getattr(settings, "brain_cross_asset_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _ca_mode not in ("off", "authoritative"):
+                _ca_hour = int(
+                    getattr(settings, "brain_cross_asset_cron_hour", 7) or 7
+                )
+                _ca_minute = int(
+                    getattr(settings, "brain_cross_asset_cron_minute", 0)
+                    or 0
+                )
+                _scheduler.add_job(
+                    _run_cross_asset_daily_job,
+                    trigger=CronTrigger(hour=_ca_hour, minute=_ca_minute),
+                    id="cross_asset_daily",
+                    name=(
+                        f"Cross-asset daily ({_ca_hour:02d}:"
+                        f"{_ca_minute:02d}; mode={_ca_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register cross_asset_daily job"
+            )
+
+        # Phase L.20: daily per-ticker regime sweep (shadow mode only).
+        try:
+            _tr_mode = (
+                getattr(settings, "brain_ticker_regime_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _tr_mode not in ("off", "authoritative"):
+                _tr_hour = int(
+                    getattr(settings, "brain_ticker_regime_cron_hour", 7) or 7
+                )
+                _tr_minute = int(
+                    getattr(settings, "brain_ticker_regime_cron_minute", 15)
+                    or 15
+                )
+                _scheduler.add_job(
+                    _run_ticker_regime_daily_job,
+                    trigger=CronTrigger(hour=_tr_hour, minute=_tr_minute),
+                    id="ticker_regime_daily",
+                    name=(
+                        f"Ticker regime daily ({_tr_hour:02d}:"
+                        f"{_tr_minute:02d}; mode={_tr_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register ticker_regime_daily job"
+            )
+
+        # Phase L.21: daily vol term-structure + dispersion snapshot
+        # (shadow mode only).
+        try:
+            _vd_mode = (
+                getattr(settings, "brain_vol_dispersion_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _vd_mode not in ("off", "authoritative"):
+                _vd_hour = int(
+                    getattr(settings, "brain_vol_dispersion_cron_hour", 7) or 7
+                )
+                _vd_minute = int(
+                    getattr(settings, "brain_vol_dispersion_cron_minute", 30)
+                    or 30
+                )
+                _scheduler.add_job(
+                    _run_vol_dispersion_daily_job,
+                    trigger=CronTrigger(hour=_vd_hour, minute=_vd_minute),
+                    id="vol_dispersion_daily",
+                    name=(
+                        f"Vol dispersion daily ({_vd_hour:02d}:"
+                        f"{_vd_minute:02d}; mode={_vd_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register vol_dispersion_daily job"
+            )
+
+        # Phase L.22: daily intraday session regime snapshot
+        # (shadow mode only). Runs post-close at 22:00 local.
+        try:
+            _is_mode = (
+                getattr(settings, "brain_intraday_session_mode", "off")
+                or "off"
+            ).lower()
+            if include_web_light and _is_mode not in ("off", "authoritative"):
+                # 2026-04-28: was a single 22:00 ET cron — produced 1 snapshot
+                # per day, useless for live intraday gating. Now uses a multi-hour
+                # spec so the snapshot refreshes every 2h during market hours and
+                # captures the day's evolving intraday character.
+                _is_hours = (
+                    str(getattr(
+                        settings, "brain_intraday_session_cron_hour", "11,13,15,16,22",
+                    ))
+                    or "11,13,15,16,22"
+                )
+                _is_minute = int(
+                    getattr(
+                        settings, "brain_intraday_session_cron_minute", 0,
+                    )
+                    or 0
+                )
+                _scheduler.add_job(
+                    _run_intraday_session_daily_job,
+                    trigger=CronTrigger(hour=_is_hours, minute=_is_minute),
+                    id="intraday_session_daily",
+                    name=(
+                        f"Intraday session sweep (hours={_is_hours}; "
+                        f"min={_is_minute:02d}; mode={_is_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register intraday_session_daily job"
+            )
+
+        # Phase M.1: pattern x regime performance ledger (shadow-only).
+        # First consumer of L.17-L.22 snapshots. Runs daily at 23:00 local,
+        # after L.22 intraday session (22:00) has landed.
+        try:
+            _prp_mode = (
+                getattr(settings, "brain_pattern_regime_perf_mode", "off")
+                or "off"
+            ).lower()
+            if include_web_light and _prp_mode not in ("off", "authoritative"):
+                _prp_hour = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_perf_cron_hour",
+                        23,
+                    )
+                    or 23
+                )
+                _prp_minute = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_perf_cron_minute",
+                        0,
+                    )
+                    or 0
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_perf_daily_job,
+                    trigger=CronTrigger(hour=_prp_hour, minute=_prp_minute),
+                    id="pattern_regime_perf_daily",
+                    name=(
+                        f"Pattern x regime perf daily "
+                        f"({_prp_hour:02d}:{_prp_minute:02d}; "
+                        f"mode={_prp_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_regime_perf_daily job"
+            )
+
+        # Phase M.2.c: pattern x regime kill-switch daily sweep (shadow-gated).
+        try:
+            _ks_mode = (
+                getattr(settings, "brain_pattern_regime_killswitch_mode", "off")
+                or "off"
+            ).lower()
+            if include_web_light and _ks_mode != "off":
+                _ks_hour = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_killswitch_cron_hour",
+                        23,
+                    )
+                    or 23
+                )
+                _ks_minute = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_killswitch_cron_minute",
+                        5,
+                    )
+                    or 5
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_killswitch_daily_job,
+                    trigger=CronTrigger(hour=_ks_hour, minute=_ks_minute),
+                    id="pattern_regime_killswitch_daily",
+                    name=(
+                        f"Pattern x regime killswitch daily "
+                        f"({_ks_hour:02d}:{_ks_minute:02d}; "
+                        f"mode={_ks_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_regime_killswitch_daily job"
+            )
+
+        try:
+            _ap_enabled = bool(
+                getattr(settings, "brain_pattern_regime_autopilot_enabled", False)
+            )
+            if include_web_light and _ap_enabled:
+                _ap_hour = int(
+                    getattr(settings, "brain_pattern_regime_autopilot_cron_hour", 6) or 6
+                )
+                _ap_minute = int(
+                    getattr(settings, "brain_pattern_regime_autopilot_cron_minute", 15) or 15
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_autopilot_tick_job,
+                    trigger=CronTrigger(hour=_ap_hour, minute=_ap_minute),
+                    id="pattern_regime_autopilot_tick",
+                    name=(
+                        f"Pattern x regime autopilot tick "
+                        f"({_ap_hour:02d}:{_ap_minute:02d})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                _ap_w_hour = int(
+                    getattr(settings, "brain_pattern_regime_autopilot_weekly_cron_hour", 9) or 9
+                )
+                _ap_w_dow = str(
+                    getattr(settings, "brain_pattern_regime_autopilot_weekly_cron_dow", "mon") or "mon"
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_autopilot_weekly_job,
+                    trigger=CronTrigger(day_of_week=_ap_w_dow, hour=_ap_w_hour, minute=0),
+                    id="pattern_regime_autopilot_weekly",
+                    name=(
+                        f"Pattern x regime autopilot weekly "
+                        f"({_ap_w_dow} {_ap_w_hour:02d}:00)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_regime_autopilot jobs"
+            )
+
+        # F.4-F.6 — Gateway learning loop (distiller every 15min, evolver hourly).
+        # Lives on the same scheduler so the brain-worker (role=all) drives it.
+        try:
+            if role in ("all", "web"):
+                def _run_gateway_distiller_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.context_brain.distiller import (
+                            distill_patterns,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = distill_patterns(_db)
+                            logger.info(
+                                "[gateway-learning] distiller pass: %s", res
+                            )
+                        finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
+                            _db.close()
+                    except Exception:
+                        logger.exception("[gateway-learning] distiller failed")
+
+                def _run_gateway_evolver_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.context_brain.policy_evolver import (
+                            evolve_policies,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = evolve_policies(_db)
+                            logger.info(
+                                "[gateway-learning] evolver pass: %s", res
+                            )
+                        finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
+                            _db.close()
+                    except Exception:
+                        logger.exception("[gateway-learning] evolver failed")
+
+                _scheduler.add_job(
+                    _run_gateway_distiller_job,
+                    trigger=IntervalTrigger(minutes=15),
+                    id="gateway_distiller",
+                    name="Gateway learning distiller (every 15min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=2),
+                )
+                _scheduler.add_job(
+                    _run_gateway_evolver_job,
+                    trigger=IntervalTrigger(hours=1),
+                    id="gateway_evolver",
+                    name="Gateway policy evolver (hourly)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=10),
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register gateway learning jobs"
+            )
+
+        # Q1.T4 — Strategy parameter learning pass (every 6 hours).
+        try:
+            if role in ("all", "web"):
+                def _run_strategy_param_learning_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.strategy_parameter import (
+                            run_parameter_learning_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_parameter_learning_pass(_db)
+                            logger.info(
+                                "[strategy-param] learning pass: %s", res
+                            )
+                        finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[strategy-param] learning pass failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_strategy_param_learning_job,
+                    trigger=IntervalTrigger(hours=6),
+                    id="strategy_parameter_learning",
+                    name="Strategy parameter learning pass (every 6h)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=20),
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register strategy parameter learning job"
+            )
+
+        # Q2 Task K (Phase 1) — daily pattern-survival feature snapshot.
+        # Runs once a day at 03:30 America/Los_Angeles (after the macro
+        # regime daily at 02:00 has settled). Flag-gated; the job itself
+        # also re-checks the flag and skips when off, so flipping the flag
+        # at runtime takes effect on the next tick without a restart.
+        try:
+            if role in ("all", "web"):
+                def _run_pattern_survival_snapshot_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.pattern_survival import (
+                            run_pattern_survival_snapshot_job,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_pattern_survival_snapshot_job(_db)
+                            logger.info(
+                                "[pattern-survival] daily snapshot: %s", res
+                            )
+                        finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[pattern-survival] daily snapshot failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_pattern_survival_snapshot_job,
+                    trigger=CronTrigger(
+                        hour=3, minute=30,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_survival_snapshot",
+                    name="Pattern-survival daily feature snapshot (03:30 PT)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_survival snapshot job"
+            )
+
+        # K Phase 3 S.5 — pattern-survival daily demote pass (04:00 PT).
+        # Runs after the daily snapshot (03:30) so today's predictions
+        # are present, and before the weekly training pass (Sun 04:30)
+        # so a fresh-trained model isn't immediately demoting on its
+        # first day's predictions. The job updates the at-risk streak
+        # counter every day regardless of flag state (continuity across
+        # flag flips); only applies lifecycle changes when
+        # chili_pattern_survival_demote_enabled is True. Gated on
+        # classifier_enabled at the parent level — without features
+        # there are no predictions to consult.
+        try:
+            if role in ("all", "web"):
+                def _run_pattern_survival_demote_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.pattern_survival import (
+                            run_pattern_survival_demote_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_pattern_survival_demote_pass(_db)
+                            logger.info(
+                                "[pattern-survival] demote pass: %s", res
+                            )
+                        finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[pattern-survival] demote pass failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_pattern_survival_demote_job,
+                    trigger=CronTrigger(
+                        hour=4, minute=0,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_survival_demote",
+                    name=(
+                        "Pattern-survival daily demote pass "
+                        "(streak update + apply, 04:00 PT)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_survival demote job"
+            )
+
+        # Q2 Task R — pattern-survival training pass (weekly Sun 04:30 PT).
+        # Runs after the regime classifier weekly retrain (Sun 04:15) and
+        # the daily snapshot job. Order matters: the snapshot must have
+        # populated features for the day before the training pass tries
+        # to score them, and the regime retrain must have run before
+        # snapshot so regime_at_snapshot is filled.
+        try:
+            if role in ("all", "web"):
+                def _run_pattern_survival_training_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.pattern_survival import (
+                            run_pattern_survival_training_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_pattern_survival_training_pass(_db)
+                            logger.info(
+                                "[pattern-survival] training pass: %s", res
+                            )
+                        finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[pattern-survival] training pass failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_pattern_survival_training_job,
+                    trigger=CronTrigger(
+                        day_of_week="sun", hour=4, minute=30,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_survival_training",
+                    name=(
+                        "Pattern-survival weekly training "
+                        "(label backfill + train + score, Sun 04:30 PT)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_survival training job"
+            )
+
+        # Q2 Task L — perps ingestion (every hour).
+        # Flag-gated by chili_perps_lane_enabled. Iterates over the seeded
+        # perp_contracts and writes premium/funding/OI rows to perp_quotes,
+        # perp_funding, perp_oi, perp_basis. Continues to no-op if the flag
+        # is off — useful so seed contract data accumulates silently before
+        # any strategy ever consumes it (warm cache for funding_carry /
+        # oi_divergence backtests).
+        try:
+            if role in ("all", "web"):
+                def _run_perps_ingestion_job() -> None:
+                    try:
+                        from app.config import settings
+                        if not getattr(
+                            settings, "chili_perps_lane_enabled", False
+                        ):
+                            return
+                        from app.db import SessionLocal
+                        from app.services.trading.perps.ingestion import (
+                            run_perps_ingestion_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_perps_ingestion_pass(_db)
+                            logger.info("[perps] ingestion: %s", res)
+                        finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
+                            _db.close()
+                    except Exception:
+                        logger.exception("[perps] ingestion failed")
+
+                _scheduler.add_job(
+                    _run_perps_ingestion_job,
+                    trigger=IntervalTrigger(hours=1),
+                    id="perps_ingestion",
+                    name="Perps premium/funding/OI ingestion (hourly)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=2),
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register perps ingestion job"
+            )
+
+        _scheduler.start()
+
+        # FIX C5 (2026-04-29 third-pass audit): post-start verification that
+        # the canonical jobs the operator depends on are actually registered.
+        # The audit found scheduler_worker_heartbeat dead 10h+ because role
+        # 'cron_only' was missing from the heartbeat-emit gate above; that's
+        # been fixed, but we now also fail-LOUD if the registration block was
+        # bypassed for any future reason. WARN-not-raise so a misconfigured
+        # role (e.g. autotrader_only) doesn't crash startup, but log the
+        # missing canonical jobs so ops sees them.
+        try:
+            _registered_ids = {str(j.id) for j in _scheduler.get_jobs()}
+        except Exception:
+            _registered_ids = set()
+        _expected_per_role: dict[str, list[str]] = {
+            "worker": ["scheduler_worker_heartbeat"],
+            "cron_only": ["scheduler_worker_heartbeat"],
+            "all": ["scheduler_worker_heartbeat"],
+        }
+        _missing = [
+            j for j in _expected_per_role.get(role, [])
+            if j not in _registered_ids
+        ]
+        if _missing:
+            logger.error(
+                "[scheduler] FIX C5: post-start canonical-job assertion FAILED "
+                "for role=%s -- missing jobs: %s. Heartbeat-driven orphan "
+                "reconciler will mis-flag legitimate runs. Investigate the "
+                "registration block above.",
+                role, ", ".join(_missing),
+            )
+        else:
+            logger.info(
+                "[scheduler] FIX C5: post-start canonical-job assertion OK "
+                "for role=%s (%d total jobs registered)",
+                role, len(_registered_ids),
+            )
+
+        _ps_note = (
+            "daily prescreen 2AM America/Los_Angeles; "
+            if getattr(settings, "brain_prescreen_scheduler_enabled", True)
+            else ""
+        )
+        logger.info(
+            f"[scheduler] Trading scheduler started (brain worker runs run_learning_cycle; {_ps_note}"
+            f"code brain every {_code_hours}h, "
+            f"reasoning brain every {_reasoning_hours}h, "
+            f"project brain every {_pb_minutes}min, "
+            "weekly review Sun 6PM, broker sync market hours every 2min, price monitor every 5min, "
+            "momentum scanner 9:30-11AM ET, "
+            "crypto viability refresh (live venue feed, ~half freshness gate) 24/7, "
+            "pattern imminent scanner every 15min; legacy generic breakout scanners retired; "
+            "web pattern research + variant evolution run inside the brain worker learning cycle)"
+        )
+
+
+def stop_scheduler():
+    """Gracefully stop the scheduler and signal background tasks to abort."""
+    global _scheduler
+    from . import trading_service as ts
+    ts.signal_shutdown()
+    with _lock:
+        if _scheduler is not None:
+            _scheduler.shutdown(wait=True)
+            _scheduler = None
+            logger.info("[scheduler] Trading scheduler stopped")
+
+
+def get_scheduler_info() -> dict:
+    """Info about the scheduler and its jobs for the Brain dashboard."""
+    if _scheduler is None:
+        return {"running": False, "jobs": []}
+
+    jobs = []
+    for _i, job in enumerate(_scheduler.get_jobs()):
+        try:
+            jid = str(getattr(job, "id", ""))
+            jname = getattr(job, "name", None)
+            jname_s = str(jname) if jname is not None else ""
+            nrt = getattr(job, "next_run_time", None)
+            next_iso = nrt.isoformat() if nrt is not None else None
+        except Exception as e:
+            logger.warning(
+                "[scheduler] get_scheduler_info: skip job type=%s: %s",
+                type(job).__name__,
+                e,
+            )
+            continue
+        jobs.append(
+            {
+                "id": jid,
+                "name": jname_s,
+                "next_run": next_iso,
+            }
+        )
+
+    return {
+        "running": _scheduler.running,
+        "jobs": jobs,
+    }

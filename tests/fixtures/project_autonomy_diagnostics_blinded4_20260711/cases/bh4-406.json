@@ -1,0 +1,168 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-406",
+  "problem_statement": "A city transit information service stopped showing arrival predictions for a subset of bus stops after importing a new operations roster. Vehicles continue reporting positions, and predictions remain available for most stops on the same routes.",
+  "observations": [
+    {
+      "evidence_id": "bh4-406-e01",
+      "statement": "The prediction gap began with roster import R-20260702 and affects 312 stop records; the preceding import used the same service and source schema without gaps.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained import ledger and prediction coverage report",
+      "independence_key": "roster-gap-timeline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "timestamps": {
+        "prior_import": "2026-07-01T02:00:00Z",
+        "affected_import": "2026-07-02T02:00:00Z",
+        "first_gap": "2026-07-02T02:17:31Z"
+      },
+      "correlation": {
+        "affected_stop_records": 312,
+        "unaffected_stop_records": 4788
+      }
+    },
+    {
+      "evidence_id": "bh4-406-e02",
+      "statement": "Every affected stop has a canonical six-character identifier beginning with zero, while no stop whose identifier begins with a nonzero digit or letter is affected.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "offline cohort analysis of canonical stop registry",
+      "independence_key": "identifier-shape-correlation",
+      "reliability": 0.99,
+      "discriminating": true,
+      "correlation": {
+        "leading_zero_affected_rate": 1.0,
+        "other_identifier_affected_rate": 0.0
+      },
+      "fingerprints": {
+        "affected": "six-character-leading-zero",
+        "control": "nonzero-or-letter-prefix"
+      }
+    },
+    {
+      "evidence_id": "bh4-406-e03",
+      "statement": "The transit authority's signed source archive preserves identifiers such as 004271, but the delivered roster artifact contains 4271 for those rows and declares the stop_id column as numeric.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed source archive and delivered roster artifact",
+      "independence_key": "source-delivery-identifier-diff",
+      "reliability": 0.99,
+      "discriminating": true,
+      "expected_state": "004271",
+      "actual_state": "4271",
+      "artifact_hash": "sha256:cff01ae87ee3bf873cf22a20d6e914b44c65af82ddc85e6cf62c2ef85fc310e3"
+    },
+    {
+      "evidence_id": "bh4-406-e04",
+      "statement": "Import logs show successful parsing of all 5,100 rows and no schema violation; the shortened identifiers are stored exactly as delivered rather than rejected or padded.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "immutable importer log and transaction snapshot",
+      "independence_key": "import-storage-boundary",
+      "reliability": 0.97,
+      "discriminating": true,
+      "component_flow": [
+        "roster-artifact",
+        "schema-parser",
+        "stop-assignment-table",
+        "prediction-join"
+      ],
+      "edge_states": {
+        "rows-parsed": "5100",
+        "short-identifiers": "stored-verbatim"
+      }
+    },
+    {
+      "evidence_id": "bh4-406-e05",
+      "statement": "Prediction traces for affected vehicles contain live location events, then a stop-assignment lookup miss between the shortened roster key and the canonical registry key, followed by suppression of the arrival estimate.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "retained structured prediction trace",
+      "independence_key": "prediction-join-trace",
+      "reliability": 0.98,
+      "discriminating": true,
+      "sequence": [
+        "vehicle-location-received",
+        "roster-key-read",
+        "canonical-stop-join-miss",
+        "arrival-suppressed"
+      ],
+      "causal_parents": [
+        "shortened-roster-key",
+        "exact-canonical-join"
+      ]
+    },
+    {
+      "evidence_id": "bh4-406-e06",
+      "statement": "An offline exact join using the delivered roster misses 312 rows; replacing only each shortened key with the value from the signed source archive yields zero misses.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "read-only paired join report",
+      "independence_key": "identifier-restoration-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "experiment_id": "stop-id-paired-join-0702",
+      "comparison": {
+        "delivered_keys_join_misses": 312,
+        "source_keys_join_misses": 0
+      }
+    },
+    {
+      "evidence_id": "bh4-406-e07",
+      "statement": "Letter-prefixed stop identifiers traversed the same export, import, and prediction path unchanged and retain complete arrival coverage, serving as a negative control for route topology and vehicle telemetry.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained identifier cohort and coverage report",
+      "independence_key": "letter-prefix-negative-control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "comparison": {
+        "letter_prefixed_coverage": 0.999,
+        "shortened_leading_zero_coverage": 0.0
+      }
+    },
+    {
+      "evidence_id": "bh4-406-e08",
+      "statement": "Application source, importer settings, registry snapshot, and prediction-service image hashes match the preceding successful import, despite a same-week map-renderer deployment that initially appeared suspicious.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed component inventory comparison",
+      "independence_key": "component-revision-control",
+      "reliability": 0.94,
+      "discriminating": false,
+      "comparison": {
+        "application_source": "unchanged",
+        "importer_settings": "unchanged",
+        "registry_snapshot": "unchanged",
+        "prediction_image": "unchanged",
+        "map_renderer": "changed"
+      }
+    },
+    {
+      "evidence_id": "bh4-406-e09",
+      "statement": "Map-renderer logs request predictions only after the prediction service has already suppressed the affected stops, so blank display markers are a downstream symptom rather than the first loss of identity.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "prediction API and renderer request correlation export",
+      "independence_key": "renderer-downstream-boundary",
+      "reliability": 0.95,
+      "discriminating": true,
+      "expected_edge_state": "prediction-returned-for-canonical-stop",
+      "actual_edge_state": "prediction-suppressed-after-join-miss"
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

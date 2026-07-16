@@ -1,0 +1,31 @@
+{
+  "candidate_id": "claude-real-chili-broker-timeout-partial-loses",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "collected_at": "2026-07-10T23:06:02.763107Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 54.05623511666696,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "claude-fable-5",
+  "notes": "Fail closed on broker_timeout: the timeout gate runs before the position and cash checks because a timed-out broker read cannot vouch for either; all four preflight tests pass with this single scoped change.",
+  "patch_file": "real-chili-broker-timeout-partial-loses.patch",
+  "planned_file": "preflight.py",
+  "provenance": {
+    "collector": "autopilot_model_candidate_drop_collector",
+    "prompt_pack_file": "claude-fable5-20260710t230100z.prompt-pack.md",
+    "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+    "prompt_pack_sha256": "78e81b1c4d9c29c3053ddf79273694e750389e27b73933c6eada66db10f77fba",
+    "run_id": "claude-fable5-20260710T230100Z",
+    "schema": "chili.model-candidate-drop-provenance.v1",
+    "source_command": "claude --print --model claude-fable-5 --output-format text --permission-mode dontAsk --no-session-persistence --effort max --max-budget-usd 5.0",
+    "transcript_events": 3,
+    "transcript_file": "claude-fable5-20260710t230100z.transcript.jsonl",
+    "transcript_sha256": "a5ceee9d93e21da65d9fd0acecdc5804b9a53965cf2f92d46f1b8780b52bebc6"
+  },
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "claude"
+}

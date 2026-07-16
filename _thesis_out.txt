@@ -1,0 +1,192 @@
+PAGES 59
+==== FIRST 1800 CHARS (title page) ====
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Intraday Momentum and Return Predictability  
+A High Frequency Analysis of the Swedish OMX30 and Selected 
+Constituent Stocks 
+ 
+ 
+Author: Jens Julin 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Spring 2024 
+Master Thesis in Finance, Advanced Level, 30 credits 
+Master’s programme in Finance 
+Örebro University School of Business 
+Supervisor: Kamil Kladivko 
+Examiner: Niclas Krüger 
+ 
+ 
+ 
+
+ 
+ 
+Acknowledgement 
+First and foremost, I would like to thank my supervisor , Kamil Kladivko . His availability , 
+constructive feedback and practical advice have been very helpful. I would also like to thank 
+London Stock Exchange Group (LSEG) for providing me with a comprehensive robust dataset. 
+Their support was crucial for the success of my research. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Abstract 
+This study examines intraday momentum and return predictability in the Swedish financial 
+market, focusing on the OMX Stockholm 30 index (OMXS30) and selected constituent stocks: 
+ABB, Investor B, Nordea SE, SBB B and Sinch. Utilizing high-frequency data from 2 March 
+2023 to 29th of February 2024, investigating whether the first half-hour returns, and the second-
+to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday 
+momentum in individual stocks like SBB and Sinch, the overall findings indicate weak 
+predictability compared to larger markets such as the U.S (Gao et al. 2018). and China (Zhang 
+et al. 2019). This outcome is discussed in the context of the theories of late-informed investors 
+and infrequent rebalancing, suggesting that these phenomena may contribute to the observed 
+patterns, but are not sufficiently strong to support consistent trading strategies.  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+#### KW 'weak' occurrences: 14
+  ... ruary 2024, investigating whether the first half-hour returns, and the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overall findings indicate weak  predictability compared to larger markets such as the U.S (Gao et al. 2018). and China (Zhang  et al. 2019). This outcome is discussed in the context of the theories of late-informed investors  and infrequent rebalancing, suggesting that these phenomena may contribute to the observed  patterns, but are not suffic ...
+  ... n on a risk -adjusted basis,  given that price changes are unpredictable and occur in response to new information, which is,  by its nature, random and unforeseeable.      There are three different forms which are important to understand, the first one is the weak-  form, efficiency which states that all past market trading data, such as stock price and volumes  are fully reflected in stock prices, making technical analysis ineffective. The second form is the  semi-strong form efficiency, which claims that all publicly available information about a   company’s fundamentals  ...
+  ... ties for strategic trading.    Liamkriangkrai et al. (2023) discusses the Efficient Market Hypothesis (EHM) in the context  of intraday momentum in stock markets and its implications. The authors reference the EHM  to emphasize that markets should be at least weak -form efficient. However, the discovery of  intraday momentum, where early trading returns can predict late -day returns, challenges this  aspect of EHM. Specifically, the presence of intraday momentum suggest that all available  information may not be instantly and fully in corporated into stock prices, allowing  ...
+  ... AC. The paper uses the concept of EHM as a context to explore  and challenge the efficiency of APAC markets through the le ns of intraday momentum. The  findings where that significant intraday momentum was found mainly in China and Japan.  South Korea showed weak evidence of momentum, while Hong Kong SAR and Singapore did  not exhibit significant intraday momentum.  The study discovered that volatility has a more  significant impact on intraday momentum than trading volume in the APAC markets. In  comparison to the US market, China and Japan suggest similarities, but overa ...
+  ... -sample forecast models  While the in-sample model provides initial insights into the dynamics of intraday returns, out- of-sample predictions are crucial to evaluate the model’s practi cal applicability. Despite the  return prediction results being strong or weak, out -of-sample forecasts are necessary to test  whether the model can improve with the inclusion of new data and potentially identify  predictive patterns that were not  apparent in the return prediction  analysis. For the out -of- sample prediction, I utilize an expanding window approach also inspired by earlier ...
+
+#### KW 'conclus' occurrences: 1
+  ... mprove predictability of the last half -hour return.  Negative 𝑅𝑂𝑆 2  values across all cases suggest underperformance compared to the simple mean  model. These results do not significantly improve the out-of-sample forecast accuracy, further  reinforcing the conclusion that the first and second-to-last half-hour returns cannot predict the  last half-hour return.    7.3 The Average Volume, Realized Volatility, and Illiquidity  Understanding the dynamics of average volume, realized volatility, and illiquidity is crucial  for interpreting the predictability of intraday return ...
+
+#### KW 'Conclus' occurrences: 3
+  ... ....................................................................................... 31  8. Discussion .................................................................................................................................................. 35  9. Conclusion ................................................................................................................................................. 37  Reference list ................................................................................................................................................ ...
+  ... ation, ensuring robustness of the analysis. Section six “Empirical Models” introduces  the methods used from which the results are generated.  Section seven, “Results”, presents the  generated results from the models. Section eight and nine, “Discussion” and “Conclusion”,  respectively, delve into the implications of my findings.                            3    2. Institutional setting    2.1 Trading hours and market  The OMX Stockholm 30 index (OMXS30) is the Swedish stock market 30 most traded stocks  on Nasdaq Stockholm. Trading activities for the OMXS30 occur within the ...
+  ... ndings  for SBB and Sinch aligns with this observation, suggesting that targeted strategies focusing on  such stocks might offer better returns. However, these strategies come with higher risk due to   increased volatility.                            37    9. Conclusion    This study investigates the presence of intraday momentum and return predictability in the   Swedish financial market, focusing on the OMXS30 index and its selected constituent stocks.   The findings reveal that while there is some evidence of intraday momentum in individual   stocks such as SBB and Sinch ...
+
+#### KW 'Gao' occurrences: 23
+  ... d the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overall findings indicate weak  predictability compared to larger markets such as the U.S (Gao et al. 2018). and China (Zhang  et al. 2019). This outcome is discussed in the context of the theories of late-informed investors  and infrequent rebalancing, suggesting that these phenomena may contribute to the observed  patterns, but are not sufficiently strong to support consistent trading strategies.           ...
+  ... tion at any given time, suggesting that exploiting price patterns at  any intraday intervals should not yield abnormal returns. However, empirical evidence suggests  otherwise, indicating the presence of intraday momentum effects in various global markets.    Gao et al. (2018)  have highlighted significant intraday momentum in markets such as United  States (U.S), with the first half-hour returns predicting the last half-hour returns of the trading  day. Zhang et al. (2019) performs a similar approach to that of Gao et al. (2018) in the Chinese  market and found an even str ...
+  ...   Gao et al. (2018)  have highlighted significant intraday momentum in markets such as United  States (U.S), with the first half-hour returns predicting the last half-hour returns of the trading  day. Zhang et al. (2019) performs a similar approach to that of Gao et al. (2018) in the Chinese  market and found an even stronger relation with the first and last half-half-hour return. Another  study in the Asia -Pacific markets, Lim kriangkrai et al. (2023)  explore intraday momentum  across multiple nations, discovering varied strengths of this effect influenced by reg ional   ...
+  ... ify and  understand the presence of intraday momentum in the Swedish financial market . Investigating  OMXS30 and five of the index constituent stocks . Furthermore, the paper draws inspiration  from two significant papers in the area, Zhang et al. (2019) and Gao et al. (2018). Utilizing their  models and insights as a foundation, this research applies their framework to the Swedish  financial market.    The structure of this paper is organized as follows: “Institutional Setting” section two, providing  background information to the topic. In “Theoretical Background”, key t ...
+  ... odel, when  investors delay rebalancing, the autocorrelation of returns may switch signs at the rebalancing  horizon, indicating that liquidity shocks and trading behaviours can spread through time ,  influencing future returns.    Both Zhang et al (2019) and Gao  et al (2018) extend this discussion by investigating intraday  momentum and return predictability in both U.S. and Chinese stock markets. Both studies find  evidence that the first and/or second to last half -hour returns can significantly predict the last- hour return, both in and out -of-sample. This intraday mo ...
+
+#### KW 'Zhang' occurrences: 29
+  ... ur returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overall findings indicate weak  predictability compared to larger markets such as the U.S (Gao et al. 2018). and China (Zhang  et al. 2019). This outcome is discussed in the context of the theories of late-informed investors  and infrequent rebalancing, suggesting that these phenomena may contribute to the observed  patterns, but are not sufficiently strong to support consistent trading strategies.                                        ...
+  ... e of intraday momentum effects in various global markets.    Gao et al. (2018)  have highlighted significant intraday momentum in markets such as United  States (U.S), with the first half-hour returns predicting the last half-hour returns of the trading  day. Zhang et al. (2019) performs a similar approach to that of Gao et al. (2018) in the Chinese  market and found an even stronger relation with the first and last half-half-hour return. Another  study in the Asia -Pacific markets, Lim kriangkrai et al. (2023)  explore intraday momentum  across multiple nations, discoverin ...
+  ... his study aim s to identify and  understand the presence of intraday momentum in the Swedish financial market . Investigating  OMXS30 and five of the index constituent stocks . Furthermore, the paper draws inspiration  from two significant papers in the area, Zhang et al. (2019) and Gao et al. (2018). Utilizing their  models and insights as a foundation, this research applies their framework to the Swedish  financial market.    The structure of this paper is organized as follows: “Institutional Setting” section two, providing  background information to the topic. In “Theore ...
+  ... ontinues to present a model, when  investors delay rebalancing, the autocorrelation of returns may switch signs at the rebalancing  horizon, indicating that liquidity shocks and trading behaviours can spread through time ,  influencing future returns.    Both Zhang et al (2019) and Gao  et al (2018) extend this discussion by investigating intraday  momentum and return predictability in both U.S. and Chinese stock markets. Both studies find  evidence that the first and/or second to last half -hour returns can significantly predict the last- hour return, both in and out -of-s ...
+  ... k markets, particularly in the context of high-frequency trading.  These investors are slower to process information and often make their trading decisions late in  the trading day. This late activity helps shape the final stock prices before market close.    Zhang et al. (2019) highlights that late -informed investors often trade actively at the end of  trading sessions. They take advantage of the high liquidity to change their positions based on  the information gathered from the morning’s trading activities.2 This activity pattern is proven  by a distinct U-shaped volume ...
+
+#### KW 'SBB' occurrences: 60
+  ...                                           Abstract  This study examines intraday momentum and return predictability in the Swedish financial  market, focusing on the OMX Stockholm 30 index (OMXS30) and selected constituent stocks:  ABB, Investor B, Nordea SE, SBB B and Sinch. Utilizing high-frequency data from 2 March  2023 to 29th of February 2024, investigating whether the first half-hour returns, and the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overal ...
+  ... quency data from 2 March  2023 to 29th of February 2024, investigating whether the first half-hour returns, and the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overall findings indicate weak  predictability compared to larger markets such as the U.S (Gao et al. 2018). and China (Zhang  et al. 2019). This outcome is discussed in the context of the theories of late-informed investors  and infrequent rebalancing, suggesting that these phenomena may contribute  ...
+  ...  of financial information. The data collection process focused on the  OMXS30 index, represent ing the 30 most ac tively traded stocks on the Stockholm Stock  Exchange (NasdaqOMX, 2024) , along with five of its constituent stocks: ABB, Investor B,  Nordea SE, SBB B and Sinch.    The time-period for the data is 2 Mars 2023 to 29 February 2024. The time-period was chosen  based on the availability of the data. Intraday data on a minute-to-minute basis was acquired  for the specified stocks and index . Due to limitation on the data download capacity, the data  retrieval proces ...
+  ... urther process and analysis.                            13    Figure 1. Normalized Daily Closing Prices for Stocks and OMXS30    Figure 1 displays the normalized daily closing prices of the OMXS30 index and its five  constituent stocks: ABB, Investor, Nordea, SBB and Sinch, over the period from March 2, 2023,  to February 29, 2024. The normalization allows for a comparison of relative performance.  Throughout this period, SBB and Sinch exhibit significant volatility, with noticeable price  fluctuations indicating higher risk and potentia l for returns. ABB, Investor, and No ...
+  ... y closing prices of the OMXS30 index and its five  constituent stocks: ABB, Investor, Nordea, SBB and Sinch, over the period from March 2, 2023,  to February 29, 2024. The normalization allows for a comparison of relative performance.  Throughout this period, SBB and Sinch exhibit significant volatility, with noticeable price  fluctuations indicating higher risk and potentia l for returns. ABB, Investor, and Nordea show  more stable price movements, aligning closely with overall market trends represented by  OMXS30 index. The increase from November 2023 can likely be attrib ...
+
+#### KW 'Sinch' occurrences: 50
+  ...                                 Abstract  This study examines intraday momentum and return predictability in the Swedish financial  market, focusing on the OMX Stockholm 30 index (OMXS30) and selected constituent stocks:  ABB, Investor B, Nordea SE, SBB B and Sinch. Utilizing high-frequency data from 2 March  2023 to 29th of February 2024, investigating whether the first half-hour returns, and the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overall findings ...
+  ... ata from 2 March  2023 to 29th of February 2024, investigating whether the first half-hour returns, and the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overall findings indicate weak  predictability compared to larger markets such as the U.S (Gao et al. 2018). and China (Zhang  et al. 2019). This outcome is discussed in the context of the theories of late-informed investors  and infrequent rebalancing, suggesting that these phenomena may contribute to the o ...
+  ... ial information. The data collection process focused on the  OMXS30 index, represent ing the 30 most ac tively traded stocks on the Stockholm Stock  Exchange (NasdaqOMX, 2024) , along with five of its constituent stocks: ABB, Investor B,  Nordea SE, SBB B and Sinch.    The time-period for the data is 2 Mars 2023 to 29 February 2024. The time-period was chosen  based on the availability of the data. Intraday data on a minute-to-minute basis was acquired  for the specified stocks and index . Due to limitation on the data download capacity, the data  retrieval process was cond ...
+  ... rocess and analysis.                            13    Figure 1. Normalized Daily Closing Prices for Stocks and OMXS30    Figure 1 displays the normalized daily closing prices of the OMXS30 index and its five  constituent stocks: ABB, Investor, Nordea, SBB and Sinch, over the period from March 2, 2023,  to February 29, 2024. The normalization allows for a comparison of relative performance.  Throughout this period, SBB and Sinch exhibit significant volatility, with noticeable price  fluctuations indicating higher risk and potentia l for returns. ABB, Investor, and Nordea sho ...
+  ... g prices of the OMXS30 index and its five  constituent stocks: ABB, Investor, Nordea, SBB and Sinch, over the period from March 2, 2023,  to February 29, 2024. The normalization allows for a comparison of relative performance.  Throughout this period, SBB and Sinch exhibit significant volatility, with noticeable price  fluctuations indicating higher risk and potentia l for returns. ABB, Investor, and Nordea show  more stable price movements, aligning closely with overall market trends represented by  OMXS30 index. The increase from November 2023 can likely be attributed to  ...
+
+#### KW 'predictab' occurrences: 48
+  ... ck Exchange Group (LSEG) for providing me with a comprehensive robust dataset.  Their support was crucial for the success of my research.                                                                Abstract  This study examines intraday momentum and return predictability in the Swedish financial  market, focusing on the OMX Stockholm 30 index (OMXS30) and selected constituent stocks:  ABB, Investor B, Nordea SE, SBB B and Sinch. Utilizing high-frequency data from 2 March  2023 to 29th of February 2024, investigating whether the first half-hour returns, and the second- to ...
+  ... 2024, investigating whether the first half-hour returns, and the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of intraday  momentum in individual stocks like SBB and Sinch, the overall findings indicate weak  predictability compared to larger markets such as the U.S (Gao et al. 2018). and China (Zhang  et al. 2019). This outcome is discussed in the context of the theories of late-informed investors  and infrequent rebalancing, suggesting that these phenomena may contribute to the observed  patterns, but are not sufficiently ...
+  ... duction    Financial markets are complex systems where various factors can influence price movements.  Among these factors, the intraday momentum of stock returns presents a nuanced opportunity  to explore market efficiency and trading strategies based on the predictability of returns. The  Efficient Market Hypotyhesis (EMH), as formulated by Fama (1970), suggests that asset prices  reflect all available information at any given time, suggesting that exploiting price patterns at  any intraday intervals should not yield abnormal returns. However, empirical evidence suggests  ...
+  ... challenge to the EHM but also indicates a potentially exploitable difference that could inform  trading strategies.    Murphy & Thirumalai (2017) investigates the predictive power of institutional trading patterns  on short-term returns, providing evidence of predictable intraday returns dynamics that could  be linked to systematic trading behaviours. Wen et al. (2021) delves into the crude oil market,  revealing a distinct intraday prediction pattern where only the first half-hour returns positively  predict the last half-hour returns, deviating from patterns observed in t ...
+  ... ck and commodity markets.  Shen et al. (2021) investigates the phenomenon in  digital asset markets such as Bitcoin , which trades 24-hours a day. Their analysis reveals that  trading sessions with the highest volume or volatility exhibit the most significant predictability  in terms of intraday momentum.  2    This paper seek s to explore s the intraday momentum within the Swedish financial market,  examining whether the patterns observed in earlier studies hold true and exploring the  implications of intraday momentum and market efficiency. By utilizing the analytical  fr ...
+
+#### KW 'R2' occurrences: 4
+  ...   on the first half-hour return (𝑟1,𝑡). Model 1 suggests that there is some degree of predictability  of the last half-hour returns based on the first half-hour returns for certain stocks. However,  this relationship is generally weak, as indicated by the low R2 values across all stocks and the  OMXS30 index.    Table 2. Return prediction, Model 1, last half-hour returns on first half-hour return.  Stocks and index 𝑅2 𝛼̂ 𝛽̂1,𝑡 Observations  ABB 1.6% 0.0429*** 0.0295** 247  Investor 0.8% 0.0417*** - 0.0242 246  Nordea 1.3% 0.0028* 0.0264*** 247  OMXS30 0.0% 0.0174* 0.0014* 2 ...
+  ... oefficient and  intercept in % form.  The Table 3 estimation results indicate a generally weak relationship between the second -to- last half-hour returns (r16,t) and the last half-hour returns (r17,t) for most stocks and the OMXS30  index. Evident by the low R2 values, suggesting that the second-to-last half-hour returns do not  explain much of the variance in the last half -hour returns.  SBB is an exception, showing a  significant positive relationship between the second -to-last and last half-hour returns, with an  R2 of 6.6% and a significant coefficient for r16,t. Thi ...
+  ... lues, suggesting that the second-to-last half-hour returns do not  explain much of the variance in the last half -hour returns.  SBB is an exception, showing a  significant positive relationship between the second -to-last and last half-hour returns, with an  R2 of 6.6% and a significant coefficient for r16,t. This suggest that for SBB, the second -to-last  half-hour return can be a meaningful predictor of the last half -hour return.  Overall, these  findings suggest that like the first model, predictability of the last half -hour returns based on  the second -to-last half  ...
+  ... tability of the last  half-hour returns improves slightly for some stocks but remains generally weak. SBB again  shows a relatively stronger relationship, with both the first and second-to-last half-hour returns  being significant predictors, with the highest R2 of 8.5% among the stocks and index . Sinch’s  first half-hour return is significant but negative, indicating a n inverse relationship. Combining  the first and second -to-last half-hour returns offers some improvements in predictability for  certain stocks, particularly SBB, but the overall explanatory power remains ...
+
+#### KW 'R-squared' occurrences: 0
+
+#### KW 'significan' occurrences: 38
+  ... hat exploiting price patterns at  any intraday intervals should not yield abnormal returns. However, empirical evidence suggests  otherwise, indicating the presence of intraday momentum effects in various global markets.    Gao et al. (2018)  have highlighted significant intraday momentum in markets such as United  States (U.S), with the first half-hour returns predicting the last half-hour returns of the trading  day. Zhang et al. (2019) performs a similar approach to that of Gao et al. (2018) in the Chinese  market and found an even stronger relation with the first and la ...
+  ... vealing a distinct intraday prediction pattern where only the first half-hour returns positively  predict the last half-hour returns, deviating from patterns observed in the equity markets. This  suggests that the mechanism dri ving intraday momentum may vary significantly across  different asset classes and markets . The research of intraday momentum extends beyond  traditional stock and commodity markets.  Shen et al. (2021) investigates the phenomenon in  digital asset markets such as Bitcoin , which trades 24-hours a day. Their analysis reveals that  trading sessions wi ...
+  ... ditional stock and commodity markets.  Shen et al. (2021) investigates the phenomenon in  digital asset markets such as Bitcoin , which trades 24-hours a day. Their analysis reveals that  trading sessions with the highest volume or volatility exhibit the most significant predictability  in terms of intraday momentum.  2    This paper seek s to explore s the intraday momentum within the Swedish financial market,  examining whether the patterns observed in earlier studies hold true and exploring the  implications of intraday momentum and market efficiency. By utilizing the an ...
+  ... ings from existing literature, this study aim s to identify and  understand the presence of intraday momentum in the Swedish financial market . Investigating  OMXS30 and five of the index constituent stocks . Furthermore, the paper draws inspiration  from two significant papers in the area, Zhang et al. (2019) and Gao et al. (2018). Utilizing their  models and insights as a foundation, this research applies their framework to the Swedish  financial market.    The structure of this paper is organized as follows: “Institutional Setting” section two, providing  background info ...
+  ...  Both Zhang et al (2019) and Gao  et al (2018) extend this discussion by investigating intraday  momentum and return predictability in both U.S. and Chinese stock markets. Both studies find  evidence that the first and/or second to last half -hour returns can significantly predict the last- hour return, both in and out -of-sample. This intraday momentum is theoretically explained by  the trading behaviour of infrequent rebalancing.                   1 Autocorrelation refers to the correlation of a time series with its own lagged value. Seasonality refers to the  tendency of ...
+
+#### KW 'OMXS30' occurrences: 50
+  ... port was crucial for the success of my research.                                                                Abstract  This study examines intraday momentum and return predictability in the Swedish financial  market, focusing on the OMX Stockholm 30 index (OMXS30) and selected constituent stocks:  ABB, Investor B, Nordea SE, SBB B and Sinch. Utilizing high-frequency data from 2 March  2023 to 29th of February 2024, investigating whether the first half-hour returns, and the second- to-last half-hour returns can predict the last half-hour returns. Despite some evidence of  ...
+  ... of intraday momentum and market efficiency. By utilizing the analytical  framework and empirical findings from existing literature, this study aim s to identify and  understand the presence of intraday momentum in the Swedish financial market . Investigating  OMXS30 and five of the index constituent stocks . Furthermore, the paper draws inspiration  from two significant papers in the area, Zhang et al. (2019) and Gao et al. (2018). Utilizing their  models and insights as a foundation, this research applies their framework to the Swedish  financial market.    The structure o ...
+  ... ed results from the models. Section eight and nine, “Discussion” and “Conclusion”,  respectively, delve into the implications of my findings.                            3    2. Institutional setting    2.1 Trading hours and market  The OMX Stockholm 30 index (OMXS30) is the Swedish stock market 30 most traded stocks  on Nasdaq Stockholm. Trading activities for the OMXS30 occur within the trading hours of the  Nasdaq Stockholm, which opens at 09:00 AM and closes at 17:30 PM Central European Time  (CET), from Monday to Friday, excluding public holidays. During these hours, in ...
+  ... o the implications of my findings.                            3    2. Institutional setting    2.1 Trading hours and market  The OMX Stockholm 30 index (OMXS30) is the Swedish stock market 30 most traded stocks  on Nasdaq Stockholm. Trading activities for the OMXS30 occur within the trading hours of the  Nasdaq Stockholm, which opens at 09:00 AM and closes at 17:30 PM Central European Time  (CET), from Monday to Friday, excluding public holidays. During these hours, investors  engage in buying and selling stocks and derivatives, such as options and futures, that are linked  ...
+  ... h opens at 09:00 AM and closes at 17:30 PM Central European Time  (CET), from Monday to Friday, excluding public holidays. During these hours, investors  engage in buying and selling stocks and derivatives, such as options and futures, that are linked  to the OMXS30.     The composition of the  OMXS30 is tailored to reflect the performance of the market’s most  actively traded stocks. The index is reviewed twice a year on the first trading day of January  and July. This process involves analysing the trading volume of each stock over the previous  six months, starting seven ...
+
+#### KW 'abstract' occurrences: 0
+
+#### KW 'Abstract' occurrences: 1
+  ... e been very helpful. I would also like to thank  London Stock Exchange Group (LSEG) for providing me with a comprehensive robust dataset.  Their support was crucial for the success of my research.                                                                Abstract  This study examines intraday momentum and return predictability in the Swedish financial  market, focusing on the OMX Stockholm 30 index (OMXS30) and selected constituent stocks:  ABB, Investor B, Nordea SE, SBB B and Sinch. Utilizing high-frequency data from 2 March  2023 to 29th of February 2024, investigat ...

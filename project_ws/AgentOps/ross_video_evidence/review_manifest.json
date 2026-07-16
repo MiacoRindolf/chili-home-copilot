@@ -1,0 +1,119 @@
+{
+  "schema": "chili.ross_visual_review_manifest.v1",
+  "generated_at": "2026-07-02T00:25:00-07:00",
+  "reviews": [
+    {
+      "symbol": "TC",
+      "evidence_id": "HTgOZI8GOV0",
+      "evidence_type": "scanner_selection_context",
+      "trade_no_trade_certifiable": false,
+      "ross_trade_outcome_certifiable": false,
+      "source_before_opportunity_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0280.jpg",
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0282.jpg"
+      ],
+      "observation": "Warrior top-gainers/scanner frame shows TC as a high-percent mover with price, volume, float, and relative-volume context; it does not show a TC chart, VWAP/HOD/pullback levels, candle sequence, or tape/L2 ladder.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_tc-visual-frame-review.md"
+    },
+    {
+      "symbol": "TC",
+      "evidence_id": "iZ-mXl0ga3U",
+      "evidence_type": "scanner_watch_context",
+      "trade_no_trade_certifiable": false,
+      "ross_trade_outcome_certifiable": false,
+      "source_before_opportunity_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/iZ-mXl0ga3U/frames/f0069.jpg",
+        "project_ws/AgentOps/ross_video_evidence/iZ-mXl0ga3U/frames/f0071.jpg"
+      ],
+      "observation": "Warrior dashboard frame shows TC in a top-gainers scanner row; active chart panels are SDOT, so the frame does not certify TC chart structure.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_tc-visual-frame-review.md"
+    },
+    {
+      "symbol": "DXF",
+      "evidence_id": "HTgOZI8GOV0",
+      "evidence_type": "chart_no_trade_context",
+      "trade_no_trade_certifiable": false,
+      "ross_trade_outcome_certifiable": false,
+      "source_before_opportunity_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0308.jpg",
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0310.jpg"
+      ],
+      "observation": "Warrior frame shows DXF in the top-gainers list and later as the active chart with VWAP/EMA/candle context, but the transcript says DXF is too cheap. This supports a Ross no-entry/avoid context, not a positive entry setup.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_dxf-visual-frame-review.md"
+    },
+    {
+      "symbol": "LHAI",
+      "evidence_id": "HTgOZI8GOV0",
+      "evidence_type": "scanner_no_trade_context",
+      "trade_no_trade_certifiable": false,
+      "ross_trade_outcome_certifiable": false,
+      "source_before_opportunity_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0270.jpg"
+      ],
+      "observation": "Warrior scanner frame shows LHAI as the leading gainer with high volume/relative-volume context, but the transcript says LHAI is a little too cheap and in a price range Ross does not typically do well with. No LHAI chart/VWAP/HOD/pullback/tape context is shown.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_lhai-jem-visual-frame-review.md"
+    },
+    {
+      "symbol": "JEM",
+      "evidence_id": "HTgOZI8GOV0",
+      "evidence_type": "scanner_watch_context",
+      "trade_no_trade_certifiable": false,
+      "ross_trade_outcome_certifiable": false,
+      "source_before_opportunity_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0311.jpg"
+      ],
+      "observation": "Warrior frame mentions GEM/JEM in transcript and shows JEM in the scanner row, but the active charts are DXF, not JEM. This does not certify JEM chart structure or trade/no-trade correctness.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_lhai-jem-visual-frame-review.md"
+    },
+    {
+      "symbol": "JEM",
+      "evidence_id": "iZ-mXl0ga3U",
+      "evidence_type": "scanner_watch_context",
+      "trade_no_trade_certifiable": false,
+      "ross_trade_outcome_certifiable": false,
+      "source_before_opportunity_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/iZ-mXl0ga3U/frames/f0263.jpg"
+      ],
+      "observation": "Warrior dashboard frame contains JEM/GEM source context in scanners/positions, but active chart panels are CANF. This does not certify JEM chart structure or trade/no-trade correctness.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_lhai-jem-visual-frame-review.md"
+    },
+    {
+      "symbol": "JEM",
+      "evidence_id": "PnuyhYGHuUY",
+      "evidence_type": "active_chart_review_context",
+      "trade_no_trade_certifiable": false,
+      "ross_trade_outcome_certifiable": false,
+      "source_before_opportunity_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/PnuyhYGHuUY/frames/f0319.jpg",
+        "project_ws/AgentOps/ross_video_evidence/PnuyhYGHuUY/frames/f0320.jpg",
+        "project_ws/AgentOps/ross_video_evidence/PnuyhYGHuUY/frames/f0650.jpg",
+        "project_ws/AgentOps/ross_video_evidence/PnuyhYGHuUY/frames/f0651.jpg"
+      ],
+      "observation": "Warrior frames show active JEM 5m/1m/1D/10s charts, but the visible context is a post-spike pullback/fade/chop near the VWAP/EMA area rather than a clean pre-opportunity Ross positive-entry or no-trade decision. This should remain noncertifying for Replay v3 source/PnL labels.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_lhai-jem-visual-frame-review.md"
+    },
+    {
+      "symbol": "CANF",
+      "evidence_id": "HTgOZI8GOV0",
+      "evidence_type": "post_opportunity_chart_review_context",
+      "trade_no_trade_certifiable": false,
+      "reviewed_frame_paths": [
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0510.jpg",
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0529.jpg",
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0539.jpg",
+        "project_ws/AgentOps/ross_video_evidence/HTgOZI8GOV0/frames/f0575.jpg"
+      ],
+      "ross_trade_outcome_certifiable": true,
+      "source_before_opportunity_certifiable": false,
+      "observation": "Warrior frames show CANF running-up scanner context, later active CANF chart/VWAP/EMA breakdown context, and post-trade account/P&L evidence. This supports that Ross reviewed/took CANF, but the source window is after the replay opportunity and includes recap-style discussion. It must not certify a positive source-before-opportunity Replay label.",
+      "review_doc": "docs/STRATEGY/CC_REPORTS/2026-07-02_canf-visual-frame-review.md"
+    }
+  ]
+}

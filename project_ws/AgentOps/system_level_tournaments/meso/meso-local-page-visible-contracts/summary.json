@@ -1,0 +1,98 @@
+{
+  "artifact_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\system_level_tournaments\\meso\\meso-local-page-visible-contracts",
+  "evidence_mode": "real_artifacts",
+  "generated_utc": "2026-07-11T01:43:23.184987Z",
+  "model_names": {
+    "local_model": "qwen2.5-coder:7b"
+  },
+  "premium_independent_local_results": 1,
+  "run_id": "meso-local-page-visible-contracts",
+  "runtime_measurements": {
+    "measured": 1,
+    "unmeasured": 0
+  },
+  "safety": "isolated temporary repositories only; premium frontier models are benchmark opponents; CHILI premium routes are fatal; no real source edit, git publication, deployment, database migration, broker, or live-trading action",
+  "schema": "chili.meso-project-workflow-tournament.v1",
+  "source_kinds": [
+    "local_model"
+  ],
+  "status": "failed",
+  "task_results": [
+    {
+      "results": [
+        {
+          "attempts": 3,
+          "behavior_passed": false,
+          "changed_files": [
+            "app/api.py",
+            "app/paging.py",
+            "app/query.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 141.48,
+          "eligible": false,
+          "failure": "validation failed: .F...FF                                                                  [100%]\n================================== FAILURES ===================================\n__________________ test_second_page_has_navigation_metadata ___________________\n    def test_second_page_has_navigation_metadata():\n        result = build_page([1, 2, 3, 4, 5], \"2\", 2)\n>       assert result == {\n            \"page\": 2,\n            \"items\": [3, 4],\n            \"has_next\": True,\n            \"next_page\": 3,\n        }\nE       AssertionError: assert {'has_next': ... 3, 'page': 2} == {'has_next': ... 3, 'page': 2}\nE\nE         Omitting 3 identical items, use -vv to show\nE         Differing items:\nE         {'items': [1, 2]} != {'items': [3, 4]}\nE         Use -v to get more diff\ntests\\test_paging.py:12: AssertionError\n_______________________ test_page_size_must_be_positive _______________________\n    def test_page_size_must_be_positive():\n>       with pytest.raises(ValueError, match=\"page_size must be positive\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE <class 'ValueError'>\nhidden_tests\\test_paging_edges.py:15: Failed\n_______________________ test_last_page_has_no_next_page _______________________\n    def test_last_page_has_no_next_page():\n>       assert build_page([1, 2, 3], \"2\", 2) == {\n            \"page\": 2,\n            \"items\": [3],\n            \"has_next\": False,\n            \"next_page\": None,\n        }\nE       AssertionError: assert {'has_next': ...ne, 'page': 2} == {'has_next': ...ne, 'page': 2}\nE\nE         Omitting 3 identical items, use -vv to show\nE         Differing items:\nE         {'items': [1, 2]} != {'items': [3]}\nE         Use -v to get more diff\nhidden_tests\\test_paging_edges.py:20: AssertionError\n===========",
+          "model_events": [
+            {
+              "error": "",
+              "latency_ms": 37646,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 23541,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 19202,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 11385,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 9083,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 31768,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            }
+          ],
+          "model_name": "qwen2.5-coder:7b",
+          "premium_calls": 0,
+          "quality_score": 30,
+          "scope_valid": true,
+          "semantic_review_passed": false,
+          "source_kind": "local_model",
+          "task_id": "one-based-page-envelope",
+          "tests_unchanged": true,
+          "validation_output": ".F...FF                                                                  [100%]\n================================== FAILURES ===================================\n__________________ test_second_page_has_navigation_metadata ___________________\n    def test_second_page_has_navigation_metadata():\n        result = build_page([1, 2, 3, 4, 5], \"2\", 2)\n>       assert result == {\n            \"page\": 2,\n            \"items\": [3, 4],\n            \"has_next\": True,\n            \"next_page\": 3,\n        }\nE       AssertionError: assert {'has_next': ... 3, 'page': 2} == {'has_next': ... 3, 'page': 2}\nE\nE         Omitting 3 identical items, use -vv to show\nE         Differing items:\nE         {'items': [1, 2]} != {'items': [3, 4]}\nE         Use -v to get more diff\ntests\\test_paging.py:12: AssertionError\n_______________________ test_page_size_must_be_positive _______________________\n    def test_page_size_must_be_positive():\n>       with pytest.raises(ValueError, match=\"page_size must be positive\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE <class 'ValueError'>\nhidden_tests\\test_paging_edges.py:15: Failed\n_______________________ test_last_page_has_no_next_page _______________________\n    def test_last_page_has_no_next_page():\n>       assert build_page([1, 2, 3], \"2\", 2) == {\n            \"page\": 2,\n            \"items\": [3],\n            \"has_next\": False,\n            \"next_page\": None,\n        }\nE       AssertionError: assert {'has_next': ...ne, 'page': 2} == {'has_next': ...ne, 'page': 2}\nE\nE         Omitting 3 identical items, use -vv to show\nE         Differing items:\nE         {'items': [1, 2]} != {'items': [3]}\nE         Use -v to get more diff\nhidden_tests\\test_paging_edges.py:20: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_paging.py::test_second_page_has_navigation_metadata - Asser...\nFAILED hidden_tests/test_paging_edges.py::test_page_size_must_be_positive - F...\nFAILED hidden_tests/test_paging_edges.py::test_last_page_has_no_next_page - A...\n3 failed, 4 passed in 0.10s"
+        }
+      ],
+      "task_id": "one-based-page-envelope",
+      "title": "One-based page envelope contract",
+      "winner": "none",
+      "winner_model": "none",
+      "winner_reason": "no contestant passed all correctness and safety gates"
+    }
+  ],
+  "tasks": 1,
+  "winner_counts": {
+    "claude": 0,
+    "codex": 0,
+    "local_model": 0,
+    "none": 1
+  }
+}

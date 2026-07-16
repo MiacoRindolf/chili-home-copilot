@@ -186,7 +186,7 @@ def validate_shadow_manifests(
     *,
     allow_partial: bool = False,
 ) -> dict[str, object]:
-    if not manifests:
+    if not manifests and not allow_partial:
         raise ShadowEvidenceError("at least one manifest is required")
     seen_sources: set[str] = set()
     comparison_classes: set[str] = set()
@@ -351,14 +351,14 @@ def _valid_manifests(root: Path) -> list[dict[str, object]]:
             root,
             source_kind="codex",
             run_id="frontier-eval-20260602-codex",
-            model_name="codex-gpt-5.5-shadow",
+            model_name="codex-gpt-5.6-sol-shadow",
             source_command="codex cli recorded transcript",
         ),
         _collect_manifest(
             root,
             source_kind="claude",
             run_id="frontier-eval-20260602-claude",
-            model_name="claude-opus-4.8-shadow",
+            model_name="claude-fable-5-shadow",
             source_command="claude code recorded transcript",
         ),
         _collect_manifest(
@@ -555,14 +555,26 @@ def run_shadow_evidence_validation(
     allow_partial: bool = False,
 ) -> tuple[list[ShadowResult], str, Path, dict[str, object]]:
     summary = validate_shadow_manifests(manifests, allow_partial=allow_partial)
-    results = [
-        evaluate_check_with_manifests(
-            check,
-            valid_manifests=manifests,
-            allow_partial=True,
-        )
-        for check in default_checks()
-    ]
+    if allow_partial and not manifests:
+        missing = ", ".join(summary.get("missing_source_kinds") or REQUIRED_SOURCE_KINDS)
+        check = default_checks()[0]
+        results = [
+            ShadowResult(
+                check=check,
+                actual_status="rejected",
+                score=0,
+                evidence=f"missing source kinds: {missing}; manifests=0; cases=0",
+            )
+        ]
+    else:
+        results = [
+            evaluate_check_with_manifests(
+                check,
+                valid_manifests=manifests,
+                allow_partial=True,
+            )
+            for check in default_checks()
+        ]
     evidence_mode = (
         PARTIAL_REAL_MANIFEST_EVIDENCE_MODE
         if summary.get("missing_source_kinds")

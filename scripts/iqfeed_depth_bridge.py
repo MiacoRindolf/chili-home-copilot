@@ -184,6 +184,49 @@ def _eligible_symbols(limit: int) -> list[str]:
         return []
 
 
+def _ross_universe_symbols(limit: int) -> list[str]:
+    """Ross-profile small-cap movers from the market snapshot.
+
+    Depth must exist during candidate evaluation, not only after a session is
+    already armed/live. Pulling the Ross universe here avoids starving the L2
+    lane when viability rows are empty or deliberately demoted.
+    """
+    if limit <= 0:
+        return []
+    try:
+        from app.services.trading.momentum_neural.universe import (
+            EQUITY_ROSS_SMALLCAP,
+            build_equity_universe,
+        )
+
+        symbols = build_equity_universe(EQUITY_ROSS_SMALLCAP) or []
+        out: list[str] = []
+        seen: set[str] = set()
+        for sym in symbols:
+            s = str(sym or "").strip().upper()
+            if not s or s in seen or "-USD" in s:
+                continue
+            seen.add(s)
+            out.append(s)
+            if len(out) >= limit:
+                break
+        return out
+    except Exception as e:
+        log.debug("ross universe query failed: %s", e)
+        return []
+
+
+def _target_symbols(forced_syms: set[str], max_watch: int) -> set[str]:
+    if forced_syms:
+        return set(forced_syms)
+    armed = _live_symbols()  # armed/live names: ALWAYS watched (load-bearing for live)
+    room = max(0, int(max_watch) - len(armed))
+    eligible = [s for s in _eligible_symbols(room) if s not in armed][:room]
+    room = max(0, int(max_watch) - len(armed) - len(eligible))
+    ross = [s for s in _ross_universe_symbols(room) if s not in armed and s not in eligible][:room]
+    return armed | set(eligible) | set(ross)
+
+
 def reader() -> None:
     global running, _limit_hit
     buf = b""
@@ -263,8 +306,7 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 target = forced_syms
             else:
                 sticky = _live_symbols()
-                elig = set(_eligible_symbols(max(0, _max_watch - len(sticky))))
-                target = sticky | elig
+                target = _target_symbols(set(), _max_watch)
             fresh = target - watched
             for sym in fresh:
                 # all three dialects like the validated probe: MBO (WOR), price-level

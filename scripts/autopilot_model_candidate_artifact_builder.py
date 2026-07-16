@@ -517,16 +517,17 @@ def source_specific_prompt_contract(
         source_kind,
         SOURCE_SPECIFIC_PROMPT_CONTRACTS["other"],
     )
-    return (
+    contract = (
         *base,
         f"Model identity: {model_name}",
-        (
-            "Do not create files, run commands, compute hashes, or include provenance; "
-            "return only the JSON objects and CHILI records provenance after parsing."
-            if response_only
-            else "Every transcript must include the prompt-pack SHA-256, source kind, model name, case id, and final patch/drop decision."
-        ),
+        "Every transcript must include the prompt-pack SHA-256, source kind, model name, case id, and final patch/drop decision.",
     )
+    if response_only:
+        return (
+            *contract,
+            "Do not create files, run commands, compute hashes, or include provenance; return only the JSON objects and CHILI records provenance after parsing.",
+        )
+    return contract
 
 
 def validate_prompt_pack_markdown(

@@ -1,0 +1,22 @@
+```diff
+diff --git a/app/store.py b/app/store.py
+--- a/app/store.py
++++ b/app/store.py
+@@ -9,7 +9,9 @@ class CheckpointStore:
+         self._processed: Dict[str, Set[str]] = {}
+         self.dead_letters: List[Dict[str, str]] = []
+         self.leases: Dict[str, Dict[str, Any]] = {}
+-        self.audit_log: List[Dict[str, Any]] = []
++        # One audit trail under two names: ``audit_log`` aliases ``audit``.
++        self.audit: List[Dict[str, Any]] = []
++        self.audit_log = self.audit
+ 
+     def get_checkpoint(self, job_id: str) -> int:
+         return self._checkpoints.get(job_id, 0)
+@@ -63,4 +65,4 @@ class CheckpointStore:
+ 
+     def add_audit(self, job_id: str, summary: Dict[str, Any]) -> None:
+         # Audit summaries keep ids, counters, and status, never payloads.
+-        self.audit_log.append({"job_id": job_id, **summary})
++        self.audit.append({"job_id": job_id, **summary})
+```

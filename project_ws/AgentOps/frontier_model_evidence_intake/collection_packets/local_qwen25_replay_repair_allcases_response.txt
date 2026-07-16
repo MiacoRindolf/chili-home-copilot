@@ -1,0 +1,125 @@
+```json
+{
+  "candidate_id": "local_model-real-chili-preflight-candidate-wins",
+  "case_id": "real-chili-preflight-candidate-wins",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-preflight-candidate-wins.",
+  "patch": "diff --git a/preflight.py b/preflight.py\nindex 3f4e1a2..b8c9d0e 100644\n--- a/preflight.py\n+++ b/preflight.py\n@@ -5,7 +5,7 @@ def can_enter(\n     ticker: str,\n     broker_position_qty: float,\n     buying_power: float,\n-    required_cash: float,\n+    required_cash: float,\n     *,\n     broker_timeout: bool = False,\n ) -> bool:\n@@ -12,7 +12,7 @@ def can_enter(\n         return False\n     if buying_power < required_cash:\n         return False\n-    return True\n+    return not broker_timeout\n",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```
+
+```json
+{
+  "candidate_id": "local_model-real-chili-runtime-control-partial-loses",
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-runtime-control-partial-loses.",
+  "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\nindex 3f4e1a2..b8c9d0e 100644\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -7,7 +7,7 @@ def looks_like_repo_edit(prompt: str) -> bool:\n     return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n \n def classify_prompt(prompt: str) -> str:\n-    return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked'\n+    return 'repo_edit' if looks_like_repo_edit(prompt.lower()) else 'blocked'\n \n def plan_if_repo_edit(prompt: str, planner):\n     if classify_prompt(prompt) == 'repo_edit':\n",
+  "planned_file": "autopilot_prompt.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```
+
+```json
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-startup-static-partial-loses.",
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\nindex 3f4e1a2..b8c9d0e 100644\n--- a/startup_contracts.py\n+++ b/startup_contracts.py\n@@ -7,7 +7,7 @@ ASSET_MANIFEST = {\n \n def missing_assets() -> list[str]:\n     return [path for path in REQUIRED_ASSETS if path not in ASSET_MANIFEST]\n-\n+\n def db_pool_size(settings: dict[str, str]) -> int:\n     return max(int(settings.get('DB_POOL_SIZE', '5')), 1)\n \n@@ -14,7 +14,7 @@ def schema_startup_wait_seconds(settings: dict[str, str]) -> int:\n     return max(int(settings.get('SCHEMA_STARTUP_WAIT_SECONDS', '60')), 30)\n \n-def test_static_asset_manifest_contains_required_assets():\n+def test_static_asset_manifest_contains_required_assets(self):\n     assert missing_assets() == []\n \n def test_db_pool_size_never_zero():\n@@ -21,7 +21,7 @@ def test_db_pool_size_never_zero():\n     assert db_pool_size({'DB_POOL_SIZE': '0'}) == 1\n \n-def test_schema_startup_wait_covers_crash_recovery_window():\n+def test_schema_startup_wait_covers_crash_recovery_window(self):\n     assert schema_startup_wait_seconds({'SCHEMA_STARTUP_WAIT_SECONDS': '5'}) == 30",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```
+
+```json
+{
+  "candidate_id": "local_model-real-chili-broker-timeout-partial-loses",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-broker-timeout-partial-loses.",
+  "patch": "diff --git a/preflight.py b/preflight.py\nindex 3f4e1a2..b8c9d0e 100644\n--- a/preflight.py\n+++ b/preflight.py\n@@ -5,7 +5,7 @@ def can_enter(\n     ticker: str,\n     broker_position_qty: float,\n     buying_power: float,\n-    required_cash: float,\n+    required_cash: float,\n     *,\n     broker_timeout: bool = False,\n ) -> bool:\n@@ -12,7 +12,7 @@ def can_enter(\n         return False\n     if buying_power < required_cash:\n         return False\n-    return True\n+    return not broker_timeout\n",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```
+
+```json
+{
+  "candidate_id": "local_model-real-chili-runtime-control-no-evidence-loses",
+  "case_id": "real-chili-runtime-control-no-evidence-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-runtime-control-no-evidence-loses.",
+  "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\nindex 3f4e1a2..b8c9d0e 100644\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -7,7 +7,7 @@ def looks_like_repo_edit(prompt: str) -> bool:\n     return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n \n def classify_prompt(prompt: str) -> str:\n-    return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked'\n+    return 'repo_edit' if looks_like_repo_edit(prompt.lower()) else 'blocked'\n \n def plan_if_repo_edit(prompt: str, planner):\n     if classify_prompt(prompt) == 'repo_edit':\n",
+  "planned_file": "autopilot_prompt.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```
+
+```json
+{
+  "candidate_id": "local_model-real-chili-runtime-control-unscoped-loses",
+  "case_id": "real-chili-runtime-control-unscoped-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-runtime-control-unscoped-loses.",
+  "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\nindex 3f4e1a2..b8c9d0e 100644\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -7,7 +7,7 @@ def looks_like_repo_edit(prompt: str) -> bool:\n     return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n \n def classify_prompt(prompt: str) -> str:\n-    return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked'\n+    return 'repo_edit' if looks_like_repo_edit(prompt.lower()) else 'blocked'\n \n def plan_if_repo_edit(prompt: str, planner):\n     if classify_prompt(prompt) == 'repo_edit':\n",
+  "planned_file": "autopilot_prompt.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```

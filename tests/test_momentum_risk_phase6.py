@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.core import User
-from app.models.trading import MomentumStrategyVariant, TradingAutomationSession
+from app.models.trading import MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
 from app.services.trading.momentum_neural.context import build_momentum_regime_context
 from app.services.trading.momentum_neural.features import ExecutionReadinessFeatures
 from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants, persist_neural_momentum_tick
@@ -17,7 +18,12 @@ from app.services.trading.momentum_neural.viability import score_viability
 from app.services.trading.momentum_neural.variants import get_family
 from app.services.trading.momentum_neural.automation_query import get_automation_session_detail
 from app.services.trading.momentum_neural.operator_actions import create_paper_draft_session
-from app.services.trading.momentum_neural.risk_evaluator import evaluate_proposed_momentum_automation
+from app.services.trading.momentum_neural.live_fsm import STATE_LIVE_COOLDOWN, STATE_WATCHING_LIVE
+from app.services.trading.momentum_neural.risk_evaluator import (
+    count_concurrent_automation_sessions,
+    evaluate_proposed_momentum_automation,
+    _ross_lane_universe_check,
+)
 from app.services.trading.momentum_neural.risk_policy import (
     RISK_SNAPSHOT_KEY,
     build_session_risk_snapshot,
@@ -53,7 +59,13 @@ def _seed_live_eligible_row(db: Session, *, symbol: str = "SOL-USD") -> tuple[in
         source_node_id="nm_momentum_crypto_intel",
     )
     db.commit()
-    v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.family == "impulse_breakout").one()
+    v = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.family == "impulse_breakout")
+        .order_by(MomentumStrategyVariant.id.asc())
+        .first()
+    )
+    assert v is not None
     return v.id, v
 
 
@@ -63,6 +75,105 @@ def _uid(db: Session, name_suffix: str) -> int:
     db.commit()
     db.refresh(u)
     return int(u.id)
+
+
+def _seed_equity_live_eligible_row(
+    db: Session,
+    *,
+    symbol: str,
+    ross_signal: dict,
+) -> tuple[int, MomentumStrategyVariant]:
+    ensure_momentum_strategy_variants(db)
+    db.commit()
+    v = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.family == "impulse_breakout")
+        .order_by(MomentumStrategyVariant.id.asc())
+        .first()
+    )
+    assert v is not None
+    now = datetime.utcnow()
+    db.add(
+        MomentumSymbolViability(
+            symbol=symbol,
+            scope="symbol",
+            variant_id=int(v.id),
+            viability_score=0.73,
+            paper_eligible=True,
+            live_eligible=True,
+            freshness_ts=now,
+            regime_snapshot_json={},
+            execution_readiness_json={
+                "spread_bps": 5.0,
+                "extra": {"ross_signals": {symbol: dict(ross_signal)}},
+            },
+            explain_json={},
+            evidence_window_json={},
+            source_node_id="test_generic_viability",
+            correlation_id="risk-ross-universe-test",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    db.commit()
+    return int(v.id), v
+
+
+def _check_by_id(evaluation: dict, check_id: str) -> dict:
+    for check in evaluation.get("checks", []):
+        if check.get("id") == check_id:
+            return check
+    raise AssertionError(f"missing check {check_id}")
+
+
+def test_ross_lane_universe_check_blocks_broad_equity_without_db() -> None:
+    via = SimpleNamespace(
+        execution_readiness_json={
+            "extra": {
+                "ross_signals": {
+                    "AAPL": {
+                        "ticker": "AAPL",
+                        "price": 295.64,
+                        "todays_change_perc": 11.0,
+                        "volume": 10_000_000,
+                        "rvol": 8.0,
+                        "source": "generic equity momentum",
+                    }
+                }
+            }
+        }
+    )
+
+    ok, reason, detail = _ross_lane_universe_check("AAPL", via)
+
+    assert ok is False
+    assert reason == "ross_universe_price_above_profile"
+    assert detail["price"] == 295.64
+
+
+def test_ross_lane_universe_check_allows_smallcap_without_db() -> None:
+    via = SimpleNamespace(
+        execution_readiness_json={
+            "extra": {
+                "ross_signals": {
+                    "JEM": {
+                        "ticker": "JEM",
+                        "price": 6.16,
+                        "todays_change_perc": 12.1,
+                        "volume": 300_000,
+                        "source": "tape_delta_ignite",
+                        "signal_type": "tape_delta_ignite",
+                    }
+                }
+            }
+        }
+    )
+
+    ok, reason, detail = _ross_lane_universe_check("JEM", via)
+
+    assert ok is True
+    assert reason == "ross_universe_profile_ok"
+    assert detail["price"] == 6.16
 
 
 def test_resolve_effective_risk_policy_has_version() -> None:
@@ -146,6 +257,105 @@ def test_evaluate_paper_not_blocked_by_kill_switch_default(db: Session) -> None:
     assert ev["allowed"] is True
 
 
+def test_ross_equity_lane_blocks_broad_live_eligible_equity(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_equity_only", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    vid, _ = _seed_equity_live_eligible_row(
+        db,
+        symbol="AAPL",
+        ross_signal={
+            "ticker": "AAPL",
+            "price": 295.64,
+            "todays_change_perc": 11.0,
+            "volume": 10_000_000,
+            "rvol": 8.0,
+            "source": "ross scanner momentum",
+        },
+    )
+    uid = _uid(db, "ross_blocks_aapl")
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="AAPL",
+        variant_id=vid,
+        mode="live",
+        execution_family="robinhood_agentic_mcp",
+    )
+
+    assert ev["allowed"] is False
+    check = _check_by_id(ev, "ross_equity_universe")
+    assert check["severity"] == "block"
+    assert check["detail"]["reason"] == "ross_universe_price_above_profile"
+    assert check["message"] == "Ross equity lane blocks broad/mega-cap equity candidate."
+
+
+def test_ross_equity_lane_blocks_faded_smallcap_with_precise_message(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_equity_only", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    vid, _ = _seed_equity_live_eligible_row(
+        db,
+        symbol="AHMA",
+        ross_signal={
+            "ticker": "AHMA",
+            "price": 2.06,
+            "todays_change_perc": -5.9,
+            "volume": 8_650_534,
+            "source": "tape_delta_ignite",
+        },
+    )
+    uid = _uid(db, "ross_blocks_faded_ahma")
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="AHMA",
+        variant_id=vid,
+        mode="live",
+        execution_family="robinhood_agentic_mcp",
+    )
+
+    assert ev["allowed"] is False
+    check = _check_by_id(ev, "ross_equity_universe")
+    assert check["severity"] == "block"
+    assert check["detail"]["reason"] == "ross_universe_change_below_profile"
+    assert check["message"] == "Ross equity lane blocks faded/thin small-cap candidate below profile."
+
+
+def test_ross_equity_lane_allows_profile_proven_smallcap(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_equity_only", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    vid, _ = _seed_equity_live_eligible_row(
+        db,
+        symbol="JEM",
+        ross_signal={
+            "ticker": "JEM",
+            "price": 6.16,
+            "todays_change_perc": 12.1,
+            "volume": 300_000,
+            "source": "tape_delta_ignite",
+            "signal_type": "tape_delta_ignite",
+        },
+    )
+    uid = _uid(db, "ross_allows_jem")
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="JEM",
+        variant_id=vid,
+        mode="live",
+        execution_family="robinhood_agentic_mcp",
+    )
+
+    check = _check_by_id(ev, "ross_equity_universe")
+    assert check["ok"] is True
+    assert check["detail"]["reason"] == "ross_universe_profile_ok"
+
+
 def test_concurrency_blocks_second_paper_draft(monkeypatch, db: Session) -> None:
     monkeypatch.setattr(settings, "chili_momentum_risk_max_concurrent_sessions", 1)
     vid, _ = _seed_live_eligible_row(db, symbol="CC1-USD")
@@ -163,6 +373,47 @@ def test_concurrency_blocks_second_paper_draft(monkeypatch, db: Session) -> None
     )
     assert r2["ok"] is False
     assert r2.get("error") == "risk_blocked"
+
+
+def test_decoupled_live_concurrency_ignores_expired_watchers_and_cooldown(
+    monkeypatch,
+    db: Session,
+) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_decouple_watching_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 60)
+    vid, _ = _seed_live_eligible_row(db, symbol="JEM-USD")
+    uid = _uid(db, f"decoupled_live_slots_{datetime.utcnow().timestamp()}")
+    old = datetime.utcnow() - timedelta(minutes=5)
+
+    for idx in range(3):
+        db.add(
+            TradingAutomationSession(
+                user_id=uid,
+                symbol=f"OLD{idx}-USD",
+                mode="live",
+                variant_id=vid,
+                state=STATE_WATCHING_LIVE,
+                execution_family="coinbase_spot",
+                started_at=old,
+                risk_snapshot_json={
+                    "expires_at_utc": (old + timedelta(seconds=30)).isoformat(),
+                },
+            )
+        )
+    db.add(
+        TradingAutomationSession(
+            user_id=uid,
+            symbol="DONE-USD",
+            mode="live",
+            variant_id=vid,
+            state=STATE_LIVE_COOLDOWN,
+            execution_family="coinbase_spot",
+            started_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    assert count_concurrent_automation_sessions(db, user_id=uid, mode="live") == 0
 
 
 def test_paper_draft_persists_momentum_risk_snapshot(db: Session) -> None:

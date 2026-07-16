@@ -1,0 +1,598 @@
+Thinking...
+We are given a fixture for a local model candidate prompt pack. The task is[2D[K
+is to generate a JSON response with a unified-diff patch for the planned fi[2D[K
+file (`startup_contracts.py`) that fixes the issue in the test case.
+
+The failure focus states:
+- This fixture is intentionally not green before the patch.
+- At least one visible behavior test must fail against the current source.
+
+Looking at the test files:
+
+`test_startup_contracts.py` has three tests:
+1. `test_static_asset_manifest_contains_required_assets()`: This test expec[5D[K
+expects `missing_assets()` to return an empty list. Currently, the `REQUIRE[8D[K
+`REQUIRED_ASSETS` and `ASSET_MANIFEST` are defined such that the asset path[4D[K
+paths are in the manifest. However, note that the test passes if there are [K
+no missing assets. But the problem says the fixture is not green, so we hav[3D[K
+have to see which test fails.
+
+2. `test_db_pool_size_never_zero()`: This test passes because the current `[1D[K
+`db_pool_size` function returns 1 when the setting is '0'. So this test is [K
+okay.
+
+3. `test_schema_startup_wait_covers_crash_recovery_window()`: This test exp[3D[K
+expects that when `SCHEMA_STARTUP_WAIT_SECONDS` is set to '5', the function[8D[K
+function returns 30. The current function does: `max(int(settings.get('SCHE[27D[K
+`max(int(settings.get('SCHEMA_STARTUP_WAIT_SECONDS', '60')), 30)`. So if th[2D[K
+the setting is '5', it returns max(5,30) -> 30. This test passes too.
+
+But the problem states: "This fixture is intentionally not green before the[3D[K
+the patch". So one of the tests must fail? Let me check the current code.
+
+Wait, the problem says: "At least one visible behavior test must fail again[5D[K
+against the current source". So we have to find which test is failing.
+
+Looking at the `startup_contracts.py`:
+
+The `missing_assets` function returns the list of paths in `REQUIRED_ASSETS[16D[K
+`REQUIRED_ASSETS` that are not in `ASSET_MANIFEST`. The `ASSET_MANIFEST` is[2D[K
+is defined as a dictionary with one key: `'app/static/components/brain-proj[34D[K
+`'app/static/components/brain-project-domain.js'` -> `'sha-js'`.
+
+The `REQUIRED_ASSETS` is a tuple of two strings: 
+  ('app/static/components/brain-project-domain.js', 'app/static/components/[23D[K
+'app/static/components/brain-project-domain.css')
+
+So the `missing_assets` function will return:
+  [ 'app/static/components/brain-project-domain.css' ]
+
+Therefore, the first test: `test_static_asset_manifest_contains_required_as[48D[K
+`test_static_asset_manifest_contains_required_assets()` expects `missing_as[11D[K
+`missing_assets()` to be `[]`, but it is actually `['app/static/components/[25D[K
+`['app/static/components/brain-project-domain.css']`. So the test fails.
+
+The problem says: "This fixture is intentionally not green". So the current[7D[K
+current state fails the first test.
+
+We are to fix the issue so that the test passes.
+
+What is the issue? The `ASSET_MANIFEST` does not have the CSS file. We need[4D[K
+need to add the CSS file to the manifest.
+
+So the patch should add the CSS file to the `ASSET_MANIFEST` dictionary.
+
+But note: the problem says "Use the test names and assertions above to infe[4D[K
+infer the smallest behavior fix".
+
+We are to produce a unified-diff for `startup_contracts.py`.
+
+The current `startup_contracts.py`:
+
+```text
+REQUIRED_ASSETS = (
+    'app/static/components/brain-project-domain.js',
+    'app/static/components/brain-project-domain.css',
+)
+
+ASSET_MANIFEST = {
+    'app/static/components/brain-project-domain.js': 'sha-js',
+}
+
+
+def missing_assets() -> list[str]:
+    return [path for path in REQUIRED_ASSETS if path not in ASSET_MANIFEST][15D[K
+ASSET_MANIFEST]
+```
+
+We want to change the `ASSET_MANIFEST` to include the CSS file.
+
+So the patch should be:
+
+```diff
+--- a/startup_contracts.py
++++ b/startup_contracts.py
+@@ -3,5 +3,6 @@
+ ASSET_MANIFEST = {
+     'app/static/components/brain-project-domain.js': 'sha-js',
++    'app/static/components/brain-project-domain.css': 'sha-css',
+ }
+```
+
+But note: the problem says "minimal unified-diff patch". We are only changi[6D[K
+changing the manifest.
+
+However, the problem also says: "Do not include unrelated files". So we out[3D[K
+output the patch for `startup_contracts.py`.
+
+But wait, the current code has a trailing comma in the tuple? Actually, the[3D[K
+the tuple has two elements without a comma at the end? Let me check:
+
+In the fixture, the tuple is written as:
+    ('app/static/components/brain-project-domain.js', 'app/static/component[21D[K
+'app/static/components/brain-project-domain.css'),
+
+But in the diff, we are only changing the manifest.
+
+Let me write the diff:
+
+We are adding one line to the manifest.
+
+The current manifest is:
+    'app/static/components/brain-project-domain.js': 'sha-js',
+
+We want to add:
+    'app/static/components/brain-project-domain.css': 'sha-css',
+
+But note: the problem says the test fails because the CSS is missing. So we[2D[K
+we have to add it.
+
+However, the problem says: "minimal". We don't want to change anything else[4D[K
+else.
+
+So the diff:
+
+```diff
+--- a/startup_contracts.py
++++ b/startup_contracts.py
+@@ -3,5 +3,6 @@
+ ASSET_MANIFEST = {
+     'app/static/components/brain-project-domain.js': 'sha-js',
++    'app/static/components/brain-project-domain.css': 'sha-css',
+ }
+```
+
+But wait, the current code has a newline after the manifest dictionary? Act[3D[K
+Actually, the fixture shows:
+
+```text
+ASSET_MANIFEST = {
+    'app/static/components/brain-project-domain.js': 'sha-js',
+}
+```
+
+So the manifest dictionary is defined with a newline after the key.
+
+The diff should be:
+
+We are adding one line inside the dictionary.
+
+The current code (from the fixture) for the manifest:
+
+```
+    'app/static/components/brain-project-domain.js': 'sha-js',
+```
+
+We want to add:
+
+```
+    'app/static/components/brain-project-domain.css': 'sha-css',
+```
+
+But note: the problem says the test fails because the CSS is missing. So we[2D[K
+we add the CSS.
+
+However, the problem says: "the smallest behavior fix". We are only adding [K
+the CSS to the manifest.
+
+But note: the problem says the test `test_static_asset_manifest_contains_re[39D[K
+`test_static_asset_manifest_contains_required_assets()` fails because it re[2D[K
+returns a list of one element (the CSS). We fix by adding the CSS to the ma[2D[K
+manifest.
+
+So the patch is:
+
+```diff
+diff --git a/startup_contracts.py b/startup_contracts.py
+index 0d7b3a8..d7b3a8a 100644
+--- a/startup_contracts.py
++++ b/startup_contracts.py
+@@ -3,5 +3,6 @@
+ ASSET_MANIFEST = {
+     'app/static/components/brain-project-domain.js': 'sha-js',
++    'app/static/components/brain-project-domain.css': 'sha-css',
+ }
+```
+
+But wait, the problem says: "The `patch` value must start with `diff --git`[6D[K
+--git`". And we are to output the patch as a string in the JSON.
+
+However, note: the problem says "Return JSON immediately. The first non-whi[7D[K
+non-whitespace character of your response must be `{`."
+
+So we output:
+
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  ...,
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\nindex[29D[K
+b/startup_contracts.py\nindex 0d7b3a8..d7b3a8a 100644\n--- a/startup_contra[16D[K
+a/startup_contracts.py\n+++ b/startup_contracts.py\n@@ -3,5 +3,6 @@\n ASSET[5D[K
+ASSET_MANIFEST = {\n     'app/static/components/brain-project-domain.js': '[1D[K
+'sha-js',\n+    'app/static/components/brain-project-domain.css': 'sha-css'[9D[K
+'sha-css',\n }\n"
+}
+
+But note: the problem says "Escape patch line breaks as `\\n` inside the JS[2D[K
+JSON string". So we have to write the string with `\n` for newlines.
+
+However, the problem also says: "Do not put literal line breaks inside `pat[4D[K
+`patch`". So we represent the diff as a string with `\n` for newlines.
+
+But the problem says: "Put the unified diff in the `patch` string". And we [K
+are to output the patch as a string that starts with `diff --git`.
+
+Also note: the problem says "the first non-whitespace character of your res[3D[K
+response must be `{`".
+
+We are only to output the JSON.
+
+Let me write the patch string with the newlines escaped.
+
+The diff we want:
+
+```
+diff --git a/startup_contracts.py b/startup_contracts.py
+index 0d7b3a8..d7b3a8a 100644
+--- a/startup_contracts.py
++++ b/startup_contracts.py
+@@ -3,5 +3,6 @@
+ ASSET_MANIFEST = {
+     'app/static/components/brain-project-domain.js': 'sha-js',
++    'app/static/components/brain-project-domain.css': 'sha-css',
+ }
+```
+
+But note: the problem says "minimal". We don't want to change anything else[4D[K
+else.
+
+However, the problem says: "if uncertain, emit a rejected/incomplete drop".[6D[K
+drop". But we are confident.
+
+But wait: the problem says the model name is `qwen3:4b`. We are to generate[8D[K
+generate the patch.
+
+Let me check the exact diff format: the unified diff starts with `diff --gi[4D[K
+--git a/file b/file` and then the index, then the old and new.
+
+But the problem says: "the `patch` value must start with `diff --git`".
+
+We'll generate the diff as:
+
+"diff --git a/startup_contracts.py b/startup_contracts.py\nindex 0d7b3a8..d[10D[K
+0d7b3a8..d7b3a8a 100644\n--- a/startup_contracts.py\n+++ b/startup_contract[18D[K
+b/startup_contracts.py\n@@ -3,5 +3,6 @@\n ASSET_MANIFEST = {\n     'app/sta[8D[K
+'app/static/components/brain-project-domain.js': 'sha-js',\n+    'app/stati[10D[K
+'app/static/components/brain-project-domain.css': 'sha-css',\n }\n"
+
+But note: the problem says to escape line breaks as `\n` inside the JSON st[2D[K
+string.
+
+So in the JSON string for `patch`, we write:
+
+"diff --git a/startup_contracts.py b/startup_contracts.py\\nindex 0d7b3a8..[9D[K
+0d7b3a8..d7b3a8a 100644\\n--- a/startup_contracts.py\\n+++ b/startup_contra[16D[K
+b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n ASSET_MANIFEST = {\\n     'app/[5D[K
+'app/static/components/brain-project-domain.js': 'sha-js',\\n+    'app/stat[9D[K
+'app/static/components/brain-project-domain.css': 'sha-css',\\n }\\n"
+
+But wait, the problem says: "Do not include unrelated files". We are only p[1D[K
+patching `startup_contracts.py`.
+
+Also, the problem says: "the first non-whitespace character of your respons[7D[K
+response must be `{`".
+
+So we output the JSON without any extra text.
+
+Let me write the JSON:
+
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contra[19D[K
+test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "qwen3:4b",
+  "notes": "Candidate patch for real-chili-startup-static-partial-loses.",
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\\ninde[29D[K
+b/startup_contracts.py\\nindex 0d7b3a8..d7b3a8a 100644\\n--- a/startup_cont[14D[K
+a/startup_contracts.py\\n+++ b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n AS[2D[K
+ASSET_MANIFEST = {\\n     'app/static/components/brain-project-domain.js': [K
+'sha-js',\\n+    'app/static/components/brain-project-domain.css': 'sha-css[8D[K
+'sha-css',\\n }\\n",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+
+But note: the problem says "Replace every placeholder in the template". The[3D[K
+The template has a placeholder for `patch` as `<unified diff for the planne[6D[K
+planned file only>`. We are replacing it with the diff string.
+
+Also, the problem says: "the `patch` value must start with `diff --git`". O[1D[K
+Our string starts with "diff --git ...".
+
+We have to be cautious: the problem says the model is `qwen3:4b` and the ca[2D[K
+case is `real-chili-startup-static-partial-loses`.
+
+We are to output only the JSON.
+
+Let me check the exact string for the patch.
+
+We are adding one line to the manifest. The manifest dictionary currently h[1D[K
+has one entry. We add one more.
+
+The diff is minimal.
+
+But note: the problem says the test `test_static_asset_manifest_contains_re[39D[K
+`test_static_asset_manifest_contains_required_assets` fails because the CSS[3D[K
+CSS is missing. We fix by adding the CSS to the manifest.
+
+We don't change the `REQUIRED_ASSETS` because the test is about the manifes[7D[K
+manifest. The test expects the manifest to have both.
+
+So the patch is as above.
+
+However, the problem says: "Do not copy placeholders". We are replacing the[3D[K
+the placeholder with the actual diff.
+
+We output the JSON.
+
+But note: the problem says "Return JSON immediately". So we write the JSON [K
+without any extra text.
+
+We have to escape the backslashes in the string? Actually, in JSON, we esca[4D[K
+escape the backslash with a double backslash.
+
+But the problem says: "Escape patch line breaks as `\\n` inside the JSON st[2D[K
+string". So we write `\n` as `\\n` in the JSON.
+
+So the string for the patch is:
+
+"diff --git a/startup_contracts.py b/startup_contracts.py\\nindex 0d7b3a8..[9D[K
+0d7b3a8..d7b3a8a 100644\\n--- a/startup_contracts.py\\n+++ b/startup_contra[16D[K
+b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n ASSET_MANIFEST = {\\n     'app/[5D[K
+'app/static/components/brain-project-domain.js': 'sha-js',\\n+    'app/stat[9D[K
+'app/static/components/brain-project-domain.css': 'sha-css',\\n }\\n"
+
+But in the JSON, the string for `patch` is a JSON string. So we have to esc[3D[K
+escape the double quotes and the backslashes.
+
+Actually, the problem says: "Escape patch line breaks as `\\n`". So in the [K
+JSON string, we write `\\n` to represent a newline.
+
+But in the JSON, the entire string is a string. So for the `patch` field, w[1D[K
+we have a string that contains the diff with newlines represented as `\n` ([1D[K
+(but in JSON, we write it as `\\n`).
+
+So the JSON will be:
+
+{
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\\ninde[29D[K
+b/startup_contracts.py\\nindex 0d7b3a8..d7b3a8a 100644\\n--- a/startup_cont[14D[K
+a/startup_contracts.py\\n+++ b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n AS[2D[K
+ASSET_MANIFEST = {\\n     'app/static/components/brain-project-domain.js': [K
+'sha-js',\\n+    'app/static/components/brain-project-domain.css': 'sha-css[8D[K
+'sha-css',\\n }\\n"
+}
+
+But note: the problem says "the first non-whitespace character of your resp[4D[K
+response must be `{`". So we output the JSON without any extra space.
+
+We can write the JSON as a string.
+
+I think we are good.
+
+But let me check: the problem says the model name is `qwen3:4b` and the cas[3D[K
+case is `real-chili-startup-static-partial-loses`.
+
+We use the candidate_id: "local_model-real-chili-startup-static-partial-los[50D[K
+"local_model-real-chili-startup-static-partial-loses"
+
+The problem says: "Replace every placeholder in the template". The template[8D[K
+template has:
+
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  ...,
+  "patch": "<unified diff for the planned file only>"
+}
+
+We replace the placeholder with the diff string.
+
+So the JSON is as above.
+
+We output it.
+
+But note: the problem says "the `patch` value must start with `diff --git`"[7D[K
+--git`". Our string does.
+
+So we write the JSON.
+
+Let me write it.
+
+Note: the problem says "no extra text". So we output only the JSON.
+
+We'll write:
+
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contra[19D[K
+test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "qwen3:4b",
+  "notes": "Candidate patch for real-chili-startup-static-partial-loses.",
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\\ninde[29D[K
+b/startup_contracts.py\\nindex 0d7b3a8..d7b3a8a 100644\\n--- a/startup_cont[14D[K
+a/startup_contracts.py\\n+++ b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n AS[2D[K
+ASSET_MANIFEST = {\\n     'app/static/components/brain-project-domain.js': [K
+'sha-js',\\n+    'app/static/components/brain-project-domain.css': 'sha-css[8D[K
+'sha-css',\\n }\\n",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+
+But wait: the problem says "the first non-whitespace character of your resp[4D[K
+response must be `{`". This JSON starts with `{`.
+
+We have to escape the backslashes in the JSON string.
+
+In the `patch` string, we have `\\n` to represent a newline.
+
+But in the actual JSON, the string for `patch` will be a string that contai[6D[K
+contains the diff with newlines as `\n` (but in the JSON, we write it as `\[2D[K
+`\\n`).
+
+Yes.
+
+We output this JSON.
+
+Let me write it without the extra spaces.
+
+But note: the problem says "the response" must start with `{`. So we output[6D[K
+output:
+
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contra[19D[K
+test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "qwen3:4b",
+  "notes": "Candidate patch for real-chili-startup-static-partial-loses.",
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\\ninde[29D[K
+b/startup_contracts.py\\nindex 0d7b3a8..d7b3a8a 100644\\n--- a/startup_cont[14D[K
+a/startup_contracts.py\\n+++ b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n AS[2D[K
+ASSET_MANIFEST = {\\n     'app/static/components/brain-project-domain.js': [K
+'sha-js',\\n+    'app/static/components/brain-project-domain.css': 'sha-css[8D[K
+'sha-css',\\n }\\n",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+
+But note: the problem says "the `patch` value must start with `diff --git`"[7D[K
+--git`". Our string does.
+
+I think this is correct.
+
+We output this JSON.
+
+But to be safe, let me check the diff format.
+
+The unified diff for one line addition:
+
+We have:
+
+@@ -3,5 +3,6 @@
+ ASSET_MANIFEST = {
+     'app/static/components/brain-project-domain.js': 'sha-js',
++    'app/static/components/brain-project-domain.css': 'sha-css',
+ }
+
+This is correct.
+
+We use the same index as in the fixture? The problem doesn't require the in[2D[K
+index, but it's standard to have it.
+
+We used a random index for the diff: `index 0d7b3a8..d7b3a8a 100644` - but [K
+the problem says "minimal". However, in a real diff, the index is there. Bu[2D[K
+But for the purpose of this problem, it's acceptable.
+
+Alternatively, we can output a diff without the index? But the problem says[4D[K
+says "unified diff". The unified diff format usually has the index.
+
+But the problem says: "the `patch` value must start with `diff --git`". So [K
+we output the standard diff.
+
+I think it's fine.
+
+So we output the JSON.
+
+But note: the problem says "no extra text". So we output only the JSON.
+
+Let me write it.
+
+However, in the JSON, the string for `patch` has a newline as `\n` (represe[8D[K
+(represented as `\\n` in the JSON string).
+
+Yes.
+
+So the response is:
+
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contra[19D[K
+test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "qwen3:4b",
+  "notes": "Candidate patch for real-chili-startup-static-partial-loses.",
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\\ninde[29D[K
+b/startup_contracts.py\\nindex 0d7b3a8..d7b3a8a 100644\\n--- a/startup_cont[14D[K
+a/startup_contracts.py\\n+++ b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n AS[2D[K
+ASSET_MANIFEST = {\\n     'app/static/components/brain-project-domain.js': [K
+'sha-js',\\n+    'app/static/components/brain-project-domain.css': 'sha-css[8D[K
+'sha-css',\\n }\\n",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+
+But note: the problem says "the first non-whitespace character of your resp[4D[K
+response must be `{`". This starts with `{`.
+
+We are done.
+...done thinking.
+
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contra[19D[K
+test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "qwen3:4b",
+  "notes": "Candidate patch for real-chili-startup-static-partial-loses.",
+  "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\\ninde[29D[K
+b/startup_contracts.py\\nindex 0d7b3a8..d7b3a8a 100644\\n--- a/startup_cont[14D[K
+a/startup_contracts.py\\n+++ b/startup_contracts.py\\n@@ -3,5 +3,6 @@\\n AS[2D[K
+ASSET_MANIFEST = {\\n     'app/static/components/brain-project-domain.js': [K
+'sha-js',\\n+    'app/static/components/brain-project-domain.css': 'sha-css[8D[K
+'sha-css',\\n }\\n",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+

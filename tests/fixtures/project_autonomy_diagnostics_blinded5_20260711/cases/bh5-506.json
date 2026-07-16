@@ -1,0 +1,146 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-506",
+  "problem_statement": "A wildlife acoustic survey dashboard loses most nocturnal detections from twelve remote recorders after their firmware maintenance, although the raw audio objects arrive and remain playable. Determine where the records disappear and what must be corrected, using immutable manifests, hashes, and pipeline ledgers rather than rerunning the production classifier.",
+  "observations": [
+    {
+      "evidence_id": "bh5-506-e01",
+      "statement": "Raw object counts remain within 2 percent of the prior week, while classifier-job counts for the twelve maintained recorders fall by 63 percent beginning with their first post-maintenance upload.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "object-store inventory and job-ledger export",
+      "independence_key": "raw-to-job-count-divergence",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "timestamps": {"onset": "2026-03-09T02:00:00Z"},
+        "comparison": {"raw_object_delta_percent": -1.7, "classifier_job_delta_percent": -63.0}
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e02",
+      "statement": "Each missing job corresponds to a new audio object whose manifest clip_id equals an older clip_id from the same recorder, even though capture times and content hashes differ.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "immutable upload manifests joined to object hashes",
+      "independence_key": "identifier-content-join",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "entities": ["recorder", "clip_id", "capture_time", "audio_hash"],
+        "comparison": {"duplicate_ids_with_distinct_hashes": 18412, "missing_jobs_accounted_for": 18412}
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e03",
+      "statement": "The ingest ledger marks those uploads already_seen and links each decision to the older job; no producer-consumer edge is created for the new object.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "append-only ingestion decision ledger",
+      "independence_key": "dedup-decision-edge",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "edges": [
+          {"producer": "recorder_upload", "consumer": "ingest_dedup", "sink": "classifier_queue", "edge_state": "suppressed_as_already_seen"}
+        ],
+        "causal_parents": ["manifest_clip_id", "dedup_lookup", "queue_emission"]
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e04",
+      "statement": "Firmware maintenance reset a persisted sequence counter to zero on the twelve recorders; clip_id is composed only of recorder serial and that counter.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed device maintenance reports and manifest schema",
+      "independence_key": "producer-identity-transition",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "transitions": [{"from": "sequence_88421", "to": "sequence_0", "event": "firmware_maintenance"}],
+        "producer_identity": {"clip_id_fields": ["recorder_serial", "sequence_counter"]}
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e05",
+      "statement": "Unmaintained recorders never reset their sequence and show neither duplicate identifiers nor a drop between object and job counts under the same pipeline revisions.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "fleet-wide comparison export",
+      "independence_key": "unmaintained-recorder-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"control_recorders": 148, "duplicate_clip_ids": 0, "raw_to_job_loss_percent": 0.04},
+        "runtime_revision": "ingest-2026.03.2"
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e06",
+      "statement": "Ingest source, dedup settings, classifier model artifact, queue service, and dashboard release are unchanged across the onset window.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deployment attestations from all pipeline stages",
+      "independence_key": "pipeline-change-negative-control",
+      "reliability": 0.96,
+      "discriminating": false,
+      "metadata": {
+        "comparison": {"ingest_revision": "a41f08d", "settings_hash": "dedup-c4f2", "model_hash": "model-2187", "queue_revision": "q-4.9", "dashboard_revision": "9ad11b"}
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e07",
+      "statement": "An offline relational reconstruction using recorder serial, capture time, and audio hash yields one unique identity per retained object and exactly restores the set of absent queue intents without decoding audio.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "read-only manifest reconstruction report",
+      "independence_key": "alternative-identity-reconstruction",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-acoustic-identity-12",
+        "input_fingerprint": "manifest-window-20260309-20260312",
+        "comparison": {"retained_objects": 29177, "unique_reconstructed_ids": 29177, "restored_absent_intents": 18412}
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e08",
+      "statement": "Classifier success and species-score distributions remain stable for jobs that are actually submitted, so model execution is downstream of the missing edge rather than the source of the loss.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "classifier result ledger and distribution report",
+      "independence_key": "classifier-downstream-control",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"success_rate_before": 0.987, "success_rate_after": 0.989, "score_distribution_distance": 0.018},
+        "edge_state": "healthy_when_job_present"
+      }
+    },
+    {
+      "evidence_id": "bh5-506-e09",
+      "statement": "A sealed contract proof with counter-reset fixtures rejects reused producer identities and accepts a collision-resistant identity, while legacy noncollision fixtures preserve their prior queue intents.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated ingest contract proof transcript",
+      "independence_key": "identity-contract-proof",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-acoustic-contract-14",
+        "comparison": {"reset_fixtures": 240, "collisions_after_correction": 0, "legacy_intent_diffs": 0},
+        "outcome_fingerprint": "producer-reset-safe-identity"
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

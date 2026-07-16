@@ -1,0 +1,65 @@
+[
+  {
+    "error": "",
+    "latency_ms": 35353,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "{\n  \"files\": [\n    {\n      \"path\": \"app/api.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import Any\n\nfrom app.paging import page_slice\nfrom app.query import parse_page\n\n\ndef build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n    page = parse_page(raw_page)\n    if page < 1:\n        raise ValueError('page must be a positive integer')\n    items_per_page = page_slice(items, page - 1, page_size)\n    has_next = len(items_per_page) == page_size\n    next_page = page + 1 if has_next else None\n    return {\"page\": page, \"items\": items_per_page, \"has_next\": has_next, \"next_page\": next_page}\n\"\"\"\n    },\n    {\n      \"path\": \"app/paging.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import TypeVar\n\nT = TypeVar(\"T\")\n\n\ndef page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n    if page_size < 1:\n        raise ValueError('page_size must be positive')\n    start = (page - 1) * page_size\n    return list(items[start : start + page_size])\n\"\"\"\n    },\n    {\n      \"path\": \"app/query.py\",\n      \"content\": \"\"\"\ndef parse_page(raw: str | None) -> int:\n    if raw is None or raw.strip() == \"\":\n        return 1\n    try:\n        page = int(raw)\n        if page < 1:\n            raise ValueError('page must be a positive integer')\n        return page\n    except ValueError as e:\n        raise ValueError('page must be a positive integer') from e\n\"\"\"\n    }\n  ]\n}"
+  },
+  {
+    "error": "",
+    "latency_ms": 32024,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```json\n{\n  \"files\": [\n    {\n      \"path\": \"app/api.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import Any\n\nfrom app.paging import page_slice\nfrom app.query import parse_page\n\n\ndef build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n    page = parse_page(raw_page)\n    if page < 1:\n        raise ValueError('page must be a positive integer')\n    items_per_page = page_slice(items, page - 1, page_size)\n    has_next = len(items_per_page) == page_size\n    next_page = page + 1 if has_next else None\n    return {\"page\": page, \"items\": items_per_page, \"has_next\": has_next, \"next_page\": next_page}\n\"\"\"\n    },\n    {\n      \"path\": \"app/paging.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import TypeVar\n\nT = TypeVar(\"T\")\n\n\ndef page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n    if page_size < 1:\n        raise ValueError('page_size must be positive')\n    start = (page - 1) * page_size\n    return list(items[start : start + page_size])\n\"\"\"\n    },\n    {\n      \"path\": \"app/query.py\",\n      \"content\": \"\"\"\ndef parse_page(raw: str | None) -> int:\n    if raw is None or raw.strip() == \"\":\n        return 1\n    try:\n        page = int(raw)\n        if page < 1:\n            raise ValueError('page must be a positive integer')\n        return page\n    except ValueError as e:\n        raise ValueError('page must be a positive integer') from e\n\"\"\"\n    }\n  ]\n}\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 23857,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/api.py\n+++ b/app/api.py\n@@ -10,7 +10,7 @@ def build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n     if page < 1:\n         raise ValueError('page must be a positive integer')\n     items_per_page = page_slice(items, page - 1, page_size)\n-    has_next = len(items_per_page) == page_size\n+    has_next = len(items_per_page) > 0 and len(items_per_page) == page_size\n     next_page = page + 1 if has_next else None\n     return {\"page\": page, \"items\": items_per_page, \"has_next\": has_next, \"next_page\": next_page}\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 15384,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/paging.py\n+++ b/app/paging.py\n@@ -1,6 +1,7 @@\n from collections.abc import Sequence\n from typing import TypeVar\n \n+from app.query import parse_page\n T = TypeVar(\"T\")\n \n \n@@ -9,7 +10,7 @@ def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n     if page_size < 1:\n         raise ValueError('page_size must be positive')\n     start = (page - 1) * page_size\n-    return list(items[start : start + page_size])\n+    return list(items[start:start + page_size])\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 13983,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/query.py\n+++ b/app/query.py\n@@ -1,7 +1,7 @@\n def parse_page(raw: str | None) -> int:\n     if raw is None or raw.strip() == \"\":\n-        return 1\n+        raise ValueError('page must be a positive integer')\n     try:\n         page = int(raw)\n         if page < 1:\n             raise ValueError('page must be a positive integer')\n         return page\n     except ValueError as e:\n         raise ValueError('page must be a positive integer') from e\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 40520,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```json\n{\n  \"files\": [\n    {\n      \"path\": \"app/api.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import Any\n\nfrom app.paging import page_slice\nfrom app.query import parse_page\n\n\ndef build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n    page = parse_page(raw_page)\n    if page < 1:\n        raise ValueError('page must be a positive integer')\n    items_per_page = page_slice(items, page - 1, page_size)\n    has_next = len(items_per_page) > 0 and len(items_per_page) == page_size\n    next_page = page + 1 if has_next else None\n    return {\"page\": page, \"items\": items_per_page, \"has_next\": has_next, \"next_page\": next_page}\n\"\"\"\n    },\n    {\n      \"path\": \"app/paging.py\",\n      \"content\": \"\"\"\nfrom collections.abc import Sequence\nfrom typing import TypeVar\n\nfrom app.query import parse_page\nT = TypeVar(\"T\")\n\n\ndef page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n    if page_size < 1:\n        raise ValueError('page_size must be positive')\n    start = (page - 1) * page_size\n    return list(items[start:start + page_size])\n\"\"\"\n    },\n    {\n      \"path\": \"app/query.py\",\n      \"content\": \"\"\"\ndef parse_page(raw: str | None) -> int:\n    if raw is None or raw.strip() == \"\":\n        raise ValueError('page must be a positive integer')\n    try:\n        page = int(raw)\n        if page < 1:\n            raise ValueError('page must be a positive integer')\n        return page\n    except ValueError as e:\n        raise ValueError('page must be a positive integer') from e\n\"\"\"\n    }\n  ]\n}\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 24001,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/api.py\n+++ b/app/api.py\n@@ -10,7 +10,7 @@ def build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n     if page < 1:\n         raise ValueError('page must be a positive integer')\n     items_per_page = page_slice(items, page - 1, page_size)\n-    has_next = len(items_per_page) > 0 and len(items_per_page) == page_size\n+    has_next = len(items_per_page) > 0 and len(items_per_page) == page_size * page_size\n     next_page = page + 1 if has_next else None\n     return {\"page\": page, \"items\": items_per_page, \"has_next\": has_next, \"next_page\": next_page}\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 13832,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/paging.py\n+++ b/app/paging.py\n@@ -10,7 +10,7 @@ def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n     if page_size < 1:\n         raise ValueError('page_size must be positive')\n     start = (page - 1) * page_size\n-    return list(items[start:start + page_size])\n+    return list(items[start:start + page_size]) if start < len(items) else []\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 12552,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/query.py\n+++ b/app/query.py\n@@ -4,7 +4,7 @@ def parse_page(raw: str | None) -> int:\n     if raw is None or raw.strip() == \"\":\n         raise ValueError('page must be a positive integer')\n     try:\n-        page = int(raw)\n+        page = int(raw) if raw else 1\n         if page < 1:\n             raise ValueError('page must be a positive integer')\n         return page\n```"
+  }
+]

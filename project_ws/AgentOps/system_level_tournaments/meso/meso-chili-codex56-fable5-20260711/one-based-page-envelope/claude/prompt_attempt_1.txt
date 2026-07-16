@@ -1,0 +1,64 @@
+You are competing in a measured multi-file repository repair tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve public behavior not changed by the goal.
+
+Goal: Repair the paging contract across app/query.py, app/paging.py, and app/api.py. parse_page must map missing or blank input to 1 and reject non-integers or values below 1 with ValueError('page must be a positive integer'). page_slice must use one-based pages and reject page_size below 1 with ValueError('page_size must be positive'). build_page must return page, items, has_next, and next_page, where next_page is page + 1 only when more items remain. Keep every test file unchanged.
+Approved source files: app/api.py, app/paging.py, app/query.py
+
+Repository snapshot:
+### app/api.py
+```python
+from collections.abc import Sequence
+from typing import Any
+
+from app.paging import page_slice
+from app.query import parse_page
+
+
+def build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:
+    page = parse_page(raw_page)
+    return {"page": page, "items": page_slice(items, page, page_size)}
+```
+
+### app/paging.py
+```python
+from collections.abc import Sequence
+from typing import TypeVar
+
+T = TypeVar("T")
+
+
+def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:
+    start = page * page_size
+    return list(items[start : start + page_size])
+```
+
+### app/query.py
+```python
+def parse_page(raw: str | None) -> int:
+    if raw is None:
+        return 0
+    return int(raw)
+```
+
+### tests/test_paging.py
+```python
+from app.api import build_page
+from app.query import parse_page
+
+
+def test_default_page_is_one():
+    assert parse_page(None) == 1
+    assert parse_page("  ") == 1
+
+
+def test_second_page_has_navigation_metadata():
+    result = build_page([1, 2, 3, 4, 5], "2", 2)
+    assert result == {
+        "page": 2,
+        "items": [3, 4],
+        "has_next": True,
+        "next_page": 3,
+    }
+```

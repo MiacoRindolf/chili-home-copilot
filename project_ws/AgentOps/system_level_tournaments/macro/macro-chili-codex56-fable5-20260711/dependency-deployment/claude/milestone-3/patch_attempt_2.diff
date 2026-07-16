@@ -1,0 +1,22 @@
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -22,7 +22,8 @@ def execute_deployment(services, deploy=None, healthy=None, rollback=None, stat
+     Progress is recorded on *state* when provided: waves *state* already
+     marks completed are skipped and reported via resumed=True, and the
+     result's completed_waves is the cumulative sorted tuple of completed
+-    wave indexes. A *state* whose fingerprint belongs to another plan
++    wave indexes. A rollback clears *state*'s completed waves so a later
++    resume starts over. A *state* whose fingerprint belongs to another plan
+     fails closed with ValueError("deployment plan changed") before any
+     deploy call or *state* mutation.
+     """
+@@ -77,6 +78,8 @@ def execute_deployment(services, deploy=None, healthy=None, rollback=None, stat
+             rolled_back.append(name)
+             if state is not None:
+                 state.record_rolled_back(name)
++        if state is not None:
++            state.completed_waves.clear()
+         result["status"] = "rolled_back"
+         result["completed_waves"] = tuple(sorted(completed))
+         return result

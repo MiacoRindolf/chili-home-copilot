@@ -81,6 +81,12 @@ FRONTIER_EVIDENCE_PREFLIGHT_LIVE = (
 FRONTIER_EVIDENCE_PREFLIGHT = (
     REPO_ROOT / "project_ws" / "AgentOps" / "FRONTIER_EVIDENCE_PREFLIGHT.md"
 )
+FRONTIER_SOURCE_AVAILABILITY = (
+    REPO_ROOT / "project_ws" / "AgentOps" / "FRONTIER_SOURCE_AVAILABILITY_DIAGNOSTICS.md"
+)
+FRONTIER_SOURCE_COLLECTION_PACKETS = (
+    REPO_ROOT / "project_ws" / "AgentOps" / "FRONTIER_SOURCE_COLLECTION_PACKETS.md"
+)
 DEFAULT_SINGLE_CASE_FALLBACK_CASE_ID = "real-chili-preflight-candidate-wins"
 
 
@@ -118,6 +124,13 @@ class SourceReadiness:
     preflight_recovery_boundary: str = ""
     preflight_recovery_validation_command: str = ""
     preflight_recovery_publish_command: str = ""
+    availability_report: str = ""
+    availability_probe_status: str = ""
+    availability_blocker: str = ""
+    availability_credential_status: str = ""
+    availability_recovery_action: str = ""
+    collection_packet_summary: str = ""
+    source_runner_command: str = ""
 
 
 def _utc_now() -> str:
@@ -208,7 +221,31 @@ def _record_single_case_command(source_kind: str, input_root: Path, *, case_id: 
     )
 
 
-def _source_next_action(source_kind: str, input_root: Path) -> str:
+def _source_runner_intro(source_runner_command: str) -> str:
+    command = str(source_runner_command or "").strip()
+    if not command or command.lower() == "none":
+        return ""
+    return f"Automated source runner: {command}; if it passes, validate intake with "
+
+
+def _source_next_action(
+    source_kind: str,
+    input_root: Path,
+    *,
+    source_runner_command: str = "",
+) -> str:
+    runner_intro = _source_runner_intro(source_runner_command)
+    if runner_intro:
+        return (
+            runner_intro
+            + _validation_command(input_root)
+            + "; then publish only when all required sources are ready: "
+            + _publish_command(input_root)
+            + ". Manual fallback: build/use the collection packet with "
+            + FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND.format(source_kind=source_kind)
+            + "; then import all cases with: "
+            + _record_all_cases_command(source_kind, input_root)
+        )
     return (
         FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND.format(source_kind=source_kind)
         + "; then import all cases with: "
@@ -229,6 +266,26 @@ def _default_preflight_report(input_root: Path) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _default_availability_report(input_root: Path) -> Path | None:
+    try:
+        input_root.resolve().relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return None
+    return FRONTIER_SOURCE_AVAILABILITY if FRONTIER_SOURCE_AVAILABILITY.is_file() else None
+
+
+def _default_collection_packet_summary(input_root: Path) -> Path | None:
+    try:
+        input_root.resolve().relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return None
+    return (
+        FRONTIER_SOURCE_COLLECTION_PACKETS
+        if FRONTIER_SOURCE_COLLECTION_PACKETS.is_file()
+        else None
+    )
 
 
 def _split_markdown_row(line: str) -> list[str]:
@@ -290,6 +347,70 @@ def _preflight_recovery_routes(
     return routes
 
 
+def _availability_label(source_kind: str) -> str:
+    return source_kind.replace("_", " ").title()
+
+
+def _source_availability_routes(
+    availability_report: Path | None,
+) -> dict[str, Mapping[str, str]]:
+    if availability_report is None or not availability_report.is_file():
+        return {}
+    lines = availability_report.read_text(encoding="utf-8", errors="replace").splitlines()
+    routes: dict[str, Mapping[str, str]] = {}
+    for source_kind in REQUIRED_SOURCE_KINDS:
+        label = _availability_label(source_kind)
+        fields: dict[str, str] = {"source_kind": source_kind, "availability_report": str(availability_report)}
+        prefixes = {
+            f"- {label} probe status: ": "probe_status",
+            f"- {label} blocker: ": "blocker",
+            f"- {label} credential status: ": "credential_status",
+            f"- {label} next action: ": "action",
+        }
+        for line in lines:
+            for prefix, field in prefixes.items():
+                if line.startswith(prefix):
+                    fields[field] = line[len(prefix) :].strip()
+        blocker = fields.get("blocker", "")
+        if blocker and blocker != "none":
+            routes[source_kind] = fields
+    return routes
+
+
+def _collection_packet_routes(
+    collection_packet_summary: Path | None,
+) -> dict[str, Mapping[str, str]]:
+    if collection_packet_summary is None or not collection_packet_summary.is_file():
+        return {}
+    routes: dict[str, Mapping[str, str]] = {}
+    lines = collection_packet_summary.read_text(encoding="utf-8", errors="replace").splitlines()
+    headers: list[str] = []
+    for line in lines:
+        cells = _split_markdown_row(line)
+        if not cells:
+            continue
+        lowered = [cell.strip().lower() for cell in cells]
+        if lowered and lowered[0] == "source":
+            headers = lowered
+            continue
+        if not headers or lowered[0] in {"---", "source"}:
+            continue
+        if len(cells) < len(headers):
+            continue
+        row = {headers[index]: cells[index] for index in range(len(headers))}
+        source_kind = (row.get("source") or "").strip()
+        if not source_kind:
+            continue
+        source_runner_command = (row.get("source runner") or "").strip()
+        if source_runner_command and source_runner_command.lower() != "none":
+            routes[source_kind] = {
+                "source_kind": source_kind,
+                "source_runner_command": source_runner_command,
+                "collection_packet_summary": str(collection_packet_summary),
+            }
+    return routes
+
+
 def _source_next_action_with_recovery(
     source_kind: str,
     fallback: str,
@@ -320,6 +441,46 @@ def _source_next_action_with_recovery(
     parts.append(f"Publish only when all sources are ready: {publish_command}.")
     parts.append(f"Boundary: {boundary}.")
     return " ".join(parts)
+
+
+def _source_next_action_with_availability(
+    source_kind: str,
+    fallback: str,
+    route: Mapping[str, str] | None,
+) -> str:
+    if not route:
+        return fallback
+    action = (route.get("action") or f"Resolve {source_kind} source availability").rstrip(".")
+    blocker = route.get("blocker") or "source_unavailable"
+    credential_status = route.get("credential_status") or "unknown"
+    return (
+        f"Availability recovery: {action}. Current blocker: {blocker}; "
+        f"credential status: {credential_status}. Then build/use the collection packet "
+        f"and import evidence: {fallback}"
+    )
+
+
+def _source_next_action_with_runner(
+    source_kind: str,
+    fallback: str,
+    route: Mapping[str, str] | None,
+    *,
+    input_root: Path,
+) -> str:
+    if not route:
+        return fallback
+    command = route.get("source_runner_command") or ""
+    runner_intro = _source_runner_intro(command)
+    if not runner_intro:
+        return fallback
+    return (
+        runner_intro
+        + _validation_command(input_root)
+        + "; then publish only when all required sources are ready: "
+        + _publish_command(input_root)
+        + ". Manual fallback: "
+        + fallback
+    )
 
 
 def _enrich_source_readiness_with_recovery(
@@ -367,6 +528,62 @@ def _enrich_source_readiness_with_recovery(
                 preflight_recovery_boundary=route.get("boundary", ""),
                 preflight_recovery_validation_command=validation_command,
                 preflight_recovery_publish_command=publish_command,
+            )
+        )
+    return enriched
+
+
+def _enrich_source_readiness_with_availability(
+    readiness: Sequence[SourceReadiness],
+    availability_routes: Mapping[str, Mapping[str, str]],
+) -> list[SourceReadiness]:
+    enriched: list[SourceReadiness] = []
+    for item in readiness:
+        route = availability_routes.get(item.source_kind)
+        if item.status == "ready" or not route:
+            enriched.append(item)
+            continue
+        enriched.append(
+            dataclasses.replace(
+                item,
+                next_action=_source_next_action_with_availability(
+                    item.source_kind,
+                    item.next_action,
+                    route,
+                ),
+                availability_report=route.get("availability_report", ""),
+                availability_probe_status=route.get("probe_status", ""),
+                availability_blocker=route.get("blocker", ""),
+                availability_credential_status=route.get("credential_status", ""),
+                availability_recovery_action=route.get("action", ""),
+            )
+        )
+    return enriched
+
+
+def _enrich_source_readiness_with_collection_packets(
+    readiness: Sequence[SourceReadiness],
+    collection_packet_routes: Mapping[str, Mapping[str, str]],
+    *,
+    input_root: Path,
+) -> list[SourceReadiness]:
+    enriched: list[SourceReadiness] = []
+    for item in readiness:
+        route = collection_packet_routes.get(item.source_kind)
+        if item.status == "ready" or not route:
+            enriched.append(item)
+            continue
+        enriched.append(
+            dataclasses.replace(
+                item,
+                next_action=_source_next_action_with_runner(
+                    item.source_kind,
+                    item.next_action,
+                    route,
+                    input_root=input_root,
+                ),
+                collection_packet_summary=route.get("collection_packet_summary", ""),
+                source_runner_command=route.get("source_runner_command", ""),
             )
         )
     return enriched
@@ -476,7 +693,7 @@ def discover_source_bundles(input_root: Path, *, allow_partial: bool = False) ->
         raise FrontierModelEvidenceIntakeError(
             f"missing source directory: {input_root / missing[0]}"
         )
-    if not bundles:
+    if not bundles and not allow_partial:
         raise FrontierModelEvidenceIntakeError("at least one source directory is required")
     return bundles
 
@@ -521,11 +738,17 @@ def run_intake(
     allow_partial: bool = False,
     publish_scorecards: bool = False,
     preflight_report: Path | None = None,
+    availability_report: Path | None = None,
+    collection_packet_summary: Path | None = None,
 ) -> dict[str, object]:
     input_root = input_root.resolve()
     output_root = output_root.resolve()
     if preflight_report is not None:
         preflight_report = preflight_report.resolve()
+    if availability_report is not None:
+        availability_report = availability_report.resolve()
+    if collection_packet_summary is not None:
+        collection_packet_summary = collection_packet_summary.resolve()
     if not write:
         import tempfile
 
@@ -537,16 +760,33 @@ def run_intake(
                 allow_partial=allow_partial,
                 publish_scorecards=publish_scorecards,
                 preflight_report=preflight_report,
+                availability_report=availability_report,
+                collection_packet_summary=collection_packet_summary,
             )
     recovery_report = preflight_report or _default_preflight_report(input_root)
+    source_availability_report = availability_report or _default_availability_report(input_root)
+    source_collection_packet_summary = (
+        collection_packet_summary or _default_collection_packet_summary(input_root)
+    )
     preflight_recovery_routes = _preflight_recovery_routes(
         recovery_report,
         input_root=input_root,
     )
+    availability_recovery_routes = _source_availability_routes(source_availability_report)
+    source_runner_routes = _collection_packet_routes(source_collection_packet_summary)
     source_readiness = _enrich_source_readiness_with_recovery(
         inspect_all_source_readiness(input_root),
         preflight_recovery_routes,
         input_root=input_root,
+    )
+    source_readiness = _enrich_source_readiness_with_collection_packets(
+        source_readiness,
+        source_runner_routes,
+        input_root=input_root,
+    )
+    source_readiness = _enrich_source_readiness_with_availability(
+        source_readiness,
+        availability_recovery_routes,
     )
     bundles = discover_source_bundles(input_root, allow_partial=allow_partial)
     manifest_paths = collect_source_bundles(
@@ -566,7 +806,12 @@ def run_intake(
         if publish_scorecards
         else scorecard_dir / "MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md"
     )
-    manifests = load_manifests([], manifest_dir=output_root / "manifests")
+    manifest_load_dir = output_root / "manifests"
+    manifests = (
+        load_manifests([], manifest_dir=manifest_load_dir)
+        if manifest_load_dir.is_dir()
+        else []
+    )
     shadow_results, _shadow_markdown, shadow_path, shadow_summary = run_shadow_evidence_validation(
         manifests,
         output_path=shadow_output,
@@ -574,6 +819,8 @@ def run_intake(
         allow_partial=allow_partial,
     )
     collected_root = output_root / "collected"
+    if allow_partial:
+        collected_root.mkdir(parents=True, exist_ok=True)
     tournament_artifact, tournament_cases, tournament_results, _tournament_markdown, tournament_path = run_tournament_benchmark(
         drop_dir=collected_root,
         output_path=tournament_output,
@@ -617,6 +864,14 @@ def run_intake(
         "preflight_report": str(recovery_report) if recovery_report else "",
         "preflight_recovery_routes": list(preflight_recovery_routes.values()),
         "preflight_recovery_route_count": len(preflight_recovery_routes),
+        "availability_report": str(source_availability_report) if source_availability_report else "",
+        "availability_recovery_routes": list(availability_recovery_routes.values()),
+        "availability_recovery_route_count": len(availability_recovery_routes),
+        "collection_packet_summary": (
+            str(source_collection_packet_summary) if source_collection_packet_summary else ""
+        ),
+        "source_runner_routes": list(source_runner_routes.values()),
+        "source_runner_route_count": len(source_runner_routes),
         "source_kinds": [bundle.source_kind for bundle in bundles],
         "required_source_kinds": list(REQUIRED_SOURCE_KINDS),
         "source_readiness": [dataclasses.asdict(item) for item in source_readiness],
@@ -666,6 +921,10 @@ def render_intake_summary(summary: Mapping[str, object]) -> str:
         f"- Generated artifacts root: {summary.get('output_root')}",
         f"- Preflight report: {summary.get('preflight_report') or 'none'}",
         f"- Preflight recovery routes: {summary.get('preflight_recovery_route_count')}",
+        f"- Availability report: {summary.get('availability_report') or 'none'}",
+        f"- Availability recovery routes: {summary.get('availability_recovery_route_count')}",
+        f"- Collection packet summary: {summary.get('collection_packet_summary') or 'none'}",
+        f"- Source runner routes: {summary.get('source_runner_route_count')}",
         f"- Source kinds: {', '.join(str(source) for source in summary.get('source_kinds', []))}",
         f"- Ready sources: {summary.get('ready_source_count')}/{summary.get('required_source_count')}",
         f"- Missing/incomplete sources: {', '.join(str(source) for source in summary.get('missing_source_kinds', [])) or 'none'}",
@@ -747,6 +1006,59 @@ def render_intake_summary(summary: Mapping[str, object]) -> str:
                 )
                 + " |"
             )
+    availability_routes = summary.get("availability_recovery_routes")
+    if isinstance(availability_routes, list) and availability_routes:
+        lines.extend(
+            [
+                "",
+                "## Availability Recovery Routes",
+                "",
+                "| Source | Probe status | Blocker | Credential status | Action | Report |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for raw_route in availability_routes:
+            if not isinstance(raw_route, Mapping):
+                continue
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _escape_cell(str(raw_route.get("source_kind") or "")),
+                        _escape_cell(str(raw_route.get("probe_status") or "")),
+                        _escape_cell(str(raw_route.get("blocker") or "")),
+                        _escape_cell(str(raw_route.get("credential_status") or "")),
+                        _escape_cell(str(raw_route.get("action") or "")),
+                        _escape_cell(str(raw_route.get("availability_report") or "")),
+                    ]
+                )
+                + " |"
+            )
+    source_runner_routes = summary.get("source_runner_routes")
+    if isinstance(source_runner_routes, list) and source_runner_routes:
+        lines.extend(
+            [
+                "",
+                "## Source Runner Routes",
+                "",
+                "| Source | Runner command | Packet summary |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for raw_route in source_runner_routes:
+            if not isinstance(raw_route, Mapping):
+                continue
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _escape_cell(str(raw_route.get("source_kind") or "")),
+                        _escape_cell(str(raw_route.get("source_runner_command") or "")),
+                        _escape_cell(str(raw_route.get("collection_packet_summary") or "")),
+                    ]
+                )
+                + " |"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -771,6 +1083,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="Optional frontier preflight markdown report used to attach recovery routes.",
     )
+    parser.add_argument(
+        "--availability-report",
+        type=Path,
+        help="Optional frontier source availability markdown report used to attach source recovery routes.",
+    )
+    parser.add_argument(
+        "--collection-packet-summary",
+        type=Path,
+        help="Optional source collection-packet summary used to attach automated source-runner routes.",
+    )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-write", action="store_true")
     args = parser.parse_args(argv)
@@ -783,6 +1105,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             allow_partial=args.allow_partial,
             publish_scorecards=args.publish_scorecards,
             preflight_report=args.preflight_report,
+            availability_report=args.availability_report,
+            collection_packet_summary=args.collection_packet_summary,
         )
     except (
         FrontierModelEvidenceIntakeError,

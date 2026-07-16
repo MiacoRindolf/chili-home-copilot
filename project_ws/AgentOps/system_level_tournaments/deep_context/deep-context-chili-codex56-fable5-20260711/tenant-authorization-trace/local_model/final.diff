@@ -1,0 +1,103 @@
+diff --git a/api/handler.py b/api/handler.py
+index d43d5ea..8db8e69 100644
+--- a/api/handler.py
++++ b/api/handler.py
+@@ -1,2 +1,21 @@
+-def handle_request(claims_payload, resource, audit):
+-    return {"status": 200}
++from typing import Any, Mapping
++
++from audit.events import record_decision
++from domain.claims import Claims
++from domain.policy import can_access
++
++
++def handle_request(
++    claims_payload: Mapping[str, Any],
++    resource: Mapping[str, Any],
++    audit: list[dict[str, Any]],
++) -> dict[str, Any]:
++    claims = Claims.from_mapping(claims_payload)
++    allowed, reason = can_access(claims, resource)
++    record_decision(audit, claims, resource, allowed, reason)
++    return {
++        "status": 200 if allowed else 403,
++        "reason": reason,
++        "subject_id": claims.subject_id,
++        "tenant_id": claims.tenant_id,
++    }
+diff --git a/audit/events.py b/audit/events.py
+index 173f64d..9bd7da0 100644
+--- a/audit/events.py
++++ b/audit/events.py
+@@ -1,2 +1,19 @@
+-def record_decision(audit, claims, resource, allowed, reason):
+-    audit.append({"claims": vars(claims), "resource": dict(resource), "allowed": allowed})
++from typing import Any, Mapping
++
++from domain.claims import Claims
++
++
++def record_decision(
++    audit: list[dict[str, Any]],
++    claims: Claims,
++    resource: Mapping[str, Any],
++    allowed: bool,
++    reason: str,
++) -> None:
++    audit.append({
++        "subject_id": claims.subject_id,
++        "tenant_id": claims.tenant_id,
++        "resource_id": str(resource.get("resource_id", "")),
++        "allowed": bool(allowed),
++        "reason": reason,
++    })
+diff --git a/domain/claims.py b/domain/claims.py
+index edf304a..329fbf0 100644
+--- a/domain/claims.py
++++ b/domain/claims.py
+@@ -11,9 +11,16 @@ class Claims:
+ 
+     @classmethod
+     def from_mapping(cls, value: Mapping[str, Any]) -> "Claims":
+-        return cls(
+-            subject_id=str(value.get("subject_id", "")),
+-            tenant_id=str(value.get("tenant_id", "")),
+-            roles=tuple(value.get("roles", ())),
+-            token=str(value.get("token", "")),
+-        )
++        subject_id = str(value.get("subject_id", "")).strip()
++        tenant_id = str(value.get("tenant_id", "")).strip()
++        token = str(value.get("token", ""))
++        raw_roles = value.get("roles", ())
++        if isinstance(raw_roles, str):
++            raw_roles = raw_roles.split(",")
++        try:
++            roles = tuple(sorted({str(role).strip().lower() for role in raw_roles if str(role).strip()}))
++        except TypeError:
++            raise ValueError("invalid claims") from None
++        if not subject_id or not tenant_id:
++            raise ValueError("invalid claims")
++        return cls(subject_id=subject_id, tenant_id=tenant_id, roles=roles, token=token)
+diff --git a/domain/policy.py b/domain/policy.py
+index 1f3e141..b4cf249 100644
+--- a/domain/policy.py
++++ b/domain/policy.py
+@@ -1,2 +1,15 @@
+-def can_access(claims, resource):
+-    return True, "allowed"
++from typing import Any, Mapping
++
++from domain.claims import Claims
++
++
++def can_access(claims: Claims, resource: Mapping[str, Any]) -> tuple[bool, str]:
++    resource_tenant = str(resource.get("tenant_id", "")).strip()
++    owner_id = str(resource.get("owner_id", "")).strip()
++    if not resource_tenant or resource_tenant != claims.tenant_id:
++        return False, "tenant_mismatch"
++    if "admin" in claims.roles:
++        return True, "tenant_admin"
++    if owner_id and owner_id == claims.subject_id:
++        return True, "owner"
++    return False, "not_authorized"

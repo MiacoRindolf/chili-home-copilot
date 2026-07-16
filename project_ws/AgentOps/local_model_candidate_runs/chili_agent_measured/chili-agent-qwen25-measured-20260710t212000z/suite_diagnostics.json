@@ -1,0 +1,112 @@
+{
+  "attempted_cases": 1,
+  "case_ids": [
+    "real-chili-preflight-candidate-wins",
+    "real-chili-runtime-control-partial-loses",
+    "real-chili-startup-static-partial-loses",
+    "real-chili-broker-timeout-partial-loses",
+    "real-chili-runtime-control-no-evidence-loses",
+    "real-chili-runtime-control-unscoped-loses"
+  ],
+  "case_results": [
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 27.755930699997407,
+          "prompt": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-extracted-candidate",
+            "changed_files": [],
+            "passed": false,
+            "reason": "apply_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "error: patch failed: preflight.py:8 | error: preflight.py: patch does not apply"
+          },
+          "response": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.response.txt",
+          "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 18.945951599998807,
+          "error": "model response JSON block is invalid: Invalid control character at: line 6 column 75 (char 243)",
+          "prompt": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.repair-1.prompt.md",
+          "repair": true,
+          "response": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.repair-1.response.txt",
+          "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md",
+          "status": "parse_failed",
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-preflight-candidate-wins",
+      "duration_seconds": 46.701882299996214,
+      "error": "model response JSON block is invalid: Invalid control character at: line 6 column 75 (char 243)",
+      "prompt": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.repair-1.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-extracted-candidate",
+        "changed_files": [],
+        "passed": false,
+        "reason": "apply_failed",
+        "score": 0,
+        "status": "failed",
+        "test_output": "error: patch failed: preflight.py:8 | error: preflight.py: patch does not apply"
+      },
+      "replay_passed": false,
+      "replay_reason": "apply_failed",
+      "response": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.repair-1.response.txt",
+      "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md",
+      "status": "parse_failed",
+      "timeout_salvaged": false
+    },
+    {
+      "case_id": "real-chili-runtime-control-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-startup-static-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-broker-timeout-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-runtime-control-no-evidence-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-runtime-control-unscoped-loses",
+      "status": "pending"
+    }
+  ],
+  "duration_seconds": 46.701882299996214,
+  "failed_case_id": "real-chili-preflight-candidate-wins",
+  "failure_reason": "real-chili-preflight-candidate-wins: model response JSON block is invalid: Invalid control character at: line 6 column 75 (char 243)",
+  "failure_stage": "parse",
+  "generated_utc": "2026-07-10T21:18:56.021800Z",
+  "model_name": "qwen2.5-coder:7b",
+  "parsed_cases": 0,
+  "permission_boundary": "local model suite diagnostics only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading",
+  "recovery_routes": [
+    {
+      "action_label": "Import corrected failed-case response",
+      "all_cases_retry_command": "python scripts/autopilot_local_model_candidate_runner.py --all-cases --model-name qwen2.5-coder:7b --timeout-seconds 480 --json",
+      "case_id": "real-chili-preflight-candidate-wins",
+      "import_response_command": "python scripts/autopilot_local_model_candidate_runner.py --retry-from-diagnostics project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\suite_diagnostics.json --response-file <local-model-real-chili-preflight-candidate-wins-response.txt> --run-id <real-local-run-id> --source-command <exact-local-model-command> --json",
+      "permission_boundary": "local model diagnostics and evidence import only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading",
+      "prompt_path": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.repair-1.prompt.md",
+      "reason": "The local model produced output, but CHILI could not parse a valid candidate JSON/diff.",
+      "response_path": "project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\cases\\real-chili-preflight-candidate-wins.repair-1.response.txt",
+      "retry_command": "python scripts/autopilot_local_model_candidate_runner.py --retry-from-diagnostics project_ws\\AgentOps\\local_model_candidate_runs\\chili_agent_measured\\chili-agent-qwen25-measured-20260710t212000z\\suite_diagnostics.json --timeout-seconds 480 --json",
+      "status": "available"
+    }
+  ],
+  "run_id": "chili-agent-qwen25-measured-20260710T212000Z",
+  "schema": "chili.local-model-suite-diagnostics.v1",
+  "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses)",
+  "status": "failed"
+}

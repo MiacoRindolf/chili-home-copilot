@@ -1,0 +1,30 @@
+{
+  "candidate_id": "local_model-real-chili-runtime-control-no-evidence-loses[57D[K
+"local_model-real-chili-runtime-control-no-evidence-loses",
+  "case_id": "real-chili-runtime-control-no-evidence-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prom[19D[K
+test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-runtime-control-no-evidence-lose[43D[K
+real-chili-runtime-control-no-evidence-loses.",
+  "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\nindex 3[1D[K
+3f8a1b2..c6d4e5f 100644\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.[19D[K
+b/autopilot_prompt.py\n@@ -7,7 +7,7 @@ def classify_prompt(prompt: str) -> [K
+str:\n     return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked[8D[K
+'blocked'\n \n def plan_if_repo_edit(prompt: str, planner):\n-    if classi[6D[K
+classify_prompt(prompt) == 'repo_edit':\n+    if classify_prompt(prompt) !=[2D[K
+!= 'blocked':\n         return planner(prompt)\n     return {'status': 'blo[4D[K
+'blocked', 'reason': 'not_repo_edit'}",
+  "planned_file": "autopilot_prompt.py",
+  "replacement_file_content": "",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+

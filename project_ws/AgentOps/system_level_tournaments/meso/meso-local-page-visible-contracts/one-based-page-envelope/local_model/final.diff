@@ -1,0 +1,58 @@
+diff --git a/app/api.py b/app/api.py
+index 4185f81..71018f9 100644
+--- a/app/api.py
++++ b/app/api.py
+@@ -1,3 +1,4 @@
++
+ from collections.abc import Sequence
+ from typing import Any
+ 
+@@ -7,4 +8,8 @@ from app.query import parse_page
+ 
+ def build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:
+     page = parse_page(raw_page)
+-    return {"page": page, "items": page_slice(items, page, page_size)}
++    if page < 1:
++        raise ValueError('page must be a positive integer')
++    has_next = len(items) > ((page - 1) * page_size + page_size)
++    next_page = page + 1 if has_next else None
++    return {"page": page, "items": page_slice(items, page - 1, page_size), "has_next": has_next, "next_page": next_page}
+diff --git a/app/paging.py b/app/paging.py
+index 99f1ee1..f07ddfc 100644
+--- a/app/paging.py
++++ b/app/paging.py
+@@ -1,9 +1,13 @@
++
+ from collections.abc import Sequence
+ from typing import TypeVar
+ 
++from app.query import parse_page
+ T = TypeVar("T")
+ 
+ 
+ def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:
+-    start = page * page_size
+-    return list(items[start : start + page_size])
++    if page < 1:
++        raise ValueError('page must be a positive integer')
++    start = (page - 1) * page_size
++    return list(items[start:start + page_size])
+diff --git a/app/query.py b/app/query.py
+index 2910476..c7293c9 100644
+--- a/app/query.py
++++ b/app/query.py
+@@ -1,4 +1,11 @@
++
+ def parse_page(raw: str | None) -> int:
+-    if raw is None:
+-        return 0
+-    return int(raw)
++    if raw is None or raw.strip() == "":
++        return 1
++    try:
++        page = int(raw)
++        if page < 1:
++            raise ValueError('page must be a positive integer')
++        return page
++    except ValueError as e:
++        raise ValueError('page must be a positive integer') from e

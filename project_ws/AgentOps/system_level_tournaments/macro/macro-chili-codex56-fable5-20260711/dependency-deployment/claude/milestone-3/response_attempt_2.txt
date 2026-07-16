@@ -1,0 +1,30 @@
+Shell execution is denied in this mode, so I verified the fix by hand-tracing all eight tests through the patched code instead of running pytest; the change is small enough that the trace is conclusive.
+
+The failure: after a rollback, the durable `DeploymentState` still claimed wave 0 was completed (`state.completed_waves == {0}`), so a later resume would skip a wave whose services had just been rolled back. The fix clears the state's completed-wave record on the rollback path in `app/executor.py` — after the rollback calls, before returning — and only touches `state`, leaving the result dict, `state.deployed` history, and every currently-passing behavior (m1 planning, m2 reverse-order rollback, m3 resume/fingerprint fail-closed) unchanged.
+
+```diff
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -22,7 +22,8 @@ def execute_deployment(services, deploy=None, healthy=None, rollback=None, stat
+     Progress is recorded on *state* when provided: waves *state* already
+     marks completed are skipped and reported via resumed=True, and the
+     result's completed_waves is the cumulative sorted tuple of completed
+-    wave indexes. A *state* whose fingerprint belongs to another plan
++    wave indexes. A rollback clears *state*'s completed waves so a later
++    resume starts over. A *state* whose fingerprint belongs to another plan
+     fails closed with ValueError("deployment plan changed") before any
+     deploy call or *state* mutation.
+     """
+@@ -77,6 +78,8 @@ def execute_deployment(services, deploy=None, healthy=None, rollback=None, stat
+             rolled_back.append(name)
+             if state is not None:
+                 state.record_rolled_back(name)
++        if state is not None:
++            state.completed_waves.clear()
+         result["status"] = "rolled_back"
+         result["completed_waves"] = tuple(sorted(completed))
+         return result
+```
+
+Trace of the failing hidden test with this patch: wave 0 is skipped (completed on the prior run), `api` deploys, health fails, rollback runs `["api", "db"]` (new + prior deployed, strict reverse order), then `state.completed_waves` is cleared to `set()` — all three assertions pass. `app/graph.py`, `app/model.py`, and `app/state.py` need no changes.

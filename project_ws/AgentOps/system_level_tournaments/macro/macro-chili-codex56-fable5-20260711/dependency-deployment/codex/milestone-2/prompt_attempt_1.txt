@@ -1,0 +1,141 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Dependency deployment evolution
+Current milestone: milestone-2
+Completed milestones: milestone-1
+Goal: Milestone 2/3. Evolve the deployment workflow across app/model.py, app/graph.py, app/state.py, and app/executor.py without regressing milestone 1. execute_deployment must deploy each wave in deterministic order, health-check the whole wave, and on any unhealthy service rollback every deployed service in strict reverse order. Return status, waves, deployed, and rolled_back. Preserve ServiceSpec, dependency_waves, DeploymentState, execute_deployment, and prior tests.
+Approved source files: app/executor.py, app/graph.py, app/model.py, app/state.py
+
+Current repository snapshot:
+### app/executor.py
+```python
+from app.graph import dependency_waves
+
+
+def execute_deployment(services, deploy=lambda name: None, healthy=lambda name: True, rollback=lambda name: None, state=None):
+    return {
+        "status": "planned",
+        "waves": dependency_waves(services),
+    }
+```
+
+### app/graph.py
+```python
+def dependency_waves(services):
+    services = tuple(services)
+    names = [service.name for service in services]
+
+    if len(names) != len(set(names)):
+        raise ValueError("invalid deployment graph")
+
+    known = set(names)
+    dependents = {name: set() for name in names}
+    remaining_dependencies = {}
+
+    for service in services:
+        dependencies = set(service.dependencies)
+        if (
+            service.name in dependencies
+            or not dependencies.issubset(known)
+        ):
+            raise ValueError("invalid deployment graph")
+
+        remaining_dependencies[service.name] = len(dependencies)
+        for dependency in dependencies:
+            dependents[dependency].add(service.name)
+
+    ready = sorted(
+        name for name, count in remaining_dependencies.items() if count == 0
+    )
+    waves = []
+    deployed = 0
+
+    while ready:
+        wave = tuple(ready)
+        waves.append(wave)
+        deployed += len(wave)
+        next_ready = []
+
+        for name in wave:
+            for dependent in dependents[name]:
+                remaining_dependencies[dependent] -= 1
+                if remaining_dependencies[dependent] == 0:
+                    next_ready.append(dependent)
+        ready = sorted(next_ready)
+
+    if deployed != len(names):
+        raise ValueError("invalid deployment graph")
+
+    return tuple(waves)
+```
+
+### app/model.py
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ServiceSpec:
+    name: str
+    dependencies: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("invalid service name")
+        if not isinstance(self.dependencies, tuple):
+            raise ValueError("invalid service dependencies")
+        if any(
+            not isinstance(dependency, str) or not dependency.strip()
+            for dependency in self.dependencies
+        ):
+            raise ValueError("invalid service dependencies")
+        if len(self.dependencies) != len(set(self.dependencies)):
+            raise ValueError("invalid service dependencies")
+```
+
+### app/state.py
+```python
+class DeploymentState:
+    pass
+```
+
+### tests/test_deploy_contract_m1.py
+```python
+from app.executor import execute_deployment
+from app.graph import dependency_waves
+from app.model import ServiceSpec
+
+
+def test_dependency_waves_are_deterministic():
+    services = [
+        ServiceSpec("web", ("api", "worker")),
+        ServiceSpec("worker", ("db",)),
+        ServiceSpec("api", ("db",)),
+        ServiceSpec("db"),
+    ]
+    assert dependency_waves(services) == (("db",), ("api", "worker"), ("web",))
+    assert execute_deployment(services)["status"] == "planned"
+```
+
+### tests/test_deploy_contract_m2.py
+```python
+from app.executor import execute_deployment
+from app.model import ServiceSpec
+
+
+def test_unhealthy_wave_rolls_back_in_reverse_order():
+    actions = []
+    result = execute_deployment(
+        [ServiceSpec("api", ("db",)), ServiceSpec("db")],
+        lambda name: actions.append(("deploy", name)),
+        lambda name: name != "api",
+        lambda name: actions.append(("rollback", name)),
+    )
+    assert result["status"] == "rolled_back"
+    assert result["rolled_back"] == ["api", "db"]
+    assert actions[-2:] == [("rollback", "api"), ("rollback", "db")]
+```

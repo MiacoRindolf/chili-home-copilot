@@ -1,0 +1,11 @@
+diff --git a/startup_contracts.py b/startup_contracts.py
+--- a/startup_contracts.py
++++ b/startup_contracts.py
+@@ -5,6 +5,7 @@
+ 
+ ASSET_MANIFEST = {
+     'app/static/components/brain-project-domain.js': 'sha-js',
++    'app/static/components/brain-project-domain.css': 'sha-css',
+ }
+ 
+ 

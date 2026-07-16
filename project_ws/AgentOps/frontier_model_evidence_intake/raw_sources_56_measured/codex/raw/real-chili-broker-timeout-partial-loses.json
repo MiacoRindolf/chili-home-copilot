@@ -1,0 +1,19 @@
+{
+  "candidate_id": "codex-real-chili-broker-timeout-partial-loses",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "collected_at": "2026-07-10T20:57:31.128280Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 19.791736799999853,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "gpt-5.6-sol",
+  "notes": "Block entry when broker state cannot be confirmed.",
+  "patch_file": "real-chili-broker-timeout-partial-loses.patch",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "codex"
+}

@@ -28,7 +28,39 @@ _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
 _VIABILITY_BRIDGE_MAX_TICKERS = 30
+# Uncapped-bridge chunk size: the pipeline tick caps each call's symbols at 32
+# (raising that cap = an OHLCV-fetch storm), so the uncapped bridge instead
+# processes the full universe in CHUNKS of this size, committing PER CHUNK to
+# avoid the long idle-in-transaction / deadlock class (#561/#610 lessons).
+_VIABILITY_BRIDGE_CHUNK = 32
 _BASELINE_AUDIT_SKIP_JOB_IDS = frozenset({"neural_mesh_drain"})
+
+# ── S1 event-driven feeder state (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5) ────────
+# In-process high-water mark for the tape-delta ignite job: only tape rows with
+# observed_at > this are read each run (an incremental DELTA, NOT a full rescan).
+# The job advances it to the max observed_at it saw. A small CACHED field snapshot
+# (the last batch's {symbol: ross_signal} dict) preserves percentile context when a
+# single crosser is scored. Guarded by a lock; module-local so a restart resets it
+# (first run after restart reads from the lookback floor, not the whole table).
+_tape_delta_state_lock = threading.Lock()
+_tape_delta_hwm: "datetime | None" = None
+_tape_delta_last_run_monotonic: float = 0.0
+_tape_delta_field_snapshot: dict = {}
+
+
+def _tape_delta_set_field_snapshot(signals: dict) -> None:
+    """Cache the last batch's {symbol: ross_signal} dict so the tape-delta ignite job
+    can score a single crosser against the SAME field for percentile context. Called by
+    the equity viability-refresh batch (the field source). Best-effort; bounded copy."""
+    if not isinstance(signals, dict) or not signals:
+        return
+    try:
+        snap = {str(k).strip().upper(): v for k, v in signals.items() if k}
+    except Exception:
+        return
+    with _tape_delta_state_lock:
+        global _tape_delta_field_snapshot
+        _tape_delta_field_snapshot = snap
 
 
 def _should_write_scheduler_baseline_audit(job_id: str) -> bool:
@@ -335,6 +367,34 @@ def _run_daily_prescreen_job():
             db.close()
 
     run_scheduler_job_guarded("daily_prescreen", _work)
+
+
+def _run_nightly_replay_regression_job():
+    """Nightly replay regression tripwire (~18:00 America/Los_Angeles, after the
+    data session ends): re-run TODAY through the replay engine on tonight's code
+    and diff vs what the live lane actually did — catches "we broke entries"
+    the evening BEFORE the next open instead of during it."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "chili_momentum_replay_regression_enabled", True):
+        return
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.momentum_neural.replay_regression import run_nightly_replay_regression
+
+        db = SessionLocal()
+        try:
+            report = run_nightly_replay_regression(db)
+            logger.info("[scheduler] nightly replay regression: flags=%s", report.get("flags"))
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("nightly_replay_regression", _work)
 
 
 def _run_daily_trading_brief_job():
@@ -806,7 +866,8 @@ def _run_momentum_live_runner_batch_job():
         from ..config import settings as _settings
         from ..db import SessionLocal
         from .trading.momentum_neural.live_runner import (
-            list_runnable_live_sessions,
+            cleanup_leaked_lane_locks,
+            plan_live_runner_batch_sessions,
             tick_live_session,
         )
 
@@ -817,7 +878,37 @@ def _run_momentum_live_runner_batch_job():
 
         db = SessionLocal()
         try:
-            session_ids = [int(s.id) for s in list_runnable_live_sessions(db, limit=15)]
+            # Once-per-batch janitor: reap any momentum-lane advisory lock orphaned by
+            # a force-killed worker (decouple B1). Only the decoupled path takes that
+            # lock, so this is a no-op when the flag is off. Runs on the short-lived
+            # listing session before the SELECT; best-effort, never raises.
+            if bool(getattr(_settings, "chili_momentum_decouple_watching_enabled", False)):
+                try:
+                    cleanup_leaked_lane_locks(db)
+                except Exception:
+                    logger.debug("[scheduler] lane-lock janitor failed", exc_info=True)
+            # Fetch limit. Legacy = 15 (byte-identical). Decoupled: the funnel fans
+            # out to watch_fanout_max WATCHERS, and every HELD position must also be
+            # ticked (its stop/trail is managed in tick_live_session) — so the limit
+            # must clear fanout + the held-position ceiling + slack, or a held name
+            # would silently stop being managed. This only widens the SELECT; tick
+            # PARALLELISM stays bounded by the worker pool below (the 429 throttle).
+            if bool(getattr(_settings, "chili_momentum_decouple_watching_enabled", False)):
+                _entry_cap = int(getattr(_settings, "chili_momentum_risk_max_concurrent_live_sessions", 5) or 5)
+                _rl = (
+                    int(getattr(_settings, "chili_momentum_watch_fanout_max", 15) or 15)
+                    + int(getattr(_settings, "chili_momentum_max_open_positions_ceiling", 20) or 20)
+                    + max(1, _entry_cap)
+                )
+            else:
+                _rl = 15
+            _plan = plan_live_runner_batch_sessions(db, limit=_rl)
+            if _plan.get("prefilter_results"):
+                db.commit()
+            session_ids = [int(sid) for sid in _plan.get("session_ids", [])]
+            session_syms = {str(sym).upper() for sym in _plan.get("symbols", []) if sym}
+            prefiltered = len(_plan.get("prefilter_results", []) or [])
+            candidates_seen = int(_plan.get("candidate_count", len(session_ids)) or 0)
         except Exception:
             logger.warning("[scheduler] live runner: failed to list runnable sessions", exc_info=True)
             return
@@ -830,7 +921,26 @@ def _run_momentum_live_runner_batch_job():
             db.close()
 
         if not session_ids:
+            if prefiltered:
+                logger.info(
+                    "[scheduler] Momentum live runner: prefiltered %d/%d dead pre-entry row(s); "
+                    "no useful session consumed capacity",
+                    prefiltered,
+                    candidates_seen,
+                )
             return
+
+        # Keep the real-time feed pointed at what we're actually trading: subscribe
+        # every runnable symbol on the price bus (stocks -> Massive WS, crypto ->
+        # Coinbase WS). Idempotent + best-effort; no-op when the WS isn't running.
+        try:
+            from .trading.price_bus import get_price_bus
+
+            _pb = get_price_bus()
+            for _sym in session_syms:
+                _pb.subscribe_symbol(_sym)
+        except Exception:
+            pass
 
         # Bound the pool by the live concurrency cap — no second magic number; an
         # explicit override knob wins when > 0. Never more workers than sessions.
@@ -875,7 +985,7 @@ def _run_momentum_live_runner_batch_job():
             _slowest_sid = max(timings, key=timings.get)
             logger.info(
                 "[scheduler] Momentum live runner: ticked %d/%d session(s) "
-                "wall=%dms work_sum=%dms slowest=%dms(sid=%s) workers=%d",
+                "wall=%dms work_sum=%dms slowest=%dms(sid=%s) workers=%d prefiltered=%d candidates=%d",
                 ticked,
                 len(session_ids),
                 _wall_ms,
@@ -883,9 +993,59 @@ def _run_momentum_live_runner_batch_job():
                 timings[_slowest_sid],
                 _slowest_sid,
                 workers,
+                prefiltered,
+                candidates_seen,
             )
 
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
+
+
+def _run_nbbo_spread_sample_job():
+    """Persist the CLEAN consolidated bid/ask (Massive snapshot lastQuote) for the
+    Ross universe into the NBBO spread tape, so the spread-sensitive replay uses REAL
+    spreads, not a proxy (the proxy read PAVS at 53bps vs the 317bps the lane saw).
+    Data-session-gated + best-effort inside the sampler; own DB session. (nbbo_tape.py)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        if not getattr(_settings, "chili_momentum_nbbo_tape_enabled", True):
+            return
+        from .trading.momentum_neural.nbbo_tape import sample_universe_nbbo_spreads
+        db = SessionLocal()
+        try:
+            sample_universe_nbbo_spreads(db)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_nbbo_sample", _work)
+
+
+def _run_nbbo_spread_prune_job():
+    """Trim NBBO-tape rows older than the retention window (the exit_parity_log bloat
+    lesson). Cheap via the observed_at index; own DB session; best-effort."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        if not getattr(_settings, "chili_momentum_nbbo_tape_enabled", True):
+            return
+        from .trading.momentum_neural.nbbo_tape import prune_nbbo_tape
+        db = SessionLocal()
+        try:
+            prune_nbbo_tape(db)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_nbbo_prune", _work)
 
 
 # Change-only dedupe for auto-arm SKIP logging: the arm pass runs every 30s, so
@@ -908,13 +1068,19 @@ def _run_momentum_auto_arm_live_job():
             return
         if not getattr(_settings, "chili_momentum_auto_arm_live_scheduler_enabled", True):
             return
+        if not getattr(_settings, "chili_momentum_auto_arm_live_scheduler_fallback_enabled", False):
+            return
         if not _settings.chili_momentum_live_runner_enabled:
             return
 
         db = SessionLocal()
         try:
             from .trading.momentum_neural.auto_arm import run_auto_arm_pass
+            from .trading.momentum_neural.lane_health import record_auto_arm_run
 
+            # Heartbeat: prove the pass actually executed so lane-health can tell a
+            # wedged/dead auto-arm job from a legitimately quiet market.
+            record_auto_arm_run()
             summary = run_auto_arm_pass(db)
             db.commit()
             if summary.get("armed") or summary.get("begin_error") or summary.get("confirm_error"):
@@ -952,6 +1118,78 @@ def _run_momentum_auto_arm_live_job():
             db.close()
 
     run_scheduler_job_guarded("momentum_auto_arm_live", _work)
+
+
+def _run_lane_health_check_job():
+    """Watch the momentum lane for a SILENT freeze (the 2026-06-15 incident: the global
+    daily-loss kill switch tripped at 05:18 ET and the lane sat empty ~8h before the
+    operator noticed). When a safety breaker has held the lane idle past the adaptive
+    grace window, emit a LOUD signal — logger.critical + a cockpit banner (via the P&L
+    rollup) + an audit row — so a tripped breaker is never silent.
+    (trading.momentum_neural.lane_health.run_lane_health_check)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_lane_health_alert_enabled", True):
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.lane_health import run_lane_health_check
+
+            run_lane_health_check(db)
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] lane_health check failed", exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("lane_health_check", _work)
+
+
+def _run_ross_feed_health_check_job():
+    """Housekeeping-only Ross lane tape check. This does not arm or submit entries;
+    it only makes a dead Massive/IQFeed feed loud while the live event loop owns
+    entry timing."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_momentum_ross_feed_health_enabled", True):
+            return
+        if not getattr(_settings, "chili_momentum_live_runner_enabled", False):
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.ross_feed_health import run_feed_health_check
+
+            run_feed_health_check(
+                db,
+                max_iqfeed_age_hot_s=float(
+                    getattr(_settings, "chili_momentum_ross_feed_health_max_iqfeed_age_hot_seconds", 60.0)
+                    or 60.0
+                ),
+            )
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] ross_feed_health check failed", exc_info=True)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("ross_feed_health_check", _work)
 
 
 def _run_momentum_post_exit_excursion_job():
@@ -2397,6 +2635,21 @@ def _run_triple_barrier_label_job():
     run_scheduler_job_guarded("triple_barrier_label", _work)
 
 
+def _run_broker_connectivity_watch_job():
+    """Broker-connectivity alarm: loud alert when a configured broker stays
+    disconnected past the threshold (the RH token died silently for ~7 weeks —
+    post-mortem 2026-06-10). Cheap status reads; no broker mutations."""
+
+    def _work() -> None:
+        from .trading.broker_connectivity_watch import run_broker_connectivity_watch
+
+        summary = run_broker_connectivity_watch()
+        if summary.get("down") or summary.get("alerted") or summary.get("resolved"):
+            logger.info("[scheduler] broker_connectivity_watch: %s", summary)
+
+    run_scheduler_job_guarded("broker_connectivity_watch", _work)
+
+
 def _run_broker_sync_job():
     """Sync Robinhood + Coinbase orders and positions for the session owner.
 
@@ -3344,12 +3597,91 @@ def _bridge_scanner_to_viability(
     # top _VIABILITY_BRIDGE_MAX_TICKERS. No-op on failure (keeps original order).
     # See docs/DESIGN/MOMENTUM_LANE.md.
     try:
-        from .trading.momentum_neural.ross_momentum import score_universe as _ross_su
+        from .trading.momentum_neural.ross_momentum import (
+            ROSS_PILLAR_WEIGHTS_ATTENTION,
+            ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+            score_universe as _ross_su,
+        )
 
         def _bsym(_r: dict) -> str:
             return str(_r.get("ticker") or _r.get("symbol") or "").strip().upper()
 
-        _ross_ranked = _ross_su({_bsym(r): r for r in results if _bsym(r)})
+        # Equity signals from the intraday sweep carry no turnover field; enrich with
+        # the snapshot dollar-volume so the tradeable_liquidity pillar has data
+        # (crypto already carries quote_volume_24h). Fail-open: missing symbols are
+        # simply absent and the pillar weight renormalises away for them.
+        try:
+            from .trading.momentum_neural.universe import snapshot_dollar_volumes
+
+            _need_dv = [
+                _bsym(r) for r in results
+                if _bsym(r) and not any(
+                    (r or {}).get(k) for k in ("dollar_volume", "quote_volume_24h", "turnover")
+                )
+            ]
+            if _need_dv:
+                _dvols = snapshot_dollar_volumes(_need_dv)
+                for r in results:
+                    _s = _bsym(r)
+                    if _s in _dvols and not (r or {}).get("dollar_volume"):
+                        r["dollar_volume"] = float(_dvols[_s])
+        except Exception:
+            logger.debug("[scheduler] ross dollar-volume enrichment skipped", exc_info=True)
+
+        # Liquidity-BIASED ranking (same weights as the pipeline tilt): prefer movers
+        # the lane can actually FILL, not only the most explosive spread-gated names.
+        # Validated on the 11-day previous-days A/B replay: +6 fills, +$914 PnL vs
+        # baseline (scripts/_sim_liquidity_selection.py, 2026-06-10).
+        _ross_weights = ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
+        try:
+            from ..config import settings as _att_settings
+            _att_on = bool(getattr(_att_settings, "chili_momentum_attention_leadership_enabled", True))
+        except Exception:
+            _att_on = False
+        if _att_on:
+            # ATTENTION-LEADERSHIP (2026-06-22 Ross study — the TRUE winner/loser separator,
+            # NOT position): stamp each EQUITY mover's amplitude-leadership share+rank over the
+            # FULL field, computed HERE (pre-chunk — pipeline.py only sees a 32-symbol chunk, so
+            # a market-wide measure must be computed at this site). The winners (NXTS, CRMT) were
+            # rank #1 owning ~30-36% of the field's amplitude; every loser was a follower. A
+            # re-rank PILLAR, never a veto → a fresh-breakout leader near VWAP still scores HIGH
+            # (no winner-kill) and the #2-#5 movers still rank (breadth kept). Equity-only; fail-open.
+            try:
+                _amps = []
+                for r in results:
+                    _su = _bsym(r)
+                    if not _su or _su.endswith("-USD"):
+                        continue  # equity-only; crypto field amplitude semantics differ (24h)
+                    try:
+                        _a = max(0.0, float(r.get("daily_change_pct") or r.get("change_pct") or 0.0))
+                    except (TypeError, ValueError):
+                        _a = 0.0
+                    if _a > 0:
+                        _amps.append((r, _a))
+                if len(_amps) >= 2:
+                    _field = sorted((a for _, a in _amps), reverse=True)
+                    _total = float(sum(_field))
+                    _n = len(_field)
+                    _max_share = (_field[0] / _total) if _total > 0 else 0.0
+                    for r, a in _amps:
+                        _rank = _field.index(a) + 1  # 1 = field leader (ties share the top rank)
+                        _grp = (1.0 - (_rank - 1) / (_n - 1)) if _n > 1 else 1.0
+                        _share_norm = ((a / _total) / _max_share) if (_total > 0 and _max_share > 0) else 0.0
+                        r["attention_leadership"] = round(_grp * (0.5 + 0.5 * _share_norm), 4)
+                        try:  # dormant->explosive: today's vol vs the name's OWN prior-day baseline (best-effort)
+                            _dv = float(r.get("volume") or r.get("day_volume") or 0.0)
+                            _pv = float(r.get("prev_day_volume") or r.get("prev_volume") or r.get("prevDayVolume") or 0.0)
+                            if _dv > 0 and _pv > 0:
+                                r["dormant_rvol"] = round(_dv / _pv, 4)
+                        except (TypeError, ValueError):
+                            pass
+                    _ross_weights = ROSS_PILLAR_WEIGHTS_ATTENTION
+            except Exception:
+                logger.debug("[scheduler] attention-leadership field compute skipped", exc_info=True)
+        _ross_ranked = _ross_su(
+            {_bsym(r): r for r in results if _bsym(r)},
+            weights=_ross_weights,
+        )
         results = sorted(
             results,
             key=lambda r: (
@@ -3358,6 +3690,20 @@ def _bridge_scanner_to_viability(
         )
     except Exception:
         logger.debug("[scheduler] ross momentum universe sort skipped", exc_info=True)
+
+    # UNCAPPED bridge (2026-06-15): when the universe is uncapped, build the FULL
+    # Ross-ranked tickers list (no top-30 truncation) — the chunked tick below
+    # scores every screened mover into viability (CUPR-class names that ranked out
+    # of the old top-30 batch now get a row). OFF ⇒ the historical top-30 cut
+    # (single capped call), byte-identical to current.
+    try:
+        from ..config import settings as _bridge_settings
+
+        _bridge_uncapped = bool(
+            getattr(_bridge_settings, "chili_momentum_universe_uncapped_enabled", False)
+        )
+    except Exception:
+        _bridge_uncapped = False
 
     tickers: list[str] = []
     ross_signals: dict[str, dict] = {}
@@ -3369,21 +3715,131 @@ def _bridge_scanner_to_viability(
             # scanner already computed instead of discarding them — the momentum
             # lane ranks explosive instruments from these (docs/DESIGN/MOMENTUM_LANE.md).
             ross_signals[t] = r
-        if len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
+        if not _bridge_uncapped and len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
             break
+
+    # ROSS "RUNNING UP" FEEDER (2026-06-11, the SKYQ gap): the ranking above is a
+    # Top Gainers clone (day change), so a name bursting NOW from a flat day —
+    # SKYQ +2% on the day yet firing pullback_break_ok with 2,163% 5-min RVOL on
+    # Ross's Running Up scanner — never earns a fresh viability row and can never
+    # arm. Our own NBBO tape already samples these names every minute: lift the
+    # fastest mid-bursts of the last few minutes into the batch (the pin block
+    # below then prepends armed sessions ahead of them, so the head order is
+    # pins -> bursts -> ranked, all inside the pipeline's 32-symbol cut).
+    try:
+        from .trading.momentum_neural.nbbo_tape import tape_running_up_signal_map
+
+        _burst_signals = tape_running_up_signal_map(db)
+        if _burst_signals:
+            _bursts = list(_burst_signals.keys())
+            ross_signals.update(_burst_signals)
+            tickers = _bursts + [t for t in tickers if t not in _bursts]
+            logger.info(
+                "[scheduler] running-up feeder lifted %d burst symbol(s): %s",
+                len(_bursts), ",".join(_bursts),
+            )
+    except Exception:
+        logger.debug("[scheduler] running-up feeder failed", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # ARMED-SESSION PIN (2026-06-11, the EDHL kill): an armed symbol that rotates
+    # OUT of the scanner's top batch stops getting viability refreshes, its
+    # snapshot ages past the 600s freshness gate, and our own staleness check
+    # then blocks every entry until the session dies — EDHL was armed at 11:33Z,
+    # never refreshed again, and got strangled (stale 1887s) while Ross banked
+    # +$782 on the same chart (also killed UEC today and AAOG on 06-10). Active
+    # live sessions' symbols are ALWAYS pinned into the refresh batch.
+    try:
+        from .trading.momentum_neural.live_fsm import LIVE_RUNNER_RUNNABLE_STATES
+        from ..models.trading import TradingAutomationSession
+
+        _armed_rows = (
+            db.query(TradingAutomationSession.symbol)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
+                ~TradingAutomationSession.symbol.like("%-USD"),
+            )
+            .distinct()
+            .all()
+        )
+        _pins = []
+        for (_sym,) in _armed_rows:
+            _su = str(_sym or "").strip().upper()
+            if _su and _su not in _pins:
+                _pins.append(_su)
+        if _pins:
+            # PREPEND the pins: the downstream pipeline caps symbols at 32, so
+            # armed names must sit at the HEAD of the list to survive the cut.
+            tickers = _pins + [t for t in tickers if t not in _pins]
+    except Exception:
+        logger.debug("[scheduler] armed-session viability pin failed", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     if not tickers:
         return
+    # S1 EVENT FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §5): cache this EQUITY batch's
+    # ross_signals so the tape-delta ignite job can score a single crosser against the
+    # SAME field for percentile context. Equity refresh only (crypto has its own field
+    # semantics); best-effort + never affects the bridge write.
+    if source in ("equity_viability_refresh", "equity_momentum"):
+        try:
+            _tape_delta_set_field_snapshot(ross_signals)
+        except Exception:
+            logger.debug("[momentum_event_select] field snapshot cache skipped", exc_info=True)
     try:
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
-        run_momentum_neural_tick(
-            db, meta={"tickers": tickers, "ross_signals": ross_signals}
-        )
-        db.commit()
-        logger.info(
-            "[scheduler] viability bridge (%s): %d tickers → direct tick ok",
-            source, len(tickers),
-        )
+        if _bridge_uncapped and len(tickers) > _VIABILITY_BRIDGE_CHUNK:
+            # UNCAPPED: the pipeline tick caps symbols at 32 internally, so feed the
+            # full universe through in chunks of _VIABILITY_BRIDGE_CHUNK and COMMIT
+            # PER CHUNK — commit-between-chunks is mandatory (the idle-in-transaction
+            # / deadlock guard; #561/#610). A failed chunk is rolled back and skipped
+            # so one bad symbol can't sink the rest of the universe.
+            _chunks = 0
+            for _i in range(0, len(tickers), _VIABILITY_BRIDGE_CHUNK):
+                _chunk = tickers[_i : _i + _VIABILITY_BRIDGE_CHUNK]
+                _chunk_signals = {t: ross_signals[t] for t in _chunk if t in ross_signals}
+                try:
+                    # A prior read probe can leave the Session in PendingRollbackError
+                    # state without any intended bridge writes. Clear it before the
+                    # scorer starts so one dead read transaction does not skip a fresh
+                    # crosser/armed symbol.
+                    db.rollback()
+                    run_momentum_neural_tick(
+                        db, meta={"tickers": _chunk, "ross_signals": _chunk_signals}
+                    )
+                    db.commit()
+                    _chunks += 1
+                except Exception as _ce:
+                    logger.warning(
+                        "[scheduler] viability bridge (%s) chunk %d failed: %s",
+                        source, (_i // _VIABILITY_BRIDGE_CHUNK), _ce,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+            logger.info(
+                "[scheduler] viability bridge (%s): %d tickers in %d chunk(s) → direct tick ok",
+                source, len(tickers), _chunks,
+            )
+        else:
+            db.rollback()
+            run_momentum_neural_tick(
+                db, meta={"tickers": tickers, "ross_signals": ross_signals}
+            )
+            db.commit()
+            logger.info(
+                "[scheduler] viability bridge (%s): %d tickers → direct tick ok",
+                source, len(tickers),
+            )
     except Exception as e:
         logger.warning("[scheduler] viability bridge (%s) failed: %s", source, e)
         try:
@@ -4092,6 +4548,41 @@ def _build_crypto_momentum_universe() -> list[dict]:
     return out
 
 
+def _presubscribe_crypto_l2(db) -> int:
+    """Warm Coinbase Level-2 books for fresh live-eligible crypto candidates so
+    ``book_imbalance`` is populated at SCORING / arm time — not only for symbols that
+    already hold a running session. Equity gets 5-level depth via
+    ``iqfeed_depth_snapshots``; this gives the crypto lane the same microstructure
+    input from the Coinbase WS the scheduler already runs (pipeline._live_book_imbalance
+    reads the microstructure ring that ``_handle_l2`` fills for every subscribed product).
+
+    Uses ``cb_ws.subscribe()`` DIRECTLY: it is idempotent (skips already-subscribed
+    pids via ``_subscribed``) and the L2 ring is fed by ``_handle_l2`` for every
+    subscribed product regardless of tick listeners. It deliberately does NOT use
+    ``price_bus.subscribe_symbol`` here, which re-appends a tick closure on every call
+    (the ``_on_cb_tick`` growth) — book warming needs the level2 channel, not a quote
+    listener. Bounded by the system's OWN live-eligibility set (~the liquidity-floored
+    whitelist), so there is no magic-N and no unbounded 429 exposure. Best-effort +
+    fail-open: a WS or DB hiccup must never break the viability refresh. Crypto-only
+    (``-USD`` filter) — equity behaviour is untouched. Returns the count warmed.
+    """
+    try:
+        # Shared eligibility filter (same one the Phase-0 crypto L2 drain uses),
+        # so the warmed set and the drained set never drift.
+        from .trading.fast_path.crypto_l2_drain import eligible_crypto_symbols
+        from .trading.venue.coinbase_spot import get_coinbase_ws
+
+        elig = eligible_crypto_symbols(db)
+        if not elig:
+            return 0
+        get_coinbase_ws().subscribe(elig)
+        logger.info("[scheduler] crypto L2 pre-subscribe: %d live-eligible candidates warmed", len(elig))
+        return len(elig)
+    except Exception as e:
+        logger.debug("[scheduler] crypto L2 pre-subscribe skipped: %s", e)
+        return 0
+
+
 def _run_crypto_viability_refresh_job():
     """24/7 crypto viability refresh: pull a FRESH crypto momentum universe from the
     live venue (Coinbase products + 24h stats) and bridge it to viability.
@@ -4109,6 +4600,9 @@ def _run_crypto_viability_refresh_job():
         results = _build_crypto_momentum_universe()
         if results:
             _bridge_scanner_to_viability(db, results, source="crypto_viability_refresh")
+            # Warm L2 books for the now-eligible crypto candidates (book_imbalance
+            # parity with equity's iqfeed depth). Best-effort; never blocks refresh.
+            _presubscribe_crypto_l2(db)
         else:
             logger.warning("[scheduler] crypto viability refresh: empty venue universe (adapter off?)")
     except Exception as e:
@@ -4124,6 +4618,96 @@ def _run_crypto_viability_refresh_job():
         db.close()
 
 
+def _merge_equity_refresh_universe(ross_tickers, active_session_symbols) -> list[str]:
+    """Pure: build the equity-refresh scan list = the screened Ross movers UNION the
+    EQUITY symbols of currently-active live sessions, de-duped + uppercased + sorted.
+
+    The active-session symbols are folded in so a name that is being WATCHED but has
+    rotated out of the day's top-mover screen still gets re-scored every cycle — its
+    viability snapshot stays fresh and the live boundary gate stops rejecting it as
+    "Viability snapshot stale" (the #1 fill-blocker). Crypto ``-USD`` pairs are
+    excluded (they have their own fast venue feed and are not equity-scanned).
+    Caller maps ``[]`` -> skip. The Ross lane must not fall back to the broad
+    default universe when the Ross snapshot is unavailable."""
+    active_eq = {
+        str(s).upper()
+        for s in (active_session_symbols or [])
+        if s and not str(s).upper().endswith("-USD")
+    }
+    screened = {str(t).upper() for t in (ross_tickers or []) if t}
+    return sorted(screened | active_eq)
+
+
+def _momentum_viability_refresh_interval_seconds(settings_obj) -> int:
+    """Refresh inside the risk gate's own viability freshness window."""
+    try:
+        max_age = float(
+            getattr(settings_obj, "chili_momentum_risk_viability_max_age_seconds", 600.0)
+        )
+    except (TypeError, ValueError):
+        max_age = 600.0
+    return max(60, int(max_age / 2))
+
+
+def _momentum_event_startup_delay_seconds(settings_obj) -> float:
+    """First prewarm delay for selector/tape jobs.
+
+    The interval cadence still comes from the adaptive tape-delta floor, but the
+    first selector run must be immediate. If the process is started at the 03:30
+    ET/04:00 ET data-session boundary, waiting even 35-50s is enough to miss the
+    first low-float burst. Scheduled refresh is a watchdog/backfill path; it
+    should never be the trading brain or add a cold-start delay before the
+    event-driven rail can warm tape/universe state.
+    """
+    return 0.0
+
+
+def _register_momentum_selection_prewarm_jobs(scheduler: BackgroundScheduler, settings_obj) -> None:
+    """Register read-only momentum selector/prewarm jobs for the active lane role."""
+    cvr_secs = _momentum_viability_refresh_interval_seconds(settings_obj)
+    first_run = datetime.now() + timedelta(
+        seconds=_momentum_event_startup_delay_seconds(settings_obj)
+    )
+    scheduler.add_job(
+        _run_crypto_viability_refresh_job,
+        trigger=IntervalTrigger(seconds=cvr_secs),
+        id="crypto_viability_refresh",
+        name="Crypto viability refresh (live venue feed, ~half freshness gate, 24/7)",
+        replace_existing=True,
+        max_instances=1,
+        next_run_time=first_run,
+    )
+    scheduler.add_job(
+        _run_equity_viability_refresh_job,
+        trigger=IntervalTrigger(seconds=cvr_secs),
+        id="equity_viability_refresh",
+        name="Equity viability prewarm/watchdog (Ross universe, event path primary)",
+        replace_existing=True,
+        max_instances=1,
+        next_run_time=first_run,
+    )
+
+    if bool(getattr(settings_obj, "chili_momentum_event_select_primary_enabled", True)):
+        try:
+            tdi_floor = float(
+                getattr(settings_obj, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0
+            )
+        except (TypeError, ValueError):
+            tdi_floor = 5.0
+        tdi_secs = max(1.0, tdi_floor)
+        scheduler.add_job(
+            _run_tape_delta_ignite_job,
+            trigger=IntervalTrigger(seconds=tdi_secs),
+            id="tape_delta_ignite",
+            name="S1 tape-delta event feeder (event primary; scheduled run is watchdog)",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=5,
+            next_run_time=first_run,
+        )
+
+
 def _run_equity_viability_refresh_job():
     """Equity PARITY with crypto: refresh equity momentum viability on its OWN fast
     job at the SAME cadence as the crypto venue feed (``_run_crypto_viability_refresh_job``),
@@ -4133,6 +4717,7 @@ def _run_equity_viability_refresh_job():
     fresh as crypto (both at ~half the gate). Light: just the equity momentum-continuation
     + premarket-gap scans (the same movers the sweep finds), bridged. docs/DESIGN/MOMENTUM_LANE.md
     """
+    from ..config import settings
     from ..db import SessionLocal
     from .trading.intraday_signals import scan_momentum_continuation, scan_premarket_gaps
     from .trading.momentum_neural.universe import EQUITY_ROSS_SMALLCAP, build_equity_universe
@@ -4149,11 +4734,44 @@ def _run_equity_viability_refresh_job():
         ross_tickers = build_equity_universe(EQUITY_ROSS_SMALLCAP)
     except Exception:
         ross_tickers = []
-    scan_tickers = ross_tickers or None
-    if ross_tickers:
+
+    # ALSO always re-score the EQUITY symbols of currently-active live momentum
+    # sessions. The live boundary-risk gate REJECTS an entry when the viability
+    # snapshot is older than the freshness window; the refresh otherwise re-scores
+    # only the day's top movers, so a name that is actively WATCHED but has rotated
+    # out of the top-mover list goes stale and EVERY entry on it is blocked
+    # ("Viability snapshot stale" — ~100% of boundary-risk blocks at the open).
+    # Keeping watched symbols in the scan keeps their snapshot fresh so a setup-in-
+    # progress can actually reach entry. Equity-only (crypto "-USD" has its own fast
+    # venue feed). Fail-open: a query hiccup must never break the refresh.
+    # docs/DESIGN/MOMENTUM_LANE.md
+    _active: set[str] = set()
+    try:
+        from .trading.momentum_neural.auto_arm import _symbols_with_active_live_session
+
+        _ses = SessionLocal()
+        try:
+            _active = _symbols_with_active_live_session(_ses, user_id=None)
+        finally:
+            try:
+                _ses.rollback()
+            except Exception:
+                pass
+            _ses.close()
+    except Exception:
+        _active = set()
+
+    merged = _merge_equity_refresh_universe(ross_tickers, _active)
+    if not merged:
+        logger.warning(
+            "[scheduler] equity Ross universe empty; skipping default large-cap fallback for Ross lane"
+        )
+        return
+    scan_tickers = merged
+    if merged:
         logger.info(
-            "[scheduler] equity Ross universe: %d small-cap movers screened from snapshot",
-            len(ross_tickers),
+            "[scheduler] equity Ross universe: %d screened + watched-session symbols -> %d scanned fresh",
+            len(ross_tickers or []), len(merged),
         )
 
     # The equity momentum scan does per-ticker OHLCV fetches and can run for minutes.
@@ -4162,6 +4780,22 @@ def _run_equity_viability_refresh_job():
     # unexpectedly"), so the bridge write failed and equities went stale. So: scan on a
     # short-lived session that is RELEASED before the write, then bridge on a FRESH
     # connection (the scan's may already be dead). docs/DESIGN/MOMENTUM_LANE.md
+    # Premarket-gap output cap: the input ``scan_tickers`` is ALREADY the screened
+    # Ross pool, so cap the gap scan to that pool's size — every screened gapper
+    # reaches the Ross percentile re-rank (which makes the real selection) instead
+    # of the fixed top-15-by-raw-gap-magnitude truncating fresh-catalyst mid-gap
+    # runners (a +7% low-float 8AM-catalyst name) out behind already-extended +200%
+    # gappers, leaving them with no fresh viability score → never armable. Adaptive
+    # (no new magic number); kill-switch default-ON; None ⇒ historical fixed cap.
+    # docs/DESIGN/MOMENTUM_LANE.md
+    _pm_gap_cap = (
+        len(scan_tickers)
+        if (
+            scan_tickers
+            and bool(getattr(settings, "chili_momentum_premarket_gap_full_universe_enabled", True))
+        )
+        else None
+    )
     sweep: dict[str, Any] = {"momentum_signals": [], "premarket_gaps": []}
     scan_db = SessionLocal()
     try:
@@ -4172,7 +4806,9 @@ def _run_equity_viability_refresh_job():
         except Exception:
             sweep["momentum_signals"] = []
         try:
-            sweep["premarket_gaps"] = list(scan_premarket_gaps(tickers=scan_tickers) or [])
+            sweep["premarket_gaps"] = list(
+                scan_premarket_gaps(tickers=scan_tickers, max_signals=_pm_gap_cap) or []
+            )
         except Exception:
             sweep["premarket_gaps"] = []
     finally:
@@ -4192,6 +4828,23 @@ def _run_equity_viability_refresh_job():
             "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
             len(movers),
         )
+        # S1 INSTRUMENT (docs/DESIGN/MOMENTUM_ENGINE.md §5): the batch path is the BASELINE
+        # ignite latency the event feeder is measured against (~half the 600s gate). Logging
+        # it here lets the tape-delta path's per-symbol lead-time be compared apples-to-apples.
+        try:
+            from ..config import settings as _evs_settings
+
+            _batch_period_ms = max(
+                60_000.0,
+                float(getattr(_evs_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0)) / 2.0 * 1000.0,
+            )
+            logger.info(
+                "[momentum_event_select] path=batch movers=%d batch_period_ms=%.0f "
+                "(baseline ignite_to_viability the event feeder beats)",
+                len(movers), _batch_period_ms,
+            )
+        except Exception:
+            pass
     except Exception as e:
         logger.warning("[scheduler] equity viability refresh bridge failed: %s", e)
     finally:
@@ -4200,6 +4853,167 @@ def _run_equity_viability_refresh_job():
         except Exception:
             pass
         write_db.close()
+
+
+def _run_tape_delta_ignite_job():
+    """S1 EVENT-DRIVEN FEEDER — Trigger B (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5).
+
+    A fast, price-bus-INDEPENDENT job: read ONLY tape rows newer than an in-process
+    high-water mark (an incremental DELTA, not a full rescan), apply _ross_threshold_crossed,
+    and score each crosser straight into momentum_symbol_viability (freshness_ts=now) via the
+    SAME single-symbol run_momentum_neural_tick path the ignition loop + scanner bridge use —
+    so a cold new explosive mover reaches live_eligible in ~5-15s instead of waiting for the
+    ~300s batch (which keeps running as the backstop).
+
+    Byte-identical-OFF: when chili_momentum_tape_delta_ignite_enabled is False this returns
+    immediately (a no-op). The master flag chili_momentum_event_select_primary_enabled gates
+    REGISTRATION (the job is only added when the master is on).
+
+    Session hygiene (#561/#610 idle-in-transaction guard): its OWN short-lived SessionLocal,
+    commit on success, rollback-in-finally before close. Adaptive self-throttle to
+    clamp(p50 tape inter-row gap, floor, 15s) so a dense tape isn't hammered and a sparse one
+    isn't lagged — the APScheduler interval is registered at the floor and the job skips a run
+    that arrived sooner than the measured cadence.
+    """
+    from ..config import settings
+    from ..db import SessionLocal
+    from .trading.momentum_neural.nbbo_tape import (
+        tape_delta_threshold_crossers,
+        tape_inter_row_gap_p50_seconds,
+    )
+
+    if not bool(getattr(settings, "chili_momentum_tape_delta_ignite_enabled", True)):
+        return  # byte-identical-off: the registered job is a no-op
+
+    global _tape_delta_hwm, _tape_delta_last_run_monotonic
+
+    # The ONE documented floor (seconds); cadence = clamp(p50 tape gap, floor, 15).
+    try:
+        _floor = float(getattr(settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0)
+    except (TypeError, ValueError):
+        _floor = 5.0
+    _floor = max(1.0, _floor)
+
+    now_mono = time.monotonic()
+    now_utc = datetime.now(timezone.utc)
+
+    db = SessionLocal()
+    crossers: list[dict] = []
+    new_hwm = None
+    try:
+        # Adaptive cadence: measure how fast the tape fills, clamp to [floor, 15].
+        _p50 = tape_inter_row_gap_p50_seconds(db, now_utc=now_utc)
+        _cadence = _floor if _p50 is None else min(15.0, max(_floor, float(_p50)))
+        with _tape_delta_state_lock:
+            _last = _tape_delta_last_run_monotonic
+            _hwm = _tape_delta_hwm
+        if _last and (now_mono - _last) < _cadence:
+            return  # arrived sooner than the adaptive cadence — self-throttle (skip)
+        # First run after a (re)start: seed the hwm from the lookback floor so we read a
+        # bounded recent slice, not the whole table.
+        if _hwm is None:
+            _lookback_min = float(
+                getattr(settings, "chili_momentum_running_up_lookback_min", 5.0) or 5.0
+            )
+            _hwm = now_utc - timedelta(minutes=_lookback_min)
+
+        crossers, new_hwm = tape_delta_threshold_crossers(db, since=_hwm, now_utc=now_utc)
+        # Advance the hwm + stamp the run time regardless of crossers (so an empty delta
+        # still moves the window forward and doesn't re-scan the same rows next run).
+        with _tape_delta_state_lock:
+            _tape_delta_last_run_monotonic = now_mono
+            if new_hwm is not None:
+                if _tape_delta_hwm is None or new_hwm > _tape_delta_hwm:
+                    _tape_delta_hwm = new_hwm
+
+        if not crossers:
+            return
+
+        # Score each crosser via the SAME single-symbol path, against the CACHED field
+        # snapshot (percentile context preserved). One symbol per tick; the FULL cached
+        # field is passed as the ranking universe so the crosser is percentile-ranked
+        # within the real batch — `tickers` (which symbol gets a viability row) and
+        # `ross_signals` (the ranking universe) are decoupled, so only the crosser's own
+        # row is written.
+        with _tape_delta_state_lock:
+            _field = dict(_tape_delta_field_snapshot)
+
+        from .trading.momentum_neural.pipeline import run_momentum_neural_tick
+
+        _scored = 0
+        for c in crossers:
+            sym = c["symbol"]
+            # Build the single-symbol ross_signals: prefer the cached batch signal (full
+            # pillars), else a minimal tape-derived dict (move% as the momentum axis) —
+            # identical SHAPE to the ignition loop's emit so the scorer reads it.
+            _base = _field.get(sym)
+            if isinstance(_base, dict):
+                _sig = dict(_base)
+                _sig.setdefault("ticker", sym)
+                _sig.setdefault("direction", "long")
+            else:
+                _sig = {
+                    "ticker": sym,
+                    "direction": "long",
+                    "todays_change_perc": float(c.get("move_pct") or 0.0),
+                    "signal_type": "tape_delta_ignite",
+                    "source": "tape_delta_ignite",
+                }
+                if c.get("last_mid"):
+                    _sig["price"] = float(c["last_mid"])
+                if c.get("day_volume"):
+                    _sig["volume"] = float(c["day_volume"])
+            # Score it against the FULL field (percentile context) but persist ONLY the
+            # crosser's viability row. ross_signals = the real ranked universe (cached
+            # field + this crosser, which overrides any stale cached entry for `sym`);
+            # tickers = [sym] so only its row is written. Own commit; idempotent
+            # (symbol,variant_id) upsert downstream.
+            _universe = dict(_field)
+            _universe[sym] = _sig
+            try:
+                # Defensive session hygiene: tape reads are complete and all scoring
+                # inputs are detached Python dicts now. Roll back any failed implicit
+                # read transaction before the scorer writes viability so a previous
+                # DB hiccup does not turn a valid crosser into a dark skip.
+                db.rollback()
+                run_momentum_neural_tick(
+                    db, meta={"tickers": [sym], "ross_signals": _universe}
+                )
+                db.commit()
+                _scored += 1
+                # S1 INSTRUMENT: the event path put a name on the board within one cadence.
+                logger.info(
+                    "[momentum_event_select] path=tape_delta symbol=%s move_pct=%.2f "
+                    "cadence_s=%.1f field_ctx=%s ignited_to_viability=ok",
+                    sym, float(c.get("move_pct") or 0.0), _cadence,
+                    bool(isinstance(_base, dict)),
+                )
+            except Exception as _se:
+                logger.warning(
+                    "[momentum_event_select] tape-delta score %s failed: %s", sym, _se
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        if _scored:
+            logger.info(
+                "[momentum_event_select] path=tape_delta scored=%d/%d crossers (cadence=%.1fs)",
+                _scored, len(crossers), _cadence,
+            )
+    except Exception as e:
+        logger.warning("[momentum_event_select] tape-delta ignite job failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        # idle-in-transaction guard: rollback-in-finally before close.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
 
 
 def _run_intraday_signal_sweep_job():
@@ -4300,6 +5114,63 @@ def _run_pattern_quality_score_refresh_job() -> None:
             sess.close()
 
     run_scheduler_job_guarded("pattern_quality_score_refresh", _work)
+
+
+def _run_meta_label_retrain_job() -> None:
+    """Momentum LEARNING step (2026-06-23): DATA-DRIVEN re-train of the adaptive meta-label
+    de-rate. maybe_retrain_meta_label re-fits ONLY when new contributing outcomes have accrued
+    (not a clock) and is cheap (<1s); the live sizing reads the saved model -> it AUTO-UPDATES
+    as trades accumulate. Integrated into the lane's learning cadence (NOT a standalone cron),
+    so it self-improves alongside the rest of the neural learning. Best-effort."""
+    from ..db import SessionLocal
+    from .trading.momentum_neural.meta_label import maybe_retrain_meta_label
+
+    db = SessionLocal()
+    try:
+        out = maybe_retrain_meta_label(db)
+        if out.get("status") == "retrained":
+            logger.info(
+                "[scheduler] meta-label re-trained: n=%s grew_from=%s confidence=%s status=%s",
+                out.get("n"), out.get("grew_from"), out.get("confidence"), out.get("model_status"),
+            )
+    except Exception:
+        logger.exception("[scheduler] meta-label re-train job failed")
+    finally:
+        db.close()
+
+
+def _run_learning_self_critic_job() -> None:
+    """SELF-CRITIC / gap-analyst step (2026-06-23, operator's "open-minded critical thinker"):
+    a data-driven critical review of the momentum lane's LEARNING health — finds gaps (feature
+    coverage holes / capture bugs, dataset thinness, not-yet-significant weights per the
+    data-snooping discipline, confidence stalls) and logs concrete enhancement proposals. The
+    report is also saved to /app/data/_learning_self_report.json. Best-effort, offline."""
+    from ..db import SessionLocal
+    from .trading.momentum_neural.meta_label import analyze_learning_gaps
+
+    db = SessionLocal()
+    try:
+        rep = analyze_learning_gaps(db)
+        _dg = rep.get("diagnostics") or {}
+        logger.info(
+            "[scheduler] learning self-critic: n=%s positives=%s confidence=%s (Δ=%s) n_eff=%s gaps=%s",
+            rep.get("n_samples"), rep.get("positives"), rep.get("confidence"),
+            rep.get("confidence_trend"), _dg.get("n_eff_report"), rep.get("n_gaps"),
+        )
+        for g in (rep.get("gaps") or [])[:6]:
+            logger.info("[scheduler] learning GAP -> %s", g)
+        for p in (rep.get("proposals") or [])[:3]:
+            logger.info("[scheduler] learning PROPOSAL -> %s", p)
+        # RESEARCHER phase: PROPOSE-only (operator launches; never auto-spent here)
+        _ag = rep.get("research_agenda") or {}
+        if _ag.get("top"):
+            logger.info("[scheduler] learning RESEARCH-AGENDA (propose-only, operator-gated) -> top(p%s): %s | open=%s new=%s",
+                        (_ag["top"] or {}).get("priority"), (_ag["top"] or {}).get("research_question"),
+                        _ag.get("n_open"), _ag.get("n_new"))
+    except Exception:
+        logger.exception("[scheduler] learning self-critic job failed")
+    finally:
+        db.close()
 
 
 def _run_realized_stats_sync_job() -> None:
@@ -4505,6 +5376,8 @@ def _run_promotion_evidence_audit_job() -> None:
     demote evidence-incomplete promoted patterns; ``CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE_DRY_RUN=true``
     logs what would be demoted without applying.
     """
+    from ..config import settings
+
     if not bool(getattr(settings, "chili_pattern_evidence_audit_enabled", True)):
         return
     try:
@@ -4965,7 +5838,7 @@ def start_scheduler():
         if role not in (
             "all", "web", "worker",
             "autotrader_only", "cron_only", "broker_sync_only",
-            "market_snapshot_only",
+            "market_snapshot_only", "momentum_exec_only", "rnd_only",
         ):
             logger.warning(
                 "[scheduler] invalid CHILI_SCHEDULER_ROLE=%r; using 'all' "
@@ -4975,23 +5848,23 @@ def start_scheduler():
             role = "all"
         # cron_only = legacy 'worker' role minus autotrader minus broker_sync
         # (so scheduler-worker container drops both hot-loop call paths).
-        include_heavy = role in ("all", "worker", "cron_only")
+        include_heavy = role in ("all", "worker", "cron_only", "rnd_only")
         # The minimal market-snapshot lane is a mesh producer. It also needs a
         # bounded drain so stale imminent_eval chatter cannot starve fresh
         # market/momentum context when heavy workers are offline.
         include_neural_mesh_drain = include_heavy or role == "market_snapshot_only"
-        include_web_light = role in ("all", "web", "cron_only")
+        include_web_light = role in ("all", "web", "cron_only", "rnd_only")
         # Market snapshots feed HRP/cash deployment, pattern mining, and
         # vitals. Keep them available in the minimal trading stack without
         # requiring the full heavy scheduler/profile.
         include_market_snapshots = role in (
-            "all", "worker", "cron_only", "market_snapshot_only",
+            "all", "worker", "cron_only", "market_snapshot_only", "rnd_only",
         )
         include_cash_deployment_work = role in (
-            "all", "web", "cron_only", "market_snapshot_only",
+            "all", "web", "cron_only", "market_snapshot_only", "rnd_only",
         )
         include_batch_reconciler = role in (
-            "all", "web", "worker", "cron_only", "market_snapshot_only",
+            "all", "web", "worker", "cron_only", "market_snapshot_only", "rnd_only",
         )
         # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
         # include them (legacy behavior preserved). 'cron_only' excludes them.
@@ -5002,6 +5875,14 @@ def start_scheduler():
         # share fate with autotrader. Pulled into their own container so a
         # broker-call storm only affects this lane.
         include_broker_sync = role in ("all", "web", "worker", "broker_sync_only")
+        # SCHEDULER SPLIT (2026-06-11, operator-approved): the EXEC-CRITICAL
+        # momentum set (live runner ticks, auto-arm, NBBO sampler, WS rails)
+        # gets its own role so R&D deploys never restart the process holding
+        # live positions. 'rnd_only' = cron_only MINUS this set; legacy roles
+        # keep everything (safe fallback). docs/DESIGN/SCHEDULER_SPLIT.md
+        include_momentum_exec = role in (
+            "all", "web", "worker", "cron_only", "momentum_exec_only",
+        )
         _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
         # FIX C5 (2026-04-29 third-pass audit): the container-split (FIX 45a/b)
         # introduced role='cron_only' for the scheduler-worker container and
@@ -5019,10 +5900,11 @@ def start_scheduler():
             emit_worker_heartbeat = False
         else:
             emit_worker_heartbeat = role in (
-                "worker", "cron_only", "market_snapshot_only", "all",
+                "worker", "cron_only", "market_snapshot_only", "momentum_exec_only", "all",
             )
 
         _scheduler = BackgroundScheduler(daemon=True)
+        _bus_on = bool(settings.chili_autopilot_price_bus_enabled)
         logger.info(
             "[scheduler] Role=%s (heavy_scan_jobs=%s web_jobs=%s emit_heartbeat=%s)",
             role,
@@ -5077,6 +5959,16 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=25),
+            )
+
+        if include_web_light and getattr(settings, "chili_momentum_replay_regression_enabled", True):
+            _scheduler.add_job(
+                _run_nightly_replay_regression_job,
+                trigger=CronTrigger(hour=18, minute=0, timezone="America/Los_Angeles"),
+                id="nightly_replay_regression",
+                name="Nightly replay regression tripwire (18:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
             )
 
         if include_web_light and getattr(settings, "brain_daily_market_scan_scheduler_enabled", True):
@@ -5221,6 +6113,17 @@ def start_scheduler():
                     max_instances=1,
                 )
 
+                # Broker-connectivity alarm: a configured-but-disconnected broker must
+                # alert loudly (not just log spam) — RH died silently for ~7 weeks.
+                _scheduler.add_job(
+                    _run_broker_connectivity_watch_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="broker_connectivity_watch",
+                    name="Broker connectivity alarm (every 5min; alert past sustained-disconnect threshold)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
                 if getattr(settings, "chili_broker_position_price_monitor_enabled", True):
                     _bppm_m = max(
                         1,
@@ -5340,6 +6243,31 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=55),
+                )
+
+                # Adaptive meta-label de-rate re-train (2026-06-23): a 20min CHECK cadence; the
+                # job itself is DATA-DRIVEN (re-fits only when new contributing outcomes accrued),
+                # so this integrates the self-improving de-rate into the lane's learning loop
+                # (not a standalone cron). Cheap + best-effort; the live sizing auto-reads the model.
+                _scheduler.add_job(
+                    _run_meta_label_retrain_job,
+                    trigger=IntervalTrigger(minutes=20),
+                    id="meta_label_retrain",
+                    name="Meta-label de-rate re-train (data-driven, every 20min check)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=90),
+                )
+                # Self-critic / gap-analyst: a data-driven critical review of the lane's learning
+                # health (gaps + enhancement proposals). Every 4h — it's an analysis, not time-critical.
+                _scheduler.add_job(
+                    _run_learning_self_critic_job,
+                    trigger=IntervalTrigger(hours=4),
+                    id="learning_self_critic",
+                    name="Learning self-critic / gap-analyst (every 4h)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=120),
                 )
 
                 _scheduler.add_job(
@@ -5474,6 +6402,9 @@ def start_scheduler():
             except (TypeError, ValueError):
                 _cvr_max_age = 600.0
             _cvr_secs = max(60, int(_cvr_max_age / 2))
+            _momentum_first_run = datetime.now() + timedelta(
+                seconds=_momentum_event_startup_delay_seconds(_cvr_settings)
+            )
             _scheduler.add_job(
                 _run_crypto_viability_refresh_job,
                 trigger=IntervalTrigger(seconds=_cvr_secs),
@@ -5481,7 +6412,7 @@ def start_scheduler():
                 name="Crypto viability refresh (live venue feed, ~half freshness gate, 24/7)",
                 replace_existing=True,
                 max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=20),
+                next_run_time=_momentum_first_run,
             )
 
             # Equity parity: refresh equity momentum viability on the SAME fast cadence
@@ -5492,11 +6423,134 @@ def start_scheduler():
                 _run_equity_viability_refresh_job,
                 trigger=IntervalTrigger(seconds=_cvr_secs),
                 id="equity_viability_refresh",
-                name="Equity viability refresh (momentum movers, crypto-parity cadence)",
+                name="Equity viability refresh watchdog/backfill (Ross universe, event path primary)",
                 replace_existing=True,
                 max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=35),
+                next_run_time=_momentum_first_run,
             )
+
+            # S1 EVENT-DRIVEN FEEDER — Trigger B (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5):
+            # a fast tape-delta ignite job so a cold new explosive mover reaches
+            # live_eligible in ~5-15s instead of waiting ~300s for the batch above (which
+            # stays as the backstop). REGISTERED only when the MASTER flag is on; the job
+            # itself is a byte-identical no-op when chili_momentum_tape_delta_ignite_enabled
+            # is off. Interval is registered at the documented floor; the job self-throttles
+            # UP to clamp(p50 tape gap, floor, 15s) adaptively. max_instances=1 + coalesce
+            # so a slow run can never stack; its own short-lived rollback-in-finally session.
+            if bool(
+                getattr(_cvr_settings, "chili_momentum_event_select_primary_enabled", True)
+            ):
+                try:
+                    _tdi_floor = float(
+                        getattr(_cvr_settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0
+                    )
+                except (TypeError, ValueError):
+                    _tdi_floor = 5.0
+                _tdi_secs = max(1.0, _tdi_floor)
+                _scheduler.add_job(
+                    _run_tape_delta_ignite_job,
+                    trigger=IntervalTrigger(seconds=_tdi_secs),
+                    id="tape_delta_ignite",
+                    name="S1 tape-delta event feeder (event primary; scheduled run is watchdog)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=5,
+                    next_run_time=_momentum_first_run,
+                )
+
+            # Phase 0 crypto L2 writer: persist the warmed Coinbase full-book ring
+            # -> fast_orderbook (crypto only; nothing else writes crypto L2). Feeds
+            # the Phase-1 log-only signal layer + Phase-2 forward-return backfill.
+            from .trading.fast_path.crypto_l2_drain import run_crypto_l2_drain_job
+
+            _cld_secs = max(
+                1.0, float(getattr(_cvr_settings, "chili_crypto_l2_drain_seconds", 5.0) or 5.0)
+            )
+            _scheduler.add_job(
+                run_crypto_l2_drain_job,
+                trigger=IntervalTrigger(seconds=_cld_secs),
+                id="crypto_l2_drain",
+                name="Crypto L2 ring drain -> fast_orderbook (log-only persistence)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=2,
+                next_run_time=datetime.now() + timedelta(seconds=30),
+            )
+
+            # Phase 1 (1a): LOG-ONLY L2 signal layer -> trading_microstructure_log.
+            # Computes OFI/micro-price/ask-eaten/hidden-seller/spoof from the ring
+            # (zero DB in the hot path). NO decision wiring — calibration data only.
+            from .trading.fast_path.microstructure_log import (
+                run_microstructure_log_drain_job,
+                run_microstructure_log_prune_job,
+            )
+
+            _mld_secs = max(
+                1.0, float(getattr(_cvr_settings, "chili_micro_log_drain_seconds", 5.0) or 5.0)
+            )
+            _scheduler.add_job(
+                run_microstructure_log_drain_job,
+                trigger=IntervalTrigger(seconds=_mld_secs),
+                id="microstructure_log_drain",
+                name="Microstructure log drain (LOG-ONLY signals)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=5,
+                next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+            _scheduler.add_job(
+                run_microstructure_log_prune_job,
+                trigger=IntervalTrigger(hours=6),
+                id="microstructure_log_prune",
+                name="Microstructure log prune (partition-drop retention)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=90),
+            )
+
+            # Phase 1 (10s): LOG-ONLY 10-second candle pattern layer ->
+            # trading_tenbeat_candle_log. Aggregates the per-tick mid into 10s candles
+            # + runs ABCD / flat-top SHAPE detectors + leak-free forward-returns. NO
+            # decision wiring — calibration data only (crypto-first; equity dark).
+            if bool(getattr(_cvr_settings, "chili_tenbeat_candle_enabled", True)):
+                from .trading.fast_path.tenbeat_candle_log import (
+                    run_tenbeat_candle_backfill_job,
+                    run_tenbeat_candle_drain_job,
+                    run_tenbeat_candle_prune_job,
+                )
+
+                _tb_secs = max(
+                    10.0, float(getattr(_cvr_settings, "chili_tenbeat_candle_drain_seconds", 10) or 10)
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_drain_job,
+                    trigger=IntervalTrigger(seconds=_tb_secs),
+                    id="tenbeat_candle_drain",
+                    name="10s-candle pattern drain (LOG-ONLY)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    misfire_grace_time=5,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_backfill_job,
+                    trigger=IntervalTrigger(minutes=10),
+                    id="tenbeat_candle_backfill",
+                    name="10s-candle forward-return backfill (LOG-ONLY)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=120),
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_prune_job,
+                    trigger=IntervalTrigger(hours=6),
+                    id="tenbeat_candle_prune",
+                    name="10s-candle log prune (partition-drop retention)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=150),
+                )
 
             _scheduler.add_job(
                 _run_fast_path_universe_rotator_job,
@@ -5538,6 +6592,12 @@ def start_scheduler():
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=35),
                 )
+
+        # Momentum-exec-only is the isolated live Ross lane. It must own selector
+        # prewarm/freshness itself instead of depending on a separate heavy worker;
+        # otherwise 04:00 ET tape can be warm while viability rows are cold.
+        if include_momentum_exec and not include_heavy:
+            _register_momentum_selection_prewarm_jobs(_scheduler, settings)
 
         # FIX 45a (2026-04-29): autotrader tick + monitor carved out under
         # their own flag so the autotrader-worker container can register them
@@ -5716,7 +6776,6 @@ def start_scheduler():
             and settings.chili_momentum_paper_runner_enabled
             and settings.chili_momentum_paper_runner_scheduler_enabled
         ):
-            _bus_on = bool(settings.chili_autopilot_price_bus_enabled)
             _pr_m = 1 if _bus_on else max(2, int(settings.chili_momentum_paper_runner_scheduler_interval_minutes))
             _scheduler.add_job(
                 _run_momentum_paper_runner_batch_job,
@@ -5736,42 +6795,98 @@ def start_scheduler():
                     logger.warning("[scheduler] Event-driven runner loop failed to start: %s", e)
 
         if (
-            include_web_light
+            include_momentum_exec
             and settings.chili_momentum_live_runner_enabled
-            and settings.chili_momentum_live_runner_scheduler_enabled
         ):
-            # Ross-style fast cadence: prefer the SECONDS knob (>0) so a fleeting
-            # momentum break is caught within ~30s instead of up to 2min. coalesce
-            # + max_instances=1 collapse any overlap if a run runs long.
-            _lr_secs = int(getattr(settings, "chili_momentum_live_runner_scheduler_interval_seconds", 0) or 0)
-            if _lr_secs > 0:
-                _lr_secs = max(10, _lr_secs)
-                _lr_trigger = IntervalTrigger(seconds=_lr_secs)
-                _lr_label = f"{_lr_secs}s"
+            _loop_primary = bool(getattr(settings, "chili_momentum_live_runner_loop_enabled", True)) and bool(_bus_on)
+            _batch_fallback = bool(getattr(settings, "chili_momentum_live_runner_batch_fallback_enabled", False))
+            _scheduler_fallback = bool(getattr(settings, "chili_momentum_live_runner_scheduler_enabled", False))
+            if _scheduler_fallback:
+                # Batch fallback cadence only. Ross first-pullback entries must be
+                # driven by the IQFeed/quote loop; this job exists only for explicit
+                # slow-path maintenance or emergency fallback.
+                _lr_secs = int(getattr(settings, "chili_momentum_live_runner_scheduler_interval_seconds", 0) or 0)
+                if _lr_secs > 0:
+                    _lr_secs = max(10, _lr_secs)
+                    _lr_trigger = IntervalTrigger(seconds=_lr_secs)
+                    _lr_label = f"{_lr_secs}s"
+                else:
+                    _lr_m = max(2, int(settings.chili_momentum_live_runner_scheduler_interval_minutes))
+                    _lr_trigger = IntervalTrigger(minutes=_lr_m)
+                    _lr_label = f"{_lr_m}min"
+                if _batch_fallback:
+                    _scheduler.add_job(
+                        _run_momentum_live_runner_batch_job,
+                        trigger=_lr_trigger,
+                        id="momentum_live_runner_batch",
+                        name=f"Momentum live automation runner fallback (every {_lr_label}; real orders)",
+                        replace_existing=True,
+                        max_instances=1,
+                        coalesce=True,
+                        next_run_time=datetime.now() + timedelta(seconds=20),
+                    )
+                else:
+                    logger.info(
+                        "[scheduler] Momentum live batch fallback disabled; explicit "
+                        "CHILI_MOMENTUM_LIVE_RUNNER_BATCH_FALLBACK_ENABLED is required "
+                        "even if the event loop is unavailable"
+                    )
             else:
-                _lr_m = max(2, int(settings.chili_momentum_live_runner_scheduler_interval_minutes))
-                _lr_trigger = IntervalTrigger(minutes=_lr_m)
-                _lr_label = f"{_lr_m}min"
-            _scheduler.add_job(
-                _run_momentum_live_runner_batch_job,
-                trigger=_lr_trigger,
-                id="momentum_live_runner_batch",
-                name=f"Momentum live automation runner (every {_lr_label}; real orders)",
-                replace_existing=True,
-                max_instances=1,
-                coalesce=True,
-                next_run_time=datetime.now() + timedelta(seconds=20),
-            )
+                logger.info("[scheduler] Momentum live scheduler fallback disabled; event-driven loop is primary")
+            if _bus_on:
+                # Stage 2 websocket rail: event-driven EXITS — a price-bus tick that
+                # breaches a tracked stop/target ticks the session IMMEDIATELY (the
+                # batch above stays as the heartbeat; FOR-UPDATE-nowait makes the
+                # overlap a no-op).
+                try:
+                    from .trading.momentum_neural.live_runner_loop import start_live_runner_loop
+                    start_live_runner_loop()
+                    logger.info("[scheduler] Event-driven LIVE runner loop started (IQFeed/quote-speed ticks)")
+                except Exception as e:
+                    logger.warning("[scheduler] Event-driven LIVE runner loop failed to start: %s", e)
+                try:
+                    from .trading.momentum_neural.tape_ws_recorder import start_tape_ws_recorder
+                    start_tape_ws_recorder()
+                    logger.info("[scheduler] WS tape recorder started (second-scale NBBO for traded names)")
+                except Exception as e:
+                    logger.warning("[scheduler] WS tape recorder failed to start: %s", e)
+                # WS ignition scorer: subscribe the (uncapped) equity universe and
+                # score a name DIRECTLY into viability the instant a tick shows it
+                # igniting — surfaces vertical movers (RGNT-class) the EMA9
+                # continuation gate emits nothing for. Additive; flag-gated.
+                if settings.chili_momentum_ws_ignition_enabled:
+                    try:
+                        from .trading.momentum_neural.ignition_loop import start_ignition_loop
+                        start_ignition_loop()
+                        logger.info("[scheduler] WS ignition scorer started")
+                    except Exception as e:
+                        logger.warning("[scheduler] WS ignition scorer failed to start: %s", e)
+
+            if getattr(settings, "chili_momentum_ross_feed_health_enabled", True):
+                _rfh_secs = max(
+                    15,
+                    int(getattr(settings, "chili_momentum_ross_feed_health_interval_seconds", 30) or 30),
+                )
+                _scheduler.add_job(
+                    _run_ross_feed_health_check_job,
+                    trigger=IntervalTrigger(seconds=_rfh_secs),
+                    id="ross_feed_health_check",
+                    name=f"Ross feed health check (every {_rfh_secs}s; housekeeping only)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=25),
+                )
 
         # Auto-arm-live: autonomously arm the surging Ross candidate (one live
         # session at a time). Only runs when the live runner is also on (no point
         # arming a session nothing will process). Guards live in the arm flow.
         if (
-            include_web_light
+            include_momentum_exec
             and settings.chili_momentum_live_runner_enabled
-            and settings.chili_momentum_live_runner_scheduler_enabled
             and getattr(settings, "chili_momentum_auto_arm_live_enabled", True)
             and getattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True)
+            and getattr(settings, "chili_momentum_auto_arm_live_scheduler_fallback_enabled", False)
         ):
             _aa_secs = max(10, int(getattr(settings, "chili_momentum_auto_arm_live_scheduler_interval_seconds", 30)))
             _scheduler.add_job(
@@ -5783,6 +6898,52 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+
+            # Lane-health FROZEN watch: a tripped safety breaker silently empties the
+            # lane (the 06-15 ~8h frozen-lane incident). Runs at the lane's own cadence
+            # (the auto-arm interval — no new magic number); evaluates against the
+            # adaptive grace window and emits critical+banner+audit row when frozen.
+            # Gated on the same lane-on condition as auto-arm + its own kill-switch flag.
+            if getattr(settings, "chili_lane_health_alert_enabled", True):
+                _scheduler.add_job(
+                    _run_lane_health_check_job,
+                    trigger=IntervalTrigger(seconds=_aa_secs),
+                    id="lane_health_check",
+                    name=f"Lane-health FROZEN watch (every {_aa_secs}s; alerts on a stuck safety breaker)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=55),
+                )
+
+        # NBBO spread tape: persist the clean consolidated bid/ask (Massive snapshot
+        # lastQuote) for the Ross universe each DATA-session cycle, so the spread-sensitive
+        # replay uses REAL spreads (the proxy read PAVS at 53bps vs the 317bps the
+        # lane saw). Independent of live trading (useful in paper/observation too);
+        # data-session prewarm + best-effort live in the sampler. (nbbo_tape.py)
+        if include_momentum_exec and getattr(settings, "chili_momentum_nbbo_tape_enabled", True):
+            _nbbo_secs = max(15, int(getattr(settings, "chili_momentum_nbbo_tape_sample_seconds", 60) or 60))
+            _nbbo_first_delay = _momentum_event_startup_delay_seconds(settings)
+            _scheduler.add_job(
+                _run_nbbo_spread_sample_job,
+                trigger=IntervalTrigger(seconds=_nbbo_secs),
+                id="momentum_nbbo_sample",
+                name=f"NBBO spread tape sampler (every {_nbbo_secs}s, data-session prewarm)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=_nbbo_first_delay),
+            )
+            _scheduler.add_job(
+                _run_nbbo_spread_prune_job,
+                trigger=IntervalTrigger(hours=6),
+                id="momentum_nbbo_prune",
+                name="NBBO spread tape prune (every 6h)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=130),
             )
 
         # Shake-out learning: label closed momentum trades vs their post-exit path

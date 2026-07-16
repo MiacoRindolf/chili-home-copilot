@@ -162,6 +162,174 @@ def test_compute_state_dry_run_then_applied_then_validated(db):
     assert compute_state(db, task, user_id=user.id).state == "validated"
 
 
+def test_compute_state_new_failed_apply_supersedes_old_success(db):
+    user = _user(db)
+    repo = _indexed_repo(db, user)
+    task = _task(db, user, with_profile=True, repo=repo)
+    suggestion = CodingAgentSuggestion(
+        task_id=task.id,
+        user_id=user.id,
+        model="m",
+        response_text="r",
+        diffs_json=json.dumps(["x"]),
+    )
+    db.add(suggestion)
+    db.commit()
+    db.add_all(
+        [
+            CodingAgentSuggestionApply(
+                suggestion_id=suggestion.id,
+                task_id=task.id,
+                user_id=user.id,
+                dry_run=True,
+                status="completed",
+                message="dry ok",
+            ),
+            CodingAgentSuggestionApply(
+                suggestion_id=suggestion.id,
+                task_id=task.id,
+                user_id=user.id,
+                dry_run=False,
+                status="completed",
+                message="old apply ok",
+            ),
+        ]
+    )
+    db.commit()
+    db.add(
+        CodingAgentSuggestionApply(
+            suggestion_id=suggestion.id,
+            task_id=task.id,
+            user_id=user.id,
+            dry_run=False,
+            status="failed",
+            message="new apply failed",
+        )
+    )
+    db.commit()
+
+    snapshot = compute_state(db, task, user_id=user.id)
+
+    assert snapshot.state == "dry_run_passed"
+    assert snapshot.last_real_apply_passed is False
+
+
+def test_compute_state_new_failed_validation_supersedes_old_success(db):
+    user = _user(db)
+    repo = _indexed_repo(db, user)
+    task = _task(db, user, with_profile=True, repo=repo)
+    suggestion = CodingAgentSuggestion(
+        task_id=task.id,
+        user_id=user.id,
+        model="m",
+        response_text="r",
+        diffs_json=json.dumps(["x"]),
+    )
+    db.add(suggestion)
+    db.commit()
+    db.add_all(
+        [
+            CodingAgentSuggestionApply(
+                suggestion_id=suggestion.id,
+                task_id=task.id,
+                user_id=user.id,
+                dry_run=True,
+                status="completed",
+                message="dry ok",
+            ),
+            CodingAgentSuggestionApply(
+                suggestion_id=suggestion.id,
+                task_id=task.id,
+                user_id=user.id,
+                dry_run=False,
+                status="completed",
+                message="apply ok",
+            ),
+        ]
+    )
+    db.commit()
+    db.add(
+        CodingTaskValidationRun(
+            task_id=task.id,
+            trigger_source="post_apply",
+            status="completed",
+            exit_code=0,
+            started_at=datetime.utcnow(),
+            finished_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+    assert compute_state(db, task, user_id=user.id).state == "validated"
+    db.add(
+        CodingTaskValidationRun(
+            task_id=task.id,
+            trigger_source="post_apply",
+            status="completed",
+            exit_code=1,
+            started_at=datetime.utcnow(),
+            finished_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    snapshot = compute_state(db, task, user_id=user.id)
+
+    assert snapshot.state == "applied"
+    assert snapshot.has_completed_validation is False
+
+
+def test_compute_state_new_snapshot_invalidates_old_apply_trajectory(db):
+    user = _user(db)
+    repo = _indexed_repo(db, user)
+    task = _task(db, user, with_profile=True, repo=repo)
+    first = CodingAgentSuggestion(
+        task_id=task.id,
+        user_id=user.id,
+        model="m",
+        response_text="first",
+        diffs_json=json.dumps(["x"]),
+    )
+    db.add(first)
+    db.commit()
+    db.add_all(
+        [
+            CodingAgentSuggestionApply(
+                suggestion_id=first.id,
+                task_id=task.id,
+                user_id=user.id,
+                dry_run=True,
+                status="completed",
+                message="dry ok",
+            ),
+            CodingAgentSuggestionApply(
+                suggestion_id=first.id,
+                task_id=task.id,
+                user_id=user.id,
+                dry_run=False,
+                status="completed",
+                message="apply ok",
+            ),
+        ]
+    )
+    db.commit()
+    db.add(
+        CodingAgentSuggestion(
+            task_id=task.id,
+            user_id=user.id,
+            model="m",
+            response_text="second",
+            diffs_json=json.dumps(["y"]),
+        )
+    )
+    db.commit()
+
+    snapshot = compute_state(db, task, user_id=user.id)
+
+    assert snapshot.state == "snapshot_saved"
+    assert snapshot.last_dry_run_passed is False
+    assert snapshot.last_real_apply_passed is False
+
+
 def test_assert_transition_rejects_apply_before_dry_run(db):
     user = _user(db)
     repo = _indexed_repo(db, user)

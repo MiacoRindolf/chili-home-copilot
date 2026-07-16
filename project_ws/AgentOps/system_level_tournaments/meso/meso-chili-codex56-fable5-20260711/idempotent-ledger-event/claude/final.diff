@@ -1,0 +1,69 @@
+diff --git a/app/model.py b/app/model.py
+index c447c4b..01e5f24 100644
+--- a/app/model.py
++++ b/app/model.py
+@@ -1,5 +1,5 @@
+ from dataclasses import dataclass
+-from decimal import Decimal
++from decimal import Decimal, InvalidOperation
+ from typing import Any, Mapping
+ 
+ 
+@@ -11,8 +11,14 @@ class Event:
+ 
+     @classmethod
+     def from_payload(cls, payload: Mapping[str, Any]) -> "Event":
+-        return cls(
+-            event_id=str(payload.get("event_id", "")),
+-            account_id=str(payload.get("account_id", "")),
+-            amount=Decimal(payload.get("amount", 0)),
+-        )
++        event_id = str(payload.get("event_id", "")).strip()
++        account_id = str(payload.get("account_id", "")).strip()
++        if not event_id or not account_id:
++            raise ValueError("invalid event")
++        try:
++            amount = Decimal(str(payload.get("amount")))
++        except (InvalidOperation, ValueError):
++            raise ValueError("invalid event") from None
++        if not amount.is_finite() or amount <= 0:
++            raise ValueError("invalid event")
++        return cls(event_id=event_id, account_id=account_id, amount=amount)
+diff --git a/app/service.py b/app/service.py
+index ad26e4a..ffc5099 100644
+--- a/app/service.py
++++ b/app/service.py
+@@ -6,5 +6,11 @@ from app.store import LedgerStore
+ 
+ def record_event(payload: Mapping[str, Any], store: LedgerStore) -> dict[str, Any]:
+     event = Event.from_payload(payload)
+-    store.add_once(event)
+-    return {"balance": str(store.balance(event.account_id))}
++    accepted = store.add_once(event)
++    balance = store.balance(event.account_id)
++    return {
++        "accepted": accepted,
++        "event_id": event.event_id,
++        "account_id": event.account_id,
++        "balance": f"{balance:.2f}",
++    }
+diff --git a/app/store.py b/app/store.py
+index dbc2c57..b2e82cb 100644
+--- a/app/store.py
++++ b/app/store.py
+@@ -8,8 +8,14 @@ class LedgerStore:
+         self.events: list[Event] = []
+ 
+     def add_once(self, event: Event) -> bool:
++        key = (event.account_id, event.event_id)
++        if any((e.account_id, e.event_id) == key for e in self.events):
++            return False
+         self.events.append(event)
+         return True
+ 
+     def balance(self, account_id: str) -> Decimal:
+-        return sum((event.amount for event in self.events), Decimal("0"))
++        return sum(
++            (event.amount for event in self.events if event.account_id == account_id),
++            Decimal("0"),
++        )

@@ -20,12 +20,14 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ....config import settings
-from ....models.trading import MomentumSymbolViability, TradingAutomationSession
+from ....models.trading import MomentumSymbolViability, TradingAutomationEvent, TradingAutomationSession
 from .live_fsm import (
     LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
+    LIVE_WATCHING_PREFILL_STATES,
     STATE_ARMED_PENDING_RUNNER,
     STATE_QUEUED_LIVE,
     STATE_WATCHING_LIVE,
@@ -38,6 +40,9 @@ logger = logging.getLogger(__name__)
 _REAPABLE_PRE_ENTRY_STATES = frozenset(
     {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE}
 )
+
+_AGENTIC_NON_TRADEABLE_SYMBOLS: set[str] = set()
+_ENTRY_REJECT_COOLDOWNS: dict[str, dict[str, Any]] = {}
 
 
 def _auto_arm_user_id() -> int | None:
@@ -79,6 +84,15 @@ def _auto_arm_equity_only() -> bool:
     return bool(getattr(settings, "chili_momentum_auto_arm_equity_only", False))
 
 
+def _ross_equity_universe_required() -> bool:
+    """Bare equity candidates must stay inside the Ross small-cap universe.
+
+    This is the equity instrument-class boundary. It is intentionally separate
+    from ``auto_arm_equity_only``, which is only a venue/lane focus toggle.
+    """
+    return bool(getattr(settings, "chili_momentum_ross_equity_universe_required", True))
+
+
 def _lane_execution_family() -> str:
     """The venue whose ACCOUNT EQUITY the lane's equity-relative caps should scale against.
     crypto-only -> Coinbase; else (equity-only or mixed) -> Robinhood (the equity lane).
@@ -87,10 +101,12 @@ def _lane_execution_family() -> str:
     equities account. docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]"""
     from ..execution_family_registry import (
         EXECUTION_FAMILY_COINBASE_SPOT,
-        EXECUTION_FAMILY_ROBINHOOD_SPOT,
+        EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
     )
 
-    return EXECUTION_FAMILY_COINBASE_SPOT if _auto_arm_crypto_only() else EXECUTION_FAMILY_ROBINHOOD_SPOT
+    if _auto_arm_crypto_only():
+        return EXECUTION_FAMILY_COINBASE_SPOT
+    return EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
 
 
 def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
@@ -101,13 +117,96 @@ def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
     return "-USD" in str(symbol or "").upper()
 
 
+def is_agentic_unauthorized_reject(reason: str | None) -> bool:
+    """Detect RH Agentic per-symbol/auth rejects from broker text."""
+    txt = str(reason or "").lower()
+    if not txt:
+        return False
+    needles = (
+        "unauthorized",
+        "not authorized",
+        "forbidden",
+        "not available for agentic",
+        "unavailable for agentic",
+        "not tradeable",
+        "non-tradeable",
+        "not tradable",
+    )
+    return any(n in txt for n in needles)
+
+
+def _record_agentic_non_tradeable(symbol: str | None) -> None:
+    sym = str(symbol or "").upper().strip()
+    if sym:
+        _AGENTIC_NON_TRADEABLE_SYMBOLS.add(sym)
+
+
+def _write_entry_reject_cooldown(symbol: str | None, *, reason: str | None = None) -> None:
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return
+    _ENTRY_REJECT_COOLDOWNS[sym] = {
+        "reason": str(reason or ""),
+        "ts": datetime.utcnow().isoformat() + "Z",
+    }
+    if is_agentic_unauthorized_reject(reason):
+        _record_agentic_non_tradeable(sym)
+
+
+def known_24h_eligible_symbols() -> set[str]:
+    """Best-effort positive 24h whitelist; empty means no explicit cache available."""
+    raw = getattr(settings, "chili_momentum_24h_eligible_symbols", "") or ""
+    if isinstance(raw, (list, tuple, set)):
+        return {str(s).upper().strip() for s in raw if str(s).strip()}
+    return {s.strip().upper() for s in str(raw).replace(";", ",").split(",") if s.strip()}
+
+
+def _is_24h_eligible(symbol: str | None) -> bool:
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return False
+    wl = known_24h_eligible_symbols()
+    if wl:
+        return sym in wl
+    return "-USD" in sym
+
+
+def win_cycle_yellow_size_multiplier(db: Session | None = None, *, execution_family: str | None = None) -> tuple[float, dict]:
+    return 1.0, {"reason": "win_cycle_neutral", "execution_family": execution_family}
+
+
+def per_symbol_fatigue_size_multiplier(
+    db: Session | None,
+    symbol: str | None,
+    *,
+    execution_family: str | None = None,
+) -> tuple[float, dict]:
+    sym = str(symbol or "").upper().strip()
+    if sym and sym in _AGENTIC_NON_TRADEABLE_SYMBOLS:
+        return 1.0, {"reason": "agentic_non_tradeable_recorded", "symbol": sym}
+    return 1.0, {"reason": "per_symbol_fatigue_neutral", "symbol": sym, "execution_family": execution_family}
+
+
+def hot_cold_tape_size_multiplier(*, atr_pct: float | None = None, rvol: float | None = None) -> tuple[float, dict]:
+    return 1.0, {"reason": "hot_cold_neutral", "atr_pct": atr_pct, "rvol": rvol}
+
+
+def prime_window_size_multiplier() -> tuple[float, dict]:
+    return 1.0, {"reason": "prime_window_neutral"}
+
+
 def _symbol_market_open(symbol: str) -> bool:
     """True if the symbol can be entered NOW. Crypto is 24/7; equities only during
     US regular hours (9:30-16:00 ET) — never arm a stock that can't fill."""
     try:
         from .market_profile import market_open_now
 
-        return bool(market_open_now(symbol))
+        return bool(
+            market_open_now(
+                symbol,
+                allow_extended_hours=bool(getattr(settings, "chili_autotrader_allow_extended_hours", False)),
+            )
+        )
     except Exception:
         # Fail safe: crypto (-USD) is always tradeable; if unsure on an equity, skip.
         return "-USD" in str(symbol or "").upper()
@@ -115,6 +214,71 @@ def _symbol_market_open(symbol: str) -> bool:
 
 def _max_watch_seconds() -> int:
     return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
+
+
+def _broker_failure_cooldown_seconds() -> float:
+    try:
+        return max(
+            0.0,
+            float(
+                getattr(
+                    settings,
+                    "chili_momentum_auto_arm_broker_failure_cooldown_seconds",
+                    600.0,
+                )
+                or 0.0
+            ),
+        )
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def _recent_broker_order_submit_failure(
+    db: Session,
+    *,
+    user_id: int | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Fresh broker submit failures mean the rail cannot be trusted for new risk.
+
+    Existing live sessions must keep retrying exits, but auto-arm should not add
+    exposure while the same execution family is failing order submissions.
+    """
+    window = _broker_failure_cooldown_seconds()
+    if window <= 0:
+        return None
+    try:
+        q = (
+            db.query(TradingAutomationEvent, TradingAutomationSession)
+            .join(
+                TradingAutomationSession,
+                TradingAutomationSession.id == TradingAutomationEvent.session_id,
+            )
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.execution_family == _lane_execution_family(),
+                TradingAutomationEvent.event_type.in_(
+                    ("live_exit_submit_failed", "live_entry_submit_failed")
+                ),
+                TradingAutomationEvent.ts >= now - timedelta(seconds=window),
+            )
+        )
+        if user_id is not None:
+            q = q.filter(TradingAutomationSession.user_id == int(user_id))
+        row = q.order_by(TradingAutomationEvent.ts.desc()).first()
+        if not row:
+            return None
+        ev, sess = row
+        return {
+            "event_type": ev.event_type,
+            "ts": ev.ts.isoformat() if getattr(ev, "ts", None) else None,
+            "session_id": getattr(sess, "id", None),
+            "symbol": getattr(sess, "symbol", None),
+            "window_seconds": window,
+        }
+    except Exception:
+        logger.debug("[auto_arm] broker failure cooldown read failed", exc_info=True)
+        return None
 
 
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
@@ -154,7 +318,22 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
 
 
 def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
-    """Live sessions occupying a concurrency slot (any symbol) for the user."""
+    """Live entries occupying real risk capacity for the user."""
+    if bool(getattr(settings, "chili_momentum_decouple_watching_enabled", False)):
+        try:
+            from .risk_evaluator import count_inflight_entry_orders, count_open_positions
+
+            uid_filter = int(user_id) if user_id is not None else None
+            if uid_filter is None:
+                return 0
+            return int(
+                count_open_positions(db, user_id=uid_filter, mode="live")
+                + count_inflight_entry_orders(db, user_id=uid_filter)
+            )
+        except Exception:
+            return 0
+
+    # Legacy all-session concurrency slot.
     q = db.query(TradingAutomationSession).filter(
         TradingAutomationSession.mode == "live",
         TradingAutomationSession.state.in_(LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY),
@@ -162,6 +341,41 @@ def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     if user_id is not None:
         q = q.filter(TradingAutomationSession.user_id == int(user_id))
     return int(q.count())
+
+
+def _active_prefill_watch_count(db: Session, *, user_id: int | None) -> int:
+    """Non-expired $0-risk pre-fill watchers governed by watch fanout."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state.in_(LIVE_WATCHING_PREFILL_STATES),
+    )
+    if user_id is not None:
+        q = q.filter(TradingAutomationSession.user_id == int(user_id))
+    try:
+        from .risk_evaluator import _live_session_counts_for_concurrency, _naive_utc
+
+        now = _naive_utc(datetime.utcnow())
+        return int(
+            sum(
+                1
+                for sess in q.all()
+                if _live_session_counts_for_concurrency(sess, now=now)
+            )
+        )
+    except Exception:
+        return int(q.count())
+
+
+def _watch_fanout_cap(field_size: int | None = None) -> int:
+    try:
+        from .risk_policy import adaptive_watch_fanout
+
+        return int(adaptive_watch_fanout(field_size))
+    except Exception:
+        try:
+            return max(1, int(getattr(settings, "chili_momentum_watch_fanout_max", 25) or 25))
+        except Exception:
+            return 25
 
 
 def _symbols_with_active_live_session(db: Session, *, user_id: int | None) -> set[str]:
@@ -210,7 +424,12 @@ def _dedupe_by_symbol(rows: list[Any], *, limit: int) -> list[Any]:
     return out
 
 
-def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[MomentumSymbolViability]:
+def _fresh_live_eligible_candidates(
+    db: Session,
+    *,
+    limit: int,
+    ross_universe_symbols: set[str] | None = None,
+) -> list[MomentumSymbolViability]:
     """Top live-eligible candidates (distinct symbols) fresh within the LIVE risk
     gate (600s).
 
@@ -230,16 +449,108 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
         # Exclude equities (ARKK, CLSK...) that go live-eligible at US market open —
         # the coinbase_spot lane cannot trade them. Crypto pairs carry "-USD".
         q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
-    elif _auto_arm_equity_only():
+    elif _auto_arm_equity_only() or _ross_equity_universe_required():
         # Equity-only focus (Ross lane): exclude crypto ("-USD") pairs so the lane trades
         # stocks only — crypto pre-entry watchers were consuming concurrency + adding noise.
-        q = q.filter(~MomentumSymbolViability.symbol.like("%-USD%"))
+        if ross_universe_symbols is None:
+            ross_universe_symbols = _ross_universe_symbols_from_snapshot_rows(
+                _ross_snapshot_rows_by_symbol()
+            )
+        if not ross_universe_symbols:
+            logger.warning(
+                "[auto_arm] Ross equity universe empty; refusing generic broad-equity fallback"
+            )
+            return []
+        if _auto_arm_equity_only():
+            q = q.filter(~MomentumSymbolViability.symbol.like("%-USD%"))
+            q = q.filter(MomentumSymbolViability.symbol.in_(sorted(ross_universe_symbols)))
+        else:
+            q = q.filter(
+                or_(
+                    MomentumSymbolViability.symbol.like("%-USD%"),
+                    MomentumSymbolViability.symbol.in_(sorted(ross_universe_symbols)),
+                )
+            )
+    row_limit = max(int(limit) * 25, 200)
+    if ross_universe_symbols:
+        # The board stores multiple variants per symbol; fetch enough rows that
+        # de-duping cannot starve valid Ross names behind one hot symbol's variants.
+        row_limit = max(row_limit, min(len(ross_universe_symbols) * 12, 5000))
     rows = (
         q.order_by(MomentumSymbolViability.viability_score.desc())
-        .limit(max(int(limit) * 25, 200))
+        .limit(row_limit)
         .all()
     )
     return _dedupe_by_symbol(rows, limit=int(limit))
+
+
+def _demote_non_ross_live_eligible_rows(
+    db: Session,
+    *,
+    ross_universe_symbols: set[str],
+) -> dict[str, Any]:
+    """Keep the live-eligible board itself aligned with the Ross equity lane.
+
+    Final live admission already has a hard Ross universe guard, but leaving
+    generic broad-equity or crypto rows marked ``live_eligible=True`` lets the
+    selector/audit surface drift away from Ross. In equity-only Ross mode, fresh
+    live-eligible rows outside the current Ross universe are not live candidates.
+    """
+    equity_only = _auto_arm_equity_only()
+    ross_required = _ross_equity_universe_required()
+    if not equity_only and not ross_required:
+        return {"demoted": 0}
+    max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+    cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+    rows = (
+        db.query(MomentumSymbolViability)
+        .filter(
+            MomentumSymbolViability.live_eligible.is_(True),
+            or_(
+                MomentumSymbolViability.scope == "symbol",
+                MomentumSymbolViability.scope == "equity",
+                MomentumSymbolViability.scope.is_(None),
+            ),
+            MomentumSymbolViability.freshness_ts >= cutoff,
+        )
+        .limit(5000)
+        .all()
+    )
+    allowed = {str(s or "").strip().upper() for s in ross_universe_symbols or set()}
+    demoted = 0
+    by_reason: dict[str, int] = {}
+    for row in rows:
+        sym = str(getattr(row, "symbol", "") or "").strip().upper()
+        if not sym:
+            continue
+        reason = None
+        if _is_coinbase_tradeable_symbol(sym):
+            if not equity_only:
+                continue
+            reason = "crypto_disabled_equity_lane"
+        elif allowed and sym not in allowed:
+            reason = "outside_ross_equity_universe"
+        if reason is None:
+            continue
+        row.live_eligible = False
+        try:
+            ex = row.explain_json if isinstance(row.explain_json, dict) else {}
+            ex = dict(ex)
+            ex["live_eligible_demoted_by"] = "ross_equity_universe_selector"
+            ex["live_eligible_demoted_reason"] = reason
+            ex["live_eligible_demoted_at_utc"] = datetime.utcnow().isoformat() + "Z"
+            row.explain_json = ex
+        except Exception:
+            pass
+        demoted += 1
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    if demoted:
+        logger.warning(
+            "[auto_arm] demoted stale/non-Ross live_eligible rows demoted=%s reasons=%s",
+            demoted,
+            by_reason,
+        )
+    return {"demoted": demoted, "reasons": by_reason}
 
 
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
@@ -267,7 +578,11 @@ def _entry_trigger_fires(symbol: str) -> tuple[bool, str]:
         if mode in ("hybrid", "pullback_break"):
             df_pb = fetch_ohlcv_df(symbol, interval=interval, period="5d")
             if df_pb is not None and not getattr(df_pb, "empty", True):
-                ok, reason, _ = pullback_break_confirmation(df_pb, entry_interval=interval)
+                ok, reason, _ = pullback_break_confirmation(
+                    df_pb,
+                    entry_interval=interval,
+                    symbol=symbol,
+                )
                 if ok:
                     return True, reason
                 if mode == "pullback_break":
@@ -324,6 +639,112 @@ def _probe_candidate(symbol: str) -> tuple[bool, str, Any]:
     """One network-bound pass per candidate: (trigger fires?, reason, freshness)."""
     fires, reason = _entry_trigger_fires(symbol)
     return fires, reason, _candidate_freshness(symbol)
+
+
+def _candidate_tick_scalp_watch_reason(candidate: MomentumSymbolViability) -> str | None:
+    """Fast non-network auto-arm reason for Ross/5-Pillars tick-scalp candidates."""
+    ok, reason, _ = _candidate_ross_tick_evidence(candidate)
+    return reason if ok else None
+
+
+def _candidate_ross_tick_evidence(candidate: MomentumSymbolViability) -> tuple[bool, str, dict[str, Any]]:
+    """Ross/5-Pillars evidence check for an equity auto-arm candidate."""
+    try:
+        from .tick_scalp import ross_signal_for_symbol, ross_tick_scalp_evidence_ok
+
+        signal = ross_signal_for_symbol(candidate.execution_readiness_json, candidate.symbol)
+        ok, reason, debug = ross_tick_scalp_evidence_ok(signal)
+        return bool(ok), str(reason or ""), dict(debug or {})
+    except Exception as exc:
+        return False, "ross_evidence_error", {"error": str(exc)[:160]}
+
+
+def _ross_snapshot_rows_by_symbol() -> dict[str, dict]:
+    """Current full-market snapshot keyed by ticker for Ross equity universe proof."""
+    try:
+        from ...massive_client import get_full_market_snapshot
+        from .universe import EQUITY_ROSS_SMALLCAP
+
+        snapshot = get_full_market_snapshot(
+            max_age_seconds=EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds
+        ) or []
+    except Exception:
+        logger.debug("[auto_arm] ross snapshot fetch failed", exc_info=True)
+        return {}
+    out: dict[str, dict] = {}
+    for row in snapshot:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if ticker:
+            out[ticker] = row
+    return out
+
+
+def _ross_universe_symbols_from_snapshot_rows(rows_by_symbol: dict[str, dict]) -> set[str]:
+    """Resolve the current Ross equity universe from snapshot rows.
+
+    This is the selector-source guard: the Ross lane must query candidates from
+    low-priced, liquid, up-moving equities first, not from the generic viability
+    board and only filter later.
+    """
+    if not rows_by_symbol:
+        return set()
+    try:
+        from .universe import ross_smallcap_profile_evidence
+    except Exception:
+        logger.debug("[auto_arm] ross universe helper unavailable", exc_info=True)
+        return set()
+    out: set[str] = set()
+    for symbol, row in rows_by_symbol.items():
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            continue
+        ok, _reason, _debug = ross_smallcap_profile_evidence(sym, snapshot_row=row)
+        if ok:
+            out.add(sym)
+    return out
+
+
+def _candidate_ross_universe_evidence(
+    candidate: MomentumSymbolViability,
+    *,
+    snapshot_row: dict | None = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross equity lane instrument-class check."""
+    try:
+        from .tick_scalp import ross_signal_for_symbol
+        from .universe import ross_smallcap_profile_evidence
+
+        signal = ross_signal_for_symbol(candidate.execution_readiness_json, candidate.symbol)
+        ok, reason, debug = ross_smallcap_profile_evidence(
+            candidate.symbol,
+            signal=signal,
+            snapshot_row=snapshot_row,
+        )
+        return bool(ok), str(reason or ""), dict(debug or {})
+    except Exception as exc:
+        return False, "ross_universe_evidence_error", {"error": str(exc)[:160]}
+
+
+def _candidate_recent_pre_submit_terminal(
+    db: Session,
+    symbol: str,
+    *,
+    user_id: int | None,
+) -> tuple[bool, dict[str, Any]]:
+    """Mirror Ross event admission's no-order terminal cooldown for auto-arm."""
+    try:
+        from .ross_event_admission import _recent_pre_submit_terminal_block
+
+        return _recent_pre_submit_terminal_block(
+            db,
+            str(symbol or "").strip().upper(),
+            user_id=user_id,
+        )
+    except Exception:
+        logger.debug("[auto_arm] recent terminal block check failed symbol=%s", symbol, exc_info=True)
+        return False, {}
 
 
 def _known_fresh(fresh: Any) -> bool:
@@ -439,6 +860,17 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 6: broker order rail health. If exits/entries are currently failing
+    # at submit time, keep the live runner focused on managing/retrying existing
+    # positions and do not add new exposure until the rail has been quiet.
+    _broker_fail = _recent_broker_order_submit_failure(
+        db, user_id=int(uid), now=datetime.utcnow()
+    )
+    if _broker_fail:
+        out["skipped"] = "broker_order_rail_unhealthy"
+        out["broker_failure"] = _broker_fail
+        return out
+
     # Clear expired pending arms so they do not pin a concurrency slot.
     try:
         from .automation_query import expire_stale_live_arm_sessions
@@ -447,16 +879,51 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
-    candidates = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+    _ross_snapshot_rows: dict[str, dict] = {}
+    _ross_universe_symbols: set[str] = set()
+    ross_required = _ross_equity_universe_required()
+    if _auto_arm_equity_only() or ross_required:
+        _ross_snapshot_rows = _ross_snapshot_rows_by_symbol()
+        _ross_universe_symbols = _ross_universe_symbols_from_snapshot_rows(_ross_snapshot_rows)
+        out["ross_snapshot_symbols"] = len(_ross_snapshot_rows)
+        out["ross_universe_symbols"] = len(_ross_universe_symbols)
+        if _ross_universe_symbols:
+            demote_summary = _demote_non_ross_live_eligible_rows(
+                db,
+                ross_universe_symbols=_ross_universe_symbols,
+            )
+            out["live_eligible_demoted"] = demote_summary.get("demoted", 0)
+            if demote_summary.get("reasons"):
+                out["live_eligible_demoted_reasons"] = demote_summary.get("reasons")
+
+    candidates = _fresh_live_eligible_candidates(
+        db,
+        limit=_scan_limit(),
+        ross_universe_symbols=_ross_universe_symbols if (_auto_arm_equity_only() or ross_required) else None,
+    )
     out["scanned"] = len(candidates)
     if not candidates:
         out["skipped"] = "no_fresh_live_eligible"
         return out
 
+    if bool(getattr(settings, "chili_momentum_decouple_watching_enabled", False)):
+        watching = _active_prefill_watch_count(db, user_id=uid)
+        fanout_cap = _watch_fanout_cap(len(candidates))
+        out["watching"] = watching
+        out["watch_fanout_cap"] = fanout_cap
+        if watching >= fanout_cap:
+            out["skipped"] = "watch_fanout_active"
+            return out
+
     # Cheap pre-filter (no network): venue, market hours, per-symbol mutex,
     # and self-collision (a symbol we already hold an active live session for).
     busy_symbols = _symbols_with_active_live_session(db, user_id=uid)
     out["busy_skipped"] = 0
+    out["ross_universe_skipped"] = 0
+    out["ross_evidence_skipped"] = 0
+    out["recent_terminal_skipped"] = 0
+    _ross_universe_skip_reasons: dict[str, int] = {}
+    _ross_evidence_skip_reasons: dict[str, int] = {}
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
@@ -464,14 +931,59 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             continue  # defensive: never arm an equity via the coinbase_spot lane
         if _auto_arm_equity_only() and _is_coinbase_tradeable_symbol(c.symbol):
             continue  # equity-only focus: never arm crypto in the Ross lane
+        if (_auto_arm_equity_only() or ross_required) and not _is_coinbase_tradeable_symbol(c.symbol):
+            _ross_universe_ok, _ross_universe_reason, _ross_universe_debug = (
+                _candidate_ross_universe_evidence(
+                    c,
+                    snapshot_row=_ross_snapshot_rows.get(str(c.symbol or "").strip().upper()),
+                )
+            )
+            if not _ross_universe_ok:
+                out["ross_universe_skipped"] += 1
+                _ross_universe_skip_reasons[_ross_universe_reason] = (
+                    _ross_universe_skip_reasons.get(_ross_universe_reason, 0) + 1
+                )
+                logger.info(
+                    "[auto_arm] skip %s: ross universe rejected (%s) %s",
+                    c.symbol, _ross_universe_reason, _ross_universe_debug,
+                )
+                continue
+            _ross_ok, _ross_reason, _ross_debug = _candidate_ross_tick_evidence(c)
+            if not _ross_ok:
+                out["ross_evidence_skipped"] += 1
+                _ross_evidence_skip_reasons[_ross_reason] = (
+                    _ross_evidence_skip_reasons.get(_ross_reason, 0) + 1
+                )
+                logger.info(
+                    "[auto_arm] skip %s: ross evidence rejected (%s) %s",
+                    c.symbol, _ross_reason, _ross_debug,
+                )
+                continue
+            _recent_terminal, _terminal_detail = _candidate_recent_pre_submit_terminal(
+                db,
+                c.symbol,
+                user_id=int(uid),
+            )
+            if _recent_terminal:
+                out["recent_terminal_skipped"] += 1
+                logger.info(
+                    "[auto_arm] skip %s: recent pre-submit terminal %s",
+                    c.symbol,
+                    _terminal_detail,
+                )
+                continue
         if c.symbol.upper() in busy_symbols:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup
         if not _symbol_market_open(c.symbol):
-            continue  # equities only during RTH; crypto always passes (24/7)
+            continue  # equities follow RTH/extended-hours setting; crypto always passes
         if not _symbol_free(db, c.symbol, uid):
             continue
         eligible.append(c)
+    if _ross_universe_skip_reasons:
+        out["ross_universe_skip_reasons"] = _ross_universe_skip_reasons
+    if _ross_evidence_skip_reasons:
+        out["ross_evidence_skip_reasons"] = _ross_evidence_skip_reasons
 
     # Probe entry trigger + intraday-impulse freshness CONCURRENTLY. Each probe fetches
     # OHLCV (network-bound), so checking serially made a pass take ~40s — past the 30s
@@ -481,46 +993,53 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     chosen_reason: str | None = None
     out["faded_skipped"] = 0
     if eligible:
-        import concurrent.futures
-
-        _workers = min(
-            len(eligible),
-            max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
-        )
-        _budget = _probe_time_budget()
         _results: dict[str, tuple[bool, str, Any]] = {}
-        _ex = concurrent.futures.ThreadPoolExecutor(max_workers=_workers)
-        try:
-            _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in eligible}
-            # Bound the whole wave by wall-clock so a WIDE candidate net never pushes a pass
-            # past the scheduler cadence: arm from whatever COMPLETED within the budget;
-            # un-probed names defer to the next tick. This is what lets a fresh #11+ name
-            # (NPT) get probed at all without the old top-10 truncation, while the pass still
-            # returns in time.
-            try:
-                for _fut in concurrent.futures.as_completed(_futs, timeout=_budget):
-                    _sym = _futs[_fut]
-                    try:
-                        _results[_sym] = _fut.result()
-                    except Exception:
-                        _results[_sym] = (False, "trigger_error", None)
-            except concurrent.futures.TimeoutError:
-                out["probe_timed_out"] = True
-        except Exception:
-            # Pool failure -> serial fallback (also budget-bounded).
-            import time as _time
+        for c in eligible:
+            fast_reason = _candidate_tick_scalp_watch_reason(c)
+            if fast_reason:
+                _results[c.symbol] = (True, fast_reason, None)
+        _probe_candidates = [c for c in eligible if c.symbol not in _results]
 
-            _deadline = _time.monotonic() + _budget
-            for c in eligible:
-                if _time.monotonic() >= _deadline:
-                    break
-                if c.symbol not in _results:
-                    _results[c.symbol] = _probe_candidate(c.symbol)
-        finally:
-            # Never block the pass on stragglers: cancel queued probes and DON'T wait on the
-            # running ones (they finish in background threads and are discarded). This is what
-            # makes the budget a real wall-clock bound, not just a collection timeout.
-            _ex.shutdown(wait=False, cancel_futures=True)
+        if _probe_candidates:
+            import concurrent.futures
+
+            _workers = min(
+                len(_probe_candidates),
+                max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
+            )
+            _budget = _probe_time_budget()
+            _ex = concurrent.futures.ThreadPoolExecutor(max_workers=_workers)
+            try:
+                _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in _probe_candidates}
+                # Bound the whole wave by wall-clock so a WIDE candidate net never pushes a pass
+                # past the scheduler cadence: arm from whatever COMPLETED within the budget;
+                # un-probed names defer to the next tick. This is what lets a fresh #11+ name
+                # (NPT) get probed at all without the old top-10 truncation, while the pass still
+                # returns in time.
+                try:
+                    for _fut in concurrent.futures.as_completed(_futs, timeout=_budget):
+                        _sym = _futs[_fut]
+                        try:
+                            _results[_sym] = _fut.result()
+                        except Exception:
+                            _results[_sym] = (False, "trigger_error", None)
+                except concurrent.futures.TimeoutError:
+                    out["probe_timed_out"] = True
+            except Exception:
+                # Pool failure -> serial fallback (also budget-bounded).
+                import time as _time
+
+                _deadline = _time.monotonic() + _budget
+                for c in _probe_candidates:
+                    if _time.monotonic() >= _deadline:
+                        break
+                    if c.symbol not in _results:
+                        _results[c.symbol] = _probe_candidate(c.symbol)
+            finally:
+                # Never block the pass on stragglers: cancel queued probes and DON'T wait on the
+                # running ones (they finish in background threads and are discarded). This is what
+                # makes the budget a real wall-clock bound, not just a collection timeout.
+                _ex.shutdown(wait=False, cancel_futures=True)
         out["probed"] = len(_results)
         out["eligible_probed_of"] = len(eligible)
 
@@ -574,10 +1093,16 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
-    from ..execution_family_registry import resolve_execution_family_for_symbol
+    from ..execution_family_registry import (
+        EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+        resolve_execution_family_for_symbol,
+    )
     from .operator_actions import begin_live_arm, confirm_live_arm
 
-    _exec_family = resolve_execution_family_for_symbol(chosen.symbol)
+    if _auto_arm_equity_only() and not _is_coinbase_tradeable_symbol(chosen.symbol):
+        _exec_family = EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+    else:
+        _exec_family = resolve_execution_family_for_symbol(chosen.symbol)
     out["symbol"] = chosen.symbol
     out["execution_family"] = _exec_family
     out["viability_score"] = round(float(chosen.viability_score or 0.0), 4)

@@ -11,7 +11,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Sequence
 
 from ...config import settings
 from .envelope import subprocess_safe_env, truncate_text
@@ -45,6 +45,7 @@ class StepResult:
     stderr: str
     skipped: bool
     skip_reason: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 def _timeout() -> float:
@@ -113,29 +114,57 @@ def _pytest_safe_database_skip(step_key: str, timed_out: bool, stdout: str, stde
     )
 
 
-def run_ast_syntax(cwd: Path) -> StepResult:
-    """Read-only: parse .py files under cwd (bounded count)."""
+def run_ast_syntax(cwd: Path, changed_files: Sequence[str] | None = None) -> StepResult:
+    """Read-only: parse changed Python files, or a bounded repo fallback."""
+    root = cwd.resolve()
     py_files: list[Path] = []
-    for p in cwd.rglob("*.py"):
-        if "__pycache__" in p.parts or ".venv" in p.parts or "venv" in p.parts:
-            continue
-        py_files.append(p)
-        if len(py_files) >= _MAX_PY_FILES:
-            break
+    ignored_files: list[str] = []
+    if changed_files is not None:
+        for raw_path in changed_files:
+            rel = str(raw_path or "").replace("\\", "/").strip()
+            if not rel.endswith(".py"):
+                if rel:
+                    ignored_files.append(rel)
+                continue
+            candidate = (root / rel).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                ignored_files.append(rel)
+                continue
+            if not candidate.is_file():
+                ignored_files.append(rel)
+                continue
+            if candidate not in py_files:
+                py_files.append(candidate)
+            if len(py_files) >= _MAX_PY_FILES:
+                break
+    else:
+        for p in root.rglob("*.py"):
+            if "__pycache__" in p.parts or ".venv" in p.parts or "venv" in p.parts:
+                continue
+            py_files.append(p)
+            if len(py_files) >= _MAX_PY_FILES:
+                break
     buf: list[str] = []
     errors = 0
     for fp in py_files:
         try:
             src = fp.read_text(encoding="utf-8", errors="replace")
             ast.parse(src, filename=str(fp))
-            buf.append(f"ok {fp.relative_to(cwd)}")
+            buf.append(f"ok {fp.relative_to(root)}")
         except SyntaxError as e:
             errors += 1
-            buf.append(f"SyntaxError {fp.relative_to(cwd)}: {e}")
+            buf.append(f"SyntaxError {fp.relative_to(root)}: {e}")
         except OSError as e:
             errors += 1
-            buf.append(f"os_error {fp.relative_to(cwd)}: {e}")
-    out = "\n".join(buf) if buf else "(no .py files under cwd)"
+            buf.append(f"os_error {fp.relative_to(root)}: {e}")
+    if buf:
+        out = "\n".join(buf)
+    elif changed_files is not None:
+        out = "(no changed .py files to parse)"
+    else:
+        out = "(no .py files under cwd)"
     code = 1 if errors else 0
     full, blen = truncate_text(out + (f"\n{errors} file(s) with syntax errors" if errors else ""))
     return StepResult(
@@ -146,6 +175,12 @@ def run_ast_syntax(cwd: Path) -> StepResult:
         "",
         False,
         None,
+        {
+            "validation_scope": "changed_python_files" if changed_files is not None else "bounded_repository",
+            "changed_files": [str(value).replace("\\", "/") for value in (changed_files or [])],
+            "parsed_python_files": [str(path.relative_to(root)).replace("\\", "/") for path in py_files],
+            "ignored_files": ignored_files,
+        },
     )
 
 
@@ -237,6 +272,17 @@ def _infer_test_files(cwd: Path, changed_files: list[str]) -> list[str]:
     if not tests_dir.is_dir():
         return []
     for src in changed_files:
+        source_path = Path(src)
+        if source_path.name.startswith("test_") and "tests" in source_path.parts:
+            direct = (cwd / source_path).resolve()
+            try:
+                direct.relative_to(cwd.resolve())
+            except ValueError:
+                direct = Path()
+            if direct.is_file():
+                rel = str(direct.relative_to(cwd.resolve())).replace("\\", "/")
+                if rel not in candidates:
+                    candidates.append(rel)
         stem = Path(src).stem  # e.g. "auth"
         for tp in tests_dir.rglob(f"test_{stem}*.py"):
             rel = str(tp.relative_to(cwd)).replace("\\", "/")
@@ -281,15 +327,41 @@ def run_pytest_targeted(cwd: Path, changed_files: list[str] | None = None) -> St
             "-o", f"cache_dir={pc}",
         ]
 
+    metadata = {
+        "command": " ".join(str(part) for part in argv),
+        "targeted": bool(test_files),
+        "fallback_collect_only": not bool(test_files),
+        "validation_scope": "targeted_tests" if test_files else "collect_only",
+        "test_files": test_files,
+        "test_selection": [
+            {
+                "test_file": test_file,
+                "reason": "matched the changed source filename",
+            }
+            for test_file in test_files
+        ],
+    }
+
     code, to, out, err = _run_subprocess_allowlisted(argv, cwd, timeout=300)
     if code == 127 or (code == 1 and "No module named pytest" in (err or "")):
-        return StepResult("pytest_targeted", 0, to, out or "", err or "", True, "pytest not available")
+        return StepResult(
+            "pytest_targeted",
+            0,
+            to,
+            out or "",
+            err or "",
+            True,
+            "pytest not available",
+            metadata,
+        )
     if _pytest_safe_database_guard_triggered(out, err):
-        return _pytest_safe_database_skip("pytest_targeted", to, out, err)
+        result = _pytest_safe_database_skip("pytest_targeted", to, out, err)
+        result.metadata = metadata
+        return result
     out_t, _ = truncate_text(out or "")
     err_t, _ = truncate_text(err or "")
     ok = code in (0, 5)  # 5 = no tests collected
-    return StepResult("pytest_targeted", 0 if ok else code, to, out_t, err_t, False, None)
+    return StepResult("pytest_targeted", 0 if ok else code, to, out_t, err_t, False, None, metadata)
 
 
 def run_mypy_check(cwd: Path) -> StepResult:

@@ -1,0 +1,19 @@
+```json
+{
+  "candidate_id": "local_model-real-chili-runtime-control-partial-loses",
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-runtime-control-partial-loses.",
+  "patch": "",
+  "planned_file": "autopilot_prompt.py",
+  "replacement_file_content": "def looks_like_repo_edit(prompt: str) -> bool:\n    text = (prompt or '').lower()\n    return any(word in text for word in ('fix', 'update', 'change', 'add'))\n\n\ndef classify_prompt(prompt: str) -> str:\n    if any(term in prompt.lower() for term in ('docker', 'compose', 'restart', 'scheduler-worker', 'worker', 'deploy', 'broker', 'database', 'runtime')):\n        return 'blocked'\n    return 'repo_edit'\n\n\ndef plan_if_repo_edit(prompt: str, planner):\n    if classify_prompt(prompt) == 'repo_edit':\n        return planner(prompt)\n    return {'status': 'blocked', 'reason': 'not_repo_edit'}\n"
+}
+```

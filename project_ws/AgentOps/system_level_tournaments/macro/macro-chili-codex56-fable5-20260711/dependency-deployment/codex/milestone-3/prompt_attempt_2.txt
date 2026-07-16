@@ -1,0 +1,417 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Dependency deployment evolution
+Current milestone: milestone-3
+Completed milestones: milestone-1, milestone-2
+Goal: Milestone 3/3. Finish the deployment workflow across app/model.py, app/graph.py, app/state.py, and app/executor.py while preserving milestones 1 and 2. Add a deterministic plan_fingerprint and durable DeploymentState fingerprint, completed waves, and deployed services. execute_deployment must skip completed waves on resume, expose resumed and completed_waves, and fail closed with ValueError('deployment plan changed') when state belongs to another graph. Rollback includes prior deployed state. Preserve ServiceSpec, dependency_waves, DeploymentState, execute_deployment, all public names, and tests.
+Approved source files: app/executor.py, app/graph.py, app/model.py, app/state.py
+
+Current repository snapshot:
+### app/executor.py
+```python
+from app.graph import dependency_waves, plan_fingerprint
+from app.state import DeploymentState
+
+
+def _noop_deploy(name):
+    pass
+
+
+def _always_healthy(name):
+    return True
+
+
+def _noop_rollback(name):
+    pass
+
+
+def execute_deployment(
+    services,
+    deploy=_noop_deploy,
+    healthy=_always_healthy,
+    rollback=_noop_rollback,
+    state=None,
+):
+    services = tuple(services)
+    waves = dependency_waves(services)
+    fingerprint = plan_fingerprint(services)
+    state = state if state is not None else DeploymentState()
+    state.begin(waves, fingerprint)
+
+    if (
+        deploy is _noop_deploy
+        and healthy is _always_healthy
+        and rollback is _noop_rollback
+    ):
+        return state.result()
+
+    for wave_index, wave in enumerate(waves):
+        if wave_index in state.completed_waves:
+            continue
+
+        for name in wave:
+            deploy(name)
+            state.deployed.append(name)
+
+        wave_health = []
+        for name in wave:
+            wave_health.append(bool(healthy(name)))
+
+        if not all(wave_health):
+            for name in reversed(state.deployed):
+                rollback(name)
+                state.rolled_back.append(name)
+            state.status = "rolled_back"
+            return state.result()
+
+        state.completed_waves.add(wave_index)
+
+    state.status = "completed"
+    return state.result()
+```
+
+### app/graph.py
+```python
+import hashlib
+import json
+
+
+def plan_fingerprint(services):
+    services = tuple(services)
+    dependency_waves(services)
+    plan = sorted(
+        (service.name, sorted(service.dependencies))
+        for service in services
+    )
+    encoded = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def dependency_waves(services):
+    services = tuple(services)
+    names = [service.name for service in services]
+
+    if len(names) != len(set(names)):
+        raise ValueError("invalid deployment graph")
+
+    known = set(names)
+    dependents = {name: set() for name in names}
+    remaining_dependencies = {}
+
+    for service in services:
+        dependencies = set(service.dependencies)
+        if (
+            service.name in dependencies
+            or not dependencies.issubset(known)
+        ):
+            raise ValueError("invalid deployment graph")
+
+        remaining_dependencies[service.name] = len(dependencies)
+        for dependency in dependencies:
+            dependents[dependency].add(service.name)
+
+    ready = sorted(
+        name for name, count in remaining_dependencies.items() if count == 0
+    )
+    waves = []
+    deployed = 0
+
+    while ready:
+        wave = tuple(ready)
+        waves.append(wave)
+        deployed += len(wave)
+        next_ready = []
+
+        for name in wave:
+            for dependent in dependents[name]:
+                remaining_dependencies[dependent] -= 1
+                if remaining_dependencies[dependent] == 0:
+                    next_ready.append(dependent)
+        ready = sorted(next_ready)
+
+    if deployed != len(names):
+        raise ValueError("invalid deployment graph")
+
+    return tuple(waves)
+```
+
+### app/model.py
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ServiceSpec:
+    name: str
+    dependencies: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("invalid service name")
+        if not isinstance(self.dependencies, tuple):
+            raise ValueError("invalid service dependencies")
+        if any(
+            not isinstance(dependency, str) or not dependency.strip()
+            for dependency in self.dependencies
+        ):
+            raise ValueError("invalid service dependencies")
+        if len(self.dependencies) != len(set(self.dependencies)):
+            raise ValueError("invalid service dependencies")
+```
+
+### app/state.py
+```python
+class DeploymentState:
+    def __init__(
+        self,
+        fingerprint=None,
+        completed_waves=None,
+        deployed=None,
+    ):
+        self.status = "planned"
+        self.waves = ()
+        self.fingerprint = fingerprint
+        self.completed_waves = set(
+            completed_waves if completed_waves is not None else ()
+        )
+        self.deployed = list(deployed if deployed is not None else ())
+        self.rolled_back = []
+        self.resumed = False
+
+    def begin(self, waves, fingerprint=None):
+        if (
+            self.fingerprint is not None
+            and fingerprint is not None
+            and self.fingerprint != fingerprint
+        ):
+            raise ValueError("deployment plan changed")
+
+        self.resumed = self.fingerprint is not None and bool(
+            self.completed_waves or self.deployed
+        )
+        if fingerprint is not None:
+            self.fingerprint = fingerprint
+        self.status = "planned"
+        self.waves = tuple(waves)
+        self.rolled_back.clear()
+
+    def result(self):
+        return {
+            "status": self.status,
+            "waves": self.waves,
+            "fingerprint": self.fingerprint,
+            "completed_waves": tuple(sorted(self.completed_waves)),
+            "deployed": list(self.deployed),
+            "rolled_back": list(self.rolled_back),
+            "resumed": self.resumed,
+        }
+```
+
+### tests/test_deploy_contract_m1.py
+```python
+from app.executor import execute_deployment
+from app.graph import dependency_waves
+from app.model import ServiceSpec
+
+
+def test_dependency_waves_are_deterministic():
+    services = [
+        ServiceSpec("web", ("api", "worker")),
+        ServiceSpec("worker", ("db",)),
+        ServiceSpec("api", ("db",)),
+        ServiceSpec("db"),
+    ]
+    assert dependency_waves(services) == (("db",), ("api", "worker"), ("web",))
+    assert execute_deployment(services)["status"] == "planned"
+```
+
+### tests/test_deploy_contract_m2.py
+```python
+from app.executor import execute_deployment
+from app.model import ServiceSpec
+
+
+def test_unhealthy_wave_rolls_back_in_reverse_order():
+    actions = []
+    result = execute_deployment(
+        [ServiceSpec("api", ("db",)), ServiceSpec("db")],
+        lambda name: actions.append(("deploy", name)),
+        lambda name: name != "api",
+        lambda name: actions.append(("rollback", name)),
+    )
+    assert result["status"] == "rolled_back"
+    assert result["rolled_back"] == ["api", "db"]
+    assert actions[-2:] == [("rollback", "api"), ("rollback", "db")]
+```
+
+### tests/test_deploy_contract_m3.py
+```python
+import pytest
+
+from app.executor import execute_deployment
+from app.graph import plan_fingerprint
+from app.model import ServiceSpec
+from app.state import DeploymentState
+
+
+def test_resume_skips_completed_wave_and_checks_fingerprint():
+    services = [ServiceSpec("api", ("db",)), ServiceSpec("db")]
+    state = DeploymentState(
+        fingerprint=plan_fingerprint(services),
+        completed_waves={0},
+        deployed=["db"],
+    )
+    deployed = []
+    result = execute_deployment(services, deployed.append, lambda name: True, lambda name: None, state)
+    assert deployed == ["api"]
+    assert result["resumed"] is True
+    assert result["completed_waves"] == (0, 1)
+    with pytest.raises(ValueError, match="deployment plan changed"):
+        execute_deployment([ServiceSpec("other")], deployed.append, lambda name: True, lambda name: None, state)
+```
+
+The previous attempt failed cumulative validation. Repair the current state using this evidence:
+validation failed: .......F                                                                 [100%]
+================================== FAILURES ===================================
+____________ test_resume_failure_rolls_back_prior_and_new_services ____________
+    def test_resume_failure_rolls_back_prior_and_new_services():
+        services = [ServiceSpec("api", ("db",)), ServiceSpec("db")]
+        state = DeploymentState(plan_fingerprint(services), {0}, ["db"])
+        rolled = []
+        result = execute_deployment(services, lambda name: None, lambda name: False, rolled.append, state)
+        assert result["rolled_back"] == ["api", "db"]
+        assert rolled == ["api", "db"]
+>       assert state.completed_waves == set()
+E       assert {0} == set()
+E
+E         Extra items in the left set:
+E         0
+E         Use -v to get more diff
+hidden_tests\test_deploy_m3_edges.py:14: AssertionError
+=========================== short test summary info ===========================
+FAILED hidden_tests/test_deploy_m3_edges.py::test_resume_failure_rolls_back_prior_and_new_services
+1 failed, 7 passed in 0.15s
+
+Previous response:
+```diff
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,4 +1,4 @@
+-from app.graph import dependency_waves
++from app.graph import dependency_waves, plan_fingerprint
+ from app.state import DeploymentState
+ 
+ 
+@@ -19,9 +19,11 @@ def execute_deployment(
+     rollback=_noop_rollback,
+     state=None,
+ ):
++    services = tuple(services)
+     waves = dependency_waves(services)
++    fingerprint = plan_fingerprint(services)
+     state = state if state is not None else DeploymentState()
+-    state.begin(waves)
++    state.begin(waves, fingerprint)
+ 
+     if (
+         deploy is _noop_deploy
+@@ -31,7 +33,10 @@ def execute_deployment(
+     ):
+         return state.result()
+ 
+-    for wave in waves:
++    for wave_index, wave in enumerate(waves):
++        if wave_index in state.completed_waves:
++            continue
++
+         for name in wave:
+             deploy(name)
+             state.deployed.append(name)
+@@ -48,6 +53,8 @@ def execute_deployment(
+             state.status = "rolled_back"
+             return state.result()
+ 
++        state.completed_waves.add(wave_index)
++
+     state.status = "completed"
+     return state.result()
+diff --git a/app/graph.py b/app/graph.py
+--- a/app/graph.py
++++ b/app/graph.py
+@@ -1,3 +1,16 @@
++import hashlib
++import json
++
++
++def plan_fingerprint(services):
++    services = tuple(services)
++    dependency_waves(services)
++    plan = sorted(
++        (service.name, sorted(service.dependencies))
++        for service in services
++    )
++    encoded = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
++    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
++
++
+ def dependency_waves(services):
+     services = tuple(services)
+     names = [service.name for service in services]
+diff --git a/app/state.py b/app/state.py
+--- a/app/state.py
++++ b/app/state.py
+@@ -1,20 +1,38 @@
+ class DeploymentState:
+-    def __init__(self):
++    def __init__(
++        self,
++        fingerprint=None,
++        completed_waves=None,
++        deployed=None,
++    ):
+         self.status = "planned"
+         self.waves = ()
+-        self.deployed = []
++        self.fingerprint = fingerprint
++        self.completed_waves = set(
++            completed_waves if completed_waves is not None else ()
++        )
++        self.deployed = list(deployed if deployed is not None else ())
+         self.rolled_back = []
++        self.resumed = False
+ 
+-    def begin(self, waves):
++    def begin(self, waves, fingerprint=None):
++        if (
++            self.fingerprint is not None
++            and fingerprint is not None
++            and self.fingerprint != fingerprint
++        ):
++            raise ValueError("deployment plan changed")
++
++        self.resumed = self.fingerprint is not None and bool(
++            self.completed_waves or self.deployed
++        )
++        if fingerprint is not None:
++            self.fingerprint = fingerprint
+         self.status = "planned"
+         self.waves = tuple(waves)
+-        self.deployed.clear()
+         self.rolled_back.clear()
+ 
+     def result(self):
+         return {
+             "status": self.status,
+             "waves": self.waves,
++            "fingerprint": self.fingerprint,
++            "completed_waves": tuple(sorted(self.completed_waves)),
+             "deployed": list(self.deployed),
+             "rolled_back": list(self.rolled_back),
++            "resumed": self.resumed,
+         }
+```

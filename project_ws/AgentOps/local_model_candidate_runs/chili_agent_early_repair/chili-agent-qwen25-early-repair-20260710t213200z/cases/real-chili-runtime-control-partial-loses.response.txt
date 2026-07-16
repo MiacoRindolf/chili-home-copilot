@@ -1,0 +1,33 @@
+```json
+{
+  "candidate_id": "local_model-real-chili-runtime-control-partial-loses",
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prom[19D[K
+test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-runtime-control-partial-loses.",[43D[K
+real-chili-runtime-control-partial-loses.",
+  "patch": "diff --git a/autopil[9D[K
+a/autopilot_prompt.py b/autopilot_prompt.py\nindex 1234567..89abcde 100644\[7D[K
+100644\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -11,6 +11,[4D[K
++11,7 @@ def classify_prompt(prompt: str) -> str:\n     return 'repo_edit' [K
+if looks_like_repo_edit(prompt) else 'blocked'\n \n def plan_if_repo_edit(p[19D[K
+plan_if_repo_edit(prompt: str, planner):\n+    if prompt.lower().startswith[25D[K
+prompt.lower().startswith('update') or prompt.lower().startswith('fix'):\n [K
+        if classify_prompt(prompt) == 'repo_edit':\n             return pla[3D[K
+planner(prompt)\n         return {'status': 'blocked', 'reason': 'not_repo_[10D[K
+'not_repo_edit'}\n",
+  "planned_file": "autopilot_prompt.py",
+  "replacement_file_content": "",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```
+

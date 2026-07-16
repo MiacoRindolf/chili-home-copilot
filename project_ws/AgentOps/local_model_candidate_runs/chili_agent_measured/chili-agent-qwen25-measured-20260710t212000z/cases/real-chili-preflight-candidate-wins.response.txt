@@ -1,0 +1,27 @@
+{
+  "candidate_id": "local_model-real-chili-preflight-candidate-wins",
+  "case_id": "real-chili-preflight-candidate-wins",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -[1D[K
+-q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-preflight-candidate-wins.",
+  "patch": "diff --git a/preflight.py b/preflight.py\n--- a/preflight.py\n+[17D[K
+a/preflight.py\n+++ b/preflight.py\n@@ -1,6 +1,6 @@\n def can_enter(\n     [K
+ticker: str,\n-    broker_position_qty: float,\n+    broker_position_qty: f[1D[K
+float = 0,\n     buying_power: float,\n     required_cash: float,\n     *,\[3D[K
+*,\n@@ -8,7 +8,7 @@ def can_enter(\n         return False\n     if buying_p[8D[K
+buying_power < required_cash:\n         return False\n-    return True\n+  [K
+  return not broker_position_qty and buying_power >= required_cash",
+  "planned_file": "preflight.py",
+  "replacement_file_content": "",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+

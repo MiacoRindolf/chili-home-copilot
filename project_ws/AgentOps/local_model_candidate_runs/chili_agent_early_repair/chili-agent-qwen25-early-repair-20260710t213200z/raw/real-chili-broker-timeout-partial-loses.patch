@@ -1,0 +1,11 @@
+diff --git a/preflight.py b/preflight.py
+index 3a1b2c3..4d5e6f7 100644
+--- a/preflight.py
++++ b/preflight.py
+@@ -9,4 +9,6 @@ def can_enter(
+         return False
+     if buying_power < required_cash:
+         return False
++    if broker_timeout:
++        return False
+     return True

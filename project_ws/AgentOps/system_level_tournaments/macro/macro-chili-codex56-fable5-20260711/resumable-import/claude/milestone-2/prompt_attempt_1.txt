@@ -1,0 +1,169 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Resumable import evolution
+Current milestone: milestone-2
+Completed milestones: milestone-1
+Goal: Milestone 2/3. Evolve the import workflow across app/model.py, app/store.py, app/processor.py, and app/service.py without regressing milestone 1. Add TransientImportError and PermanentImportError. execute_handler retries only transient failures up to max_attempts with exponential 1,2,... sleep and returns retry count. Permanent failures are dead-lettered without payload and advance the checkpoint; exhausted transient failure is re-raised without advancement. run_import returns retried and dead_lettered. Preserve ImportItem, CheckpointStore, execute_handler, run_import, and prior tests.
+Approved source files: app/model.py, app/processor.py, app/service.py, app/store.py
+
+Current repository snapshot:
+### app/model.py
+```python
+from collections.abc import Mapping as MappingABC
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ImportItem:
+    item_id: str
+    sequence: int
+    payload: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id.strip():
+            raise ValueError("item_id must be a nonblank string")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise ValueError("sequence must be a positive integer")
+        if self.sequence <= 0:
+            raise ValueError("sequence must be a positive integer")
+        if not isinstance(self.payload, MappingABC):
+            raise ValueError("payload must be a mapping")
+```
+
+### app/processor.py
+```python
+def execute_handler(item, handler):
+    return handler(item)
+```
+
+### app/service.py
+```python
+from app.processor import execute_handler
+
+
+def run_import(items, job_id, store, handler):
+    batch = list(items)
+
+    previous = None
+    for item in batch:
+        if previous is not None and item.sequence <= previous:
+            raise ValueError(
+                "invalid import batch: sequences must be strictly increasing and unique"
+            )
+        previous = item.sequence
+
+    processed = 0
+    skipped = 0
+    for item in batch:
+        already_done = store.is_processed(job_id, item.item_id) or (
+            item.sequence <= store.get_checkpoint(job_id)
+        )
+        if already_done:
+            skipped += 1
+            continue
+        execute_handler(item, handler)
+        store.mark_processed(job_id, item.item_id)
+        store.advance_checkpoint(job_id, item.sequence)
+        processed += 1
+
+    return {
+        "processed": processed,
+        "skipped": skipped,
+        "checkpoint": store.get_checkpoint(job_id),
+    }
+```
+
+### app/store.py
+```python
+from typing import Dict, Set
+
+
+class CheckpointStore:
+    """Tracks per-job monotonic checkpoints and processed item ids."""
+
+    def __init__(self) -> None:
+        self._checkpoints: Dict[str, int] = {}
+        self._processed: Dict[str, Set[str]] = {}
+
+    def get_checkpoint(self, job_id: str) -> int:
+        return self._checkpoints.get(job_id, 0)
+
+    def checkpoint(self, job_id: str) -> int:
+        return self.get_checkpoint(job_id)
+
+    def advance_checkpoint(self, job_id: str, sequence: int) -> int:
+        if sequence > self._checkpoints.get(job_id, 0):
+            self._checkpoints[job_id] = sequence
+        return self.get_checkpoint(job_id)
+
+    # Checkpoints are monotonic: a lower value never rewinds the watermark.
+    set_checkpoint = advance_checkpoint
+
+    def is_processed(self, job_id: str, item_id: str) -> bool:
+        return item_id in self._processed.get(job_id, set())
+
+    def mark_processed(self, job_id: str, item_id: str) -> None:
+        self._processed.setdefault(job_id, set()).add(item_id)
+
+    def processed_ids(self, job_id: str) -> Set[str]:
+        return set(self._processed.get(job_id, set()))
+```
+
+### tests/test_import_contract_m1.py
+```python
+from app.model import ImportItem
+from app.service import run_import
+from app.store import CheckpointStore
+
+
+def test_import_is_idempotent_and_checkpointed():
+    items = [ImportItem("a", 1, {}), ImportItem("b", 2, {})]
+    store = CheckpointStore()
+    seen = []
+    first = run_import(items, "job", store, lambda item: seen.append(item.item_id))
+    second = run_import(items, "job", store, lambda item: seen.append(item.item_id))
+    assert {key: first[key] for key in ("processed", "skipped", "checkpoint")} == {
+        "processed": 2, "skipped": 0, "checkpoint": 2
+    }
+    assert {key: second[key] for key in ("processed", "skipped", "checkpoint")} == {
+        "processed": 0, "skipped": 2, "checkpoint": 2
+    }
+    assert seen == ["a", "b"]
+```
+
+### tests/test_import_contract_m2.py
+```python
+from app.model import ImportItem
+from app.processor import PermanentImportError, TransientImportError
+from app.service import run_import
+from app.store import CheckpointStore
+
+
+def test_retry_and_dead_letter_are_bounded():
+    store = CheckpointStore()
+    attempts = {"a": 0}
+    sleeps = []
+
+    def handler(item):
+        if item.item_id == "a":
+            attempts["a"] += 1
+            if attempts["a"] == 1:
+                raise TransientImportError("later")
+        if item.item_id == "b":
+            raise PermanentImportError("bad row")
+
+    result = run_import(
+        [ImportItem("a", 1, {}), ImportItem("b", 2, {"secret": 1})],
+        "job", store, handler, sleep=sleeps.append
+    )
+    assert {key: result[key] for key in ("processed", "skipped", "checkpoint", "retried", "dead_lettered")} == {
+        "processed": 1, "skipped": 0, "checkpoint": 2, "retried": 1, "dead_lettered": 1
+    }
+    assert sleeps == [1.0]
+    assert store.dead_letters == [{"job_id": "job", "item_id": "b", "reason": "bad row"}]
+```

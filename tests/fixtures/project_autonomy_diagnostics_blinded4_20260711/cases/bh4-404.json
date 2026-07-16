@@ -1,0 +1,172 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-404",
+  "problem_statement": "A public library's hold-notification batch reports success, but some patrons receive neither email nor text. The omissions are concentrated in branches that suppress notices for already expired holds, and rerunning the batch produces the same recipient gaps.",
+  "observations": [
+    {
+      "evidence_id": "bh4-404-e01",
+      "statement": "The omission pattern began with notifier revision 8f31b7c, which replaced offset paging with cursor paging; provider, template, and branch-policy revisions did not change that day.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "signed deployment timeline and revision inventory",
+      "independence_key": "notifier-change-timeline",
+      "reliability": 0.97,
+      "discriminating": true,
+      "timestamps": {
+        "revision_deployed": "2026-06-28T04:15:00Z",
+        "first_affected_batch": "2026-06-28T05:00:00Z"
+      },
+      "source_revision": "8f31b7c"
+    },
+    {
+      "evidence_id": "bh4-404-e02",
+      "statement": "Each affected batch page contains one or more expired holds interleaved before active holds; pages without suppressed rows deliver every active notice.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained batch-input and delivery reconciliation",
+      "independence_key": "page-shape-correlation",
+      "reliability": 0.96,
+      "discriminating": true,
+      "correlation": {
+        "pages_with_suppressed_rows_and_gaps": 1.0,
+        "pages_without_suppressed_rows_and_gaps": 0.0
+      }
+    },
+    {
+      "evidence_id": "bh4-404-e03",
+      "statement": "Trace events show that the next cursor is taken from the final retained recipient after filtering instead of from the final source row returned by the query.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "retained structured cursor trace",
+      "independence_key": "cursor-origin-trace",
+      "reliability": 0.99,
+      "discriminating": true,
+      "expected_state": "cursor-at-last-source-row",
+      "actual_state": "cursor-at-last-retained-row",
+      "events": [
+        "page_loaded",
+        "expired_rows_filtered",
+        "cursor_selected",
+        "next_page_loaded"
+      ]
+    },
+    {
+      "evidence_id": "bh4-404-e04",
+      "statement": "For one retained sequence of source IDs 1201 through 1300, filtering removes 1298 through 1300, the emitted cursor remains 1297, and the next query begins after 1297, returning the removed rows again before its limit is reached.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "content-addressed query and trace excerpt",
+      "independence_key": "cursor-loop-example",
+      "reliability": 0.99,
+      "discriminating": true,
+      "sequence": [
+        "query-1201-1300",
+        "retain-through-1297",
+        "cursor-1297",
+        "query-after-1297",
+        "page-limit-consumed-before-new-active-rows"
+      ],
+      "artifact_hash": "sha256:0ae5a968d8751f506f6abbe7dd641f70f31ed6b4f1a4d6a654c658f795d491c8"
+    },
+    {
+      "evidence_id": "bh4-404-e05",
+      "statement": "An offline simulator fed the retained ordered IDs and suppression flags through the deployed paging function and reproduced exactly the 214 missing active recipient IDs.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated deterministic replay report",
+      "independence_key": "paging-function-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "experiment_id": "cursor-replay-20260629",
+      "comparison": {
+        "simulated_missing_ids": 214,
+        "observed_missing_ids": 214,
+        "set_difference": 0
+      }
+    },
+    {
+      "evidence_id": "bh4-404-e06",
+      "statement": "The same retained input passed through the prior paging function emits all active recipients while suppressing the same expired holds.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "paired offline replay against prior revision",
+      "independence_key": "prior-revision-negative-control",
+      "reliability": 0.98,
+      "discriminating": true,
+      "experiment_id": "cursor-prior-pair-20260629",
+      "comparison": {
+        "current_revision_active_emitted": 3786,
+        "prior_revision_active_emitted": 4000,
+        "active_input_rows": 4000
+      }
+    },
+    {
+      "evidence_id": "bh4-404-e07",
+      "statement": "Email and text providers accept every notification submitted to them, and no provider request exists for the omitted recipient IDs, locating the first divergence before channel dispatch.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "independent provider receipts and dispatcher ledger",
+      "independence_key": "provider-dispatch-boundary",
+      "reliability": 0.97,
+      "discriminating": true,
+      "component_flow": [
+        "hold-query",
+        "policy-filter",
+        "cursor-pager",
+        "channel-dispatch",
+        "providers"
+      ],
+      "edge_states": {
+        "submitted-notices": "accepted",
+        "omitted-recipient-requests": "absent"
+      }
+    },
+    {
+      "evidence_id": "bh4-404-e08",
+      "statement": "Database snapshots contain active, valid contact records for omitted patrons at batch time, so stale contacts and late hold expiration are not associated with the gap set.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "transaction-time patron and hold snapshot",
+      "independence_key": "recipient-data-control",
+      "reliability": 0.95,
+      "discriminating": false,
+      "comparison": {
+        "omitted_with_valid_contact": 214,
+        "omitted_active_at_batch_time": 214
+      }
+    },
+    {
+      "evidence_id": "bh4-404-e09",
+      "statement": "A static source comparison isolates the behavioral change to cursor selection after filtering; query ordering, page size, suppression predicate, and dispatch calls are unchanged.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "reviewed source diff and build symbols",
+      "independence_key": "source-diff-isolation",
+      "reliability": 0.98,
+      "discriminating": true,
+      "comparison": {
+        "cursor_selection": "changed",
+        "query_ordering": "unchanged",
+        "page_size": "unchanged",
+        "suppression_predicate": "unchanged"
+      },
+      "fingerprints": {
+        "prior_function": "pager:2cc19e",
+        "current_function": "pager:f831a2"
+      }
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

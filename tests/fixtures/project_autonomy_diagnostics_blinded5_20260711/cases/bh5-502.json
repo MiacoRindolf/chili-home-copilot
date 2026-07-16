@@ -1,0 +1,150 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-502",
+  "problem_statement": "A cold-chain monitoring service delayed silence alerts for refrigerated medical sensors in one region during an autumn time transition. Ingestion remained active and delayed alerts eventually appeared. Determine the initiating mechanism from retained event, calculation, and environment evidence without altering the live alert service.",
+  "observations": [
+    {
+      "evidence_id": "bh5-502-e01",
+      "statement": "During the incident, gateways continued publishing every 60 seconds in UTC, and broker receive gaps never exceeded 74 seconds for sensors whose silence alerts were delayed.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "gateway signatures and broker append log",
+      "independence_key": "upstream-delivery-continuity",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "timestamps": {"window_start": "2026-11-01T08:45:00Z", "window_end": "2026-11-01T10:20:00Z"},
+        "comparison": {"expected_period_seconds": 60, "maximum_gap_seconds": 74}
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e02",
+      "statement": "The alert rule remained a 15-minute silence threshold, and its signed settings digest matches the prior seven days and an unaffected UTC-only region.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "rule registry audit export",
+      "independence_key": "rule-configuration-negative-control",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "artifact_hash": "sha256:64d653b1a38e24bfb75676cf47b227c9c97061d62d9e54377a3a1e4123eb73c0",
+        "expected_state": {"silence_threshold_seconds": 900},
+        "actual_state": {"silence_threshold_seconds": 900}
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e03",
+      "statement": "For an affected sensor, successive evaluator records show computed age moving from 842 seconds to negative 2758 seconds even though the later evaluation has a larger UTC sequence timestamp.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "append-only evaluator decision log",
+      "independence_key": "age-calculation-transition",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "sequence": [918221, 918222],
+        "events": [
+          {"utc": "2026-11-01T08:59:42Z", "local": "2026-11-01T01:59:42", "age_seconds": 842},
+          {"utc": "2026-11-01T09:00:02Z", "local": "2026-11-01T01:00:02", "age_seconds": -2758}
+        ],
+        "transition": "eligible_to_suppressed"
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e04",
+      "statement": "The persisted last-seen field stores a local date and time without an offset, while the source event retained beside it includes an offset and an unambiguous UTC instant.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read-only row snapshot and source event envelope",
+      "independence_key": "timestamp-representation-mismatch",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "entities": ["sensor_event", "last_seen_row"],
+        "producer_consumer": {"producer": "event_ingest", "consumer": "silence_evaluator", "edge_state": "offset_removed_on_persist"}
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e05",
+      "statement": "The host synchronization journal shows no step, slew anomaly, reboot, or leap indicator; maximum offset from its upstream source was 11 milliseconds.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "host synchronization and boot journals",
+      "independence_key": "host-time-health-negative-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "runtime_revision": "node-image-2026.10.3",
+        "comparison": {"maximum_offset_ms": 11, "reboots": 0, "clock_steps": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e06",
+      "statement": "Tenants evaluated by the same binary and workers but configured for a zone without a repeated local hour did not show a negative age or a delayed alert.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "cross-tenant evaluator export",
+      "independence_key": "zone-boundary-control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"repeated-hour_tenants": {"negative_age_records": 384}, "continuous-zone_tenants": {"negative_age_records": 0}},
+        "code_fingerprint": "alert-evaluator-46a7d2"
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e07",
+      "statement": "An offline replay of the retained rows reproduces the suppression only when subtraction uses the two offset-free local values; subtraction of their retained UTC instants crosses the threshold normally.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "deterministic read-only calculation replay",
+      "independence_key": "representation-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-silence-fold-03",
+        "input_fingerprint": "sensor-44-seq-918180-918260",
+        "outcomes": {"offset_free_local": "suppressed", "utc_instants": "alert_at_900_seconds"}
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e08",
+      "statement": "Database latency, queue depth, and evaluator duration stayed within their normal ranges; alert emission resumes when the repeated local hour catches up, without any backlog drain signature.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "service metrics and message emission timeline",
+      "independence_key": "capacity-backlog-negative-control",
+      "reliability": 0.93,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"queue_depth_p95": 18, "normal_queue_depth_p95": 21, "evaluator_ms_p95": 37, "normal_evaluator_ms_p95": 40},
+        "causal_parents": ["computed_age", "threshold_decision", "alert_emission"]
+      }
+    },
+    {
+      "evidence_id": "bh5-502-e09",
+      "statement": "A sealed proof run over both repeated-hour offsets produces one alert per silent sensor at the correct elapsed duration when instants retain their offsets, while all ordinary-day fixtures remain byte-identical.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated post-change proof transcript",
+      "independence_key": "boundary-proof-corpus",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-silence-fold-proof-04",
+        "comparison": {"boundary_cases": 32, "correct_alerts": 32, "ordinary_fixture_diffs": 0},
+        "outcome_fingerprint": "elapsed-instant-semantics"
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

@@ -1,0 +1,102 @@
+```json
+[
+    {
+        "candidate_id": "local_model-real-chili-preflight-candidate-wins",
+        "case_id": "real-chili-preflight-candidate-wins",
+        "cost_units": 0.0,
+        "declared_commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_prefli[11D[K
+test_preflight.py -q"
+        ],
+        "duration_seconds": 0.0,
+        "expected_changed_files": [
+            "preflight.py"
+        ],
+        "model_name": "qwen2.5-coder:7b",
+        "notes": "The candidate introduces a bug that causes the preflight [K
+check to incorrectly allow entry when there are insufficient funds.",
+        "patch": "diff --git a/preflight.py b/preflight.py\nindex 3a9b4c6..[9D[K
+3a9b4c6..e2f5d1a 100644\n--- a/preflight.py\n+++ b/preflight.py\n@@ -4,7 +4[2D[K
++4,7 @@ def can_enter(\n     buying_power: float,\n     required_cash: floa[4D[K
+float,\n     *,\n-    broker_timeout: bool = False,\n+    broker_timeout: b[1D[K
+bool = True,\n ) -> bool:\n     if broker_position_qty > 0:\n         retur[5D[K
+return False\n@@ -12,7 +12,7 @@ def can_enter(\n     return False\n     ret[3D[K
+return True",
+        "planned_file": "preflight.py",
+        "schema": "chili.model-candidate-drop.v1",
+        "source_kind": "local_model"
+    },
+    {
+        "candidate_id": "local_model-real-chili-broker-timeout-partial-lose[51D[K
+"local_model-real-chili-broker-timeout-partial-loses",
+        "case_id": "real-chili-broker-timeout-partial-loses",
+        "cost_units": 0.0,
+        "declared_commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_prefli[11D[K
+test_preflight.py -q"
+        ],
+        "duration_seconds": 0.0,
+        "expected_changed_files": [
+            "preflight.py"
+        ],
+        "model_name": "qwen2.5-coder:7b",
+        "notes": "The candidate fails to provide evidence that the broker t[1D[K
+timeout check is necessary, leading to a loss of functionality.",
+        "patch": "",
+        "planned_file": "preflight.py",
+        "schema": "chili.model-candidate-drop.v1",
+        "source_kind": "local_model"
+    },
+    {
+        "candidate_id": "local_model-real-chili-runtime-control-no-evidence[51D[K
+"local_model-real-chili-runtime-control-no-evidence-loses",
+        "case_id": "real-chili-runtime-control-no-evidence-loses",
+        "cost_units": 0.0,
+        "declared_commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopi[11D[K
+test_autopilot_prompt.py -q"
+        ],
+        "duration_seconds": 0.0,
+        "expected_changed_files": [
+            "autopilot_prompt.py"
+        ],
+        "model_name": "qwen2.5-coder:7b",
+        "notes": "The candidate fails to provide evidence that the runtime [K
+control check is necessary, leading to a loss of functionality.",
+        "patch": "",
+        "planned_file": "autopilot_prompt.py",
+        "schema": "chili.model-candidate-drop.v1",
+        "source_kind": "local_model"
+    },
+    {
+        "candidate_id": "local_model-real-chili-runtime-control-unscoped-lo[51D[K
+"local_model-real-chili-runtime-control-unscoped-loses",
+        "case_id": "real-chili-runtime-control-unscoped-loses",
+        "cost_units": 0.0,
+        "declared_commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopi[11D[K
+test_autopilot_prompt.py -q"
+        ],
+        "duration_seconds": 0.0,
+        "expected_changed_files": [
+            "autopilot_prompt.py"
+        ],
+        "model_name": "qwen2.5-coder:7b",
+        "notes": "The candidate introduces a bug that causes the runtime co[2D[K
+control check to incorrectly allow execution of out-of-scope commands.",
+        "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\ni[24D[K
+b/autopilot_prompt.py\nindex 3a9b4c6..e2f5d1a 100644\n--- a/autopilot_promp[17D[K
+a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -7,7 +7,7 @@ def class[5D[K
+classify_prompt(prompt: str) -> str:\n     return 'repo_edit' if looks_like[10D[K
+looks_like_repo_edit(prompt) else 'blocked'\n\ndef plan_if_repo_edit(prompt[24D[K
+plan_if_repo_edit(prompt: str, planner):\n-    if classify_prompt(prompt) =[1D[K
+== 'repo_edit':\n+    if False and classify_prompt(prompt) == 'repo_edit':\[13D[K
+'repo_edit':\n         return planner(prompt)\n     return {'status': 'bloc[5D[K
+'blocked', 'reason': 'not_repo_edit'}",
+        "planned_file": "autopilot_prompt.py",
+        "schema": "chili.model-candidate-drop.v1",
+        "source_kind": "local_model"
+    }
+]
+```
+

@@ -1,0 +1,132 @@
+﻿{
+  "blockers": [
+    "model_shadow_status",
+    "model_shadow_evidence_mode",
+    "model_tournament_status"
+  ],
+  "generated_utc": "2026-07-04T07:56:37.044652Z",
+  "input_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources",
+  "manifests": [
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\manifests\\codex.manifest.json",
+    "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\manifests\\local_model.manifest.json"
+  ],
+  "missing_source_kinds": [
+    "claude"
+  ],
+  "output_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake",
+  "preflight_recovery_route_count": 0,
+  "preflight_recovery_routes": [],
+  "preflight_report": "",
+  "published_scorecards": false,
+  "ready_source_count": 2,
+  "ready_source_kinds": [
+    "codex",
+    "local_model"
+  ],
+  "required_source_count": 3,
+  "required_source_kinds": [
+    "codex",
+    "claude",
+    "local_model"
+  ],
+  "schema": "chili.frontier-model-evidence-intake.v1",
+  "shadow": {
+    "average_score": 86,
+    "cases": 12,
+    "checks": 7,
+    "evidence_mode": "partial_real_manifest",
+    "manifests": 2,
+    "missing_source_kinds": [
+      "claude"
+    ],
+    "output": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\scorecards\\MODEL_SHADOW_EVIDENCE_BENCHMARK.md",
+    "status": "failed"
+  },
+  "source_kinds": [
+    "codex",
+    "local_model"
+  ],
+  "source_readiness": [
+    {
+      "missing_files": [],
+      "next_action": "none",
+      "path": "codex",
+      "preflight_recovery_action": "",
+      "preflight_recovery_all_cases_command": "",
+      "preflight_recovery_boundary": "",
+      "preflight_recovery_dry_run_command": "",
+      "preflight_recovery_publish_command": "",
+      "preflight_recovery_response_staging_file": "",
+      "preflight_recovery_single_case_fallback": "",
+      "preflight_recovery_validation_command": "",
+      "preflight_report": "",
+      "present_files": [
+        "codex/metadata.json",
+        "codex/prompt_pack.md",
+        "codex/transcript.jsonl",
+        "codex/raw/*.json"
+      ],
+      "raw_drop_count": 6,
+      "source_kind": "codex",
+      "status": "ready"
+    },
+    {
+      "missing_files": [
+        "claude/metadata.json",
+        "claude/prompt_pack.md",
+        "claude/transcript.jsonl",
+        "claude/raw/*.json"
+      ],
+      "next_action": "python scripts/autopilot_frontier_source_collection_packet.py --source-kind claude --json; then import all cases with: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json",
+      "path": "claude",
+      "preflight_recovery_action": "",
+      "preflight_recovery_all_cases_command": "",
+      "preflight_recovery_boundary": "",
+      "preflight_recovery_dry_run_command": "",
+      "preflight_recovery_publish_command": "",
+      "preflight_recovery_response_staging_file": "",
+      "preflight_recovery_single_case_fallback": "",
+      "preflight_recovery_validation_command": "",
+      "preflight_report": "",
+      "present_files": [],
+      "raw_drop_count": 0,
+      "source_kind": "claude",
+      "status": "partial"
+    },
+    {
+      "missing_files": [],
+      "next_action": "none",
+      "path": "local_model",
+      "preflight_recovery_action": "",
+      "preflight_recovery_all_cases_command": "",
+      "preflight_recovery_boundary": "",
+      "preflight_recovery_dry_run_command": "",
+      "preflight_recovery_publish_command": "",
+      "preflight_recovery_response_staging_file": "",
+      "preflight_recovery_single_case_fallback": "",
+      "preflight_recovery_validation_command": "",
+      "preflight_report": "",
+      "present_files": [
+        "local_model/metadata.json",
+        "local_model/prompt_pack.md",
+        "local_model/transcript.jsonl",
+        "local_model/raw/*.json"
+      ],
+      "raw_drop_count": 6,
+      "source_kind": "local_model",
+      "status": "ready"
+    }
+  ],
+  "status": "warning",
+  "tournament": {
+    "average_score": 0,
+    "cases": 6,
+    "evidence_mode": "real_artifacts",
+    "output": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\scorecards\\MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md",
+    "source_kinds": [
+      "codex",
+      "local_model"
+    ],
+    "status": "failed"
+  }
+}

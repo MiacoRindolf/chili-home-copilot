@@ -1,0 +1,41 @@
+```diff
+--- a/app/query.py
++++ b/app/query.py
+@@ -1,4 +1,10 @@
+ def parse_page(raw: str | None) -> int:
+-    if raw is None:
+-        return 0
+-    return int(raw)
++    if raw is None or not raw.strip():
++        return 1
++    try:
++        page = int(raw)
++    except ValueError:
++        raise ValueError("page must be a positive integer") from None
++    if page < 1:
++        raise ValueError("page must be a positive integer")
++    return page
+--- a/app/paging.py
++++ b/app/paging.py
+@@ -7,3 +7,5 @@
+ def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:
+-    start = page * page_size
++    if page_size < 1:
++        raise ValueError("page_size must be positive")
++    start = (page - 1) * page_size
+     return list(items[start : start + page_size])
+--- a/app/api.py
++++ b/app/api.py
+@@ -8,3 +8,10 @@
+ def build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:
+     page = parse_page(raw_page)
+-    return {"page": page, "items": page_slice(items, page, page_size)}
++    page_items = page_slice(items, page, page_size)
++    has_next = page * page_size < len(items)
++    return {
++        "page": page,
++        "items": page_items,
++        "has_next": has_next,
++        "next_page": page + 1 if has_next else None,
++    }
+```

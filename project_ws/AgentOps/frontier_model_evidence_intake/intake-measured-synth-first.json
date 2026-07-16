@@ -1,0 +1,49 @@
+# CHILI Frontier Model Evidence Intake
+
+- Schema: chili.frontier-model-evidence-intake.v1
+- Generated UTC: 2026-07-10T14:47:52.153788Z
+- Status: warning
+- Input root: D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\measured_synth_first_sources
+- Generated artifacts root: D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\measured_synth_first_scorecards
+- Preflight report: none
+- Preflight recovery routes: 0
+- Availability report: D:\dev\chili-home-copilot\project_ws\AgentOps\FRONTIER_SOURCE_AVAILABILITY_DIAGNOSTICS.md
+- Availability recovery routes: 1
+- Collection packet summary: D:\dev\chili-home-copilot\project_ws\AgentOps\FRONTIER_SOURCE_COLLECTION_PACKETS.md
+- Source runner routes: 1
+- Source kinds: codex, local_model
+- Ready sources: 2/3
+- Missing/incomplete sources: claude
+- Shadow evidence mode: partial_real_manifest
+- Shadow status: failed
+- Tournament evidence mode: real_artifacts
+- Tournament status: failed
+- Published scorecards: False
+- Required behavior: one run ingests Codex, Claude, and local-model raw drops, stamps provenance, validates real shadow evidence, and runs the real-artifact tournament.
+
+| Artifact | Path |
+| --- | --- |
+| manifest | D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\measured_synth_first_scorecards\manifests\codex.manifest.json |
+| manifest | D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\measured_synth_first_scorecards\manifests\local_model.manifest.json |
+| model shadow scorecard | D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\measured_synth_first_scorecards\scorecards\MODEL_SHADOW_EVIDENCE_BENCHMARK.md |
+| model tournament scorecard | D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\measured_synth_first_scorecards\scorecards\MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md |
+
+## Source Readiness
+
+| Source | Path | Status | Raw drops | Missing files | Next action |
+| --- | --- | --- | ---: | --- | --- |
+| codex | codex | ready | 6 | none | none |
+| claude | claude | missing | 0 | claude/metadata.json, claude/prompt_pack.md, claude/transcript.jsonl, claude/raw/*.json | Availability recovery: Run `claude setup-token` in a trusted interactive terminal to refresh the long-lived subscription token; if print-mode auth still fails, run `claude auth logout` then `claude auth login --claudeai`, or provide a valid `ANTHROPIC_API_KEY` and rerun the probe in API-key mode; current credential status is env_credentials_absent; logged_in (auth_method=claude.ai; provider=firstParty; subscription=max; setup_token_command=claude setup-token --help; setup_token_available); current source runner auth mode is subscription (api_key_missing); rerun source availability diagnostics with --source-kind claude --probe-live; then collect/import a real all-cases Claude response with `python scripts/autopilot_frontier_source_runner.py --source-kind claude --source-auth-mode auto --json`. Current blocker: claude_auth_failed; credential status: env_credentials_absent; logged_in. Then build/use the collection packet and import evidence: Automated source runner: python scripts/autopilot_frontier_source_runner.py --source-kind claude --source-auth-mode auto --json; if it passes, validate intake with python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/measured_synth_first_sources --allow-partial --json --no-write; then publish only when all required sources are ready: python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/measured_synth_first_sources --publish-scorecards --json. Manual fallback: python scripts/autopilot_frontier_source_collection_packet.py --source-kind claude --json; then import all cases with: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json |
+| local_model | local_model | ready | 6 | none | none |
+
+## Availability Recovery Routes
+
+| Source | Probe status | Blocker | Credential status | Action | Report |
+| --- | --- | --- | --- | --- | --- |
+| claude | auth_failed | claude_auth_failed | env_credentials_absent; logged_in | Run `claude setup-token` in a trusted interactive terminal to refresh the long-lived subscription token; if print-mode auth still fails, run `claude auth logout` then `claude auth login --claudeai`, or provide a valid `ANTHROPIC_API_KEY` and rerun the probe in API-key mode; current credential status is env_credentials_absent; logged_in (auth_method=claude.ai; provider=firstParty; subscription=max; setup_token_command=claude setup-token --help; setup_token_available); current source runner auth mode is subscription (api_key_missing); rerun source availability diagnostics with --source-kind claude --probe-live; then collect/import a real all-cases Claude response with `python scripts/autopilot_frontier_source_runner.py --source-kind claude --source-auth-mode auto --json`. | D:\dev\chili-home-copilot\project_ws\AgentOps\FRONTIER_SOURCE_AVAILABILITY_DIAGNOSTICS.md |
+
+## Source Runner Routes
+
+| Source | Runner command | Packet summary |
+| --- | --- | --- |
+| claude | python scripts/autopilot_frontier_source_runner.py --source-kind claude --source-auth-mode auto --json | D:\dev\chili-home-copilot\project_ws\AgentOps\FRONTIER_SOURCE_COLLECTION_PACKETS.md |

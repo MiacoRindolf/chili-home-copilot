@@ -1,0 +1,26 @@
+{
+  "attempts": 1,
+  "behavior_passed": true,
+  "changed_files": [
+    "cache/keys.py",
+    "cache/store.py",
+    "domain/revision.py",
+    "service/catalog.py"
+  ],
+  "context_files": 24,
+  "context_scope_precise": true,
+  "distractor_files": 20,
+  "duration_seconds": 0.182,
+  "eligible": true,
+  "failure": "",
+  "model_events": [],
+  "model_name": "qwen2.5-coder:7b",
+  "premium_calls": 0,
+  "quality_score": 100,
+  "scope_valid": true,
+  "semantic_review_passed": true,
+  "source_kind": "local_model",
+  "task_id": "revision-cache-trace",
+  "tests_unchanged": true,
+  "validation_output": "....                                                                     [100%]\n4 passed in 0.06s"
+}

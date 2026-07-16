@@ -1,0 +1,36 @@
+diff --git a/autopilot_prompt.py b/autopilot_prompt.py
+--- a/autopilot_prompt.py
++++ b/autopilot_prompt.py
+@@ -1,10 +1,29 @@
+-def looks_like_repo_edit(prompt: str) -> bool:
+-    text = (prompt or '').lower()
+-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))
++RUNTIME_CONTROL_MARKERS = (
++    'docker',
++    'compose',
++    'systemctl',
++    'kubectl',
++    'restart',
++    'deploy',
++    'reboot',
++    'shutdown',
++)
++
++
++def looks_like_runtime_control(prompt: str) -> bool:
++    text = (prompt or '').lower()
++    return any(marker in text for marker in RUNTIME_CONTROL_MARKERS)
++
++
++def looks_like_repo_edit(prompt: str) -> bool:
++    text = (prompt or '').lower()
++    return any(word in text for word in ('fix', 'update', 'change', 'add'))
+ 
+ 
+ def classify_prompt(prompt: str) -> str:
++    if looks_like_runtime_control(prompt):
++        return 'blocked'
+     return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked'
+ 
+ 
+ def plan_if_repo_edit(prompt: str, planner):

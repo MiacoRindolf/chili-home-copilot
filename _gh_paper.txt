@@ -1,0 +1,793 @@
+THE JOURNAL OF FINANCE •VOL. LIX, NO. 5 •OCTOBER 2004
+The 52-Week High and Momentum Investing
+THOMAS J. GEORGE and CHUAN-YANG HWANG∗
+ABSTRACT
+When coupled with a stock’s current price, a readily available piece of information—the
+52-week high price–explains a large portion of the profits from momentum investing.Nearness to the 52-week high dominates and improves upon the forecasting power ofpast returns (both individual and industry returns) for future returns. Future returnsforecast using the 52-week high do not reverse in the long run. These results indicatethat short-term momentum and long-term reversals are largely separate phenomena,which presents a challenge to current theory that models these aspects of securityreturns as integrated components of the market’s response to news.
+THERE IS SUBSTANTIAL EVIDENCE that stock prices do not follow random walks and
+that returns are predictable. Jegadeesh and Titman (1993) show that stock re-turns exhibit momentum behavior at intermediate horizons. A self-financingstrategy that buys the top 10% and sells the bottom 10% of stocks ranked by re-turns during the past 6 months, and holds the positions for 6 months, producesprofits of 1% per month. Moskowitz and Grinblatt (1999) argue that momen-tum in individual stock returns is driven by momentum in industry returns.DeBondt and Thaler (1985), Lee and Swaminathan (2000), and Jegadeesh andTitman (2001) document long-term reversals in stock returns. Stocks that per-form poorly in the past perform better over the next 3 to 5 years than stocksthat perform well in the past.
+Barberis, Shleifer, and Vishny (1998), Daniel, Hirshleifer, and
+Subrahmanyam (1998), and Hong and Stein (1999) present theoreticalmodels that attempt to explain the coexistence of intermediate horizon mo-mentum and long horizon reversals in individual stock returns as the result ofsystematic violations of rational behavior by traders. In Barberis, Shleifer, andVishny and in Hong and Stein, momentum occurs because traders are slow torevise their priors when new information arrives. Long-term reversals occurbecause when traders finally do adjust, they overreact. In Daniel, Hirshleifer,and Subrahmanyam, momentum occurs because traders overreact to priorinformation when new information confirms it. Long-term reversals occur asthe overreaction is corrected in the long run. In all three models, short-term
+∗Bauer College of Business, University of Houston, and School of Business and Manage-
+ment, Hong Kong University of Science and Technology, respectively. We thank Joyce Berg, MarkGrinblatt, David Hirshleifer, Tom Rietz, and especially Sheridan Titman and the referee for help-ful comments, and Harry Leung for excellent research assistance. George acknowledges finan-cial support of the Bauer professorship and Hwang acknowledges financial support of RGC grantHKUST6011/00H.
+2145
+2146 The Journal of Finance
+momentum and long-term reversals are sequential components of the process
+by which the market absorbs news.
+In this paper, we find that a readily available piece of information —the 52-
+week high price –largely explains the profits from momentum investing. We ex-
+amine the 52-week high because the models predict, in particular, that tradersare slow to react, or overreact, to good news. A stock whose price is at or near its
+52-week high is a stock for which good news has recently arrived. This may bethe time when biases in how traders react to news, and hence profits to momen-tum investing, are at their peaks. Indeed, we find that profits to a momentumstrategy based on nearness to the 52-week high are superior to those where thearrival of news is measured by a return computed over a fixed-length intervalin the past (e.g., 6 months).
+Like the results in Jegadeesh and Titman (1993), these findings present a
+serious challenge to the view that markets are semistrong-form efficient. Thisfinding is remarkable because the nearness of a stock ’s price to its 52-week
+high is among the information that is most readily available to investors. Oneneed not even compute a past return. Virtually every newspaper that publishesstock prices also identifies those that hit 52-week highs and lows. For example,theWall Street Journal ,Investors Business Daily ,Financial Times , and the
+South China Morning Post all print lists of these stocks each day, and Barron’s
+Magazine prints a comprehensive weekly list of stocks hitting 52-week highs
+and lows.
+Our most interesting results emerge from head-to-head comparisons of a
+strategy based on the 52-week high with traditional momentum strategies. Wefind that nearness to the 52-week high is a better predictor of future returnsthan are past returns, and that nearness to the 52-week high has predictivepower whether or not stocks have experienced extreme past returns. This sug-gests that price levels are more important determinants of momentum effects
+than are past price changes.
+An explanation of behavior that is consistent with our results is that traders
+use the 52-week high as a reference point against which they evaluate thepotential impact of news. When good news has pushed a stock ’s price near or to a
+new 52-week high, traders are reluctant to bid the price of the stock higher evenif the information warrants it.
+1The information eventually prevails and the
+price moves up, resulting in a continuation. Similarly, when bad news pushesa stock ’s price far from its 52-week high, traders are initially unwilling to sell
+the stock at prices that are as low as the information implies. The informationeventually prevails and the price falls. In this respect, traders ’reluctance to
+revise their priors is price-level dependent. The greatest reluctance is at pricelevels nearest and farthest from the stock ’s 52-week high. At prices that are
+neither near nor far from the 52-week high, priors adjust more quickly andthere is no pronounced predictability when information arrives.
+1The evidence in Grinblatt and Keloharju (2001) is consistent with this. They find price-level
+effects in investors, trading patterns. Using detailed data from the Finnish stock market, they find
+that investors are much more likely to sell (than hold or buy) a stock whose price is near a historicalhigh, and more likely to buy (than sell) a stock that is near a historical low.
+The 52-Week High and Momentum Investing 2147
+This description is consistent with results in experimental economics re-
+search on the “adjustment and anchoring bias ”surveyed in Kahneman, Slovic,
+and Tversky ((1982), pp. 14 –20). They report on experiments in which subjects
+are asked to estimate a quantity (e.g., the number of African nations in theUN) as an increment to a number that the subject observes was generated ran-
+domly . Estimates are higher (lower) for subjects that start with higher (lower)
+random numbers. Our results suggest that traders might use the 52-week highas an “anchor, ”like the random number in the experiments when assessing the
+increment in stock value implied by new information.
+A similar phenomenon is documented in Ginsburgh and van Ours (2003),
+who examine the career success of pianists who compete in the Queen ElizabethPiano Competition. The order in which competitors play both across the weekof the competition and on the night they perform (two perform each night) pre-dicts the judges ’ranking, even though order is chosen randomly . The authors
+find that subsequent career success as measured by critical acclaim and num-ber of recordings is significantly related to the component of the competitionranking that is related to order, i.e., the component that cannot be related tomusicianship. Thus, the competition rankings are similar to the random num-ber drawn in the “anchoring ”experiments. The ranking is an anchor against
+which critics and the recording companies judge talent, which results in ca-reer momentum for musicians. This finding is noteworthy because critics andrecording executives are professionals who have a financial stake in identify-ing intrinsic musical talent, similar to investors who attempt to identify theintrinsic value of a stock. Nevertheless, they appear to anchor on criteria thatare unrelated to intrinsic talent.
+We also examine whether long-term reversals occur when past performance
+is measured based on nearness to the 52-week high. They do not. This finding,coupled with those described above, suggests that short-term momentum andlong-term reversals are not likely to be components of the same phenomenonas modeled by Barberis, Shleifer, and Vishny (1998), Daniel, Hirshleifer, andSubrahmanyam (1998), and Hong and Stein (1999). Our results indicate thatshort-term underreaction is best characterized as an anchoring bias that themarket resolves without the overcorrection that results in long-term reversals.The explanation for long-term reversals lies elsewhere, suggesting that sep-arate theories of short- and long-term predictability in prices may be moredescriptive than a theory that integrates both phenomena into a “life cycle ”of
+the market ’s response to news.
+Our findings suggest that models in which agents ’valuations depend on near-
+ness of the share price to an anchor will be successful in explaining price dynam-ics. Two recent theoretical papers take this approach. In Klein ’s (2001) model,
+the representative agent is motivated by tax avoidance. His demand for sharesis positively related to the imbedded capital gain, so the anchor is the priceat which shares are acquired. Klein uses this structure to explain long-termreturn reversals. In Grinblatt and Han (2002), a subset of agents is subjectto a disposition effect making them averse to selling shares that result in therecognition of losses. The anchor in their model is also the acquisition price
+2148 The Journal of Finance
+of the shares, but demand functions are negatively related to imbedded gains.
+In the context of their model, Grinblatt and Han show that this dependenceresults in momentum behavior for stocks whose prices are at or near long-run(e.g., 52-week) highs and lows. We find that strategies based on Grinblatt andHan’s anchor do generate significant profits that do not reverse. However, prof-
+its from this strategy are also strongly dominated by profits from the 52-weekhigh strategy.
+The rest of the paper is organized as follows. The next section describes
+our sampling procedure and how the investment strategies are implemented.Section II describes the results. Section III concludes.
+I. Data and Method
+In the tests that follow, we compare the momentum strategies of Jegadeesh
+and Titman (1993) (hereafter JT) and Moskowitz and Grinblatt (1999) (here-after MG) to a strategy based on the nearness of a stock ’s price to its 52-week
+high.
+The data are collected exactly as described in MG. We use all stocks on CRSP
+from 1963 to 2001. Two-digit SIC codes are used to form the 20 industries shownin Table I of MG. For every month from 1963 to 2001, a value-weighted averagereturn is created for each of these industries.
+We also adopt the same approach as JT and MG to calculate monthly returns
+to the investment strategies. Both JT and MG focus on (6, 6) strategies: Eachmonth investors form a portfolio based on past 6-month returns, and hold theposition for 6 months. The differences between the strategies of JT and MG liein how past performance is measured.
+Table I
+Profits from Momentum Strategies
+This table reports the average monthly portfolio returns from July 1963 through December 2001 for
+three different momentum investing strategies. Jegadeesh –Titman (JT) and Moskowitz –Grinblatt
+(MG) portfolios are formed based on past 6-month returns and the 52-week high portfolios are basedon the ratio of current price to the highest price achieved within the past 12 months. All portfoliosare held for 6 months. The winner (loser) portfolio in JT ’s strategy is the equally weighted portfolio
+of 30% of stocks with the highest (lowest) past 6-month return. The winner (loser) portfolio inMG’s strategy is the equally weighted portfolio of the top (bottom) 30% of stocks ranked by the
+value-weighted industry return to which the stock belongs. The winner (loser) portfolio for the 52-week high strategy is the equally weighted portfolio of the 30% of stocks with the highest (lowest)ratio of current price to 52-week high. The sample includes all stocks on CRSP; t-statistics are in
+parentheses.
+Winner Loser Winner −Loser
+JT’s individual stock momentum 1.53% 1.05% 0 .48%
+(2.35)
+MG’s industrial momentum 1.48% 1.03% 0 .45%
+(3.43)
+52-week high 1.51% 1.06% 0 .45%
+(2.00)
+The 52-Week High and Momentum Investing 2149
+For each stock, MG measures past performance as the value-weighted indus-
+try return, over the past 6 months, of the industry to which the stock belongs. Atthe beginning of each month t, stocks are ranked in ascending order according
+to their industries ’past performance. Based on these rankings, three portfolios
+are formed. Stocks ranked in the top 30% of industries constitute the winnerportfolio, stocks in bottom 30% constitute the loser portfolio, and the remainingstocks constitute the middle portfolio. These portfolios are equally weighted.
+2
+The strategy is to hold, for 6 months, a self-financing portfolio that is long thewinner and short the loser portfolios.
+3In any particular month tof a (6, 6)
+strategy, the return to winners is calculated as the equally weighted averageof the month treturns from six separate winner portfolios, each formed in one
+of the 6 consecutive prior months t–6t o t–1. The same is done to compute
+the month –treturn to losers. The month –treturn to the overall strategy is the
+difference between the month –treturn to winners and the month −treturn to
+losers.
+The monthly returns of JT ’s (6, 6) strategy and the 52-week high strategy
+are obtained the same way. The only difference is that stocks are ranked usingdifferent measures of past performance than industry return. For JT ’s strategy,
+stocks are ranked based on their own individual returns over months t–6t o
+t–1. For the 52-week high strategy, stocks are ranked based on
+Pi,t−1
+highi,t−1, where
+Pi,t−1is the price of stock iat the end of month t–1 and highi,t−1is the highest
+price of stock iduring the 12-month period that ends on the last day of month
+t–1.
+We focus the early discussion in the paper on (6, 6) strategies because these
+have been analyzed so extensively in the literature to date. After establishingour main results, we then examine their robustness to (6, 12), (12, 6), and(12, 12) strategies.
+II. Results
+A. Pro ﬁts from (6, 6) Momentum Strategies
+Table I reports average monthly returns of winner, loser, and self-financing
+portfolios of the three (6, 6) investment strategies described above. The first rowis for JT ’s individual stock momentum strategy, the next is for MG ’s industrial
+momentum strategy, and the last is for the 52-week high strategy. The returnsto these strategies are very close, all around 0.45% per month.
+In Table II, Panel A, we examine the strategies ’returns in non-January
+months. Compared with Table I, the returns of the loser portfolios withoutJanuary are much smaller for all three strategies. This is because the January
+2MG uses value-weighted portfolios because it facilitates their calculations of size-adjusted
+returns. Our use of equally weighted portfolios follows JT.
+3To abstract from bid-ask bounce, we skip a month between ranking and holding periods in our
+regression tests. We do not skip a month for the more descriptive Tables I –IV to better compare
+with numbers reported in existing studies such as JT, so our initial description of methods ignoresthe skip.
+2150 The Journal of Finance
+Table II
+Profits to Momentum Strategies
+This table reports the average monthly portfolio returns from July 1963 through December 2001,
+excluding Januaries (Panel A) or Januaries only (Panel B), for three different momentum investingstrategies. Jegadeesh –Titman (JT) and Moskowitz –Grinblatt (MG) portfolios are formed based on
+past 6-month returns; the 52-week high portfolios are based on the ratio of current price to thehighest price achieved within the past 12 months. All portfolios are held for 6 months. The winner(loser) portfolio in JT ’s strategy is the equally weighted portfolio of 30% of stocks with the highest
+(lowest) past 6-month return. The winner (loser) portfolio in MG ’s strategy is the equally weighted
+portfolio of the top (bottom) 30% of stocks ranked by the value-weighted industry return to whichthe stock belongs. The winner (loser) portfolio for the 52-week high strategy is the equally weightedportfolio of the 30% of stocks with the highest (lowest) ratio of current price to the 52-week high.The sample includes all stocks on CRSP; t-statistics are in parentheses.
+Winner Loser Winner −Loser
+Panel A: January Returns Excluded
+JT’s individual stock momentum 1.23% 0.16% 1 .07%
+(6.97)
+MG’s industrial momentum 0.99% 0.50% 0 .50%
+(3.92)
+52-week high 1.30% 0.07% 1 .23%
+(7.06)
+Panel B: January Only
+JT’s individual stock momentum 4.96% 11.2% −6.29%
+(−4.48)
+MG’s industrial momentum 7.00% 7.09% −0.09%
+(−0.12)
+52-week high 3.84% 12.11% −8.27%
+(−5.49)
+rebound for loser stocks is missing when January is excluded.4The reduc-
+tions are larger for the JT and 52-week high momentum strategies than forMG’s strategy because the former strategies are based on past performance
+of the individual stocks.
+5This pattern is apparent in Panel B, which exam-
+ines returns in January only. The JT and 52-week high strategies earn sig-nificantly negative returns, while the return to MG ’s strategy is near zero in
+January.
+Table II also illustrates that winner industries are not entirely populated by
+winner stocks. When January is excluded, there are small reductions in returns
+4Roll (1983), Griffiths and White (1993), and Ferris, D ’Mello, and Hwang (2001) argue that the
+January/turn-of-the-year effect is a consequence of tax loss selling: Investors sell loser stocks torealize tax loss benefits at year end. The selling pressure temporarily depresses the prices of thesestocks at year end, but the prices rebound after the new year when the selling pressure vanishes.
+5This is consistent with the observation in the previous footnote. Tax loss selling is associated
+with capital losses of individual stocks, not the loss of the industry.
+The 52-Week High and Momentum Investing 2151
+for the winners in the JT and the 52-week high momentum strategies, but the
+reduction for the winners in the MG industrial portfolios is substantial (from1.48 to 0.99%). This indicates that there are significant numbers of individual-
+stock losers in MG ’s winner portfolio whose price increases are missing when
+January is excluded. This is evident in Panel B; January returns to MG ’s
+winners and losers are almost identical. The net result is that the momen-tum profits for MG change very little when January is excluded, but profitsfrom the JT and 52-week high strategies more than double when the Januaryeffect is removed —from 0.48 to 1.07% and from 0.45 to 1.23%, respectively.
+B. Dominance of the 52-Week High Momentum Strategy
+Tables I and II show that the two strategies based on past performance of
+individual stocks generate very similar returns. They are not identical, however.A large part of JT ’s profit is actually attributable to the future returns of stocks
+whose prices are near or far from their 52-week high. We demonstrate this intwo separate tests.
+We first conduct pairwise nested comparisons of profits from the 52-week high
+strategy versus the other two strategies. These tests identify whether the JTor MG strategies have explanatory power conditional on the rankings impliedby the 52-week high strategy, and vice versa.
+As in Tables I and II, we define the winner portfolio to include stocks per-
+forming in the top 30%, and the loser portfolio to include the bottom 30%. Theremaining 40% is the middle portfolio. The performance ranking is based on
+Pi,t−1
+highi,t−1for the 52-week high strategy, individual stock returns over t–6t o
+t–1 for JT ’s strategy, and the industry return over t–6t o t–1 for MG ’s
+strategy.
+Panel A of Table III compares the 52-week high strategy against JT ’s momen-
+tum strategy. Stocks are collected into winner, loser, and middle groups usingJT’s rankings, then each of those groups is further subdivided using the 52-week
+high performance measure. Within the winner and loser JT groups, the 52-weekhigh strategy still maintains its profitability. A self-financing strategy based onthe 52-week high produces monthly returns of 0.46% (1.11%) and 0.56% (0.98%)per month (outside of January) among stocks that have already been classifiedby JT as winners and losers, respectively. The nesting is reversed in Panel B.Stocks are first grouped using the 52-week high performance measure, thenby JT ’s. Within winners and losers classified using the 52-week high, the prof-
+itability of JT ’s strategy is small at 0.22% (0.29%) or less per month (outside of
+January) and not statistically significant. These results indicate that extremesof the distribution of the 52-week high performance measure are better thanJT’s at predicting future returns.
+A similar conclusion is implied by the non-January results for the stocks
+that fall in the middle portfolios. These stocks are those that the first groupingcriterion predicts will not have extreme future returns. Thus, if the first crite-rion is good at prediction, profits should not be available by further subdividingthese stocks into subgroups using another criterion. Within the middle portfolio
+2152 The Journal of Finance
+Table III
+Pairwise Comparison of the 52-Week High and Jegadeesh and
+Titman’s Momentum Strategies
+Stocks are sorted independently by past 6-month return and by the 52-week high measure. JT
+winners (losers) are the 30% of stocks with the highest (lowest) past 6-month return. JT middleare stocks that are neither JT winners nor JT losers. The 52-week high winners (losers) are the30% of stocks that have the highest (lowest) 52-week high measure; the middle group consists ofthose that are neither winners nor losers. All portfolios are held for 6 months. Panel A reports theaverage monthly returns from July 1963 through December 2001 for equally weighted portfoliosthat are long 52-week winners and short 52-week losers within winner, middle, and loser categories
+identified by JT ’s strategy. Panel B reports returns for equally weighted portfolios formed using
+JT’s strategy within groups identified as winner, middle, and loser by the 52-week high strategy.
+Thet-statistics are in parentheses.
+Panel A
+Portfolios Classified by
+Jegadeesh and Titman ’s Portfolio Classified Ave. Ave. Monthly Return
+Momentum Strategy by 52-Week High Monthly Return Excluding January
+Winner Winner 1.63% 1.41%
+Loser 1.17% 0.31%Winner −Loser 0.46% (2.15) 1.11% (6.11)
+Middle Winner 1.30% 1.10%
+Loser 1.04% 0.24%Winner −Loser 0.26% (1.33) 0.86% (6.28)
+Loser Winner 1.27% 1.04%
+Loser 1.05% 0.01%Winner −Loser 0.56% (1.62) 0.98% (3.13)
+Panel B
+Portfolios Classified by
+Portfolio Classified Jegadeesh and Titman ’s Ave. Ave. Monthly Return
+by 52-Week High Momentum Strategy Monthly Return Excluding January
+Winner Winner 1.63% 1.41%
+Loser 1.27% 1.04%Winner −Loser 0.22% (0.68) 0.24% (0.74)
+Middle Winner 1.48% 1.03%
+Loser 1.21% 0.73%Winner −Loser 0.27% (2.12) 0.30% (2.35)
+Loser Winner 1.17% 0.31%
+Loser 1.05% 0.01%Winner −Loser 0.12% (0.76) 0.29% (1.96)
+classified by JT ’s approach, a 52-week high strategy earns 0.26% (0.86%) per
+month (excluding January). Within the middle portfolio classified by the 52-week high approach, JT ’s strategy earns 0.27% (0.30%) per month (excluding
+January). The magnitudes are small and similar when January is included.However, the former return is almost triple the latter outside of January, thoughboth are statistically significant.
+The 52-Week High and Momentum Investing 2153
+Table IV
+Pairwise Comparison of the 52-Week High and Moskowitz and
+Grinblatt ’s Momentum Strategies
+Stocks are sorted independently by past 6-month industry return and by the 52-week high measure.
+MG winners (losers) are the 30% of stocks with the highest (lowest) past 6-month industry return.MG middle are stocks that are neither MG winners nor MG losers. The 52-week high winners(losers) are the 30% of stocks that have the highest (lowest) 52-week measure; the middle groupconsists of those that are neither winners nor losers. All portfolios are held for 6 months. Panel Areports the average monthly returns from July 1963 through December 2001 for equally weightedportfolios that are long 52-week winners and short 52-week losers within winner, middle, and
+loser categories identified by MG ’s strategy. Panel B reports returns for equally weighted portfolios
+formed using MG ’s strategy within groups identified as winner, middle, and loser by the 52-week
+high strategy. The t-statistics are in parentheses.
+Panel A
+Portfolios Classified by
+Moskowitz and Grinblatt ’s Ave. Ave. Monthly Return
+Industrial Momentum Portfolio Classified Monthly ExcludingStrategy by 52-Week High Return January
+Winner Winner 1.67% 1.46%
+Loser 1.42% 0.41%Winner −Loser 0.25% (1.14) 1.04% (6.43)
+Middle Winner 1.40% 1.18%
+Loser 1.09% 0.13%Winner −Loser 0.32% (1.44) 1.05% (6.18)
+Loser Winner 1.40% 1.19%
+Loser 0.77% −0.19%
+Winner −Loser 0.62% (2.60) 1.38% (7.83)
+Panel B
+Portfolio Classified
+Moskowitz and Grinblatt ’s
+Portfolios Classified by Industrial Momentum Ave. Ave. Monthly Return52-Week High Strategy Monthly Return Excluding January
+Winner Winner 1.67% 1.46%
+Loser 1.40% 1.19%Winner −Loser 0.27% (2.60) 0.26% (2.37)
+Middle Winner 1.50% 1.08%
+Loser 1.17% 0.80%Winner −Loser 0.32% (3.34) 0.28% (2.71)
+Loser Winner 1.42% 0.41%
+Loser 0.77% −0.19%
+Winner −Loser 0.64% (4.73) 0.60% (4.48)
+We use the same approach to compare the 52-week high and MG ’s indus-
+trial momentum strategies. The results are reported in Table IV. Both of thesestrategies retain similar profitability within groups sorted on the other strategywhen January is included. However, outside of January, when the 52-week highstrategy is applied within groups of MG ’s strategy, profits are two to four times
+2154 The Journal of Finance
+larger than when the reverse is done. These findings are consistent with the
+notion that the 52-week high performance measure is better than MG ’s at pre-
+dicting future returns outside of January. However, the statistical significanceof MG ’s profits within groups formed using the 52-week high performance mea-
+sure indicates that the two strategies are independent enough and combiningthem would improve profits from momentum investing.
+Our second approach to comparing the strategies is more careful and power-
+ful than the pairwise comparisons.
+6These tests are based on Fama –MacBeth
+(1973) style cross-sectional regressions, which control for the effects of firmsize and bid-ask bounce, and enable us to compare all three strategies simul-taneously. The dependent variable in these regressions is the month –treturn
+to stock i,R
+i,t. The independent variables are dummies that indicate whether
+stock iis held (either long or short) in month tas part of one of the three
+strategies. We control for market capitalization ( size i,t−1). We also follow MG
+by skipping a month between ranking and holding periods, and by includingthe month t–1 return R
+i,t−1as an independent variable to mitigate the impact
+of bid-ask bounce on the coefficient estimates. (The results are not sensitive towhether we skip a month and whether R
+i,t−1is included or not.) Coefficients on
+the dummies enable us to examine the return to a single strategy in isolationfrom the other two strategies, while also controlling for size and bid-ask bounce.
+As explained earlier, the profit from a winner or loser portfolio in month t
+for a (6, 6) strategy can be calculated as the sum of returns to six portfolios,each formed in one of the six past successive months t–j(forj=2t oj=7t o
+skip a month between formation and holding periods). The contributions of thevarious portfolios formed in month t–jto the month treturn can be obtained
+by estimating the following regression:
+R
+it=b0jt+b1jtRi,t−1+b2jtsize i,t−1+b3jtJH i,t−j+b4jtJLi,t−j+b5jtMH i,t−j
++b6jtML i,t−j+b7jtFHH i,t−j+b8jtFHL i,t−j+eit, (1)
+where JH i,t−jequals one if stock i’s past performance over the 6-month period
+(t–j–6,t–j) is in the top 30% when measured by JT ’s performance criterion,
+and is zero otherwise; JLi,t−jequals one if stock i’s past performance over the
+period ( t–j–6,t–j) is in the bottom 30% when measured by JT ’s performance
+criterion, and is zero otherwise. The variables MHandML(FHH andFHL ) are
+defined similarly for MG ’s (the 52-week high) strategy.
+According to Fama (1976), the coefficient estimate b0jtcan be interpreted as
+the return to a neutral portfolio that has zeroed (hedged) out the effects of size,
+6A weakness with the results in Tables III and IV is that the cells are not evenly balanced.
+For instance, relative to the others, the portfolio of 52-week high winners and JT losers has asmall number of stocks in it, and in some months it has none. Both winner and loser portfoliosmust be nonempty for a month to be included in the winner minus loser cell. This is why, forexample, the average in the last row of Panel A is not the difference between the two rows aboveit. Even if we exclude this portfolio (the last row of Panel A and the first row of Panel B) fromour comparison in Table III, we still have reasonable evidence to suggest that the 52-week highstrategy dominates. Nevertheless, regression tests do not suffer from potential problems associatedwith having unbalanced cells.
+The 52-Week High and Momentum Investing 2155
+bid-ask bounce, and momentum identified by all three strategies; and b3jtas
+the month treturn to a zero investment portfolio that is long JT winner stocks
+but that has also hedged out all other effects. In other words, b3jtcan be viewed
+as the return in excess of b0jtthat can be earned by taking a long position in a
+pure JT winner portfolio.7Estimates of the remaining coefficients have similar
+interpretations.
+The returns to (6, 6) strategies involve portfolios formed over 6 of the prior
+7 months. For a given strategy, the total return in month t(as a monthly re-
+turn) of the set of pure winner or pure loser portfolios can be expressed as
+sums1
+6/summationtext7
+j=2b3jt,...,1
+6/summationtext7
+j=2b8jt, where the individual coefficients are com-
+puted from separate cross-sectional regressions for each j=2,..., 7. The time-
+series averages of the month-by-month estimates of these sums, and associatedt-statistics, are reported in Table V for raw and risk-adjusted returns.
+8The
+average profit that is related exclusively to each of the different momentuminvesting strategies can be readily obtained from the figures reported in thetable. For instance, the difference between the JT winner and JT loser dum-mies represents the return from a zero investment portfolio that is long pureJT winners and short pure JT losers.
+The top panel of Table V reports the regression results. Profits from the
+three momentum strategies and significance tests appear in the bottom panel.These results for (6, 6) strategies mirror those of the pairwise comparisons.When data from all months are included, the coefficients on the 52-week highmomentum dummies dominate those of JT ’s and MG ’s strategies. In raw re-
+turns, a self-financing 52-week high momentum strategy yields 0.65% (firstrow of bottom panel) per month, which is much greater than 0.38% for JT and0.25% for MG. Outside of January, the 52-week high strategy is even more dom-inant. The return from the 52-week high strategy is 1.06% per month versusJT’s 0.46% and MG ’s 0.22%.
+Dominance of the 52-week high strategy is stronger in risk-adjusted returns
+than in raw returns. When January is included, the 52-week high strategyearns 0.86%, while JT earns 0.38% and MG earns 0.25% per month. Outside ofJanuary, the 52-week high earns 1.13% per month, while JT earns 0.46% andMG earns 0.24%.
+Table V also displays results for (6, 12) strategies. These serve as a point of
+reference for the analysis of reversals in the next subsection. Similar to the(6, 6) strategies, rankings into top and bottom 30% are based on performanceover the past 6 months (with a 1-month skip). The difference is that the posi-tions are held for 12 months. Analogous to the discussion above, the month t
+return to a (6, 12) strategy is the equal-weighted average of the returns from
+7The weights associated with the pure JT winner portfolio are the entries in the fourth row of
+the 9 xnmatrix ( X’X)−1X’where Xis the matrix of regressors in equation (1) and nis the number
+of stocks in the cross-section.
+8Our risk adjustment is equivalent to hedging out the strategy ’sF a m a –French (1996) factor
+exposure. For example, the risk-adjusted return of a pure (6, 6) JT winner portfolio is the interceptfrom a time series regression of
+1
+6/summationtext7
+j=2b3jton the contemporaneous Fama –French factors.
+2156 The Journal of FinanceTable V
+Comparison of JT, MG, and 52-Week High Strategies
+Each month between July 1963 and December 2001, 6 ( j=2,...,7 )o r1 2( j=2,..., 13) cross-sectional regressions of the following form are estimated
+for (6, 6) and (6, 12) strategies, respectively:
+Rit=b0jt+b1jtRi,t−1+b2jtsize i,t−1+b3jtJHi,t−j+b4jtJLi,t−j+b5jtMH i,t−j+b6jtML i,t−j+b7jtFHH i,t−j+b8jtFHL i,t−j+eit,
+where Ri,tandsize i,tare the return and the market capitalization of stock iin month t;FHH i,t−j(FHL i,t−j) is the 52-week high winner (loser) dummy
+that takes the value of 1 if the 52-week high measure for stock iis ranked in the top (bottom) 30% in month t–j, and zero otherwise. The 52-week high
+measure in month t–jis the ratio of price level in month t–jto the maximum price achieved in months t–j–12 to t–j. The measures JH, JL, MH ,
+andMLare defined similarly except that the JH(JL) indicates a winner (loser) by JT ’s ranking criterion, and MH(ML) indicates a winner (loser) by
+MG’s criterion, for the period between months t–j–6 and t–j. The coefficient estimates of a given independent variable are averaged over j=2,...,7
+for (6, 6) strategies, and j=2,..., 13 for (6, 12) strategies. The numbers reported for the raw return in the tables are the time-series averages of
+these averages. They are in percent per month. The t-statistics (in parentheses) are calculated from the times series. To obtain risk-adjusted returns,
+we further run times series regressions of these averages (one for each average) on the contemporaneous Fama –French factor realizations to hedge
+out the factor exposure. The numbers reported for risk adjusted returns are intercepts from these time-series regressions and their t-statistics are in
+parentheses.
+Raw Returns Risk-Adjusted Returns Raw Returns Risk-Adjusted Returns
+Monthly Return Monthly Return Monthly Return Monthly Return
+from (6, 6) Strategy from (6, 6) Strategy from (6, 12) Strategy from (6, 12) Strategy
+Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl.
+Intercept 3 .62 1 .87 2 .58 1 .55 3 .42 1 .66 2 .38 1 .34
+(6.09) (3 .57) (5 .99) (4 .02) (5 .73) (3 .17) (5 .56) (3 .51)
+Ri,t−1 −6.50 −5.53 −5.94 −5.36 −6.56 −5.58 −5.99 −5.41
+(−14.90) ( −14.89) ( −14.17) ( −14.78) ( −14.88) ( −14.96) ( −14.14) ( −14.82)
+Size −0.20 −0.08 −0.17 −0.09 −0.19 −0.06 −0.16 −0.07
+(−4.70) ( −2.13) ( −5.11) ( −3.09) ( −4.27) ( −1.61) ( −4.58) ( −2.44)
+JT winner dummy 0 .17 0 .15 0 .16 0 .16 0 .05 0 .02 0 .05 0 .04
+(2.07) (1 .69) (2 .80) (2 .69) (0 .60) (0 .22) (1 .10) (0 .79)
+The 52-Week High and Momentum Investing 2157JT loser dummy −0.21 −0.31 −0.22 −0.30 −0.19 −0.27 −0.21 −0.28
+(−3.60) ( −6.29) ( −3.85) ( −6.28) ( −4.64) ( −7.58) ( −5.22) ( −7.82)
+MG winner dummy 0 .18 0 .17 0 .19 0 .19 0 .10 0 .09 0 .14 0 .13
+(2.80) (2 .54) (2 .85) (2 .76) (1 .81) (1 .56) (2 .44) (2 .17)
+MG loser dummy −0.07 −0.05 −0.07 −0.05 −0.07 −0.05 −0.09 −0.07
+(−1.14) ( −0.84) ( −1.09) ( −0.85) ( −1.53) ( −1.16) ( −1.98) ( −1.65)
+52-week high winner dummy 0 .16 0 .27 0 .27 0 .32 0 .13 0 .22 0 .23 0 .27
+(3.06) (5 .25) (6 .49) (7 .66) (2 .83) (5 .19) (6 .89) (8 .39)
+52-week high loser dummy −0.48 −0.79 −0.59 −0.81 −0.26 −0.56 −0.37 −0.58
+(−4.07) ( −7.76) ( −6.30) ( −10.65) ( −2.29) ( −5.87) ( −4.22) ( −8.33)
+52-week high winner dummy − 0.65 1 .06 0 .86 1 .13 0 .39 0 .78 0 .60 0 .85
+52-week high loser dummy (4 .08) (7 .64) (7 .29) (11 .35) (2 .63) (6 .14) (5 .61) (9 .73)
+JT winner dummy − 0.38 0 .46 0 .38 0 .46 0 .24 0 .29 0 .27 0 .32
+JT loser dummy (3 .71) (4 .39) (4 .02) (5 .13) (2 .74) (3 .25) (3 .77) (4 .65)
+MG winner dummy − 0.25 0 .22 0 .25 0 .24 0 .17 0 .15 0 .22 0 .20
+MG loser dummy (2 .83) (2 .45) (2 .92) (2 .72) (2 .23) (1 .81) (3 .11) (2 .66)
+2158 The Journal of Finance
+12 separate portfolios. Accordingly, the estimates reported in the tables are
+time-series averages of the sums1
+12/summationtext13
+j=2b0jt,1
+12/summationtext13
+j=2b1jt,...,1
+12/summationtext13
+j=2b8jt.
+Results for the (6, 12) strategies are qualitatively the same as those of the
+(6, 6) strategies. Returns from the 52-week strategy dominate the others inmagnitude and statistical significance, especially outside of January, and thedominance is even greater when returns are risk-adjusted. The significanceof regression coefficients on the JT and MG dummies is less for (6, 12) than(6, 6) strategies; but in all cases, the coefficients on the 52-week dummies aresignificant.
+The results from the pairwise comparisons and the regressions both indicate
+that nearness of the current price level to the 52-week high is a better predic-tor of future returns than are measures of past price changes. This suggeststhat a theory in which price level relative to an anchor plays a role may bemore descriptive of the data than existing theories based on overconfidence,conservatism, or slow diffusion of information that lead to continuations ofpast returns. This also raises the question of whether the long-term rever-sals that are built into existing theories should be part of a theory based onan anchor-and-adjust bias. The next subsection addresses whether the futureprice changes predicted by each strategy are permanent or temporary. Assum-ing that an anchor is an important component of investor behavior, the answerto the persistence question indicates whether traders over- or underadjust incorrecting their initial anchoring bias.
+C. Long-Term Reversals
+Next we analyze the extent to which the momentum of stocks with extreme
+rankings reverses in the long run. The analysis is similar to that in Table V, ex-cept that the time gap is larger than one month between when past performanceis measured and when the stocks are held. For example, in the regression cor-responding to the (6, 12) strategies in Table V, past performance is measuredin the 6 month period from 1 to 7 months prior to when the stocks are held(for 12 months). By contrast, the strategy (6, ∼24, 12) selects stocks based on
+performance over the 6 month period that begins 31 months earlier and ends25 months earlier (as in Table V, we also skip a month). The (6, 12) strategy isdesigned to measure returns in the 12-month period immediately after portfo-lio formation. The (6, ∼24, 12) strategy is designed to measure returns in the
+12-month period that begins 24 months after portfolio formation. This allowsus to test whether momentum persists, reverses, or disappears 24 months aftera stock ’s past performance ranks in the top or bottom 30%.
+Table VI presents regression results for risk-adjusted returns.
+9There is evi-
+dence of reversals of prior gains to stocks ranked as winners by JT ’s and MG ’s
+strategies, suggesting that the momentum they identify is a temporary priceeffect. For example, the coefficient estimates for the (6, ∼12, 12) strategies in
+9The results using raw returns are similar and available from the authors.
+The 52-Week High and Momentum Investing 2159Table VI
+Persistence of Profits from JT, MG, and 52-Week High Strategies —Risk-Adjusted Returns
+Each month between July 1963 and December 2001, 12 ( j=2,..., 13) cross-sectional regressions of the following form are estimated:
+Rit=b0jt+b1jtRi,t−1+b2jtsize i,t−1+b3jtJHi,t−k−j+b4jtJLi,t−k−j+b5jtMH i,t−k−j+b6jtML i,t−k−j+b7jtFHH i,t−k−j+b8jtFHL i,t−k−j+eit,
+where Ri,tandsize i,tare the return and the market capitalization of stock iin month t;FHH i,t−k−j(FHL i,t−k−j) is the 52-week high winner (loser)
+dummy that takes the value of 1 if the 52-week high measure for stock iis ranked in the top (bottom) 30% in month t–k–j, and zero otherwise.
+The 52-week high measure in month t–k–jis the ratio of price level in month t–k–jto the maximum price achieved in months t–k–j–12 to
+t–k–j. The measures JH,JL,MH,and MLare defined similarly except that the JH(JL) indicates a winner (loser) by JT ’s ranking criterion, and
+MH (ML) indicates a winner (loser) by MG ’s criterion, for the period between months t–k–j–6 and t–k–j. The index kdetermines the time gap
+across which persistence is measured. In the table, k=12, 24, 36, 48. The coefficient estimates of a given independent variable are averaged over
+j=2,..., 13. To obtain risk-adjusted returns, we further run time series regressions of these averages (one for each average) on the contemporaneous
+Fama –French factor realizations to hedge out the factor exposure. The numbers reported in the table are the intercepts from these time-series
+regressions. They are in percent per month and their t-statistics are in parentheses.
+Monthly Return Monthly Return Monthly Return Monthly Return
+from (6, ∼12, 12) from (6, ∼24, 12) from (6, ∼36, 12) from (6, ∼48, 12)
+Strategy Strategy Strategy Strategy
+Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl
+Intercept 1 .73 0 .62 1 .60 .51 .41 0 .31 .28 0 .14
+(3.96) (1 .62) (3 .59) (1 .29) (3 .17) (0 .77) (2 .96) (0 .37)
+Ri,t−1 −6.05 −5.41 −6.10 −5.43 −6.16 −5.47 −6.25 −5.57
+(−13.85) ( −14.56) ( −13.86) ( −14.45) ( −13.98) ( −14.27) ( −13.93) ( −14.01)
+Size −0.09 −0.01 −0.08 0 .00 −0.07 0 .02 −0.05 0 .03
+(−2.63) ( −0.17) ( −2.27) (0 .16) ( −2.00) (0 .58) ( −1.56) (1 .20)
+JT winner dummy −0.15 −0.18 −0.08 −0.11 −0.06 −0.10 −0.09 −0.13
+(−3.80) ( −4.76) ( −2.06) ( −2.90) ( −1.54) ( −2.73) ( −2.23) ( −3.36)
+JT loser dummy −0.02 −0.06 −0.02 −0.03 0 .00 −0.02 0 .02 0 .02
+(−0.86) ( −2.26) ( −0.72) ( −1.27) ( −0.08) ( −0.76) (0 .68) (0 .77)
+MG winner dummy −0.11 −0.12 −0.08 −0.09 0 .05 0 .02 0 .06 0 .06
+(−2.42) ( −2.76) ( −2.04) ( −2.43) (1 .16) (0 .49) (1 .37) (1 .42)
+(continued)
+2160 The Journal of FinanceTable VI —Continued
+Monthly Return Monthly Return Monthly Return Monthly Return
+from (6, ∼12, 12) from (6, ∼24, 12) from (6, ∼36, 12) from (6, ∼48, 12)
+Strategy Strategy Strategy Strategy
+Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl
+MG loser dummy −0.03 −0.01 −0.11 −0.10 0 .00 0 .00 −0.03 −0.02
+(−0.72) ( −0.21) ( −2.67) ( −2.50) (0 .04) (0 .01) ( −0.75) ( −0.43)
+52-week high winner dummy 0 .03 0 .06 0 .02 0 .06 0 .00 0 .01 −0.02 −0.01
+(1.00) (2 .15) (0 .74) (1 .91) ( −0.07) (0 .51) ( −0.70) ( −0.34)
+52-week high loser dummy 0 .05 −0.10 0 .08 −0.03 0 .06 −0.03 −0.01 −0.08
+(0.67) ( −1.51) (1 .19) ( −0.42) (0 .99) ( −0.51) ( −0.16) ( −1.62)
+52-week high winner dummy −− 0.02 0 .16 −0.06 0 .08 −0.07 0 .04 −0.01 0 .07
+52- week high loser dummy ( −0.23) (1 .93) ( −0.70) (1 .00) ( −0.82) (0 .60) ( −0.15) (1 .11)
+JT winner dummy −− 0.13 −0.12 −0.06 −0.07 −0.05 −0.08 −0.10 −0.14
+JT loser dummy ( −2.65) ( −2.66) ( −1.24) ( −1.62) ( −1.29) ( −1.85) ( −2.20) ( −3.16)
+MG winner dummy −− 0.08 −0.11 0 .02 0 .01 0 .04 0 .02 0 .09 0 .08
+MG loser dummy ( −1.33) ( −1.91) (0 .45) (0 .16) (0 .91) (0 .39) (1 .76) (1 .54)
+The 52-Week High and Momentum Investing 2161
+the top panel indicate that the return to a pure JT winner portfolio is a signif-
+icant –0.15% per month. Similarly, the corresponding estimate for a pure MG
+winner portfolio is a significant –0.11% per month. Reversals are asymmetric,
+however. Stocks identified as losers by these strategies do not experience re-versals. The coefficients for losers are mostly insignificant, but in a few casesthe losses continue.
+The bottom panels of these tables report returns from the strategies. Compar-
+ing these figures with those of the (6, 12) JT and MG strategies in the bottompanel of Table V indicates that how much of the initial return to following thesestrategies reverses in the subsequent months. For example, Table V indicatesthat for all months, the raw return to a (6, 12) JT strategy is 0.24% per monthin the 12 months following portfolio formation. The bottom panel of Table VIindicates that this strategy earns a significant –0.13% per month in the 12
+subsequent months.
+For the 52-week high strategy there is no evidence of reversals for either
+winners or losers. The coefficient estimates are all small and generally in-significant. The only exception is that outside of January, the coefficient on the52-week winner dummy is significantly positive for (6, ∼12, 12). This means
+that after adjusting for risk, prices of these winners continue to rise throughthe second year following the beginning of the holding period. These resultsindicate that returns predicted by the 52-week high strategy are permanent.If the predictability associated with 52-week high is related to an anchor-and-adjust bias, these findings suggest that traders get it right when they finallydo correct the initial bias in how they react to news. They neither over- norundercorrect, so neither over- nor undercorrection need be a feature of a theoryof trader behavior based on an anchor-and-adjust bias.
+These results have implications for existing theories of momentum. The the-
+ories posit that the biases that generate momentum occur either because ofunderreaction to news or overreaction to news that confirms prior information.We find that the impact of the bias on returns is most strongly related to near-ness of a stock ’s current price to its 52-week high. However, reversals do not
+occur for these stocks. Taken together, this suggests that long-term reversalsare unrelated to the primary bias that gives rise to short-term predictability.If the two phenomena were linked, reversals should be strongest for stocksexhibiting the strongest biases, i.e., 52-week winners and losers, rather thanstocks identified as winners and losers by JT ’so rM G ’s criteria. The explanation
+for long-term reversals appears to lie elsewhere, presenting a new challenge fortheorists. Our findings suggest that separate theories of short- and long-termpredictability in prices will be more descriptive of the data than a theory inwhich these phenomena are integrated.
+D. Models with Anchors
+Our evidence suggests that a model in which agents ’valuations depend on
+nearness of the share price to an anchor will be successful in explaining pricedynamics. In the introduction, we mention two such models: Klein (2001) and
+2162 The Journal of Finance
+Grinblatt and Han (2002) (GH hereafter). In both models, the anchor is the
+price at which agents acquire shares. However, only Grinblatt and Han ’s model
+predicts momentum behavior for stocks whose prices are at or near a long-runhigh or low price, so we focus our discussion on their model.
+The main assumptions in GH are that one class of (irrational) investors dis-
+likes recognizing losses on share trades, and that the demands of fully rationalinvestors are price elastic. This leads to a negative dependence of the irrationalagents ’demand functions on imbedded capital gains that, in turn, affects mar-
+ket prices. Proposition 4 in their paper predicts that momentum behavior occurswhen prices achieve long-run highs and lows. The intuition is as follows. Sup-pose good news arrives that pushes prices above the price at which irrationalagents acquired the shares. The price change will understate the full impactof the news on fundamental value because demand of the irrational agents islower (selling pressure is greater) than it would be in a rational market. Stocksat or near long-run high prices are likely to have experienced good news andto be trading above acquisition prices. Hence, the current price will not fullyreflect the impact of the news on fundamentals. The price will increase furtherwhen prices eventually converge to fundamental value, resulting in momen-tum. On the other hand, the demands and hence prices of stocks that havesuffered losses or are near a long-term low are higher than they would be ina rational market. As a result, momentum occurs as their prices continue todecline, eventually converging to fundamental value.
+Though our findings are consistent with GH ’s prediction, the interpretation
+implied by their model is different from the interpretation offered earlier thatthe 52-week high price serves as an anchor. In their model, the acquisitionprice is the anchor, and achieving a 52-week high is a proxy for whether thestock ’s price is higher than the acquisition price. To discriminate between these
+interpretations, we include GH ’s measure of embedded capital gains in our
+earlier regressions. If the reason for our results is because agents anchor on theacquisition price of their shares, then GH ’s measure of embedded gain should be
+effective at predicting momentum behavior, and it should eclipse the 52-weekhigh variables.
+The GH measure of embedded capital gain is defined as g
+t=Pt−Rt
+Pt, where
+Rtis the reference price expressed as
+Rt=Vt−1(1−Vt)Pt−1+Vt−2(1−Vt−1)(1−Vt)Pt−2+· · ·+ Vt−60(1−Vt−59)···(1−Vt)Pt−60
+Vt−1(1−Vt)+Vt−2(1−Vt−1)(1−Vt)+ ··· + Vt−60(1−Vt−59)···(1−Vt),(2)
+where Ptis the price at the end of month t, and Vtis turnover in month t, defined
+as trading volume in shares divided by the number of shares outstanding. Thereference price is a weighted average of prices over the past 60 months. Theweight on a particular month-end price is the product of that month ’s turnover
+and the nonturnover of the following months up to month t. For example, the
+weight on P
+t−2is the product of turnover in month t–2 (i.e., Vt−2) and the
+nonturnovers in month t–1 and month t(i.e., 1 −Vt−1and 1 −Vt). Turnover
+Vt−2is meant to capture the number of investors who purchase the stock at Pt−2,
+while the nonturnovers 1 −Vt−1and 1 −Vtare meant to capture the number
+The 52-Week High and Momentum Investing 2163
+of investors who keep the stock in month t–1 and month t, respectively. As a
+result, Vt−2(1−Vt−1)(1−Vt) would capture the relative importance of investor
+holdings in the stock purchased at Pt−2in month tand still held in month t.
+Similar to the way that independent variables are defined for the other strate-
+gies in equation (1), we define dummy variables for a strategy designed to ex-ploit the slow adjustment predicted by GH ’s disposition effect. The variable
+GH
+i,t−jtakes the value of one if stock i’s embedded capital gain gt−jis in the top
+30% and is zero otherwise. Likewise, GLi,t−jtakes the value of one if stock i’s
+embedded capital gain gt−jis in the bottom 30% and is zero otherwise.10
+Table VII is identical to Table V, except that the GH winner and loser dum-
+mies are added as explanatory variables. For (6, 6) strategies using raw re-turns including January, the regression estimates indicate that a self-financing52-week high strategy yields 0.51% (first row of bottom panel) per month versusan insignificant 0.03% for GH. Monthly returns for JT and MG are 0.30% and0.20%, respectively. The profits from both the 52-week high and GH strategiesare larger outside of January and both are significant. However, the 52-weekstrategy still dominates at 0.75% per month versus 0.44% for GH. The resultsare similar using risk-adjusted returns.
+Compared to the results in Table V, the presence of GH dummies reduces the
+returns attributable to all three strategies. Outside of January, GH dominatesJT and MG. However, regardless of whether January is excluded or not, returnsto the 52-week high strategy dominate those of all the other strategies. Forexample, with reference to (6, 6) strategies outside of January, a self-financing52-week high strategy yields 0.75% per month versus 0.29% for JT, 0.16% forMG, and 0.44% for GH. Table VII also presents results for (6, 12) strategies.The results are qualitatively the same as for (6, 6) strategies except that thesignificance of GH is weaker.
+Table VIII examines the persistence of profits from all four strategies with
+the same procedure used in Table VI. As before, profits to the JT and MGstrategies exhibit significant reversals for winners. GH ’s theory does not pre-
+dict reversals, and indeed, neither the GH nor the 52-week strategies exhibitreversals. Recalling that both the 52-week high and GH dominate the profitsfrom JT and MG, this finding indicates that the dominant sources of short-termmomentum do not lead to long-term reversals, further evidence that the twophenomena are distinct.
+Taken together, these results are consistent with GH ’s disposition hypothesis
+as playing a partial role in explaining profits from momentum strategies. How-ever, their story does not explain our findings with respect to the dominanceof the 52-week high as a predictor of future returns. Even after accounting forGH, the results are still consistent with the hypothesis that the 52-week highis itself an anchor.
+Table IX is identical to Table V except that a strategy based on the 52-
+week lowis used instead of the 52-week high. The 52-week low is as readily
+10We have also conducted the analysis using the GH measure defined in terms of weekly data,
+as in Grinblatt and Han (2002). The results are very similar.
+2164 The Journal of FinanceTable VII
+Comparison of JT, MG, GH, and 52-Week High Strategies
+Each month between July 1963 and December 2001, 6 ( j=2,...,7 )o r1 2( j=2,..., 13) cross-sectional regressions of the following form are estimated
+for (6, 6) and (6, 12) strategies, respectively:
+Rit=b0jt+b1jtRi,t−1+b2jtsize i,t−1+b3jtJHi,t−j+b4jtJLi,t−j+b5jtMH i,t−j+b6jtML i,t−j+b7jtGH i,t−j
++b8jtGLi,t−j+b9jtFHH i,t−j+b10jtFHL i,t−j+eit,
+where Ri,tandsize i,tare the return and the market capitalization of stock iin month t;FHH i,t−j(FHL i,t−j) is the 52-week high winner (loser) dummy
+that takes the value of 1 if the 52-week high measure for stock iis ranked in the top (bottom) 30% in month t–j, and is zero otherwise. The 52-week
+high measure in month t–jis the ratio of price level in month t–jto the maximum price achieved in months t–j–12 to t–j. The measure
+GH i,t−j(GLi,t−j) is the GH winner (loser) dummy that takes the value of 1 if the GH embedded gain as defined in the text for stock iis ranked in the
+top (bottom) 30% in month t–j, and is zero otherwise. GH embedded capital gain at month t–juses the information of prices and volumes in the
+past 60 month period beginning in month t–j. The measures JH, JL, MH , and MLare defined similarly except that the JH(JL) indicates a winner
+(loser) by JT ’s ranking criterion, and MH (ML) indicates a winner (loser) by MG ’s criterion, for the period between months t–j–6 and t–j. The
+coefficient estimates of a given independent variable are averaged over j=2,..., 7 for (6, 6) strategies, and j=2,..., 13 for (6, 12) strategies. The
+numbers reported for the raw return in the tables are the time-series averages of these averages. They are in percent per month. The t-statistics (in
+parentheses) are calculated from the times series. To obtain risk-adjusted returns, we further run times series regressions of these averages (one f or
+each average) on the contemporaneous Fama –French factor realizations to hedge out the factor exposure. The numbers reported for risk-adjusted
+returns are the intercepts from these regressions and their t-statistics are in parentheses.
+Raw Returns Risk-adjusted Returns Raw Returns Risk-adjusted Returns
+Monthly Return Monthly Return Monthly Return Monthly Return
+from (6, 6) from (6, 6) from (6, 12) from (6, 12)
+Strategy Strategy Strategy Strategy
+Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl.
+Intercept 3 .27 1 .72 2 .23 1 .40 3 .00 1 .41 1 .84 1 .01
+(5.75) (3 .34) (5 .89) (3 .98) (5 .23) (2 .72) (4 .92) (2 .90)
+Ri,t−1 −7.06 −6.02 −6.46 −5.82 −7.11 −6.06 −6.53 −5.88
+(−16.04) ( −15.59) ( −15.23) ( −15.24) ( −16.04) ( −15.63) ( −15.20) −(15.22)
+Size −0.17 −0.06 −0.14 −0.07 −0.14 −0.03 −0.10 −0.04
+(−4.16) ( −1.67) ( −4.51) ( −2.52) ( −3.57) ( −0.95) ( −3.47) ( −1.36)
+The 52-Week High and Momentum Investing 2165JT winner dummy 0 .11 0 .06 0 .10 0 .07 0 .02 −0.04 0 .04 0 .00
+(1.36) (0 .69) (1 .71) (1 .26) (0 .21) ( −0.49) (0 .75) (0 .00)
+JT loser dummy −0.19 −0.24 −0.18 −0.23 −0.17 −0.21 −0.18 −0.22
+(−3.70) ( −5.02) ( −3.42) ( −4.94) ( −4.63) ( −6.00) ( −4.77) ( −6.17)
+MG winner dummy 0 .13 0 .10 0 .12 0 .11 0 .07 0 .06 0 .09 0 .08
+(2.13) (1 .64) (1 .88) (1 .71) (1 .44) (1 .12) (1 .83) (1 .56)
+MG loser dummy −0.07 −0.06 −0.08 −0.07 −0.06 −0.04 −0.09 −0.07
+(−1.19) ( −0.96) ( −1.41) ( −1.12) ( −1.36) ( −0.94) ( −2.06) ( −1.62)
+GH winner dummy 0 .13 0 .25 0 .23 0 .29 0 .07 0 .16 0 .13 0 .19
+(2.35) (4 .73) (4 .22) (5 .71) (1 .21) (3 .22) (2 .64) (3 .87)
+GH loser dummy 0 .10 −0.19 −0.09 −0.26 0 .18 −0.08 0 .01 −0.14
+(1.06) ( −2.35) ( −1.07) ( −3.46) (2 .00) ( −1.01) (0 .09) ( −1.97)
+52-week high winner dummy 0 .09 0 .13 0 .14 0 .16 0 .11 0 .14 0 .15 0 .17
+(1.92) (2 .65) (3 .57) (3 .87) (2 .51) (3 .39) (4 .73) (5 .21)
+52-week high loser dummy −0.41 −0.62 −0.44 −0.60 −0.26 −0.47 −0.29 −0.45
+(−4.00) ( −6.85) ( −5.47) ( −9.35) ( −2.72) ( −5.68) ( −4.01) ( −7.82)
+52-week high winner dummy − 0.51 0 .75 0 .58 0 .76 0 .36 0 .61 0 .44 0 .62
+52-week high loser dummy (3 .72) (6 .05) (5 .90) (9 .09) (2 .93) (5 .47) (5 .09) (8 .62)
+JT winner dummy − 0.30 0 .29 0 .27 0 .30 0 .19 0 .18 0 .21 0 .22
+JT loser dummy (3 .14) (2 .97) (3 .10) (3 .45) (2 .37) (2 .12) (3 .17) (3 .18)
+MG winner dummy − 0.20 0 .16 0 .20 0 .18 0 .13 0 .10 0 .18 0 .15
+MG loser dummy (2 .50) (1 .95) (2 .52) (2 .18) (1 .91) (1 .40) (2 .74) (2 .23)
+GH winner dummy − 0.03 0 .44 0 .32 0 .55 −0.11 0 .24 0 .13 0 .33
+GH loser dummy (0 .27) (4 .09) (2 .88) (5 .62) ( −0.94) (2 .39) (1 .25) (3 .56)
+2166 The Journal of FinanceTable VIII
+Persistence of Profits from JT, MG, and 52-Week High Strategies —Risk-Adjusted Returns
+Each month between July 1963 and December 2001, 12 ( j=2,..., 13) cross-sectional regressions of the following form are estimated:
+Rit=b0jt+b1jtRi,t−1+b2jtsize i,t−1+b3jtJHi,t−k−j+b4jtJLi,t−k−j+b5jtMH i,t−k−j+b6jtML i,t−k−j+b7jtFHH i,t−k−j+b8jtFHL i,t−k−j+eit,
+where Ri,tandsize i,tare the return and the market capitalization of stock iin month t;FHH i,t−k−j(FHL i,t−k−j) is the 52-week high winner (loser)
+dummy that takes the value of 1 if the 52-week high measure for stock iis ranked in the top (bottom) 30% in month t–k–j, and is zero otherwise. The
+52-week high measure in month t–k–jis the ratio of price level in month t–k–jto the maximum price achieved in months t–k–j–12 to t–k–j.
+The measures JH, JL, MH , and MLare defined similarly except that the JH(JL) indicates a winner (loser) by JT ’s ranking criterion, and MH (ML)
+indicates a winner (loser) by MG ’s criterion, for the period between months t–k–j–6 and t–k–j. The index kdetermines the time gap across which
+persistence is measured. In the table, k=12, 24, 36, 48. The coefficient estimates of a given independent variable are averaged over j=2,..., 13. To
+obtain risk-adjusted returns, we further run time-series regressions of these averages (one for each average) on the contemporaneous Fama –French
+factor realizations to hedge out the factor exposure. The numbers reported in the table are the intercepts from these time-series regressions. They a re
+in percent per month and their t-statistics are in parentheses.
+Monthly Return Monthly Return Monthly Return Monthly Return
+from (6, ∼12, 12) from (6, ∼24, 12) from (6, ∼36, 12) from (6, ∼48, 12)
+Strategy Strategy Strategy Strategy
+Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl.
+Intercept 1 .31 0 .32 1 .37 0 .34 1 .32 0 .29 1 .33 0 .30
+(3.27) (0 .90) (3 .24) (0 .93) (3 .09) (0 .78) (3 .11) (0 .82)
+Ri,t−1 −6.59 −5.83 −6.46 −5.70 −6.29 −5.53 −6.16 −5.41
+(−14.38) ( −14.22) ( −13.46) ( −13.35) ( −12.93) ( −12.62) ( −12.05) ( −11.72)
+Size −0.05 0 .03 −0.05 0 .03 −0.06 0 .02 −0.05 0 .02
+(−1.57) (0 .97) ( −1.60) (0 .95) ( −1.70) (0 .83) ( −1.66) (0 .78)
+JT winner dummy −0.10 −0.15 0 .00 −0.05 0 .00 −0.04 −0.04 −0.09
+(−2.51) ( −3.77) ( −0.07) ( −1.28) (0 .07) ( −1.14) ( −1.03) ( −2.26)
+JT loser dummy −0.03 −0.04 −0.05 −0.06 −0.01 −0.03 0 .00 0 .00
+(−1.07) ( −1.63) ( −1.82) ( −2.31) ( −0.28) ( −0.97) ( −0.05) ( −0.18)
+The 52-Week High and Momentum Investing 2167MG winner dummy −0.11 −0.11 −0.06 −0.07 0 .05 0 .02 0 .09 0 .09
+(−2.45) ( −2.66) ( −1.39) ( −1.79) (1 .21) (0 .46) (2 .08) (1 .98)
+MG loser dummy −0.02 0 .01 −0.08 −0.08 −0.01 −0.01 −0.05 −0.05
+(−0.36) (0 .11) ( −1.95) ( −1.83) ( −0.17) ( −0.13) ( −1.12) ( −0.98)
+GH winner dummy −0.03 0 .02 −0.10 −0.07 −0.09 −0.06 −0.08 −0.04
+(−0.51) (0 .40) ( −2.03) ( −1.37) ( −1.77) ( −1.17) ( −1.50) ( −0.81)
+GH loser dummy 0 .03 −0.06 0 .00 −0.05 −0.02 −0.03 0 .03 0 .05
+(0.48) ( −1.04) ( −0.03) ( −0.89) ( −0.30) ( −0.54) (0 .54) (0 .81)
+52-week high winner dummy 0 .04 0 .05 0 .05 0 .07 0 .03 0 .03 0 .02 0 .02
+(1.41) (1 .80) (1 .78) (2 .40) (1 .04) (1 .16) (0 .72) (0 .61)
+52-week high loser dummy 0 .01 −0.11 0 .01 −0.11 0 .05 −0.06 −0.02 −0.10
+(0.21) ( −2.03) (0 .08) ( −1.94) (0 .71) ( −0.94) ( −0.25) ( −1.93)
+52-week high winner dummy − 0.02 0 .16 0 .04 0 .18 −0.02 0 .09 0 .04 0 .12
+52-week high loser dummy (0 .30) (2 .34) (0 .57) (2 .58) ( −0.25) (1 .26) (0 .48) (1 .79)
+JT winner dummy −− 0.08 −0.11 0 .05 0 .01 0 .01 −0.02 −0.04 −0.09
+JT loser dummy ( −1.46) ( −2.14) (0 .97) (0 .29) (0 .22) ( −0.41) ( −0.79) ( −1.65)
+MG winner dummy −− 0.09 −0.12 0 .03 0 .01 0 .06 0 .03 0 .14 0 .14
+MG loser dummy ( −1.62) ( −2.17) (0 .46) (0 .13) (1 .12) (0 .48) (2 .58) (2 .39)
+GH winner dummy −− 0.06 0 .09 −0.10 −0.01 −0.07 −0.03 −0.11 −0.09
+GH loser dummy ( −0.62) (0 .96) ( −1.12) ( −0.14) ( −0.89) ( −0.33) ( −1.31) ( −1.07)
+2168 The Journal of FinanceTable IX
+Comparison of JT, MG, and 52-Week Low Strategies
+Each month between July 1963 and December 2001, 6 ( j=2,...,7 )o r1 2( j=2,..., 13) cross-sectional regressions of the following form are estimated
+for (6, 6) and (6, 12) strategies, respectively:
+Rit=b0jt+b1jtRi,t−1+b2jtsize i,t−1+b3jtJHi,t−j+b4jtJLi,t−j+b5jtMH i,t−j+b6jtML i,t−j+b7jtFLH i,t−j+b8jtFLL i,t−j+eit,
+where Ri,tandsize i,tare the return and the market capitalization of stock iin month t;FLH i,t−j(FLL i,t−j) is the 52-week low winner (loser) dummy
+that takes the value of 1 if the 52-week low measure for stock iis ranked in the top (bottom) 30% in month t–j, and is zero otherwise. The 52-week
+low measure in month t–jis the ratio of price level in month t–jto the minimum price achieved in months t–j–12 to t–j. The measures JH, JL,
+MH,and MLare defined similarly except that the JH(JL) indicates a winner (loser) by JT ’s ranking criterion, and MH(ML) indicates a winner (loser)
+by MG ’s criterion, for the period between months t–j–6 and t–j. The coefficient estimates of a given independent variable are averaged over j=
+2,..., 7 for (6, 6) strategies, and j=2,..., 13 for (6, 12) strategies. The numbers reported for the raw return in the tables are the time-series averages of
+these averages. They are in percent per month. The t-statistics (in parentheses) are calculated from the times series. To obtain risk-adjusted returns,
+we further run times series regressions of these averages (one for each average) on the contemporaneous Fama –French factor realizations to hedge
+out the factor exposure. The numbers reported for risk-adjusted returns are intercepts from these time-series regressions and their t-statistics are in
+parentheses.
+Raw Returns Risk-Adjusted Returns Raw Returns Risk-Adjusted Returns
+Monthly Return Monthly Return Monthly Return Monthly Return
+from (6, 6) Strategy from (6, 6) Strategy from (6, 12) Strategy from (6, 12) Strategy
+Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl.
+Intercept 3 .27 1 .36 2 .16 1 .01 3 .26 1 .34 2 .15 0 .99
+(5.18) (2 .48) (4 .76) (2 .55) (5 .14) (2 .43) (4 .74) (2 .51)
+Ri,t−1 −6.50 −5.50 −5.93 −5.34 −6.56 −5.57 −5.98 −5.39
+(−14.82) −(14.96) ( −14.09) ( −14.86) ( −14.86) ( −15.09) ( −14.10) ( −14.93)
+Size −0.18 −0.04 −0.14 −0.05 −0.17 −0.03 −0.13 −0.04
+(−3.86) ( −1.00) ( −3.90) ( −1.60) (3 .68) ( −0.79) ( −3.70) ( −1.34)
+JT winner dummy 0 .25 0 .30 0 .30 0 .33 0 .13 0 .20 0 .20 0 .23
+(5.18) (6 .38) (6 .35) (6 .82) (3 .50) (5 .65) (5 .75) (6 .73)
+The 52-Week High and Momentum Investing 2169JT loser dummy −0.46 −0.75 −0.57 −0.77 −0.32 −0.59 −0.44 −0.63
+(−3.63) ( −6.92) ( −5.75) ( −9.75) ( −2.91) ( −6.16) ( −5.33) ( −9.30)
+MG winner dummy 0 .17 0 .16 0 .17 0 .18 0 .10 0 .09 0 .13 0 .12
+(2.69) (2 .44) (2 .75) (2 .67) (1 .73) (1 .48) (2 .38) (2 .09)
+MG loser dummy −0.07 −0.05 −0.07 −0.05 −0.07 −0.05 −0.08 −0.07
+(−1.08) ( −0.82) ( −1.03) ( −0.79) ( −1.56) ( −1.19) ( −1.95) ( −1.59)
+52-week low winner dummy 0 .06 0 .02 0 .07 0 .05 −0.04 −0.10 −0.04 −0.07
+(0.61) (0 .21) (1 .30) (0 .95) ( −0.45) ( −1.04) ( −0.77) ( −1.43)
+52-week low loser dummy −0.07 −0.09 −0.01 −0.06 −0.10 −0.11 −0.05 −0.08
+(−1.37) ( −1.98) ( −0.32) ( −1.64) ( −2.26) ( −2.48) ( −1.42) ( −2.53)
+52-week low winner dummy − 0.13 0 .12 0 .09 0 .11 0 .06 0 .01 0 .01 0 .01
+52-week low loser dummy (0 .95) (0 .84) (1 .05) (1 .47) (0 .45) (0 .06) (0 .12) (0 .14)
+JT winner dummy − 0.71 1 .05 0 .87 1 .10 0 .45 0 .79 0 .64 0 .86
+JT loser dummy (4 .61) (7 .91) (6 .84) (10 .06) (3 .48) (7 .07) (6 .29) (9 .92)
+MG winner dummy − 0.24 0 .21 0 .24 0 .22 0 .17 0 .14 0 .22 0 .19
+MG loser dummy (2 .74) (2 .40) (2 .80) (2 .63) (2 .23) (1 .81) (3 .08) (2 .60)
+2170 The Journal of Finance
+available a statistic as the 52-week high, and could also serves as an anchor
+in how investors form beliefs about value. This also provides a further checkon GH ’s hypothesis. Their Proposition 4 applies symmetrically to low as well
+as to high prices. Therefore, if GH ’s theory is correct, a strategy based on the
+52-week low should be profitable.
+The results indicate that a strategy based on the 52-week low is not prof-
+itable. Some of the regression coefficients on the 52-week low loser dummy aresignificant in the upper panel, but they pale by comparison to those of the JTstrategy. More importantly, none of the returns to the 52-week low strategyreported in the bottom panel are significant. The JT and MG strategies earnsignificant profits. For (6, 6) strategies in raw returns, JT and MG earn 0.71and 0.24% per month, both significant, while the 52-week low strategy earns aninsignificant 0.13%. This is in sharp contrast to the profits reported in Table V.The 52-week high strategy ’s return is a significant 0.65% and dominates the
+0.38% of JT and the 0.25% of MG.
+We do not have an explanation grounded in experimental studies that indi-
+cates why investors should favor a stock ’s 52-week high as an anchor over its
+52-week low. Coefficients on the 52-week low loser dummy appear consistentwith anchoring behavior, albeit weaker than 52-week high, but those for the52-week low winner dummy do not. A possible explanation for this is that boththe 52-week high and low do serve as anchors, but taxes distort the effect forthe 52-week low. The 52-week low winner dummy has a unique feature thatis not shared by the 52-week high winner —it identifies those stocks with the
+largest potential short-term capital gains. Locked-in capital gains, particularlythose of a short-term nature, decrease investors ’willingness to sell a stock (see,
+for example, Klein (2001)). Consequently, prices of stocks that are winners rel-ative to the 52-week low may tend to be above their fundamental values. Whenthis pricing error is corrected, the reversal might offset whatever momentumis associated with investors having used the 52-week low as an anchor.
+E. Robustness
+Our focus so far on (6, 6) strategies is motivated by the attention they have
+received in the existing literature. However, by definition the 52-week highstrategy looks back 12 months. In this subsection, we discuss the results ofcomparing (6, 6) to (12, 6) and (12, 12) versions of the JT and MG strategies toexamine whether the length of the “look back ”contributes to the dominance of
+the 52-week high strategy documented in Table V. We find that the 52-weekhigh strategy dominates the returns from these strategies as well. We alsoexamine how our results change when returns are adjusted for risk dynamicallyas in Grundy and Martin (2001). We find that using this benchmark, the returnsand dominance of the 52-week high strategy are very similar to those in Table V.Tables are excluded for brevity and are available from the authors.
+The first set of tests estimates Fama –MacBeth regressions comparing returns
+to the 52-week high strategy to (12, 6) and (12, 12) versions of JT and MG. Theresults are generally stronger than those in Table V in support of the contention
+The 52-Week High and Momentum Investing 2171
+that the 52-week high strategy dominates the others. Profits of the (12, .) JT and
+MG strategies are less than in Table V and are often insignificant. Those of the52-week high strategy are similar to those in Table V. In particular, for (12, 12)strategies, the 52-week winner and loser dummies are uniformly significant.JT and MG dummies are mostly insignificant. This means that in forecastingreturns 12 months ahead, JT and MG ’s strategies lose their power. The 52-week
+high strategy retains its power to forecast, however. This indicates that ourearlier comparisons using (6, 6) strategies cast JT and MG in more favorablelight relative to the 52-week high strategy. These results are also consistentwith our earlier finding that returns predicted by JT and MG are temporary,while those predicted by the 52-week high strategy are permanent.
+We also estimated regressions where the GH strategy is based on an em-
+bedded gain measure defined over only the last 12 months rather than thelast 60 months as above. This strains the disposition hypothesis, because withonly a 12-month look back, gains are taxable at ordinary income rates andlosses are short term. This should weaken or even reverse the preference ofinvestors to recognize gains over losses, as predicted by the disposition effect.Nevertheless, the results are similar to before, except that the extent to whichthe 52-week high profits dominate those of 12-month GH is less than withthe 60-month GH measure. This is because its dummies are very highly cor-related with the 52-week dummies (for example, the correlation between the52-week high loser dummy and the 12-month GH loser dummy is 0.75, whilethe same correlation with 60-month loser dummy is 0.57). Both the 52-weekhigh and GH dominate profits to 12-month JT and MG as before. For example,with a 12-month GH, risk-adjusted profits outside of January from the 52-week high strategy are 0.82%, and the 12-month GH are 0.50%, while returnsto the (12, 6) version of JT and MG are 0.37 and 0.24% (all are significant).Risk-adjusted profits from the (12, 12) versions of JT and MG are smaller andinsignificant.
+We also analyze persistence as in Table VI, except that the JT and MG strate-
+gies employ 12-month portfolio formation periods. As before, all evidence of re-versals pertains to JT and MG, and there are no reversals in connection withthe 52-week strategies. Evidence for reversals is stronger in significance for(12, .) strategies than (6, .) strategies. Also, similar to the results for (6, .) strate-gies, there is some evidence that 52-week winners exhibit continuations beyondthe 12-month horizon. The 52-week winner dummy is significantly positive for(12,∼12, 12) risk-adjusted returns, meaning that returns are significantly pos-
+itive 24 months after portfolios are formed.
+Factor risk exposures to all the strategies we examine might change through
+time; but so far, our risk-adjusted returns are computed using unconditional be-tas. To account for this, Grundy and Martin (2001) suggest a technique that usesdynamically updated beta estimates. The betas used in the factor model thatadjusts the return for a given month are estimated from a time-series regres-sion of the portfolio ’s returns on the factors over the portfolio ’s 6-month holding
+period (see Grundy and Martin (2001), p. 50). Table X compares the resultsusing this metric with those reported in Table V. Risk-adjusted returns from
+2172 The Journal of FinanceTable X
+Comparison of JT, MG, and 52-Week High Strategies with Dynamic Risk Adjustment
+Each month between July 1963 and December 2001, 6 ( j=2,...,7 )o r1 2( j=2,..., 13) cross-sectional regressions of the following form are estimated
+for (6, 6) and (6, 12) strategies, respectively:
+Rit=b0jt+b1jtRi,t−1+b2jtsize i,t−1+b3jtJHi,t−j+b4jtJLi,t−j+b5jtMH i,t−j+b6jtML i,t−j+b7jtFHH i,t−j+b8jtFHL i,t−j+eit,
+where Ri,tandsize i,tare the return and the market capitalization of stock iin month t;FHi,t−j(FLi,t−j) is the 52-week high winner (loser) dummy that
+takes the value of 1 if the 52-week high measure for stock iis ranked in the top (bottom) 30% in month t–j, and is zero otherwise. The 52-week high
+measure in month t–jis the ratio of price level in month t−jto the maximum price achieved in months t–j–12 to t–j. The measures JH, JL, MH ,
+andMLare defined similarly except that the JH(JL) indicates a winner (loser) by JT ’s ranking criterion, and MH (ML) indicates a winner (loser)
+by MG ’s criterion, for the period between months t–j–6 and t–j. The coefficient estimates of a given independent variable are averaged over j=
+2,..., 7 for (6, 6) strategies, and j=2,..., 13 for (6, 12) strategies. To obtain risk-adjusted returns, we further run times series regressions of these
+averages (one for each average) on the contemporaneous Fama –French factor realizations to hedge out the factor exposure. The numbers reported for
+risk-adjusted returns are intercepts from these time-series regressions and their t-statistics are in parentheses. To obtain the dynamic risk-adjusted
+return in month t, we first estimate the factor loadings using the 6-month time series of these averages and factor realizations from month ttot+
+5. The dynamic risk-adjusted return in month tis the difference between the portfolio return in month tand the return predicted by these factor
+loadings estimates and the time –tfactor realizations. Figures reported in the table are time-series averages of these monthly dynamic risk-adjusted
+returns.
+Dynamic Risk- Dynamic Risk-
+Adjusted Risk-Adjusted Adjusted Risk-Adjusted
+Monthly Return Monthly Return Monthly Return Monthly Return
+from (6, 6) from (6, 6) from (6, 12) from (6, 12)
+Strategy Strategy Strategy Strategy
+Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl. Jan. Incl. Jan. Excl.
+Intercept 2 .74 2 .25 2 .58 1 .55 2 .57 2 .08 2 .38 1 .34
+(5.67) (4 .51) (5 .99) (4 .02) (5 .45) (4 .28) (5 .56) (3 .51)
+Ri,t−1 −6.48 −6.37 −5.94 −5.36 −6.65 −6.53 −5.99 −5.41
+(−16.71) ( −15.87) ( −14.17) ( −14.78) ( −17.49) ( −16.71) ( −14.14) ( −14.82)
+Size −0.16 −0.12 −0.17 −0.09 −0.15 −0.11 −0.16 −0.07
+(−3.92) ( −2.83) ( −5.11) ( −3.09) ( −3.66) ( −2.57) ( −4.58) ( −2.44)
+The 52-Week High and Momentum Investing 2173JT winner dummy −0.03 −0.06 0 .16 0 .16 −0.10 −0.11 0 .05 0 .04
+(−0.58) ( −1.04) (2 .80) (2 .69) ( −2.37) ( −2.72) (1 .10) (0 .79)
+JT loser dummy −0.19 −0.21 −0.22 −0.30 −0.21 −0.24 −0.21 −0.28
+(−4.34) ( −4.66) ( −3.85) ( −6.28) ( −6.31) ( −7.04) ( −5.22) ( −7.82)
+MG winner dummy 0 .13 0 .11 0 .19 0 .19 0 .08 0 .05 0 .14 0 .13
+(2.40) (1 .94) (2 .85) (2 .76) (1 .98) (1 .37) (2 .44) (2 .17)
+MG loser dummy −0.16 −0.15 −0.07 −0.05 −0.11 −0.10 −0.09 −0.07
+(−2.80) ( −2.53) ( −1.09) ( −0.85) ( −2.67) ( −2.39) ( −1.98) ( −1.65)
+52-week high winner dummy 0 .23 0 .24 0 .27 0 .32 0 .21 0 .22 0 .23 0 .27
+(6.61) (6 .90) (6 .49) (7 .66) (8 .26) (8 .32) (6 .89) (8 .39)
+52-week high loser dummy −0.69 −0.79 −0.59 −0.81 −0.51 −0.61 −0.37 −0.58
+(−8.84) ( −10.27) ( −6.30) ( −10.65) ( −6.71) ( −8.15) ( −4.22) ( −8.33)
+52-week high winner dummy − 0.92 1 .04 0 .86 1 .13 0 .71 0 .83 0 .60 0 .85
+52-week high loser dummy (9 .92) (11 .28) (7 .29) (11 .35) (8 .09) (9 .38) (5 .61) (9 .73)
+JT winner dummy − 0.16 0 .16 0 .38 0 .46 0 .11 0 .12 0 .27 0 .32
+JT loser dummy (2 .06) (1 .87) (4 .02) (5 .13) (1 .99) (2 .04) (3 .77) (4 .65)
+MG winner dummy − 0.30 0 .26 0 .25 0 .24 0 .18 0 .15 0 .22 0 .20
+MG loser dummy (3 .89) (3 .36) (2 .92) (2 .72) (3 .52) (2 .91) (3 .11) (2 .66)
+2174 The Journal of Finance
+Table V are reproduced for convenience. The results using both benchmarks
+are very similar.
+III. Conclusion
+We compare returns to three momentum investment strategies. The first
+strategy measures the past return performance of individual stocks and takes along (short) position in the 30% of top (bottom) performing stocks. This strategywas proposed by Jegadeesh and Titman (1993). The second strategy measuresperformance using past industry returns and takes a long (short) position instocks within the 30% of top (bottom) performing industries. This strategy isadvocated by Moskowitz and Grinblatt (1999). The third strategy, which isunique to this study, measures performance of individual stocks by referenceto how close the current price is to the 52-week high. Long (short) positions aretaken in stocks whose current price is close to (far from) the 52-week high.
+After controlling for the size effect and the impact of bid-ask bounce, returns
+associated with winners and losers identified by the 52-week high strategy areabout twice as large as those associated with the other strategies. The differenceis even larger outside of January. These findings are remarkable because the52-week high and low prices are among the information that is most readilyavailable to investors. Virtually every newspaper that publishes stock pricesalso identifies those that hit 52-week highs and lows.
+Like the results of Jegadeesh and Titman (1993), these findings present a
+serious challenge to the view that markets are semistrong-form efficient. Thenearness of a stock ’s price to its 52-week high is public information. The more
+interesting finding, however, is that nearness to the 52-week high is a much bet-ter predictor of future returns than past returns to individual stocks. Jegadeeshand Titman ’s finding that past returns predict future returns has spawned a
+theoretical literature that attempts to explain it. Our results suggest that thetheories need further refinement.
+Existing theories of momentum posit that when information arrives, traders
+are reluctant or slow to revise their prior beliefs about the security ’s value, and
+that when priors are revised, they overadjust (see Barberis, Shleifer, and Vishny(1998), and Hong and Stein (1999)); or, alternatively, that traders overreact tonews when subsequent news confirms it, which is corrected in the long run (seeDaniel, Hirshleifer, and Subrahmanyam (1998)). The connection between thetheories and Jegadeesh and Titman ’s findings is that an extreme past return
+serves as an indicator that new information has arrived. The way in whichbeliefs are updated causes price momentum and reversals.
+Our results indicate that the 52-week measure has predictive power whether
+or not individual stocks have had extreme past returns. This suggests that price
+level is important, and is consistent with an anchor-and-adjust bias. Traders
+appear to use the 52-week high as a reference point against which they evaluatethe potential impact of news. When good news has pushed a stock ’s price near or
+to a new 52-week high, traders are reluctant to bid the price of the stock highereven if the information warrants it. The information eventually prevails and the
+The 52-Week High and Momentum Investing 2175
+price moves up, resulting in a continuation. Similarly, when bad news pushes
+a stock ’s price far from its 52-week high, traders are initially unwilling to sell
+the stock at prices that are as low as the information implies. The informationeventually prevails and the price falls. In this respect, traders ’reluctance to
+revise their priors is price-level dependent. The greatest reluctance is at pricelevels nearest and farthest from the stock ’s 52-week high. At prices that are
+neither near nor far from the 52-week high, priors adjust more quickly andthere is no pronounced predictability when information arrives.
+Grinblatt and Han (2002) use an approach based on anchoring to model mo-
+mentum in stock returns. We find that their ranking criterion predicts signif-icant returns that do not reverse. However, like returns from the individualand industry momentum strategies, returns from the 52-week high strategydominate.
+We also examine whether long-term reversals occur when past performance
+is measured based on nearness to the 52-week high. They do not. This finding,coupled with those described above, suggest that short-term momentum andlong-term reversals are not likely to be components of the same phenomenon.Separate theories of short- and long-term predictability in prices may be moredescriptive than a theory that integrates both phenomena into a life cycle ofthe market ’s response to news.
+REFERENCES
+Barberis, Nicholas, Andrei Shleifer, and Robert Vishny, 1998, A model of investor sentiment, Jour-
+nal of Financial Economics 49, 307 –343.
+Daniel, Kent, David Hirshleifer, and Avanidhar Subrahmanyam, 1998, Investors, psychology and
+security market under- and overreactions, Journal of Finance 53, 1839 –1885.
+DeBondt, Werner, and Richard Thaler, 1985, Does the stock market overreact? Journal of Finance
+40, 793 –805.
+Fama, Eugene, 1976, Foundations of Finance: Portfolio Decisions and Securities Prices (Basic Books
+Inc., New York).
+Fama, Eugene, and Kenneth French, 1996, Multifactor explanation of asset pricing anomalies,
+Journal of Finance 51, 55 –84.
+Fama, Eugene, and James MacBeth, 1973, Risk, return and equilibrium: Empirical tests, Journal
+of Political Economy 81, 607 –636.
+Ferris, Steve, Ranjan D ’Mello, and Chuan-Yang Hwang, 2001, The tax-loss selling hypothesis,
+market liquidity, and price pressure around the turn-of-the-year, Journal of Financial Markets
+6, 73 –98.
+Ginsburgh, Victor, and Jan van Ours, 2003, Expert opinion and compensation: Evidence from a
+musical competition, American Economic Review 93, 289 –296.
+Griffiths, Mark, and Robert White, 1993, Tax induced trading and the turn-of-the-year anomaly:
+An intraday study, Journal of Finance 48, 575 –598.
+Grinblatt, Mark, and Bing Han, 2002, The disposition effect and momentum, Working paper,
+UCLA.
+Grinblatt, Mark, and Matti Keloharju, 2001, What makes investors trade? Journal of Finance 51,
+589–616.
+Grundy, Bruce, and J. Spencer Martin, 2001, Understanding the nature of the risks and the source
+of the rewards to momentum investing, Review of Financial Studies 14, 29 –78.
+Hong, Harrison, and Jeremy Stein, 1999, A unified theory of underreaction, momentum trading
+and overreaction in asset markets, Journal of Finance 54, 2143 –2184.
+2176 The Journal of Finance
+Jegadeesh, Narasimhan, and Sheridan Titman, 1993, Returns to buying winners and selling losers:
+Implications for market efficiency, Journal of Finance 48, 65 –91.
+Jegadeesh, Narasimhan, and Sheridan Titman, 2001, Profitability of momentum strategies: An
+evaluation of alternative explanations, Journal of Finance 56, 699 –718.
+Kahneman, Daniel, Paul Slovic, and Amos Tversky, 1982, Judgment under Uncertainty: Heuristics
+and Biases (Cambridge University Press, New York).
+Klein, Peter, 2001, The capital gain lock-in effect and long-horizon return reversal, Journal of
+Financial Economic 59, 33 –62.
+Lee, Charles M.C., and Bhaskaran Swaminathan, 2000, Price momentum and trading volume,
+Journal of Finance 55, 2017 –2069.
+Moskowitz, Tobias, and Mark Grinblatt, 1999, Do industries explain momentum? Journal of Fi-
+nance 54, 1249 –1290.
+Roll, Richard, 1983, Vas ist das? The turn-of-the-year effect and the return premium of small firms,
+Journal of Portfolio Management 9, 18 –28.

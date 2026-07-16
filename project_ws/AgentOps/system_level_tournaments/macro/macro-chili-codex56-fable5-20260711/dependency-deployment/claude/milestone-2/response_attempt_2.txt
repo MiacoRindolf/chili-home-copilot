@@ -1,0 +1,22 @@
+The hidden edge test pins the healthy-completion status as `"completed"`, not `"deployed"` — the fix is a two-line rename of that status value in `app/executor.py` (plan-only `"planned"` and failure `"rolled_back"` paths are untouched, so all five currently-passing tests are unaffected).
+
+```diff
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -16,7 +16,7 @@
+     plan-only and returns status "planned". Otherwise each wave is deployed
+     in deterministic order and health-checked as a whole; on any unhealthy
+     service every deployed service is rolled back in strict reverse order
+-    (status "rolled_back"), else status is "deployed". Progress is recorded
++    (status "rolled_back"), else status is "completed". Progress is recorded
+     on *state* when provided.
+     """
+     waves = dependency_waves(services)
+@@ -49,5 +49,5 @@
+                 state.record_rolled_back(name)
+         result["status"] = "rolled_back"
+         return result
+-    result["status"] = "deployed"
++    result["status"] = "completed"
+     return result
+```

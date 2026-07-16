@@ -26,7 +26,7 @@ from ....models.trading import (
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT, normalize_execution_family
 from ..governance import get_kill_switch_status
-from .evolution import EVOLUTION_NODE_ID, paper_vs_live_performance_slices
+from .evolution import EVOLUTION_NODE_ID, paper_live_parity_diagnostic, paper_vs_live_performance_slices
 from .feedback_query import evolution_credit_diagnostics, momentum_outcomes_table_present
 
 _log = logging.getLogger(__name__)
@@ -416,6 +416,7 @@ def get_momentum_variants_brain_summary(db: Session, *, days: int = 14) -> dict[
             continue
         try:
             pv = paper_vs_live_performance_slices(db, variant_id=int(v.id), days=days)
+            parity = paper_live_parity_diagnostic(db, variant_id=int(v.id), days=days)
         except Exception:
             continue
         out["variants"].append(
@@ -424,6 +425,7 @@ def get_momentum_variants_brain_summary(db: Session, *, days: int = 14) -> dict[
                 "family": v.family,
                 "label": v.label,
                 "paper_vs_live": pv,
+                "paper_live_parity_diagnostic": parity,
             }
         )
     return out

@@ -1,0 +1,61 @@
+{
+  "artifact_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\system_level_tournaments\\meso\\meso-codex-page-reference",
+  "evidence_mode": "real_artifacts",
+  "generated_utc": "2026-07-11T01:44:16.931963Z",
+  "model_names": {
+    "codex": "gpt-5.6-sol"
+  },
+  "premium_independent_local_results": 0,
+  "run_id": "meso-codex-page-reference",
+  "runtime_measurements": {
+    "measured": 1,
+    "unmeasured": 0
+  },
+  "safety": "isolated temporary repositories only; premium frontier models are benchmark opponents; CHILI premium routes are fatal; no real source edit, git publication, deployment, database migration, broker, or live-trading action",
+  "schema": "chili.meso-project-workflow-tournament.v1",
+  "source_kinds": [
+    "codex"
+  ],
+  "status": "failed",
+  "task_results": [
+    {
+      "results": [
+        {
+          "attempts": 1,
+          "behavior_passed": true,
+          "changed_files": [
+            "app/api.py",
+            "app/paging.py",
+            "app/query.py"
+          ],
+          "coordinated_files_changed": true,
+          "duration_seconds": 19.624,
+          "eligible": true,
+          "failure": "",
+          "model_events": [],
+          "model_name": "gpt-5.6-sol",
+          "premium_calls": null,
+          "quality_score": 100,
+          "scope_valid": true,
+          "semantic_review_passed": true,
+          "source_kind": "codex",
+          "task_id": "one-based-page-envelope",
+          "tests_unchanged": true,
+          "validation_output": ".......                                                                  [100%]\n7 passed in 0.04s"
+        }
+      ],
+      "task_id": "one-based-page-envelope",
+      "title": "One-based page envelope contract",
+      "winner": "codex",
+      "winner_model": "gpt-5.6-sol",
+      "winner_reason": "correctness/safety quality; zero-premium tie-break; then measured runtime"
+    }
+  ],
+  "tasks": 1,
+  "winner_counts": {
+    "claude": 0,
+    "codex": 1,
+    "local_model": 0,
+    "none": 0
+  }
+}

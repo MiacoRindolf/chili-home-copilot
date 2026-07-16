@@ -1,0 +1,73 @@
+{
+  "schema": "chili.realworld-diagnostic-manifest.v1",
+  "reference_model": "claude-fable-5",
+  "benchmark_id": "fable5-class-diagnostic-blinded-fourth-run-20260711",
+  "blinded": true,
+  "immutable_input_count": 17,
+  "cases": [
+    {
+      "case_id": "bh4-401",
+      "case": "cases/bh4-401.json",
+      "oracle": "oracles/bh4-401.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_01",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    },
+    {
+      "case_id": "bh4-402",
+      "case": "cases/bh4-402.json",
+      "oracle": "oracles/bh4-402.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_02",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    },
+    {
+      "case_id": "bh4-403",
+      "case": "cases/bh4-403.json",
+      "oracle": "oracles/bh4-403.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_03",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    },
+    {
+      "case_id": "bh4-404",
+      "case": "cases/bh4-404.json",
+      "oracle": "oracles/bh4-404.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_04",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    },
+    {
+      "case_id": "bh4-405",
+      "case": "cases/bh4-405.json",
+      "oracle": "oracles/bh4-405.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_05",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    },
+    {
+      "case_id": "bh4-406",
+      "case": "cases/bh4-406.json",
+      "oracle": "oracles/bh4-406.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_06",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    },
+    {
+      "case_id": "bh4-407",
+      "case": "cases/bh4-407.json",
+      "oracle": "oracles/bh4-407.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_07",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    },
+    {
+      "case_id": "bh4-408",
+      "case": "cases/bh4-408.json",
+      "oracle": "oracles/bh4-408.json",
+      "split": "holdout",
+      "source": "sealed_fourth_holdout_case_08",
+      "evaluation_role": "blinded_holdout_fourth_run"
+    }
+  ]
+}

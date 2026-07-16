@@ -1,0 +1,92 @@
+You are competing in a measured multi-file repository repair tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve public behavior not changed by the goal.
+
+Goal: Repair the retry contract across app/config.py, app/backoff.py, and app/worker.py. RetryPolicy.from_mapping must use defaults max_attempts=3, base_delay_ms=100, max_delay_ms=1000; require max_attempts >= 1, positive delays, and base_delay_ms <= max_delay_ms, raising ValueError('invalid retry policy') otherwise. retry_delays must return exactly max_attempts - 1 exponential delays capped at max_delay_ms. run_with_retry must call the operation immediately, retry only TransientError, sleep only between failed attempts, return the first success, and re-raise the final TransientError. Keep every test file unchanged.
+Approved source files: app/backoff.py, app/config.py, app/worker.py
+
+Repository snapshot:
+### app/backoff.py
+```python
+from app.config import RetryPolicy
+
+
+def retry_delays(policy: RetryPolicy) -> tuple[int, ...]:
+    return tuple(policy.base_delay_ms * (2 ** attempt) for attempt in range(policy.max_attempts))
+```
+
+### app/config.py
+```python
+from dataclasses import dataclass
+from typing import Mapping
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_attempts: int = 3
+    base_delay_ms: int = 100
+    max_delay_ms: int = 1000
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> "RetryPolicy":
+        return cls(
+            max_attempts=int(values.get("MAX_ATTEMPTS", "0")),
+            base_delay_ms=int(values.get("BASE_DELAY_MS", "0")),
+            max_delay_ms=int(values.get("MAX_DELAY_MS", "0")),
+        )
+```
+
+### app/worker.py
+```python
+from collections.abc import Callable
+from typing import TypeVar
+
+from app.backoff import retry_delays
+from app.config import RetryPolicy
+
+T = TypeVar("T")
+
+
+class TransientError(RuntimeError):
+    pass
+
+
+def run_with_retry(operation: Callable[[], T], policy: RetryPolicy, sleep: Callable[[float], None]) -> T:
+    for delay_ms in retry_delays(policy):
+        sleep(delay_ms / 1000)
+        try:
+            return operation()
+        except Exception:
+            continue
+    return operation()
+```
+
+### tests/test_retry.py
+```python
+from app.backoff import retry_delays
+from app.config import RetryPolicy
+from app.worker import TransientError, run_with_retry
+
+
+def test_defaults_and_capped_delays():
+    policy = RetryPolicy.from_mapping({})
+    assert policy == RetryPolicy(3, 100, 1000)
+    assert retry_delays(policy) == (100, 200)
+
+
+def test_retry_sleeps_only_after_failure():
+    calls = []
+    sleeps = []
+
+    def operation():
+        calls.append("call")
+        if len(calls) < 3:
+            raise TransientError("later")
+        return "ok"
+
+    result = run_with_retry(operation, RetryPolicy(3, 50, 100), sleeps.append)
+    assert result == "ok"
+    assert calls == ["call", "call", "call"]
+    assert sleeps == [0.05, 0.1]
+```

@@ -1,0 +1,43 @@
+diff --git a/app/paging.py b/app/paging.py
+index 99f1ee1..bb63010 100644
+--- a/app/paging.py
++++ b/app/paging.py
+@@ -4,6 +4,27 @@ from typing import TypeVar
+ T = TypeVar("T")
+ 
+ 
++def parse_page(raw: str | None) -> int:
++    if raw is None or raw.strip() == "":
++        return 1
++    try:
++        page = int(raw)
++        if page < 1:
++            raise ValueError('page must be a positive integer')
++        return page
++    except ValueError as e:
++        raise ValueError('page must be a positive integer') from e
++
++
+ def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:
+-    start = page * page_size
++    if page_size < 1:
++        raise ValueError('page_size must be positive')
++    start = (page - 1) * page_size
+     return list(items[start : start + page_size])
++
++
++def build_page(items: Sequence[T], page: int, page_size: int) -> tuple[int, list[T], bool, int | None]:
++    items_per_page = page_slice(items, page, page_size)
++    has_next = len(items) > page * page_size
++    next_page = page + 1 if has_next else None
++    return page, items_per_page, has_next, next_page
+diff --git a/app/query.py b/app/query.py
+index 2910476..d322ce0 100644
+--- a/app/query.py
++++ b/app/query.py
+@@ -1,4 +1,4 @@
+ def parse_page(raw: str | None) -> int:
+     if raw is None:
+-        return 0
++        raise ValueError('page must be a positive integer')
+     return int(raw)

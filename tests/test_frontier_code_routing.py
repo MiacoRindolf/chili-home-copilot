@@ -10,7 +10,7 @@ These verify the *routing* contract without any network or DB:
 
 The frontier tier reuses the generic OpenAI-compatible ``_call_provider``;
 Anthropic exposes an OpenAI-compatible endpoint, so the same plumbing reaches
-Claude Opus 4.8 with no new SDK.
+Claude Fable 5 with no new SDK.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from app.config import settings
 from app.services.context_brain import llm_gateway
 
 
-FRONTIER_MODEL = "claude-opus-4-8"
+FRONTIER_MODEL = "claude-fable-5"
 
 
 @pytest.fixture

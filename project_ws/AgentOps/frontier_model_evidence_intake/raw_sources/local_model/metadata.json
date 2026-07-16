@@ -1,0 +1,12 @@
+{
+  "model_name": "qwen2.5-coder:7b",
+  "prompt_pack_file": "prompt_pack.md",
+  "prompt_pack_sha256": "a52a2506e3c612ba2dec9fecd809ac6150cb4fb889b76a104baa53343ac32443",
+  "raw_dir": "raw",
+  "recorded_at": "2026-07-10T14:47:16.260058Z",
+  "recorder": "autopilot_local_model_evidence_recorder",
+  "run_id": "local-synthesize-first-allcases-20260710-1450",
+  "source_command": "chili replay-guided synthesis-first local candidate run (fallback: ollama run qwen2.5-coder:7b < compact_prompt_pack.md; sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses); synthesized-first cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses",
+  "source_kind": "local_model",
+  "transcript_file": "transcript.jsonl"
+}

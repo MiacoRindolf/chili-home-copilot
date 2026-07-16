@@ -1,0 +1,44 @@
+[
+  {
+    "error": "",
+    "latency_ms": 27177,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "{\n  \"edits\": [\n    {\n      \"path\": \"app/api.py\",\n      \"replacements\": [\n        {\n          \"old_lines\": [\"page = parse_page(raw_page)\"],\n          \"new_lines\": [\"page = parse_page(raw_page, default=1)\"]\n        }\n      ]\n    },\n    {\n      \"path\": \"app/paging.py\",\n      \"replacements\": [\n        {\n          \"old_lines\": [\"start = page * page_size\"],\n          \"new_lines\": [\"start = (page - 1) * page_size\"]\n        }\n      ]\n    },\n    {\n      \"path\": \"app/query.py\",\n      \"replacements\": [\n        {\n          \"old_lines\": [\"def parse_page(raw: str | None) -> int:\"],\n          \"new_lines\": [\"def parse_page(raw: str | None, default: int = 1) -> int:\"]\n        },\n        {\n          \"old_lines\": [\"return int(raw)\"],\n          \"new_lines\": [\n            \"if raw is None or raw.strip() == '':\",\n            \"    return default\",\n            \"try:\",\n            \"        return max(1, int(raw))\",\n            \"    except ValueError:\",\n            \"        raise ValueError('page must be a positive integer') from None\"\n          ]\n        }\n      ]\n    }\n  ]\n}"
+  },
+  {
+    "error": "",
+    "latency_ms": 12354,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "{\n  \"edits\": [\n    {\n      \"path\": \"app/query.py\",\n      \"replacements\": [\n        {\n          \"old_lines\": [\"if raw is None or raw.strip() == '':\"],\n          \"new_lines\": [\"if raw is None or raw.strip() == '':\\n    return default\"]\n        },\n        {\n          \"old_lines\": [\"return max(1, int(raw))\"],\n          \"new_lines\": [\"return max(1, int(raw))\"]\n        }\n      ]\n    }\n  ]\n}"
+  },
+  {
+    "error": "",
+    "latency_ms": 13660,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "{\n  \"edits\": [\n    {\n      \"path\": \"app/query.py\",\n      \"replacements\": [\n        {\n          \"old_lines\": [\"if raw is None or raw.strip() == '':\"],\n          \"new_lines\": [\"if raw is None or raw.strip() == '':\\n    return default\"]\n        },\n        {\n          \"old_lines\": [\"return max(1, int(raw))\"],\n          \"new_lines\": [\"return max(1, int(raw))\"]\n        }\n      ]\n    }\n  ]\n}"
+  },
+  {
+    "error": "",
+    "latency_ms": 34132,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/query.py\n+++ b/app/query.py\n@@ -4,10 +4,12 @@ def parse_page(raw: str | None, default: int = 1) -> int:\n     if raw is None:\n         return 0\n-    if raw is None or raw.strip() == '':\n+    if raw is None or raw.strip() == '':\n+        return default\n     try:\n         return max(1, int(raw))\n     except ValueError:\n         raise ValueError('page must be a positive integer') from None\n\n--- a/app/paging.py\n+++ b/app/paging.py\n@@ -5,7 +5,7 @@ def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:\n     start = (page - 1) * page_size\n     return list(items[start : start + page_size])\n\n--- a/app/api.py\n+++ b/app/api.py\n@@ -6,7 +6,8 @@ from app.query import parse_page\n\n def build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:\n     page = parse_page(raw_page, default=1)\n-    return {\"page\": page, \"items\": page_slice(items, page, page_size)}\n+    items_list = page_slice(items, page, page_size)\n+    has_next = len(items_list) > page_size\n+    next_page = page + 1 if has_next else None\n+    return {\"page\": page, \"items\": items_list, \"has_next\": has_next, \"next_page\": next_page}\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 11650,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/query.py\n+++ b/app/query.py\n@@ -4,7 +4,8 @@ def parse_page(raw: str | None, default: int = 1) -> int:\n     if raw is None:\n         return 0\n     if raw is None or raw.strip() == '':\n-    return default\n+        return default\n     try:\n         return max(1, int(raw))\n     except ValueError:\n```"
+  },
+  {
+    "error": "",
+    "latency_ms": 10459,
+    "model": "qwen2.5-coder:7b",
+    "ok": true,
+    "response": "```diff\n--- a/app/query.py\n+++ b/app/query.py\n@@ -4,7 +4,8 @@\n     if raw is None:\n         return 0\n     if raw is None or raw.strip() == '':\n-    return default\n+        return default\n try:\n         return max(1, int(raw))\n     except ValueError:\n```"
+  }
+]

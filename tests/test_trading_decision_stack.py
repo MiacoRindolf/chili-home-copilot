@@ -1056,6 +1056,224 @@ def test_synthetic_paper_quote_keeps_audit_but_no_evolution_credit():
     assert row.extracted_summary_json["quote_source_at_entry"] == "synthetic_spread"
 
 
+def test_process_adherence_clean_structural_entry_is_persisted():
+    from app.services.trading.momentum_neural.outcome_extract import derive_process_adherence_label
+
+    extracted = {
+        "entry_occurred": True,
+        "entry_decision_packet_id": 123,
+    }
+    events = [
+        SimpleNamespace(
+            event_type="live_entry_candidate",
+            payload_json={
+                "setup_coverage": "structural_a_setup",
+                "structural_stop_covered": True,
+                "a_setup_floor_covered": True,
+            },
+        )
+    ]
+
+    label = derive_process_adherence_label(extracted, events)
+    row = outcome_row_from_extracted(
+        {
+            "session_id": 44,
+            "user_id": 2,
+            "variant_id": 3,
+            "variant_family": "momentum_scalp",
+            "variant_key": "v1",
+            "symbol": "JEM",
+            "mode": "live",
+            "execution_family": "robinhood_agentic_mcp",
+            "terminal_state": "live_finished",
+            "terminal_at_utc": "2026-01-01T12:00:00",
+            "outcome_class": "small_win",
+            "realized_pnl_usd": 1.25,
+            "return_bps": 12.0,
+            "hold_seconds": 60,
+            "exit_reason": "target",
+            "entry_occurred": True,
+            "entry_decision_packet_id": 123,
+            "partial_exit_occurred": False,
+            "regime_snapshot_json": {},
+            "entry_regime_snapshot_json": {},
+            "exit_regime_snapshot_json": {},
+            "readiness_snapshot_json": {},
+            "admission_snapshot_json": {},
+            "governance_context_json": {},
+            "process_adherence": label,
+        }
+    )
+
+    assert label["label"] == "process_clean"
+    assert label["score"] == pytest.approx(1.0)
+    assert row.extracted_summary_json["process_adherence"]["label"] == "process_clean"
+    from app.services.trading.momentum_neural.feedback_query import _outcome_brief
+
+    brief = _outcome_brief(row)
+    assert brief["process_adherence_label"] == "process_clean"
+    assert brief["process_adherence_score"] == pytest.approx(1.0)
+    assert brief["process_adherence_violations"] == []
+
+
+def test_process_adherence_penalizes_explicit_stale_nonstructural_entry():
+    from app.services.trading.momentum_neural.outcome_extract import derive_process_adherence_label
+
+    label = derive_process_adherence_label(
+        {
+            "entry_occurred": True,
+            "entry_decision_packet_id": None,
+        },
+        [
+            SimpleNamespace(
+                event_type="live_entry_candidate",
+                payload_json={"setup_coverage": "non_structural_volume_fallback"},
+            ),
+            SimpleNamespace(
+                event_type="live_entry_blocked_stale_pre_submit",
+                payload_json={"reason": "stale_pre_submit_path"},
+            ),
+        ],
+    )
+
+    assert label["label"] == "process_violation"
+    assert label["score"] == pytest.approx(0.0)
+    assert set(label["violations"]) >= {
+        "missing_entry_decision_packet",
+        "non_structural_volume_fallback_entry",
+        "stale_pre_submit_entry_path",
+    }
+
+
+def test_process_adherence_warns_not_penalizes_missing_legacy_setup_telemetry():
+    from app.services.trading.momentum_neural.outcome_extract import derive_process_adherence_label
+
+    label = derive_process_adherence_label(
+        {
+            "entry_occurred": True,
+            "entry_decision_packet_id": 123,
+        },
+        [],
+    )
+
+    assert label["label"] == "process_unknown"
+    assert label["score"] == pytest.approx(1.0)
+    assert label["violations"] == []
+    assert label["warnings"] == ["missing_setup_process_telemetry"]
+
+
+def test_process_adherence_diagnostic_is_read_only_and_self_normalized(db):
+    from app.services.trading.momentum_neural.feedback_query import process_adherence_diagnostic
+
+    now = datetime.utcnow().replace(microsecond=0).isoformat()
+    user = User(name=f"Process Diagnostic User {uuid.uuid4().hex[:8]}")
+    var = MomentumStrategyVariant(
+        family="momentum_scalp",
+        variant_key=f"process_diag_{uuid.uuid4().hex[:12]}",
+        label="process_diag",
+        params_json={},
+    )
+    db.add_all([user, var])
+    db.flush()
+    sessions = []
+    for symbol in ("PADCLEAN", "PADVIOL", "PADUNKN"):
+        sess = TradingAutomationSession(
+            user_id=user.id,
+            venue="robinhood",
+            execution_family="robinhood_agentic_mcp",
+            mode="live",
+            symbol=symbol,
+            variant_id=int(var.id),
+            state="live_finished",
+            risk_snapshot_json={},
+        )
+        db.add(sess)
+        sessions.append(sess)
+    db.flush()
+
+    def _row(sess: TradingAutomationSession, label: dict, pnl: float, rbps: float):
+        return outcome_row_from_extracted(
+            {
+                "session_id": int(sess.id),
+                "user_id": int(user.id),
+                "variant_id": int(var.id),
+                "variant_family": "momentum_scalp",
+                "variant_key": "v1",
+                "symbol": str(sess.symbol),
+                "mode": "live",
+                "execution_family": "robinhood_agentic_mcp",
+                "terminal_state": "live_finished",
+                "terminal_at_utc": now,
+                "outcome_class": "small_win" if pnl >= 0 else "stop_loss",
+                "realized_pnl_usd": pnl,
+                "return_bps": rbps,
+                "hold_seconds": 60,
+                "exit_reason": "target" if pnl >= 0 else "stop",
+                "entry_occurred": True,
+                "entry_decision_packet_id": 123,
+                "partial_exit_occurred": False,
+                "regime_snapshot_json": {},
+                "entry_regime_snapshot_json": {},
+                "exit_regime_snapshot_json": {},
+                "readiness_snapshot_json": {},
+                "admission_snapshot_json": {},
+                "governance_context_json": {},
+                "process_adherence": label,
+            }
+        )
+
+    db.add_all(
+        [
+            _row(
+                sessions[0],
+                {"label": "process_clean", "score": 1.0, "violations": [], "warnings": []},
+                12.0,
+                40.0,
+            ),
+            _row(
+                sessions[1],
+                {
+                    "label": "process_violation",
+                    "score": 0.0,
+                    "violations": ["stale_pre_submit_entry_path"],
+                    "warnings": [],
+                },
+                -6.0,
+                -30.0,
+            ),
+            _row(
+                sessions[2],
+                {
+                    "label": "process_unknown",
+                    "score": 1.0,
+                    "violations": [],
+                    "warnings": ["missing_setup_process_telemetry"],
+                },
+                0.0,
+                0.0,
+            ),
+        ]
+    )
+    db.commit()
+
+    diag = process_adherence_diagnostic(
+        db,
+        days=30,
+        user_id=int(user.id),
+        execution_family="robinhood_agentic_mcp",
+    )
+
+    assert diag["enablement_gate"] is False
+    assert diag["claim_gate"] is True
+    assert diag["diagnostic_status"] == "ready"
+    assert diag["with_process_adherence"] >= 3
+    buckets = {row["label"]: row for row in diag["label_buckets"]}
+    assert buckets["process_clean"]["avg_return_bps"] == pytest.approx(40.0)
+    assert buckets["process_violation"]["avg_return_bps"] == pytest.approx(-30.0)
+    assert {"violation": "stale_pre_submit_entry_path", "count": 1} in diag["violation_counts"]
+    assert diag["evidence_balance"] is not None
+
+
 def test_live_partial_exit_filled_event_sets_partial_outcome_flag(db, momentum_user_and_live_session):
     user, sess, _via, _var = momentum_user_and_live_session
     sess.state = "live_finished"

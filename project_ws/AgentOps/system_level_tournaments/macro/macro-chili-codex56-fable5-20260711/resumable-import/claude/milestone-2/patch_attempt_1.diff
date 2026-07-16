@@ -1,0 +1,125 @@
+diff --git a/app/processor.py b/app/processor.py
+--- a/app/processor.py
++++ b/app/processor.py
+@@ -1,2 +1,38 @@
+-def execute_handler(item, handler):
+-    return handler(item)
++import time
++
++
++class TransientImportError(Exception):
++    """Failure that may succeed if the same item is attempted again."""
++
++
++class PermanentImportError(Exception):
++    """Failure that will never succeed; the item is dead-lettered instead."""
++
++
++def execute_handler(item, handler, max_attempts=3, sleep=None):
++    """Invoke ``handler(item)``, retrying transient failures.
++
++    Only ``TransientImportError`` is retried, up to ``max_attempts`` total
++    attempts, sleeping exponentially (1, 2, 4, ... seconds) between
++    attempts. Returns the number of retries performed (0 when the first
++    attempt succeeds). An exhausted transient failure is re-raised; any
++    other exception (including ``PermanentImportError``) propagates
++    immediately.
++    """
++    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
++        raise ValueError("max_attempts must be a positive integer")
++    if max_attempts < 1:
++        raise ValueError("max_attempts must be a positive integer")
++    if sleep is None:
++        sleep = time.sleep
++
++    retries = 0
++    while True:
++        try:
++            handler(item)
++            return retries
++        except TransientImportError:
++            if retries + 1 >= max_attempts:
++                raise
++            sleep(float(2 ** retries))
++            retries += 1
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,7 +1,7 @@
+-from app.processor import execute_handler
++from app.processor import PermanentImportError, execute_handler
+ 
+ 
+-def run_import(items, job_id, store, handler):
++def run_import(items, job_id, store, handler, max_attempts=3, sleep=None):
+     batch = list(items)
+ 
+     previous = None
+@@ -13,15 +13,27 @@
+         previous = item.sequence
+ 
+     processed = 0
+     skipped = 0
++    retried = 0
++    dead_lettered = 0
+     for item in batch:
+         already_done = store.is_processed(job_id, item.item_id) or (
+             item.sequence <= store.get_checkpoint(job_id)
+         )
+         if already_done:
+             skipped += 1
+             continue
+-        execute_handler(item, handler)
++        try:
++            retried += execute_handler(
++                item, handler, max_attempts=max_attempts, sleep=sleep
++            )
++        except PermanentImportError as exc:
++            # A poison item advances the checkpoint so resumes never replay
++            # it; the dead letter keeps ids and reason, never the payload.
++            store.add_dead_letter(job_id, item.item_id, str(exc))
++            store.advance_checkpoint(job_id, item.sequence)
++            dead_lettered += 1
++            continue
+         store.mark_processed(job_id, item.item_id)
+         store.advance_checkpoint(job_id, item.sequence)
+         processed += 1
+@@ -28,6 +40,8 @@
+ 
+     return {
+         "processed": processed,
+         "skipped": skipped,
+         "checkpoint": store.get_checkpoint(job_id),
++        "retried": retried,
++        "dead_lettered": dead_lettered,
+     }
+diff --git a/app/store.py b/app/store.py
+--- a/app/store.py
++++ b/app/store.py
+@@ -1,11 +1,12 @@
+-from typing import Dict, Set
++from typing import Dict, List, Set
+ 
+ 
+ class CheckpointStore:
+-    """Tracks per-job monotonic checkpoints and processed item ids."""
++    """Tracks per-job monotonic checkpoints, processed ids, and dead letters."""
+ 
+     def __init__(self) -> None:
+         self._checkpoints: Dict[str, int] = {}
+         self._processed: Dict[str, Set[str]] = {}
++        self.dead_letters: List[Dict[str, str]] = []
+ 
+     def get_checkpoint(self, job_id: str) -> int:
+@@ -28,5 +29,11 @@
+     def mark_processed(self, job_id: str, item_id: str) -> None:
+         self._processed.setdefault(job_id, set()).add(item_id)
+ 
+     def processed_ids(self, job_id: str) -> Set[str]:
+         return set(self._processed.get(job_id, set()))
++
++    def add_dead_letter(self, job_id: str, item_id: str, reason: str) -> None:
++        # Dead letters intentionally never include the item payload.
++        self.dead_letters.append(
++            {"job_id": job_id, "item_id": item_id, "reason": reason}
++        )

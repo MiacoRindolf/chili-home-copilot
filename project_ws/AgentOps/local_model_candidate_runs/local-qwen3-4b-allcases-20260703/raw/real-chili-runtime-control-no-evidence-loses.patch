@@ -1,0 +1,8 @@
+diff --git a/autopilot_prompt.py b/autopilot_prompt.py
+      index 1234567..8901234 100644
+      --- a/autopilot_prompt.py
+      +++ b/autopilot_prompt.py
+      @@ -4,7 +4,7 @@
+        def looks_like_repo_edit(prompt: str) -> bool:
+            text = (prompt or '').lower()
+            return any(word in text for word in ('fix', 'update', 'change', '

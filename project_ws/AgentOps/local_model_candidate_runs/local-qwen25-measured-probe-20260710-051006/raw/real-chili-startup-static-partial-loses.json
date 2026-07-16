@@ -1,0 +1,19 @@
+{
+  "candidate_id": "local_model-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "collected_at": "2026-07-10T12:19:57.602675Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 127.49017780000577,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Candidate patch for real-chili-startup-static-partial-loses.",
+  "patch_file": "real-chili-startup-static-partial-loses.patch",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

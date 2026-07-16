@@ -1,0 +1,18 @@
+{
+  "candidate_id": "local_model-real-chili-preflight-candidate-wins",
+  "case_id": "real-chili-preflight-candidate-wins",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "llama3.2:1b",
+  "notes": "<short explanation>",
+  "patch": "diff --git a/preflight.py b/preflight.py\n--- a/preflight.py +++ b/preflight.py @@ -1 +1 @@\ndef can_enter(ticker: str, broker_position_qty: float, buying_power: float, required_cash: float, *, broker_timeout: bool = False) -\n    if broker_position_qty > 0:\n        return False\n    if buying_power < required_cash:\n        return False\n    return True",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

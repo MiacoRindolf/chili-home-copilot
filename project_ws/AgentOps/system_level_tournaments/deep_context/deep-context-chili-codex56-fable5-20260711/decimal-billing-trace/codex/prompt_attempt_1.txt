@@ -1,0 +1,563 @@
+You are competing in a measured deep-context repository reasoning tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Infer the minimal contract-owning files from symbols and repository relationships.
+Do not edit tests, add dependencies, touch distractors, use placeholders, or modify unrelated source files.
+Held-out tests are not shown.
+
+Goal: Deep-context repository contract repair. Trace the unique owners of Money, apply_discount, apply_tax, and build_invoice across the repository; no target paths are provided and similarly themed files are distractors. Money.from_value must use Decimal(str(value)), uppercase a three-letter currency, reject negative or non-finite values with ValueError('invalid money'), and quantize cents with ROUND_HALF_UP. apply_discount and apply_tax accept basis points 0..10000, reject others with ValueError('invalid basis points'), and return quantized Money. Tax is calculated after discount. build_invoice returns currency, subtotal, discount, net, tax, and total as two-decimal strings without float arithmetic. Change only the minimal repository contract owners.
+Repository source files in context: 24
+
+Repository snapshot:
+### billing/discounts.py
+```python
+def apply_discount(subtotal, basis_points):
+    return 0, subtotal
+```
+
+### billing/invoice.py
+```python
+def build_invoice(currency, subtotal_value, discount_basis_points, tax_basis_points):
+    return {"currency": currency, "total": str(subtotal_value)}
+```
+
+### billing/tax.py
+```python
+def apply_tax(net, basis_points):
+    return 0
+```
+
+### distractors/billing_money/module_01.py
+```python
+"""Archived billing money compatibility component 1."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord1:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_1(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-1",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_1(record: ArchivedBillingMoneyRecord1) -> str:
+    return f"{record.key}:1"
+```
+
+### distractors/billing_money/module_02.py
+```python
+"""Archived billing money compatibility component 2."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord2:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_2(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-2",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_2(record: ArchivedBillingMoneyRecord2) -> str:
+    return f"{record.key}:2"
+```
+
+### distractors/billing_money/module_03.py
+```python
+"""Archived billing money compatibility component 3."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord3:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_3(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-3",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_3(record: ArchivedBillingMoneyRecord3) -> str:
+    return f"{record.key}:3"
+```
+
+### distractors/billing_money/module_04.py
+```python
+"""Archived billing money compatibility component 4."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord4:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_4(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-4",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_4(record: ArchivedBillingMoneyRecord4) -> str:
+    return f"{record.key}:4"
+```
+
+### distractors/billing_money/module_05.py
+```python
+"""Archived billing money compatibility component 5."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord5:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_5(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-5",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_5(record: ArchivedBillingMoneyRecord5) -> str:
+    return f"{record.key}:5"
+```
+
+### distractors/billing_money/module_06.py
+```python
+"""Archived billing money compatibility component 6."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord6:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_6(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-6",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_6(record: ArchivedBillingMoneyRecord6) -> str:
+    return f"{record.key}:6"
+```
+
+### distractors/billing_money/module_07.py
+```python
+"""Archived billing money compatibility component 7."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord7:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_7(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-7",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_7(record: ArchivedBillingMoneyRecord7) -> str:
+    return f"{record.key}:7"
+```
+
+### distractors/billing_money/module_08.py
+```python
+"""Archived billing money compatibility component 8."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord8:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_8(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-8",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_8(record: ArchivedBillingMoneyRecord8) -> str:
+    return f"{record.key}:8"
+```
+
+### distractors/billing_money/module_09.py
+```python
+"""Archived billing money compatibility component 9."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord9:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_9(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-9",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_9(record: ArchivedBillingMoneyRecord9) -> str:
+    return f"{record.key}:9"
+```
+
+### distractors/billing_money/module_10.py
+```python
+"""Archived billing money compatibility component 10."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord10:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_10(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-10",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_10(record: ArchivedBillingMoneyRecord10) -> str:
+    return f"{record.key}:10"
+```
+
+### distractors/billing_money/module_11.py
+```python
+"""Archived billing money compatibility component 11."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord11:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_11(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-11",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_11(record: ArchivedBillingMoneyRecord11) -> str:
+    return f"{record.key}:11"
+```
+
+### distractors/billing_money/module_12.py
+```python
+"""Archived billing money compatibility component 12."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord12:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_12(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-12",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_12(record: ArchivedBillingMoneyRecord12) -> str:
+    return f"{record.key}:12"
+```
+
+### distractors/billing_money/module_13.py
+```python
+"""Archived billing money compatibility component 13."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord13:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_13(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-13",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_13(record: ArchivedBillingMoneyRecord13) -> str:
+    return f"{record.key}:13"
+```
+
+### distractors/billing_money/module_14.py
+```python
+"""Archived billing money compatibility component 14."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord14:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_14(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-14",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_14(record: ArchivedBillingMoneyRecord14) -> str:
+    return f"{record.key}:14"
+```
+
+### distractors/billing_money/module_15.py
+```python
+"""Archived billing money compatibility component 15."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord15:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_15(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-15",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_15(record: ArchivedBillingMoneyRecord15) -> str:
+    return f"{record.key}:15"
+```
+
+### distractors/billing_money/module_16.py
+```python
+"""Archived billing money compatibility component 16."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord16:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_16(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-16",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_16(record: ArchivedBillingMoneyRecord16) -> str:
+    return f"{record.key}:16"
+```
+
+### distractors/billing_money/module_17.py
+```python
+"""Archived billing money compatibility component 17."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord17:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_17(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-17",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_17(record: ArchivedBillingMoneyRecord17) -> str:
+    return f"{record.key}:17"
+```
+
+### distractors/billing_money/module_18.py
+```python
+"""Archived billing money compatibility component 18."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord18:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_18(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-18",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_18(record: ArchivedBillingMoneyRecord18) -> str:
+    return f"{record.key}:18"
+```
+
+### distractors/billing_money/module_19.py
+```python
+"""Archived billing money compatibility component 19."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord19:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_19(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-19",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_19(record: ArchivedBillingMoneyRecord19) -> str:
+    return f"{record.key}:19"
+```
+
+### distractors/billing_money/module_20.py
+```python
+"""Archived billing money compatibility component 20."""
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ArchivedBillingMoneyRecord20:
+    key: str
+    metadata: Mapping[str, Any]
+
+
+def evaluate_billing_money_20(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "component": "billing_money-20",
+        "active": bool(value.get("active", False)),
+        "metadata": dict(value),
+    }
+
+
+def format_billing_money_20(record: ArchivedBillingMoneyRecord20) -> str:
+    return f"{record.key}:20"
+```
+
+### money/amount.py
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Money:
+    currency: str
+    amount: float
+
+    @classmethod
+    def from_value(cls, currency, value):
+        return cls(currency, float(value))
+
+    def formatted(self):
+        return str(self.amount)
+```
+
+### tests/test_billing_contract.py
+```python
+from billing.invoice import build_invoice
+from money.amount import Money
+
+
+def test_invoice_uses_decimal_rounding_and_tax_after_discount():
+    assert Money.from_value("usd", "1.005").formatted() == "1.01"
+    assert build_invoice("usd", "10.005", 1000, 825) == {
+        "currency": "USD",
+        "subtotal": "10.01",
+        "discount": "1.00",
+        "net": "9.01",
+        "tax": "0.74",
+        "total": "9.75",
+    }
+```

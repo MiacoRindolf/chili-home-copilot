@@ -97,6 +97,11 @@ class OrderBookBuffer:
             buf = self._books.get(product_id, deque())
             return [s for s in buf if s.ts >= cutoff]
 
+    def product_ids(self) -> list[str]:
+        """Return product ids with currently buffered book snapshots."""
+        with self._lock:
+            return list(self._books.keys())
+
     def _prune(self, product_id: str) -> None:
         cutoff = time.time() - self._max_age
         buf = self._books.get(product_id)

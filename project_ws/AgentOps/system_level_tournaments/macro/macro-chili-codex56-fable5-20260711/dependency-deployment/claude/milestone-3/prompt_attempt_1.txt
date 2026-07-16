@@ -1,0 +1,226 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Dependency deployment evolution
+Current milestone: milestone-3
+Completed milestones: milestone-1, milestone-2
+Goal: Milestone 3/3. Finish the deployment workflow across app/model.py, app/graph.py, app/state.py, and app/executor.py while preserving milestones 1 and 2. Add a deterministic plan_fingerprint and durable DeploymentState fingerprint, completed waves, and deployed services. execute_deployment must skip completed waves on resume, expose resumed and completed_waves, and fail closed with ValueError('deployment plan changed') when state belongs to another graph. Rollback includes prior deployed state. Preserve ServiceSpec, dependency_waves, DeploymentState, execute_deployment, all public names, and tests.
+Approved source files: app/executor.py, app/graph.py, app/model.py, app/state.py
+
+Current repository snapshot:
+### app/executor.py
+```python
+from app.graph import dependency_waves
+
+
+def _noop(name):
+    return None
+
+
+def _always_healthy(name):
+    return True
+
+
+def execute_deployment(services, deploy=None, healthy=None, rollback=None, state=None):
+    """Plan *services* into dependency waves and optionally execute them.
+
+    With none of *deploy*, *healthy*, or *rollback* provided the call is
+    plan-only and returns status "planned". Otherwise each wave is deployed
+    in deterministic order and health-checked as a whole; on any unhealthy
+    service every deployed service is rolled back in strict reverse order
+    (status "rolled_back"), else status is "completed". Progress is recorded
+    on *state* when provided.
+    """
+    waves = dependency_waves(services)
+    if state is not None:
+        state.plan(waves)
+    result = {"status": "planned", "waves": waves, "deployed": [], "rolled_back": []}
+    if deploy is None and healthy is None and rollback is None:
+        return result
+    deploy = _noop if deploy is None else deploy
+    healthy = _always_healthy if healthy is None else healthy
+    rollback = _noop if rollback is None else rollback
+    deployed = result["deployed"]
+    rolled_back = result["rolled_back"]
+    for wave in waves:
+        for name in wave:
+            deploy(name)
+            deployed.append(name)
+            if state is not None:
+                state.record_deployed(name)
+        unhealthy = [name for name in wave if not healthy(name)]
+        if not unhealthy:
+            continue
+        if state is not None:
+            for name in unhealthy:
+                state.record_failed(name)
+        for name in reversed(deployed):
+            rollback(name)
+            rolled_back.append(name)
+            if state is not None:
+                state.record_rolled_back(name)
+        result["status"] = "rolled_back"
+        return result
+    result["status"] = "completed"
+    return result
+```
+
+### app/graph.py
+```python
+def dependency_waves(services):
+    """Return deterministic sorted topological waves for *services*.
+
+    Each wave is an alphabetically sorted tuple of service names whose
+    dependencies are all satisfied by earlier waves. Raises
+    ValueError("invalid deployment graph") on duplicate service names,
+    dependencies on unknown services, self edges, or cycles.
+    """
+    specs = list(services)
+    names = [spec.name for spec in specs]
+    known = set(names)
+    if len(known) != len(names):
+        raise ValueError("invalid deployment graph")
+    pending = {}
+    for spec in specs:
+        dependencies = set(spec.dependencies)
+        if spec.name in dependencies or not dependencies <= known:
+            raise ValueError("invalid deployment graph")
+        pending[spec.name] = dependencies
+    waves = []
+    resolved = set()
+    while pending:
+        ready = sorted(n for n, deps in pending.items() if deps <= resolved)
+        if not ready:
+            raise ValueError("invalid deployment graph")
+        waves.append(tuple(ready))
+        resolved.update(ready)
+        for n in ready:
+            del pending[n]
+    return tuple(waves)
+```
+
+### app/model.py
+```python
+from dataclasses import dataclass
+
+
+def _valid_name(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+@dataclass(frozen=True)
+class ServiceSpec:
+    name: str
+    dependencies: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not _valid_name(self.name):
+            raise ValueError("invalid service spec")
+        if isinstance(self.dependencies, str):
+            raise ValueError("invalid service spec")
+        try:
+            dependencies = tuple(self.dependencies)
+        except TypeError:
+            raise ValueError("invalid service spec") from None
+        if not all(_valid_name(dependency) for dependency in dependencies):
+            raise ValueError("invalid service spec")
+        object.__setattr__(self, "dependencies", dependencies)
+```
+
+### app/state.py
+```python
+class DeploymentState:
+    """Mutable record of a deployment run's plan and progress."""
+
+    def __init__(self):
+        self.waves = ()
+        self.deployed = []
+        self.failed = []
+        self.rolled_back = []
+
+    def plan(self, waves):
+        self.waves = tuple(tuple(wave) for wave in waves)
+
+    def record_deployed(self, name):
+        self.deployed.append(name)
+
+    def record_failed(self, name):
+        self.failed.append(name)
+
+    def record_rolled_back(self, name):
+        self.rolled_back.append(name)
+
+    def snapshot(self):
+        return {
+            "waves": self.waves,
+            "deployed": tuple(self.deployed),
+            "failed": tuple(self.failed),
+            "rolled_back": tuple(self.rolled_back),
+        }
+```
+
+### tests/test_deploy_contract_m1.py
+```python
+from app.executor import execute_deployment
+from app.graph import dependency_waves
+from app.model import ServiceSpec
+
+
+def test_dependency_waves_are_deterministic():
+    services = [
+        ServiceSpec("web", ("api", "worker")),
+        ServiceSpec("worker", ("db",)),
+        ServiceSpec("api", ("db",)),
+        ServiceSpec("db"),
+    ]
+    assert dependency_waves(services) == (("db",), ("api", "worker"), ("web",))
+    assert execute_deployment(services)["status"] == "planned"
+```
+
+### tests/test_deploy_contract_m2.py
+```python
+from app.executor import execute_deployment
+from app.model import ServiceSpec
+
+
+def test_unhealthy_wave_rolls_back_in_reverse_order():
+    actions = []
+    result = execute_deployment(
+        [ServiceSpec("api", ("db",)), ServiceSpec("db")],
+        lambda name: actions.append(("deploy", name)),
+        lambda name: name != "api",
+        lambda name: actions.append(("rollback", name)),
+    )
+    assert result["status"] == "rolled_back"
+    assert result["rolled_back"] == ["api", "db"]
+    assert actions[-2:] == [("rollback", "api"), ("rollback", "db")]
+```
+
+### tests/test_deploy_contract_m3.py
+```python
+import pytest
+
+from app.executor import execute_deployment
+from app.graph import plan_fingerprint
+from app.model import ServiceSpec
+from app.state import DeploymentState
+
+
+def test_resume_skips_completed_wave_and_checks_fingerprint():
+    services = [ServiceSpec("api", ("db",)), ServiceSpec("db")]
+    state = DeploymentState(
+        fingerprint=plan_fingerprint(services),
+        completed_waves={0},
+        deployed=["db"],
+    )
+    deployed = []
+    result = execute_deployment(services, deployed.append, lambda name: True, lambda name: None, state)
+    assert deployed == ["api"]
+    assert result["resumed"] is True
+    assert result["completed_waves"] == (0, 1)
+    with pytest.raises(ValueError, match="deployment plan changed"):
+        execute_deployment([ServiceSpec("other")], deployed.append, lambda name: True, lambda name: None, state)
+```

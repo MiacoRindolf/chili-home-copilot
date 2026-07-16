@@ -1,0 +1,13 @@
+diff --git a/startup_contracts.py b/startup_contracts.py
+--- a/startup_contracts.py
++++ b/startup_contracts.py
+@@ -4,8 +4,9 @@
+ )
+ 
+ ASSET_MANIFEST = {
+     'app/static/components/brain-project-domain.js': 'sha-js',
++    'app/static/components/brain-project-domain.css': 'sha-css',
+ }
+ 
+ 
+ def missing_assets() -> list[str]:

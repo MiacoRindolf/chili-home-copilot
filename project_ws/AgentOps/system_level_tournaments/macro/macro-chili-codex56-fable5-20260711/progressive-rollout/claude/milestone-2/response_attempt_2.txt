@@ -1,0 +1,21 @@
+The sandbox denied both shell and file-write tools, so I verified the repair by hand instead — the traceback's line numbers (`config.py:69` in `from_mapping`, `config.py:32` at the `else: raise`) match the snapshot exactly, which pins the failure precisely.
+
+**Diagnosis:** the hidden test `test_global_disable_precedes_allowlist` calls `evaluate_request("vip", {"ENABLED": "false", "SALT": "x", "ALLOWLIST": "vip"})` with no `PERCENTAGE` key. `from_mapping` passes `values.get("PERCENTAGE")` → `None` into `_parse_percentage`, which treats it as invalid and raises before the decision logic ever runs. A missing percentage must fall back to the dataclass default of `0`, the same way `_parse_subject_list` already maps a missing list to an empty `frozenset`.
+
+**Fix:** make `_parse_percentage` return `0` for `None`. With that, the failing case parses to `enabled=False, percentage=0, allowlist={"vip"}` and `decide_rollout` returns `{"enabled": False, "reason": "disabled", "bucket": None}` — global disable correctly precedes allowlist. Every other behavior is untouched: present-but-invalid values (`""`, `"abc"`, `101`, bools) still raise, missing `ENABLED`/`SALT` still raise, and all visible milestone-1/2 tests supply `PERCENTAGE` explicitly, so their paths are unchanged. The other nine tests passed under the current code and none of them can depend on missing-`PERCENTAGE` raising (that would contradict the failing test in the same cumulative suite).
+
+```diff
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -18,7 +18,9 @@
+     raise ValueError(_INVALID_CONFIG)
+ 
+ 
+ def _parse_percentage(value: Any) -> int:
++    if value is None:
++        return 0
+     if isinstance(value, bool):
+         raise ValueError(_INVALID_CONFIG)
+     if isinstance(value, int):
+```

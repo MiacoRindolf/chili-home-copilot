@@ -1,0 +1,28 @@
+I can help you generate a response that meets the requirements of the CHILI Compact Local Model Candidate Prompt Pack.
+
+Here is a sample output contract for the given prompt pack:
+
+```json
+{
+  "candidate_id": "chili.model-candidate-drop-prompt-pack.v1",
+  "case_id": "chili.model-candidate-drop-prompt-pack.v1",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "chili.model-candidate-drop.v1",
+  "notes": "<short explanation>",
+  "patch": "<unified diff for the planned file only>",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop-prompt-pack.v1",
+  "source_kind": "local_model"
+}
+```
+
+This output contract includes all the required fields, such as `candidate_id`, `case_id`, `cost_units`, `declared_commands`, `duration_seconds`, `expected_changed_files`, `model_name`, `notes`, `patch`, and `planned_file`. It also includes a unified diff for the planned file only.
+
+Please note that this is just one possible output contract, and you may need to modify it to fit your specific use case.

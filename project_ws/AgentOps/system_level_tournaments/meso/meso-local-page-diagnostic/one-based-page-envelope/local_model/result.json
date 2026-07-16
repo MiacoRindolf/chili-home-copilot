@@ -1,0 +1,60 @@
+{
+  "attempts": 2,
+  "behavior_passed": false,
+  "changed_files": [
+    "app/api.py",
+    "app/paging.py",
+    "app/query.py"
+  ],
+  "coordinated_files_changed": true,
+  "duration_seconds": 115.241,
+  "eligible": false,
+  "failure": "validation failed: =================================== ERRORS ====================================\n____________________ ERROR collecting tests/test_paging.py ____________________\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\python.py:498: in importtestmodule\n    mod = import_path(\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\n..\\..\\..\\..\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:186: in exec_module\n    exec(co, module.__dict__)\ntests\\test_paging.py:1: in <module>\n    from app.api import build_page\napp\\api.py:5: in <module>\n    from app.query import parse_page\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\meso_one-based-page-envelope_local_model_1_t9q57q\\app\\query.py\", line 8\nE       except ValueError:\nE                         ^\nE   IndentationError: unindent does not match any outer indentation level\n_____________ ERROR collecting hidden_tests/test_paging_edges.py ______________\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\python.py:498: in importtestmodule\n    mod = import_path(\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\n..\\..\\..\\..\\miniconda3\\Lib\\importlib\\__init__.py:88: ",
+  "model_events": [
+    {
+      "error": "",
+      "latency_ms": 27177,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 12354,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 13660,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 34132,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 11650,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 10459,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    }
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "premium_calls": 0,
+  "quality_score": 30,
+  "scope_valid": true,
+  "semantic_review_passed": false,
+  "source_kind": "local_model",
+  "task_id": "one-based-page-envelope",
+  "tests_unchanged": true,
+  "validation_output": "\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:186: in exec_module\n    exec(co, module.__dict__)\ntests\\test_paging.py:1: in <module>\n    from app.api import build_page\napp\\api.py:5: in <module>\n    from app.query import parse_page\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\meso_one-based-page-envelope_local_model_1_t9q57q\\app\\query.py\", line 8\nE       except ValueError:\nE                         ^\nE   IndentationError: unindent does not match any outer indentation level\n_____________ ERROR collecting hidden_tests/test_paging_edges.py ______________\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\python.py:498: in importtestmodule\n    mod = import_path(\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\pathlib.py:587: in import_path\n    importlib.import_module(module_name)\n..\\..\\..\\..\\miniconda3\\Lib\\importlib\\__init__.py:88: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n<frozen importlib._bootstrap>:1387: in _gcd_import\n    ???\n<frozen importlib._bootstrap>:1360: in _find_and_load\n    ???\n<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked\n    ???\n<frozen importlib._bootstrap>:935: in _load_unlocked\n    ???\nD:\\dev\\chili-home-copilot\\.pytest_venv\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:186: in exec_module\n    exec(co, module.__dict__)\nhidden_tests\\test_paging_edges.py:3: in <module>\n    from app.api import build_page\napp\\api.py:5: in <module>\n    from app.query import parse_page\nE     File \"C:\\Users\\rindo\\AppData\\Local\\Temp\\meso_one-based-page-envelope_local_model_1_t9q57q\\app\\query.py\", line 8\nE       except ValueError:\nE                         ^\nE   IndentationError: unindent does not match any outer indentation level\n=========================== short test summary info ===========================\nERROR tests/test_paging.py\nERROR hidden_tests/test_paging_edges.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!\n2 errors in 0.44s"
+}

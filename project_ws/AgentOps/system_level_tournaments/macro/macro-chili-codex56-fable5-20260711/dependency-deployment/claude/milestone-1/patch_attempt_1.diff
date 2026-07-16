@@ -1,0 +1,119 @@
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,2 +1,8 @@
+-def execute_deployment(services, deploy=lambda name: None, healthy=lambda name: True, rollback=lambda name: None, state=None):
+-    return {"status": "planned"}
++from app.graph import dependency_waves
++
++
++def execute_deployment(services, deploy=lambda name: None, healthy=lambda name: True, rollback=lambda name: None, state=None):
++    waves = dependency_waves(services)
++    if state is not None:
++        state.plan(waves)
++    return {"status": "planned", "waves": waves}
+diff --git a/app/graph.py b/app/graph.py
+--- a/app/graph.py
++++ b/app/graph.py
+@@ -1,2 +1,30 @@
+-def dependency_waves(services):
+-    return tuple((service.name,) for service in services)
++def dependency_waves(services):
++    """Return deterministic sorted topological waves for *services*.
++
++    Each wave is an alphabetically sorted tuple of service names whose
++    dependencies are all satisfied by earlier waves. Raises
++    ValueError("invalid deployment graph") on duplicate service names,
++    dependencies on unknown services, self edges, or cycles.
++    """
++    specs = list(services)
++    names = [spec.name for spec in specs]
++    known = set(names)
++    if len(known) != len(names):
++        raise ValueError("invalid deployment graph")
++    pending = {}
++    for spec in specs:
++        dependencies = set(spec.dependencies)
++        if spec.name in dependencies or not dependencies <= known:
++            raise ValueError("invalid deployment graph")
++        pending[spec.name] = dependencies
++    waves = []
++    resolved = set()
++    while pending:
++        ready = sorted(n for n, deps in pending.items() if deps <= resolved)
++        if not ready:
++            raise ValueError("invalid deployment graph")
++        waves.append(tuple(ready))
++        resolved.update(ready)
++        for n in ready:
++            del pending[n]
++    return tuple(waves)
+diff --git a/app/model.py b/app/model.py
+--- a/app/model.py
++++ b/app/model.py
+@@ -1,7 +1,24 @@
+-from dataclasses import dataclass
+-
+-
+-@dataclass(frozen=True)
+-class ServiceSpec:
+-    name: str
+-    dependencies: tuple[str, ...] = ()
++from dataclasses import dataclass
++
++
++def _valid_name(value):
++    return isinstance(value, str) and bool(value.strip())
++
++
++@dataclass(frozen=True)
++class ServiceSpec:
++    name: str
++    dependencies: tuple[str, ...] = ()
++
++    def __post_init__(self):
++        if not _valid_name(self.name):
++            raise ValueError("invalid service spec")
++        if isinstance(self.dependencies, str):
++            raise ValueError("invalid service spec")
++        try:
++            dependencies = tuple(self.dependencies)
++        except TypeError:
++            raise ValueError("invalid service spec") from None
++        if not all(_valid_name(dependency) for dependency in dependencies):
++            raise ValueError("invalid service spec")
++        object.__setattr__(self, "dependencies", dependencies)
+diff --git a/app/state.py b/app/state.py
+--- a/app/state.py
++++ b/app/state.py
+@@ -1,2 +1,28 @@
+-class DeploymentState:
+-    pass
++class DeploymentState:
++    """Mutable record of a deployment run's plan and progress."""
++
++    def __init__(self):
++        self.waves = ()
++        self.deployed = []
++        self.failed = []
++        self.rolled_back = []
++
++    def plan(self, waves):
++        self.waves = tuple(tuple(wave) for wave in waves)
++
++    def record_deployed(self, name):
++        self.deployed.append(name)
++
++    def record_failed(self, name):
++        self.failed.append(name)
++
++    def record_rolled_back(self, name):
++        self.rolled_back.append(name)
++
++    def snapshot(self):
++        return {
++            "waves": self.waves,
++            "deployed": tuple(self.deployed),
++            "failed": tuple(self.failed),
++            "rolled_back": tuple(self.rolled_back),
++        }

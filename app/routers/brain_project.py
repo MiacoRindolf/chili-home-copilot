@@ -41,6 +41,44 @@ from .chat_streaming import sse_done, sse_error, sse_event
 
 AUTONOMY_EVENTS_POLL_SECONDS = 1.0
 
+
+class _AutonomyEventPulse:
+    """Wake in-process SSE readers while durable events remain in the database."""
+
+    def __init__(self, *, max_runs: int = 512):
+        self._condition = threading.Condition()
+        self._max_runs = max(1, int(max_runs))
+        self._sequence = 0
+        self._versions: dict[str, int] = {}
+
+    def publish(self, event: dict[str, Any]) -> None:
+        run_id = str(event.get("run_id") or "").strip()
+        if not run_id:
+            return
+        with self._condition:
+            self._sequence += 1
+            self._versions.pop(run_id, None)
+            self._versions[run_id] = self._sequence
+            while len(self._versions) > self._max_runs:
+                oldest_run_id = next(iter(self._versions))
+                self._versions.pop(oldest_run_id, None)
+            self._condition.notify_all()
+
+    def version(self, run_id: str) -> int:
+        with self._condition:
+            return int(self._versions.get(run_id, 0))
+
+    def wait_for_change(self, run_id: str, after_version: int, timeout: float) -> int:
+        with self._condition:
+            self._condition.wait_for(
+                lambda: int(self._versions.get(run_id, 0)) > int(after_version),
+                timeout=max(0.0, float(timeout)),
+            )
+            return int(self._versions.get(run_id, after_version))
+
+
+_AUTONOMY_EVENT_PULSE = _AutonomyEventPulse()
+
 router = APIRouter(
     tags=["brain"],
     dependencies=[Depends(require_project_domain_enabled), Depends(require_paired_identity)],
@@ -102,7 +140,11 @@ def _run_autonomy_worker(run_id: str) -> None:
 
     sdb = SessionLocal()
     try:
-        project_autonomy.run_autonomy_sync(sdb, run_id)
+        project_autonomy.run_autonomy_sync(
+            sdb,
+            run_id,
+            on_event=_AUTONOMY_EVENT_PULSE.publish,
+        )
     finally:
         sdb.close()
 
@@ -1090,6 +1132,7 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
         after_message_id = 0
         after_step_id = 0
         after_artifact_id = 0
+        pulse_version = _AUTONOMY_EVENT_PULSE.version(run_id)
         user_id: int | None = None
         try:
             initial_error: str | None = None
@@ -1145,7 +1188,12 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
                     yield sse_event({"type": "complete", "run": latest})
                     yield sse_done()
                     return
-                await asyncio.sleep(AUTONOMY_EVENTS_POLL_SECONDS)
+                pulse_version = await asyncio.to_thread(
+                    _AUTONOMY_EVENT_PULSE.wait_for_change,
+                    run_id,
+                    pulse_version,
+                    AUTONOMY_EVENTS_POLL_SECONDS,
+                )
         except Exception as exc:
             yield sse_error(str(exc))
 

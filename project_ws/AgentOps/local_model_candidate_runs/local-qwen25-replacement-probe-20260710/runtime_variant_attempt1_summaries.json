@@ -1,0 +1,20 @@
+[
+  {
+    "case_id": "real-chili-runtime-control-no-evidence-loses",
+    "command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=4096 temperature=0 < compact_prompt_pack.md (CPU fallback after forced API replacement-content real-chili-runtime-control-no-evidence-loses attempt 1)",
+    "duration_seconds": 95.16630060001626,
+    "error": "model_response.replacement_file_content must change the planned file",
+    "passed": false,
+    "reason": "LocalModelCandidateRunnerError",
+    "status": "error"
+  },
+  {
+    "case_id": "real-chili-runtime-control-unscoped-loses",
+    "command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=4096 temperature=0 < compact_prompt_pack.md (CPU fallback after forced API replacement-content real-chili-runtime-control-unscoped-loses attempt 1)",
+    "duration_seconds": 94.83324610002455,
+    "error": "model_response.replacement_file_content must change the planned file",
+    "passed": false,
+    "reason": "LocalModelCandidateRunnerError",
+    "status": "error"
+  }
+]

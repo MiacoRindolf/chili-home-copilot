@@ -170,7 +170,16 @@ class _FakeSession:
         self.closed = True
 
 
-def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurrent: int):
+def _wire_batch(
+    monkeypatch,
+    *,
+    n_sessions: int,
+    batch_workers: int,
+    max_concurrent: int,
+    decoupled: bool = False,
+    watch_fanout: int = 15,
+    open_ceiling: int = 20,
+):
     """Drive _run_momentum_live_runner_batch_job with fakes; return captured state."""
     import app.db as app_db
     from app.config import settings
@@ -183,9 +192,13 @@ def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurr
     monkeypatch.setattr(
         settings, "chili_momentum_risk_max_concurrent_live_sessions", max_concurrent, raising=False
     )
+    monkeypatch.setattr(settings, "chili_momentum_decouple_watching_enabled", decoupled, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_watch_fanout_max", watch_fanout, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_max_open_positions_ceiling", open_ceiling, raising=False)
 
     created: list[_FakeSession] = []
     created_lock = threading.Lock()
+    captured: dict[str, object] = {}
 
     def _session_factory():
         with created_lock:
@@ -193,8 +206,18 @@ def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurr
             created.append(s)
         return s
 
-    sess_objs = [type("_S", (), {"id": 100 + i})() for i in range(n_sessions)]
-    monkeypatch.setattr(live_runner, "list_runnable_live_sessions", lambda db, **_: sess_objs)
+    session_ids = [100 + i for i in range(n_sessions)]
+
+    def _fake_plan_live_runner_batch_sessions(db, **kwargs):
+        captured["plan_limit"] = kwargs.get("limit")
+        return {
+            "session_ids": list(session_ids),
+            "symbols": [f"T{i}" for i in range(n_sessions)],
+            "prefilter_results": [],
+            "candidate_count": n_sessions,
+        }
+
+    monkeypatch.setattr(live_runner, "plan_live_runner_batch_sessions", _fake_plan_live_runner_batch_sessions)
 
     ticks: list[tuple[str, int]] = []
     ticks_lock = threading.Lock()
@@ -206,7 +229,6 @@ def _wire_batch(monkeypatch, *, n_sessions: int, batch_workers: int, max_concurr
 
     monkeypatch.setattr(live_runner, "tick_live_session", _fake_tick)
 
-    captured: dict[str, object] = {}
     real_dispatch = trading_scheduler._dispatch_live_runner_ticks
 
     def _spy_dispatch(session_ids, *, workers, tick_one):
@@ -236,6 +258,7 @@ def test_batch_gives_each_tick_its_own_session_and_derives_worker_cap(monkeypatc
 
     # workers derived from the concurrency cap, never more than #sessions.
     assert captured["workers"] == 3
+    assert captured["plan_limit"] == 15
     assert sorted(captured["ids"]) == [100, 101, 102]
 
     # 1 listing session + 3 per-tick sessions, all distinct, all closed.
@@ -269,3 +292,20 @@ def test_batch_single_session_uses_one_worker(monkeypatch):
     )
     assert captured["workers"] == 1
     assert [sid for _, sid in ticks] == [100]
+
+
+def test_batch_passes_adaptive_decoupled_capacity_to_planner(monkeypatch):
+    """Decoupled mode derives the planner cap from fanout + held-position ceiling + entry cap."""
+    _, ticks, captured = _wire_batch(
+        monkeypatch,
+        n_sessions=4,
+        batch_workers=0,
+        max_concurrent=3,
+        decoupled=True,
+        watch_fanout=7,
+        open_ceiling=11,
+    )
+
+    assert captured["plan_limit"] == 7 + 11 + 3
+    assert captured["workers"] == 3
+    assert sorted(sid for _, sid in ticks) == [100, 101, 102, 103]

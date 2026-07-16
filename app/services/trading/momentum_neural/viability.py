@@ -27,6 +27,11 @@ class ViabilityResult:
     regime_fit: str
     rationale: str
     warnings: tuple[str, ...]
+    # LEVER 1 — when an extreme-vol explosive name is admitted live, it is admitted
+    # RISK-BOUNDED: the runner multiplies its risk budget by ``risk_mult`` (<= 1.0).
+    # 1.0 (default) is a strict no-op for every name that isn't risk-bounded.
+    risk_bounded: bool = False
+    risk_mult: float = 1.0
 
     def to_public_dict(self) -> dict:
         return {
@@ -40,6 +45,8 @@ class ViabilityResult:
             "regime_fit": self.regime_fit,
             "rationale": self.rationale,
             "warnings": list(self.warnings),
+            "risk_bounded": self.risk_bounded,
+            "risk_mult": round(self.risk_mult, 4),
         }
 
 
@@ -86,6 +93,23 @@ def score_viability(
     """Heuristic score in [0,1]; tightens live eligibility on spread/vol/fees."""
     warnings: list[str] = []
     base = 0.48
+    risk_bounded = False
+    risk_mult = 1.0
+
+    # Explosive-quality (Ross) percentile for THIS symbol, if the scanner bridge
+    # threaded it via ctx.meta. Read up-front so the extreme-vol eligibility gate
+    # (LEVER 1) can consult it. None when absent (aggregate / non-bridge callers).
+    explosive_score: float | None = None
+    try:
+        _es = (
+            ctx.meta.get("ross_scores")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if isinstance(_es, dict) and symbol in _es:
+            explosive_score = float(_es[symbol])
+    except (TypeError, ValueError, AttributeError):
+        explosive_score = None
 
     # Session tilt (crypto liquidity clusters)
     if ctx.session_label in ("us", "europe"):
@@ -203,7 +227,38 @@ def score_viability(
         warnings.append("Product not tradable / metadata missing")
 
     if ctx.vol_regime == VolatilityRegime.extreme:
-        live_eligible = False
+        # LEVER 1 — extreme-vol / explosive eligibility. Legacy = blanket-block.
+        # When the lever is on, an extreme-vol name that ALSO clears the explosive
+        # floor + is tradable + has an OK spread (live_eligible still True here,
+        # i.e. spread/slip/fee/tradable gates above didn't trip) becomes live-
+        # eligible under RISK-BOUNDED (size-down) admission. Otherwise it stays
+        # gated. Flag-off => blanket-block parity (live_eligible = False).
+        from ....config import settings as _settings
+        from .extreme_explosive_eligibility import evaluate_extreme_explosive
+
+        _ee = evaluate_extreme_explosive(
+            is_extreme_vol=True,
+            explosive_score=explosive_score,
+            product_tradable=feats.product_tradable,
+            ok_spread=bool(live_eligible),
+            enabled=bool(
+                getattr(_settings, "chili_momentum_extreme_explosive_eligible_enabled", False)
+            ),
+            explosive_floor=float(
+                getattr(_settings, "chili_momentum_extreme_explosive_floor", 0.7)
+            ),
+            risk_mult=float(
+                getattr(_settings, "chili_momentum_extreme_explosive_risk_mult", 0.5)
+            ),
+        )
+        if _ee.eligible:
+            risk_bounded = True
+            risk_mult = _ee.risk_mult
+            warnings.append(
+                f"Extreme-vol explosive admitted RISK-BOUNDED (x{_ee.risk_mult:.2f} size)"
+            )
+        else:
+            live_eligible = False
 
     if db is not None:
         try:
@@ -275,4 +330,6 @@ def score_viability(
         regime_fit=regime_fit,
         rationale=rationale,
         warnings=tuple(warnings),
+        risk_bounded=risk_bounded,
+        risk_mult=risk_mult,
     )

@@ -36,6 +36,7 @@ _BROKER_SESSION_RESTORE_ROLES = frozenset(
         "all",
         "web",
         "worker",
+        "momentum_exec_only",
         "autotrader_only",
         "broker_sync_only",
     }

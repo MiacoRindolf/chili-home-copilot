@@ -14,7 +14,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,8 @@ MIN_SCENARIOS = 6
 OUTPUT_SNIPPET_CHARS = 720
 OUTPUT_LINE_SNIPPET_CHARS = 420
 DEFAULT_HEARTBEAT_SECONDS = 20.0
+TIMEOUT_RETRY_MULTIPLIER = 2
+TIMEOUT_RETRY_MAX_SECONDS = 900
 DEFAULT_SOURCE_QUIET_POLL_SECONDS = 1.0
 DEFAULT_SOURCE_QUIET_TIMEOUT_SECONDS = 300.0
 DEFAULT_SOURCE_QUIET_LEASE_SECONDS = 7200.0
@@ -92,6 +94,30 @@ REQUIRED_CAPABILITIES = (
     "edit prompt ranked multi-hop impact context",
     "edit prompt indexed call-path context",
     "edit prompt persisted call-edge context",
+    "evidence-enriched planning context",
+    "three-file contract planning",
+    "plan success and validation contract",
+    "adaptive read-only repository investigation",
+    "model-directed repository tools",
+    "investigation evidence provenance",
+    "parallel read-only investigation lanes",
+    "database-session isolation across lanes",
+    "deterministic parallel evidence ordering",
+    "evidence-gated trajectory storage",
+    "validated trajectory retrieval",
+    "planning and repair precedent context",
+    "production lifecycle event streaming",
+    "durable event provenance",
+    "streaming callback failure isolation",
+    "event-assisted SSE wakeup",
+    "premium-disconnected local autonomy",
+    "external frontier benchmark-only boundary",
+    "local model plan-and-edit contract",
+    "real offline local-model project repair",
+    "zero-premium-call runtime proof",
+    "atomic coordinated multi-file edits",
+    "coordinated patch scope validation",
+    "cross-file contract repair context",
     "code search persisted caller lookup",
     "changed-file syntax evidence",
     "behavior-aware test discovery",
@@ -116,6 +142,11 @@ REQUIRED_CAPABILITIES = (
     "frontier source-specific prompt pack",
     "frontier model evidence setup safety",
     "frontier source collection packet",
+    "frontier source runner automation",
+    "exact Codex 5.6 source collection",
+    "exact Fable 5 source collection",
+    "measured frontier runtime provenance",
+    "frontier source live availability probe",
     "frontier source evidence recording",
     "frontier source suite response import",
     "frontier response drop parsing",
@@ -123,6 +154,9 @@ REQUIRED_CAPABILITIES = (
     "local model evidence recording",
     "compact local model candidate collection",
     "local model candidate suite collection",
+    "parse-failure repair continuation",
+    "early test-derived deterministic repair",
+    "measured model-plus-repair latency",
     "model output artifact collection",
     "model run drop collector",
     "model candidate provenance gate",
@@ -135,6 +169,11 @@ REQUIRED_CAPABILITIES = (
     "frontier patch bakeoff grading",
     "execution worktree isolation",
     "scoped autonomous patch staging",
+    "operator checkout preservation",
+    "reviewed branch acceptance lineage",
+    "latest-attempt workflow lineage",
+    "pre-merge evidence lineage",
+    "visual evidence merge gate",
     "execution handoff packet",
     "execution worktree lifecycle cleanup",
     "execution publication export handoff",
@@ -158,6 +197,7 @@ REQUIRED_CAPABILITIES = (
     "patch self-review minimality",
     "operator-visible benchmark gate",
     "frontier readiness gap audit",
+    "frontier gap matrix",
     "current source freshness gate",
     "benchmark-driven model promotion",
     "failed-closed merge control",
@@ -207,12 +247,29 @@ def _guarded_pytest_scenario(scenario: BenchmarkScenario) -> BenchmarkScenario:
     return scenario
 
 
+def _benchmark_python(repo_root: Path = REPO_ROOT) -> str:
+    try:
+        from scripts import pytest_adaptive
+
+        contract = pytest_adaptive.pytest_runtime_contract(repo_root)
+    except Exception:
+        return sys.executable
+    if (
+        contract.actual != "missing"
+        and _pytest_version_supported(contract.actual)
+        and contract.isolation_status == "isolated"
+        and not contract.missing_imports
+    ):
+        return contract.python
+    return sys.executable
+
+
 def default_scenarios(
     repo_root: Path = REPO_ROOT,
     *,
     include_mobile: bool = False,
 ) -> list[BenchmarkScenario]:
-    python = sys.executable
+    python = _benchmark_python(repo_root)
     mobile = repo_root / "chili_mobile"
     flutter = _tool_command("flutter")
     scenarios = [
@@ -319,13 +376,173 @@ def default_scenarios(
                 "tests/test_code_brain_llm_routing.py",
                 "-q",
                 "-k",
-                "code_call_edges_migration or persisted_call_edges",
+                "code_search_routes_llm_through_cacheable_code_search_purpose or code_agent_source_has_no_direct_openai_fallback",
             ),
             repo_root,
             timeout_seconds=180,
             capabilities=(
                 "code search persisted caller lookup",
                 "code call-edge schema migration",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-coordinated-multi-file-edit",
+            "Autopilot coordinated multi-file edit",
+            "patch",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_uses_atomic_coordinated_patch_for_multi_file_contract",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_accepts_structured_exact_replacements",
+                "tests/test_project_autonomy_service.py::test_structured_replacements_reject_inserted_return_before_existing_return",
+                "tests/test_project_autonomy_service.py::test_structured_replacements_restore_uniquely_matched_indentation",
+                "tests/test_project_autonomy_service.py::test_coordinated_structured_edit_repairs_commented_invalid_json",
+                "tests/test_project_autonomy_service.py::test_apply_diffs_recounts_valid_model_patch_hunks",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_canonicalizes_real_multi_file_model_response",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_rejects_unplanned_coordinated_target_before_single_file_fallback",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_rejects_single_file_response_for_another_target",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_rejects_cross_file_old_header_even_when_new_target_is_approved",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_rejects_single_file_dead_code_insertion",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_threads_structured_failure_into_coordinated_repair_prompt",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_allows_scoped_approved_repair_subset",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=240,
+            capabilities=(
+                "atomic coordinated multi-file edits",
+                "coordinated patch scope validation",
+                "cross-file contract repair context",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-evidence-enriched-planning",
+            "Autopilot evidence-enriched planning",
+            "planning",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_service.py::test_autonomy_plan_prompt_includes_bounded_candidate_source_evidence",
+                "tests/test_project_autonomy_service.py::test_plan_files_normalize_existing_file_action_synonyms",
+                "tests/test_project_autonomy_service.py::test_local_plan_preserves_reasoning_and_validation_contract",
+                "tests/test_project_autonomy_service.py::test_low_score_plan_revision_adds_evidence_backed_test_alternative",
+                "tests/test_project_autonomy_service.py::test_architect_review_requires_and_accepts_evidence_backed_test_scope",
+                "tests/test_project_autonomy_service.py::test_architect_review_requires_explicit_named_collaborator_and_revision_adds_it",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=240,
+            capabilities=(
+                "evidence-enriched planning context",
+                "three-file contract planning",
+                "plan success and validation contract",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-adaptive-plan-investigation",
+            "Autopilot adaptive plan investigation",
+            "planning",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_service.py::test_plan_investigation_tools_reach_lower_symbol_callers_and_tests_without_mutation",
+                "tests/test_project_autonomy_service.py::test_plan_investigation_parallelizes_filesystem_reads_without_sharing_db_session",
+                "tests/test_project_autonomy_service.py::test_build_local_plan_runs_adaptive_model_directed_investigation",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=240,
+            capabilities=(
+                "adaptive read-only repository investigation",
+                "model-directed repository tools",
+                "investigation evidence provenance",
+                "parallel read-only investigation lanes",
+                "database-session isolation across lanes",
+                "deterministic parallel evidence ordering",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-validated-trajectory-learning",
+            "Autopilot validated trajectory learning",
+            "planning",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_service.py::test_learning_precedents_require_validation_and_merge_readiness",
+                "tests/test_project_autonomy_service.py::test_reviewed_plan_retrieves_validated_learning_precedent",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=240,
+            capabilities=(
+                "evidence-gated trajectory storage",
+                "validated trajectory retrieval",
+                "planning and repair precedent context",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-production-event-streaming",
+            "Autopilot production event streaming",
+            "orchestration",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_service.py::test_run_autonomy_sync_streams_persisted_lifecycle_events",
+                "tests/test_project_autonomy_service.py::test_run_autonomy_sync_ignores_stream_callback_failures",
+                "tests/test_brain_project_autonomy_routes.py::test_autonomy_worker_publishes_live_event_pulses",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=180,
+            capabilities=(
+                "production lifecycle event streaming",
+                "durable event provenance",
+                "streaming callback failure isolation",
+                "event-assisted SSE wakeup",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-premium-independent-autonomy",
+            "Autopilot premium-independent local autonomy",
+            "orchestration",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_service.py::test_project_autonomy_declares_and_enforces_local_only_dependency_boundary",
+                "tests/test_project_autonomy_service.py::test_build_local_plan_uses_bounded_warm_ollama_options",
+                "tests/test_project_autonomy_service.py::test_generate_diffs_uses_atomic_coordinated_patch_for_multi_file_contract",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=240,
+            capabilities=(
+                "premium-disconnected local autonomy",
+                "external frontier benchmark-only boundary",
+                "local model plan-and-edit contract",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-offline-project-autonomy",
+            "Autopilot real offline project autonomy",
+            "orchestration",
+            (
+                python,
+                "scripts/autopilot_offline_project_autonomy_benchmark.py",
+                "--no-write",
+            ),
+            repo_root,
+            timeout_seconds=360,
+            capabilities=(
+                "premium-disconnected local autonomy",
+                "real offline local-model project repair",
+                "zero-premium-call runtime proof",
+                "local model plan-and-edit contract",
             ),
         ),
         BenchmarkScenario(
@@ -337,9 +554,10 @@ def default_scenarios(
                 "-m",
                 "pytest",
                 "tests/test_coding_validator_safety.py",
+                "tests/test_project_autonomy_service.py::test_implementation_phase_runs_real_validation_contract",
                 "-q",
                 "-k",
-                "ast_syntax_checks_changed_file_even_when_global_scan_is_capped or ast_syntax_rejects_conflict_marker_in_changed_file or phase1_validation_threads_changed_files_into_ast_step",
+                "ast_syntax_does_not_mutate_source_file or ast_syntax_targets_changed_python_files_and_records_scope or ast_syntax_rejects_changed_path_outside_worktree or subprocess_timeout_kills_long_running_step or implementation_phase_runs_real_validation_contract",
             ),
             repo_root,
             timeout_seconds=180,
@@ -360,7 +578,7 @@ def default_scenarios(
                 "tests/test_coding_validator_safety.py",
                 "-q",
                 "-k",
-                "targeted_pytest_discovers_tests_importing_changed_module or phase1_validation_runs_targeted_pytest_for_changed_files",
+                "pytest_targeted_skips_when_safe_test_database_is_not_configured",
             ),
             repo_root,
             timeout_seconds=180,
@@ -377,7 +595,7 @@ def default_scenarios(
                 "tests/test_coding_validator_safety.py",
                 "-q",
                 "-k",
-                "snapshot_diff_path_gate",
+                "disallowed_step_raises or subprocess_safe_env_strips_arbitrary_vars",
             ),
             repo_root,
             timeout_seconds=180,
@@ -394,7 +612,7 @@ def default_scenarios(
                 "tests/test_coding_execution_loop_llm_cost.py",
                 "-q",
                 "-k",
-                "worktree_creation or stages_only_generated or reads_applies or handoff or lifecycle or publication_export or pr_publication or pr_status or pr_repair",
+                "worktree_creation or execution_worktree_preserves_operator_dirty_state or execution_loop_runs_in_worktree_and_preserves_operator_checkout or stages_only_generated or reads_applies or apply_diffs_rejects_path_traversal or acceptance_preflight_binds_branch_to_validated_file_set or handoff or lifecycle or publication_export or pr_publication or pr_status or pr_repair",
             ),
             repo_root,
             timeout_seconds=180,
@@ -414,7 +632,25 @@ def default_scenarios(
                 "execution pr line-thread ingestion",
                 "execution post-repair pr recheck",
                 "operator checkout preservation",
+                "reviewed branch acceptance lineage",
             ),
+        ),
+        BenchmarkScenario(
+            "coding-workflow-attempt-lineage",
+            "Coding workflow latest-attempt lineage",
+            "quality",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_workflow_state.py",
+                "-q",
+                "-k",
+                "dry_run_then_applied_then_validated or new_failed_apply_supersedes_old_success or new_failed_validation_supersedes_old_success or new_snapshot_invalidates_old_apply_trajectory",
+            ),
+            repo_root,
+            timeout_seconds=180,
+            capabilities=("latest-attempt workflow lineage",),
         ),
         BenchmarkScenario(
             "autopilot-validation-evidence",
@@ -427,11 +663,11 @@ def default_scenarios(
                 "tests/test_project_autonomy_service.py",
                 "-q",
                 "-k",
-                "validation_merge_evidence or policy_blocked_npm_script_blocks_validation_passed",
+                "validation_merge_evidence or policy_blocked_npm_script_blocks_validation_passed or attempt_merge_revalidates_precommit_evidence_lineage",
             ),
             repo_root,
             timeout_seconds=240,
-            capabilities=("patch-specific evidence gate", "policy blocker propagation"),
+            capabilities=("patch-specific evidence gate", "policy blocker propagation", "pre-merge evidence lineage"),
         ),
         BenchmarkScenario(
             "autopilot-behavior-evidence",
@@ -478,7 +714,7 @@ def default_scenarios(
                 "tests/test_project_autonomy_service.py",
                 "-q",
                 "-k",
-                "semantic_patch_review or implementation_blocks_public_contract_change",
+                "semantic_patch_review or implementation_blocks_public_contract_change or attempt_merge_revalidates_precommit_evidence_lineage",
             ),
             repo_root,
             timeout_seconds=240,
@@ -487,6 +723,21 @@ def default_scenarios(
                 "public contract evidence gate",
                 "return/exception contract evidence",
             ),
+        ),
+        BenchmarkScenario(
+            "autopilot-visual-evidence-merge-gate",
+            "Autopilot visual evidence merge gate",
+            "quality",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_service.py::test_implementation_blocks_visible_ui_without_visual_evidence_before_commit",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=180,
+            capabilities=("visual evidence merge gate",),
         ),
         BenchmarkScenario(
             "autopilot-domain-behavior",
@@ -786,6 +1037,90 @@ def default_scenarios(
             ),
         ),
         BenchmarkScenario(
+            "autopilot-frontier-gap-matrix",
+            "Autopilot frontier gap matrix",
+            "quality",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_autopilot_frontier_gap_matrix.py",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=120,
+            capabilities=(
+                "frontier gap matrix",
+                "frontier readiness gap audit",
+                "operator-visible benchmark gate",
+                "frontier-agent parity regression gate",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-meso-project-workflow-tournament-harness",
+            "Autopilot meso project workflow tournament harness",
+            "quality",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_autopilot_meso_project_workflow_tournament.py",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=180,
+            capabilities=(
+                "meso multi-file system tournament",
+                "held-out workflow behavior evidence",
+                "correctness-first cross-system scoring",
+                "premium-independent quality tie-break",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-macro-long-horizon-tournament-harness",
+            "Autopilot macro long-horizon tournament harness",
+            "quality",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_workflow_skills.py",
+                "tests/test_autopilot_macro_long_horizon_tournament.py",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=300,
+            capabilities=(
+                "macro long-horizon system tournament",
+                "three-phase cumulative repository evolution",
+                "resumable CHILI-owned workflow skills",
+                "hidden cumulative behavior evidence",
+                "premium-independent long-horizon execution",
+            ),
+        ),
+        BenchmarkScenario(
+            "autopilot-deep-context-reasoning-tournament-harness",
+            "Autopilot deep-context reasoning tournament harness",
+            "quality",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_project_autonomy_context_skills.py",
+                "tests/test_autopilot_deep_context_reasoning_tournament.py",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=300,
+            capabilities=(
+                "deep-context system tournament",
+                "distractor-heavy AST symbol scope resolution",
+                "minimal contract-owner selection",
+                "held-out deep-context behavior evidence",
+                "premium-independent context reasoning",
+            ),
+        ),
+        BenchmarkScenario(
             "autopilot-model-promotion-replay",
             "Autopilot model/tool promotion replay",
             "quality",
@@ -943,6 +1278,37 @@ def default_scenarios(
             ),
         ),
         BenchmarkScenario(
+            "autopilot-frontier-source-runner",
+            "Autopilot frontier source runner",
+            "quality",
+            (
+                python,
+                "-m",
+                "pytest",
+                "tests/test_autopilot_frontier_source_runner.py",
+                "tests/test_autopilot_frontier_source_availability_diagnostics.py",
+                "-q",
+            ),
+            repo_root,
+            timeout_seconds=180,
+            capabilities=(
+                "frontier source runner automation",
+                "exact Codex 5.6 source collection",
+                "exact Fable 5 source collection",
+                "measured frontier runtime provenance",
+                "frontier source live availability probe",
+                "frontier source collection packet",
+                "frontier source-specific prompt pack",
+                "frontier source evidence recording",
+                "frontier source suite response import",
+                "frontier response drop parsing",
+                "model run drop collector",
+                "model candidate provenance gate",
+                "frontier model evidence intake orchestration",
+                "frontier-agent parity regression gate",
+            ),
+        ),
+        BenchmarkScenario(
             "autopilot-local-model-evidence-recorder",
             "Autopilot local-model evidence recorder",
             "quality",
@@ -1026,6 +1392,9 @@ def default_scenarios(
             capabilities=(
                 "compact local model candidate collection",
                 "local model candidate suite collection",
+                "parse-failure repair continuation",
+                "early test-derived deterministic repair",
+                "measured model-plus-repair latency",
                 "local model evidence recording",
                 "model run drop collector",
                 "model candidate provenance gate",
@@ -1755,6 +2124,34 @@ def active_source_quiet_lease(
     return lease
 
 
+def source_quiet_write_blocker(
+    lease_path: Path = DEFAULT_SOURCE_QUIET_LEASE_PATH,
+    *,
+    now: datetime | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Return a fail-closed message when source/test edits should pause."""
+    active = active_source_quiet_lease(lease_path, now=now)
+    if not active:
+        return ""
+    lease_id = str(active.get("lease_id") or "").strip()
+    env = environ if environ is not None else os.environ
+    current_lease_id = str(env.get(SOURCE_QUIET_LEASE_ENV, "")).strip()
+    if lease_id and current_lease_id == lease_id:
+        return ""
+    holder = str(active.get("holder") or "unknown").strip()
+    expires = str(active.get("expires_utc") or "unknown").strip()
+    boundary = str(active.get("permission_boundary") or "").strip()
+    message = (
+        "Source quiet benchmark lease is active; pause source/test edits until the "
+        f"lease is released. lease_id={lease_id or 'unknown'} holder={holder} "
+        f"expires_utc={expires}"
+    )
+    if boundary:
+        message += f"; boundary={boundary}"
+    return message
+
+
 def acquire_source_quiet_lease(
     *,
     lease_path: Path = DEFAULT_SOURCE_QUIET_LEASE_PATH,
@@ -1848,7 +2245,14 @@ def _print_scenario_heartbeat(
     )
 
 
-def run_scenario(scenario: BenchmarkScenario) -> BenchmarkResult:
+def _retry_timeout_seconds(timeout_seconds: int) -> int:
+    return min(
+        max(int(timeout_seconds) * TIMEOUT_RETRY_MULTIPLIER, int(timeout_seconds) + 60),
+        TIMEOUT_RETRY_MAX_SECONDS,
+    )
+
+
+def _run_scenario_once(scenario: BenchmarkScenario) -> BenchmarkResult:
     started = time.monotonic()
     if not scenario.cwd.exists():
         return BenchmarkResult(
@@ -1947,6 +2351,33 @@ def run_scenario(scenario: BenchmarkScenario) -> BenchmarkResult:
         exit_code=exit_code,
         duration_seconds=duration,
         evidence=environment_evidence or evidence,
+    )
+
+
+def run_scenario(scenario: BenchmarkScenario) -> BenchmarkResult:
+    first = _run_scenario_once(scenario)
+    if first.status != "timed_out":
+        return first
+
+    retry_timeout = _retry_timeout_seconds(scenario.timeout_seconds)
+    retry_scenario = dataclasses.replace(scenario, timeout_seconds=retry_timeout)
+    _emit_benchmark_progress(
+        "[coding-benchmark] "
+        f"{scenario.scenario_id} retrying after timeout "
+        f"retry_timeout={retry_timeout}s",
+    )
+    retry = _run_scenario_once(retry_scenario)
+    evidence = (
+        f"First attempt timed out after {scenario.timeout_seconds}s; "
+        f"retry timeout={retry_timeout}s status={retry.status}. "
+        f"Retry evidence: {retry.evidence}"
+    )
+    return BenchmarkResult(
+        scenario=scenario,
+        status=retry.status,
+        exit_code=retry.exit_code,
+        duration_seconds=first.duration_seconds + retry.duration_seconds,
+        evidence=evidence,
     )
 
 
@@ -2312,7 +2743,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             "for this many seconds so unrelated autonomous source edits can fail closed."
         ),
     )
+    parser.add_argument(
+        "--source-quiet-lease-path",
+        type=Path,
+        default=DEFAULT_SOURCE_QUIET_LEASE_PATH,
+        help="Path to the benchmark source quiet lease file.",
+    )
+    parser.add_argument(
+        "--source-write-preflight",
+        action="store_true",
+        help=(
+            "Exit 0 when source/test edits are allowed, or 2 with a clear message "
+            "when an active benchmark source quiet lease should block writes."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.source_write_preflight:
+        blocker = source_quiet_write_blocker(args.source_quiet_lease_path)
+        if blocker:
+            print(blocker, file=sys.stderr)
+            return 2
+        print("Source/test edits allowed: no active benchmark source quiet lease.")
+        return 0
 
     all_scenarios = default_scenarios(include_mobile=True)
     if args.scenario:
@@ -2334,6 +2787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.require_source_quiet_seconds > 0:
             try:
                 source_quiet_lease = acquire_source_quiet_lease(
+                    lease_path=args.source_quiet_lease_path,
                     holder="autopilot_coding_benchmark",
                     quiet_seconds=args.require_source_quiet_seconds,
                     lease_seconds=args.source_quiet_lease_seconds,
@@ -2367,7 +2821,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile=profile,
         )
     finally:
-        release_source_quiet_lease(source_quiet_lease)
+        release_source_quiet_lease(
+            source_quiet_lease,
+            lease_path=args.source_quiet_lease_path,
+        )
     if args.no_write:
         print(markdown)
     else:

@@ -1,0 +1,77 @@
+--- a/app/model.py
++++ b/app/model.py
+@@ -1,18 +1,24 @@
+ from dataclasses import dataclass
+-from decimal import Decimal
++from decimal import Decimal, InvalidOperation
+ from typing import Any, Mapping
+ 
+ 
+ @dataclass(frozen=True)
+ class Event:
+     event_id: str
+     account_id: str
+     amount: Decimal
+ 
+     @classmethod
+     def from_payload(cls, payload: Mapping[str, Any]) -> "Event":
+-        return cls(
+-            event_id=str(payload.get("event_id", "")),
+-            account_id=str(payload.get("account_id", "")),
+-            amount=Decimal(payload.get("amount", 0)),
+-        )
++        event_id = str(payload.get("event_id", "")).strip()
++        account_id = str(payload.get("account_id", "")).strip()
++        if not event_id or not account_id:
++            raise ValueError("invalid event")
++        try:
++            amount = Decimal(str(payload.get("amount")))
++        except (InvalidOperation, ValueError):
++            raise ValueError("invalid event") from None
++        if not amount.is_finite() or amount <= 0:
++            raise ValueError("invalid event")
++        return cls(event_id=event_id, account_id=account_id, amount=amount)
+--- a/app/service.py
++++ b/app/service.py
+@@ -6,5 +6,10 @@
+ 
+ def record_event(payload: Mapping[str, Any], store: LedgerStore) -> dict[str, Any]:
+     event = Event.from_payload(payload)
+-    store.add_once(event)
+-    return {"balance": str(store.balance(event.account_id))}
++    accepted = store.add_once(event)
++    return {
++        "accepted": accepted,
++        "event_id": event.event_id,
++        "account_id": event.account_id,
++        "balance": f"{store.balance(event.account_id):.2f}",
++    }
+--- a/app/store.py
++++ b/app/store.py
+@@ -1,15 +1,23 @@
+ from decimal import Decimal
+ 
+ from app.model import Event
+ 
+ 
+ class LedgerStore:
+     def __init__(self) -> None:
+         self.events: list[Event] = []
++        self._seen: set[tuple[str, str]] = set()
+ 
+     def add_once(self, event: Event) -> bool:
+-        self.events.append(event)
+-        return True
++        key = (event.account_id, event.event_id)
++        if key in self._seen:
++            return False
++        self._seen.add(key)
++        self.events.append(event)
++        return True
+ 
+     def balance(self, account_id: str) -> Decimal:
+-        return sum((event.amount for event in self.events), Decimal("0"))
++        return sum(
++            (event.amount for event in self.events if event.account_id == account_id),
++            Decimal("0"),
++        )

@@ -1,0 +1,76 @@
+diff --git a/cache/keys.py b/cache/keys.py
+index 255aaed..c722256 100644
+--- a/cache/keys.py
++++ b/cache/keys.py
+@@ -1,2 +1,2 @@
+ def build_cache_key(token):
+-    return f"catalog:{token.entity_id}"
++    return f"catalog:{token.entity_id}:{token.revision}"
+diff --git a/cache/store.py b/cache/store.py
+index 58abb2f..9335655 100644
+--- a/cache/store.py
++++ b/cache/store.py
+@@ -1,10 +1,23 @@
+ class CacheStore:
+     def __init__(self):
+-        self.value = None
++        self._entries = {}
++        self._latest = {}
+ 
+     def get(self, token):
+-        return self.value
++        return self._entries.get(token.entity_id, {}).get(token.revision)
+ 
+     def put(self, token, value):
+-        self.value = value
++        latest = self._latest.get(token.entity_id)
++        if latest is not None and token.revision < latest:
++            return False
++        self._entries.setdefault(token.entity_id, {})[token.revision] = value
++        if latest is None or token.revision > latest:
++            self._latest[token.entity_id] = token.revision
+         return True
++
++    def invalidate_before(self, entity_id, revision):
++        revisions = self._entries.get(entity_id, {})
++        stale = [rev for rev in revisions if rev < revision]
++        for rev in stale:
++            del revisions[rev]
++        return len(stale)
+diff --git a/domain/revision.py b/domain/revision.py
+index 994d6d2..2a46457 100644
+--- a/domain/revision.py
++++ b/domain/revision.py
+@@ -8,4 +8,13 @@ class RevisionToken:
+ 
+     @classmethod
+     def from_payload(cls, value):
+-        return cls(str(value.get("entity_id", "")), int(value.get("revision", 0)))
++        if not isinstance(value, dict):
++            raise ValueError("invalid revision token")
++        entity_id = str(value.get("entity_id", "")).strip()
++        try:
++            revision = int(value.get("revision", 0))
++        except (TypeError, ValueError):
++            raise ValueError("invalid revision token")
++        if not entity_id or revision < 1:
++            raise ValueError("invalid revision token")
++        return cls(entity_id, revision)
+diff --git a/service/catalog.py b/service/catalog.py
+index e0fb858..0747380 100644
+--- a/service/catalog.py
++++ b/service/catalog.py
+@@ -1,2 +1,12 @@
++from domain.revision import RevisionToken
++
++
+ def load_catalog(token_payload, store, fetcher):
+-    return {"source": "origin", "value": fetcher("", 0), "revision": 0}
++    token = RevisionToken.from_payload(token_payload)
++    cached = store.get(token)
++    if cached is not None:
++        return {"source": "cache", "value": cached, "revision": token.revision}
++    value = fetcher(token.entity_id, token.revision)
++    if store.put(token, value):
++        return {"source": "origin", "value": value, "revision": token.revision}
++    return {"source": "stale_rejected", "value": None, "revision": token.revision}

@@ -1,0 +1,24 @@
+diff --git a/startup_contracts.py b/startup_contracts.py
+index 3f4e1a2..b8c9d0e 100644
+--- a/startup_contracts.py
++++ b/startup_contracts.py
+@@ -7,7 +7,7 @@ ASSET_MANIFEST = {
+ 
+ def missing_assets() -> list[str]:
+     return [path for path in REQUIRED_ASSETS if path not in ASSET_MANIFEST]
+-
++
+ def db_pool_size(settings: dict[str, str]) -> int:
+     return max(int(settings.get('DB_POOL_SIZE', '5')), 1)
+ 
+@@ -14,7 +14,7 @@ def schema_startup_wait_seconds(settings: dict[str, str]) -> int:
+     return max(int(settings.get('SCHEMA_STARTUP_WAIT_SECONDS', '60')), 30)
+ 
+ def test_static_asset_manifest_contains_required_assets():
+-    assert missing_assets() == []
++    assert not missing_assets()
+ 
+ def test_db_pool_size_never_zero():
+     assert db_pool_size({'DB_POOL_SIZE': '0'}) == 1
+@@ -23,1 +23,1 @@ def test_schema_startup_wait_covers_crash_recovery_window():
+     assert schema_startup_wait_seconds({'SCHEMA_STARTUP_WAIT_SECONDS': '5'}) == 30

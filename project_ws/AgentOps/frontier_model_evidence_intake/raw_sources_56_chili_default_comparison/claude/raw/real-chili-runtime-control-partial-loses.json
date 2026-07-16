@@ -1,0 +1,19 @@
+{
+  "candidate_id": "claude-real-chili-runtime-control-partial-loses",
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "collected_at": "2026-07-10T23:06:02.759684Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 54.05623511666696,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "claude-fable-5",
+  "notes": "Quarantine runtime-control prompts before repo-edit classification: classify_prompt blocks docker/compose/restart/deploy-style prompts first so the planner is never invoked for them, and restart/deploy are removed from the repo-edit word list; plain repo-edit prompts still reach the planner.",
+  "patch_file": "real-chili-runtime-control-partial-loses.patch",
+  "planned_file": "autopilot_prompt.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "claude"
+}

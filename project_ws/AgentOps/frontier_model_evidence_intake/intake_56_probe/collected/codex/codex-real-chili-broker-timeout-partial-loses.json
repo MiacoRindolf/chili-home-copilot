@@ -1,0 +1,31 @@
+{
+  "candidate_id": "codex-real-chili-broker-timeout-partial-loses",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "collected_at": "2026-07-10T20:50:37.744526Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "gpt-5.6-sol",
+  "notes": "Block entry when broker state cannot be confirmed.",
+  "patch_file": "real-chili-broker-timeout-partial-loses.patch",
+  "planned_file": "preflight.py",
+  "provenance": {
+    "collector": "autopilot_model_candidate_drop_collector",
+    "prompt_pack_file": "codex-gpt-5-6-sol-20260710t204950z.prompt-pack.md",
+    "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+    "prompt_pack_sha256": "9cbe83ddae80311e5a6edfcb58c39f8b7ce450ae2d2279bb738e810194707834",
+    "run_id": "codex-gpt-5-6-sol-20260710T204950Z",
+    "schema": "chili.model-candidate-drop-provenance.v1",
+    "source_command": "codex exec --ignore-user-config --ignore-rules --model gpt-5.6-sol --ephemeral --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=\"xhigh\" -",
+    "transcript_events": 3,
+    "transcript_file": "codex-gpt-5-6-sol-20260710t204950z.transcript.jsonl",
+    "transcript_sha256": "e74e567168e331f7bf1cb55523977b0942b7d36d5e6bae9739cb82d461cf1702"
+  },
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "codex"
+}

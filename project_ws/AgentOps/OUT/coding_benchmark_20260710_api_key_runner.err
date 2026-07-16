@@ -1,0 +1,130 @@
+[coding-benchmark] 1/57 core-python-compile start
+[coding-benchmark] 1/57 core-python-compile passed
+[coding-benchmark] 2/57 code-agent-plan-safety start
+[coding-benchmark] 2/57 code-agent-plan-safety passed
+[coding-benchmark] 3/57 code-agent-request-preflight-safety start
+[coding-benchmark] 3/57 code-agent-request-preflight-safety passed
+[coding-benchmark] 4/57 code-agent-diff-safety start
+[coding-benchmark] 4/57 code-agent-diff-safety passed
+[coding-benchmark] 5/57 code-agent-related-context start
+[coding-benchmark] 5/57 code-agent-related-context passed
+[coding-benchmark] 6/57 code-search-persisted-callers start
+[coding-benchmark] 6/57 code-search-persisted-callers passed
+[coding-benchmark] 7/57 validator-changed-file-ast start
+[coding-benchmark] 7/57 validator-changed-file-ast passed
+[coding-benchmark] 8/57 validator-targeted-test-discovery start
+[coding-benchmark] 8/57 validator-targeted-test-discovery passed
+[coding-benchmark] 9/57 snapshot-diff-path-safety start
+[coding-benchmark] 9/57 snapshot-diff-path-safety passed
+[coding-benchmark] 10/57 coding-execution-worktree-isolation start
+[coding-benchmark] coding-execution-worktree-isolation still running elapsed=20s timeout=180s pid=22880
+[coding-benchmark] 10/57 coding-execution-worktree-isolation passed
+[coding-benchmark] 11/57 autopilot-validation-evidence start
+[coding-benchmark] 11/57 autopilot-validation-evidence passed
+[coding-benchmark] 12/57 autopilot-behavior-evidence start
+[coding-benchmark] 12/57 autopilot-behavior-evidence passed
+[coding-benchmark] 13/57 autopilot-repair-context start
+[coding-benchmark] 13/57 autopilot-repair-context passed
+[coding-benchmark] 14/57 autopilot-semantic-review start
+[coding-benchmark] 14/57 autopilot-semantic-review passed
+[coding-benchmark] 15/57 autopilot-domain-behavior start
+[coding-benchmark] autopilot-domain-behavior still running elapsed=20s timeout=240s pid=28616
+[coding-benchmark] 15/57 autopilot-domain-behavior passed
+[coding-benchmark] 16/57 autopilot-trading-invariant-replay start
+[coding-benchmark] autopilot-trading-invariant-replay still running elapsed=20s timeout=120s pid=24712
+[coding-benchmark] 16/57 autopilot-trading-invariant-replay passed
+[coding-benchmark] 17/57 autopilot-trading-business-invariants start
+[coding-benchmark] autopilot-trading-business-invariants still running elapsed=20s timeout=120s pid=9132
+[coding-benchmark] autopilot-trading-business-invariants still running elapsed=40s timeout=120s pid=9132
+[coding-benchmark] 17/57 autopilot-trading-business-invariants passed
+[coding-benchmark] 18/57 autopilot-trading-incident-replay start
+[coding-benchmark] autopilot-trading-incident-replay still running elapsed=20s timeout=120s pid=36824
+[coding-benchmark] 18/57 autopilot-trading-incident-replay passed
+[coding-benchmark] 19/57 autopilot-trading-db-incident-replay start
+[coding-benchmark] autopilot-trading-db-incident-replay still running elapsed=20s timeout=120s pid=26396
+[coding-benchmark] 19/57 autopilot-trading-db-incident-replay passed
+[coding-benchmark] 20/57 autopilot-synthetic-repo-repair-replay start
+[coding-benchmark] 20/57 autopilot-synthetic-repo-repair-replay passed
+[coding-benchmark] 21/57 autopilot-multistep-repair-loop-replay start
+[coding-benchmark] 21/57 autopilot-multistep-repair-loop-replay passed
+[coding-benchmark] 22/57 autopilot-hosted-pr-repair-artifact-replay start
+[coding-benchmark] 22/57 autopilot-hosted-pr-repair-artifact-replay passed
+[coding-benchmark] 23/57 autopilot-hosted-pr-repair-evidence-mode-gate start
+[coding-benchmark] 23/57 autopilot-hosted-pr-repair-evidence-mode-gate passed
+[coding-benchmark] 24/57 autopilot-hosted-pr-repair-collection-packet start
+[coding-benchmark] 24/57 autopilot-hosted-pr-repair-collection-packet passed
+[coding-benchmark] 25/57 autopilot-hosted-pr-repair-artifact-assembler start
+[coding-benchmark] 25/57 autopilot-hosted-pr-repair-artifact-assembler passed
+[coding-benchmark] 26/57 autopilot-hosted-pr-repair-evidence-collector start
+[coding-benchmark] 26/57 autopilot-hosted-pr-repair-evidence-collector passed
+[coding-benchmark] 27/57 autopilot-blast-radius-safety start
+[coding-benchmark] 27/57 autopilot-blast-radius-safety passed
+[coding-benchmark] 28/57 autopilot-patch-self-review-safety start
+[coding-benchmark] 28/57 autopilot-patch-self-review-safety passed
+[coding-benchmark] 29/57 autopilot-quality-gates start
+[coding-benchmark] autopilot-quality-gates still running elapsed=20s timeout=240s pid=31080
+[coding-benchmark] 29/57 autopilot-quality-gates passed
+[coding-benchmark] 30/57 autopilot-frontier-readiness-audit start
+[coding-benchmark] 30/57 autopilot-frontier-readiness-audit passed
+[coding-benchmark] 31/57 autopilot-model-promotion-replay start
+[coding-benchmark] 31/57 autopilot-model-promotion-replay passed
+[coding-benchmark] 32/57 autopilot-real-chili-regression-replay start
+[coding-benchmark] autopilot-real-chili-regression-replay still running elapsed=20s timeout=240s pid=55856
+[coding-benchmark] autopilot-real-chili-regression-replay still running elapsed=40s timeout=240s pid=55856
+[coding-benchmark] autopilot-real-chili-regression-replay still running elapsed=61s timeout=240s pid=55856
+[coding-benchmark] 32/57 autopilot-real-chili-regression-replay passed
+[coding-benchmark] 33/57 autopilot-real-chili-candidate-bakeoff start
+[coding-benchmark] 33/57 autopilot-real-chili-candidate-bakeoff passed
+[coding-benchmark] 34/57 autopilot-model-candidate-artifact-builder start
+[coding-benchmark] 34/57 autopilot-model-candidate-artifact-builder passed
+[coding-benchmark] 35/57 autopilot-model-candidate-prompt-pack start
+[coding-benchmark] 35/57 autopilot-model-candidate-prompt-pack passed
+[coding-benchmark] 36/57 autopilot-frontier-prompt-pack-bundle start
+[coding-benchmark] 36/57 autopilot-frontier-prompt-pack-bundle passed
+[coding-benchmark] 37/57 autopilot-frontier-model-evidence-setup start
+[coding-benchmark] 37/57 autopilot-frontier-model-evidence-setup passed
+[coding-benchmark] 38/57 autopilot-frontier-source-collection-packet start
+[coding-benchmark] 38/57 autopilot-frontier-source-collection-packet passed
+[coding-benchmark] 39/57 autopilot-frontier-source-runner start
+[coding-benchmark] 39/57 autopilot-frontier-source-runner passed
+[coding-benchmark] 40/57 autopilot-local-model-evidence-recorder start
+[coding-benchmark] 40/57 autopilot-local-model-evidence-recorder passed
+[coding-benchmark] 41/57 autopilot-frontier-source-evidence-recorder start
+[coding-benchmark] 41/57 autopilot-frontier-source-evidence-recorder passed
+[coding-benchmark] 42/57 autopilot-frontier-evidence-preflight start
+[coding-benchmark] 42/57 autopilot-frontier-evidence-preflight passed
+[coding-benchmark] 43/57 autopilot-local-model-candidate-runner start
+[coding-benchmark] 43/57 autopilot-local-model-candidate-runner passed
+[coding-benchmark] 44/57 autopilot-model-candidate-drop-collector start
+[coding-benchmark] 44/57 autopilot-model-candidate-drop-collector passed
+[coding-benchmark] 45/57 autopilot-model-candidate-provenance start
+[coding-benchmark] 45/57 autopilot-model-candidate-provenance passed
+[coding-benchmark] 46/57 autopilot-frontier-model-evidence-intake start
+[coding-benchmark] autopilot-frontier-model-evidence-intake still running elapsed=20s timeout=240s pid=49912
+[coding-benchmark] 46/57 autopilot-frontier-model-evidence-intake passed
+[coding-benchmark] 47/57 autopilot-model-shadow-evidence start
+[coding-benchmark] 47/57 autopilot-model-shadow-evidence passed
+[coding-benchmark] 48/57 autopilot-model-shadow-evidence-mode-gate start
+[coding-benchmark] 48/57 autopilot-model-shadow-evidence-mode-gate passed
+[coding-benchmark] 49/57 autopilot-model-candidate-artifact-bakeoff start
+[coding-benchmark] autopilot-model-candidate-artifact-bakeoff still running elapsed=20s timeout=240s pid=50076
+[coding-benchmark] 49/57 autopilot-model-candidate-artifact-bakeoff passed
+[coding-benchmark] 50/57 autopilot-model-candidate-tournament start
+[coding-benchmark] autopilot-model-candidate-tournament still running elapsed=20s timeout=240s pid=36244
+[coding-benchmark] autopilot-model-candidate-tournament still running elapsed=40s timeout=240s pid=36244
+[coding-benchmark] 50/57 autopilot-model-candidate-tournament passed
+[coding-benchmark] 51/57 autopilot-model-candidate-tournament-evidence-mode-gate start
+[coding-benchmark] 51/57 autopilot-model-candidate-tournament-evidence-mode-gate passed
+[coding-benchmark] 52/57 autopilot-frontier-bakeoff-replay start
+[coding-benchmark] autopilot-frontier-bakeoff-replay still running elapsed=20s timeout=180s pid=8896
+[coding-benchmark] 52/57 autopilot-frontier-bakeoff-replay passed
+[coding-benchmark] 53/57 agentops-report-replay-quality start
+[coding-benchmark] 53/57 agentops-report-replay-quality passed
+[coding-benchmark] 54/57 autopilot-task-replay-quality start
+[coding-benchmark] 54/57 autopilot-task-replay-quality passed
+[coding-benchmark] 55/57 agentops-archived-task-replay-quality start
+[coding-benchmark] 55/57 agentops-archived-task-replay-quality passed
+[coding-benchmark] 56/57 autopilot-recovery-safety start
+[coding-benchmark] 56/57 autopilot-recovery-safety passed
+[coding-benchmark] 57/57 autopilot-patch-application-safety start
+[coding-benchmark] 57/57 autopilot-patch-application-safety passed

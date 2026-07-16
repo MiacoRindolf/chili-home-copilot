@@ -1,0 +1,376 @@
+
+const rlEsc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const T0 = 11*60, T1 = 20*60;                          // UTC 11:00→20:00 = 07:00–16:00 ET (incl. pre-market)
+const tMin = t => { const [h,m] = String(t||'').split(':').map(Number); return h*60+(m||0); };
+const tPct = t => Math.max(0, Math.min(100, (tMin(t)-T0)/(T1-T0)*100));
+let rlPoll = null, rlCur = null;
+
+function rlSetStatus(text, cls) { const el = document.getElementById('rl-status'); el.textContent = text; el.className = 'rl-status ' + (cls||''); }
+
+async function rlRun() {
+  const date = document.getElementById('rl-date').value;
+  if (!date) { rlSetStatus('pick a date first','error'); return; }
+  document.getElementById('rl-run').disabled = true;
+  rlSetStatus('starting…','running');
+  try {
+    const j = await (await fetch('/api/trading/momentum/replay/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({date, armed_source: document.getElementById('rl-mode').value})})).json();
+    if (!j.ok) { rlSetStatus(j.error==='replay_already_running' ? 'a replay is already running — wait for it' : (j.error||'error'),'error'); document.getElementById('rl-run').disabled = false; return; }
+    rlPoll = setInterval(rlCheck, 5000); rlCheck();
+  } catch (e) { rlSetStatus('request failed: '+e,'error'); document.getElementById('rl-run').disabled = false; }
+}
+
+async function rlCheck() {
+  try {
+    const j = await (await fetch('/api/trading/momentum/replay/status')).json();
+    const job = j.job || {};
+    if (job.state === 'running') { rlSetStatus('running… ('+(job.date||'')+') ~3-8 min','running'); return; }
+    if (rlPoll) { clearInterval(rlPoll); rlPoll = null; }
+    document.getElementById('rl-run').disabled = false;
+    if (job.state === 'done') { rlSetStatus('done: '+job.date+' → $'+Number(job.total_usd||0).toLocaleString()+' ('+(job.n_trades||0)+' trades)','done'); rlLoadResult(job.date, job.armed_source); rlLoadHistory(); }
+    else if (job.state === 'error') { rlSetStatus('error: '+(job.error||'?'),'error'); rlLoadHistory(); }
+    else rlSetStatus(job.state || 'idle');
+  } catch (e) { /* transient */ }
+}
+
+async function rlLoadResult(date, mode) {
+  try {
+    const j = await (await fetch('/api/trading/momentum/replay/result/'+date+'?armed_source='+(mode||'asof'))).json();
+    if (!j.ok) return;
+    const r = rlCur = j.result;
+    document.getElementById('rl-result-card').style.display = '';
+    document.getElementById('rl-result-title').textContent = '📊 ' + r.date + ' — high-fidelity result · ' + (r.armed_source === 'live' ? 'live-armed re-enactment' : 'as-of selection');
+    const tot = Number(r.total_usd||0);
+    document.getElementById('rl-kpis').innerHTML =
+      kpi('$'+tot.toLocaleString(), 'Day P/L', tot>=0?'pos':'neg') +
+      kpi((r.trades||[]).length, 'Trades') + kpi((r.wins||0)+'/'+(r.losses||0), 'W/L') +
+      kpi(r.candidates||0, 'As-of candidates') + kpi((r.armed_timeline||[]).length, 'Symbols watched') +
+      kpi(r.halt_windows||0, 'Halt windows') + kpi(r.day_halted||'—', 'Day halt');
+    rlTimeline(r);
+    rlTradesTable(r);
+    rlDivergence(r);
+  } catch (e) { /* ignore */ }
+}
+
+function rlCauseChip(cause) {
+  const root = String(cause||'').split(':')[0];
+  const c = {aligned:'#3fb950', replay_trigger:'#e8b339', replay_gate:'#f0883e', arming_timing:'#a371f7',
+             fill_model_no_touch:'#f85149', live_blocked:'#58a6ff', both_skipped:'#8b949e'}[root] || '#8b949e';
+  return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10.5px;font-weight:600;'
+       + 'color:'+c+';border:1px solid '+c+'55;background:'+c+'18;white-space:nowrap;">'+rlEsc(cause)+'</span>';
+}
+
+function rlDivergence(r, showAll) {
+  const sec = document.getElementById('rl-div-sec');
+  const rows = r.divergence || [];
+  if (!rows.length) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+  const interesting = rows.filter(d => d.cause !== 'both_skipped');
+  const counts = {};
+  rows.forEach(d => { const k = String(d.cause||'').split(':')[0]; counts[k] = (counts[k]||0) + 1; });
+  document.getElementById('rl-div-kpis').innerHTML = Object.entries(counts)
+    .sort((a,b) => b[1]-a[1]).map(([k,n]) => kpi(n, k)).join('');
+  const vis = showAll ? rows : interesting;
+  document.getElementById('rl-div-rows').innerHTML = vis.map(d =>
+    '<tr><td><b>'+rlEsc(d.sym)+'</b></td>'+
+    '<td style="font-size:11px;color:var(--text-secondary);max-width:340px;">'+rlEsc(d.live)+'</td>'+
+    '<td style="font-size:11px;color:var(--text-secondary);max-width:340px;">'+rlEsc(d.replay)+'</td>'+
+    '<td>'+rlCauseChip(d.cause)+'</td></tr>'
+  ).join('') || '<tr><td colspan="4" style="color:var(--text-secondary);">No divergent symbols — live and replay agreed everywhere.</td></tr>';
+  document.getElementById('rl-div-more').innerHTML = (!showAll && rows.length > interesting.length)
+    ? '<a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="rlDivergence(rlCur,true); return false;">Show '+(rows.length-interesting.length)+' both-skipped symbols ▾</a>'
+    : (showAll ? '<a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="rlDivergence(rlCur); return false;">Hide both-skipped ▴</a>' : '');
+}
+const kpi = (v,k,cls) => '<div class="rl-kpi"><div class="v '+(cls||'')+'">'+v+'</div><div class="k">'+k+'</div></div>';
+
+function rlTradesTable(r) {
+  document.getElementById('rl-trades').innerHTML = (r.trades||[]).map(t =>
+    '<tr><td>'+rlEsc(t.t)+'</td><td>'+rlEsc(t.exit_t||'—')+'</td><td><b>'+rlEsc(t.sym)+'</b></td><td>'+rlEsc(t.entry)+'</td><td>'+rlEsc(t.exit)+'</td>'+
+    '<td>'+Number(t.qty||0).toLocaleString()+'</td><td>'+rlEsc(t.spread_bps)+'bps</td><td>'+rlEsc(t.stop??'—')+'</td><td>'+rlEsc(t.target??'—')+'</td>'+
+    '<td>'+rlEsc(t.why)+'</td><td class="'+(Number(t.usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(t.usd||0).toLocaleString()+'</td></tr>'
+  ).join('') || '<tr><td colspan="11" style="color:var(--text-secondary);">No trades passed the real-fidelity gates this day.</td></tr>';
+}
+
+function rlTimeline(r) {
+  const rows = (r.armed_timeline||[]).slice().sort((a,b) => (b.traded?1:0)-(a.traded?1:0) || a.sym.localeCompare(b.sym));
+  const tradesBySym = {}; (r.trades||[]).forEach(t => (tradesBySym[t.sym] = tradesBySym[t.sym]||[]).push(t));
+  // axis hour marks
+  let axis = '<div class="tl-axis">';
+  for (let m = T0; m <= T1; m += 60) { const et=(m-240+1440)%1440; axis += '<span style="left:'+((m-T0)/(T1-T0)*100)+'%;">'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET</span>'; }
+  axis += '</div>';
+  const CAP = 15; let hidden = 0;
+  window._rlAllRows = rows;
+  const visRows = window._rlShowAll ? rows : rows.filter((r,ix) => r.traded || ix < CAP);
+  hidden = rows.length - visRows.length;
+  document.getElementById('rl-timeline').innerHTML = axis + visRows.map((row,i) => {
+    const spans = (row.spans||[]).map(sp => '<div class="tl-armed" style="left:'+tPct(sp[0])+'%;width:'+Math.max(0.7, tPct(sp[1])-tPct(sp[0]))+'%;"></div>').join('');
+    const halts = ((r.halt_spans||{})[row.sym]||[]).map(h => '<div class="tl-halt" style="left:'+tPct(h[0])+'%;width:'+Math.max(0.5, tPct(h[1])-tPct(h[0]))+'%;"></div>').join('');
+    const marks = (tradesBySym[row.sym]||[]).map(t =>
+      '<div class="tl-entry" style="left:'+tPct(t.t)+'%;" title="entry '+t.entry+' @'+t.t+'"></div>' +
+      (t.exit_t ? '<div class="tl-exit" style="left:'+tPct(t.exit_t)+'%;" title="exit '+t.exit+' @'+t.exit_t+'"></div>' : '')).join('');
+    return '<div class="tl-row'+(row.traded?' traded':'')+'" onclick="rlToggleChart('+i+',\''+rlEsc(row.sym)+'\')">' +
+      '<div class="tl-sym">'+(row.traded?'★ ':'')+rlEsc(row.sym)+'</div>' +
+      '<div class="tl-track">'+spans+halts+marks+'</div></div>' +
+      '<div class="tl-chartbox" id="rl-cb-'+i+'"></div>';
+  }).join('') + (hidden > 0 ? '<div style="padding:8px;text-align:center;"><a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="window._rlShowAll=true; rlTimeline(rlCur); return false;">Show all '+rows.length+' watched symbols ▾</a></div>' : '');
+  // auto-open charts for traded symbols
+  visRows.forEach((row,i) => { if (row.traded) rlToggleChart(i, row.sym, true); });
+}
+
+function rlToggleChart(i, sym, forceOpen) {
+  const box = document.getElementById('rl-cb-'+i);
+  if (!box) return;
+  if (box.classList.contains('open') && !forceOpen) { box.classList.remove('open'); return; }
+  if (!box.innerHTML) box.innerHTML = rlChartSVG(sym);
+  box.classList.add('open');
+  rlAttachHover('rlc-'+sym.replace(/[^A-Za-z0-9]/g,''), sym);
+}
+
+function rlChartSVG(sym) {
+  const r = rlCur || {};
+  let S = (r.series||{})[sym];
+  if (!S || !S.length) return '<div class="rl-chart-meta">no bar data for '+rlEsc(sym)+'</div>';
+  S = S.filter(b => { const m = tMin(b[0]); return m >= T0 && m <= T1; });
+  if (!S.length) return '<div class="rl-chart-meta">no bars in the trading window for '+rlEsc(sym)+'</div>';
+  const cid = 'rlc-'+sym.replace(/[^A-Za-z0-9]/g,'');
+  window._rlBars = window._rlBars || {}; window._rlBars[cid] = S;
+  window._rlView = window._rlView || {};
+  if (!window._rlView[cid]) window._rlView[cid] = { t0: 13*60+30, t1: T1 };  // default RTH; drag left to reveal pre-market
+  const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
+  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — '+rlEsc((rlCur&&rlCur.entry_interval)||'5m')+' · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom time · shift+scroll=zoom price · drag=pan · dbl-click=reset'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
+         '<div style="position:relative;">' +
+         '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 1040 252" preserveAspectRatio="none">'+rlChartBody(sym, cid)+'</svg>' +
+         '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
+}
+
+function rlChartBody(sym, cid) {
+  const r = rlCur || {};
+  const view = (window._rlView||{})[cid] || { t0: T0, t1: T1 };
+  const V0 = view.t0, V1 = view.t1;
+  const all = (window._rlBars||{})[cid] || [];
+  const S = all.filter(b => { const m = tMin(b[0]); return m >= V0 - 5 && m <= V1 + 5; });
+  if (!S.length) return '';
+  const W = 1040, H = 252, padL = 46, padR = 8, padT = 10, padB = 40;
+  // EMA9/VWAP computed over ALL bars (correct history), kept for in-view points
+  const ov = [];
+  (function(){
+    const k = 2/(9+1); let ema = null, cumPV = 0, cumV = 0;
+    all.forEach(b => {
+      const m = tMin(b[0]); const typ = (b[2]+b[3]+b[4])/3;
+      ema = ema === null ? b[4] : b[4]*k + ema*(1-k);
+      cumPV += typ * b[5]; cumV += b[5];
+      if (m >= V0 && m <= V1) ov.push([b[0], ema, cumV > 0 ? cumPV/cumV : null]);
+    });
+  })();
+  // SMART Y: auto-fit to everything visible — bars, overlays, AND trade annotations
+  let lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
+  ov.forEach(p => { const v = p[2] == null ? p[1] : p[2]; lo = Math.min(lo, p[1], v); hi = Math.max(hi, p[1], v); });
+  ((r.trades)||[]).filter(t => t.sym === sym).forEach(t => {
+    const te = tMin(t.t), tx = t.exit_t ? tMin(t.exit_t) : null;
+    const add = p => { if (p != null && isFinite(+p)) { lo = Math.min(lo, +p); hi = Math.max(hi, +p); } };
+    if (te >= V0 && te <= V1) add(t.entry);
+    if (te <= V1) { add(t.stop); add(t.target); }       // stop/target lines extend right
+    if (tx != null && tx >= V0 && tx <= V1) add(t.exit);
+  });
+  const padPr = (hi - lo) * 0.07 || Math.max(hi, 1) * 0.005;
+  let dLo = lo - padPr, dHi = hi + padPr;
+  if (view.p0 != null && view.p1 != null) { dLo = view.p0; dHi = view.p1; }  // manual price view
+  view._dLo = dLo; view._dHi = dHi;                      // handlers read the rendered domain
+  const span = (dHi - dLo) || 1, y = p => padT + (dHi - p) / span * (H-padT-padB);
+  const dec = span < 0.35 ? 3 : (dHi >= 100 ? 1 : 2);
+  const x = t => padL + (Math.max(V0, Math.min(V1, tMin(t))) - V0) / (V1-V0) * (W-padL-padR);
+  const barMin = (rlCur && rlCur.bar_interval_min) || 5;
+  const bw = Math.max(1.2, (W-padL-padR) / ((V1-V0)/barMin) - (barMin >= 5 ? 2 : 0.6));
+  const fmtET = t => { const m = (tMin(t)-240+1440)%1440; return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); };
+  let g = '';
+  const range = V1 - V0;
+  const step = range > 360 ? 60 : range > 150 ? 30 : range > 60 ? 15 : 5;
+  for (let m = Math.ceil(V0/step)*step; m <= V1; m += step) {
+    const xx = padL + (m - V0) / (V1-V0) * (W-padL-padR);
+    const et = (m-240+1440)%1440;
+    g += '<line x1="'+xx+'" x2="'+xx+'" y1="'+(H-padB)+'" y2="'+(H-padB+4)+'" stroke="rgba(255,255,255,.3)"/>' +
+         '<text x="'+xx+'" y="'+(H-padB+14)+'" text-anchor="middle" fill="rgba(255,255,255,.5)" font-size="9">'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+'</text>';
+  }
+  if (V0 <= 810 && 810 <= V1) {
+    const xo = padL + (810 - V0)/(V1-V0)*(W-padL-padR);
+    g += '<line x1="'+xo+'" x2="'+xo+'" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.22)" stroke-dasharray="3 4"/>' +
+         '<text x="'+(xo+3)+'" y="'+(padT+9)+'" fill="rgba(255,255,255,.4)" font-size="8">09:30 open</text>';
+  }
+  (function(){
+    const spans = ((r.halt_spans||{})[sym]||[]).slice().sort((a,b) => tMin(a[0])-tMin(b[0]));
+    const merged = [];
+    spans.forEach(h => {
+      const last = merged[merged.length-1];
+      if (last && tMin(h[0]) - tMin(last[1]) <= 3) { if (tMin(h[1]) > tMin(last[1])) last[1] = h[1]; }
+      else merged.push([h[0], h[1]]);
+    });
+    merged.forEach(h => {
+      if (tMin(h[1]) < V0 || tMin(h[0]) > V1) return;
+      const x0 = x(h[0]), wpx = Math.max(2, x(h[1])-x0);
+      g += '<rect x="'+x0+'" y="'+padT+'" width="'+wpx+'" height="'+(H-padT-padB)+'" fill="rgba(248,81,73,.10)"/>';
+      if (wpx > 30) g += '<text x="'+(x0+3)+'" y="'+(padT+19)+'" fill="rgba(248,81,73,.7)" font-size="8">HALT</text>';
+    });
+  })();
+  for (let k = 0; k <= 4; k++) {
+    const pp = dLo + span*k/4, yy = y(pp);
+    g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+yy+'" y2="'+yy+'" stroke="rgba(255,255,255,.06)"/>' +
+         '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+pp.toFixed(dec)+'</text>';
+  }
+  const vmax = Math.max(...S.map(b => b[5])) || 1;
+  S.forEach(b => {
+    const up = b[4] >= b[1];
+    const vh = Math.max(1, (b[5] / vmax) * 24);
+    g += '<rect x="'+(x(b[0])-bw/2)+'" y="'+(H-16-vh)+'" width="'+bw+'" height="'+vh+'" fill="'+(up?'#3fb950':'#f85149')+'" opacity="0.28"/>';
+  });
+  S.forEach(b => {
+    const cx = x(b[0]), up = b[4] >= b[1], col = up ? '#3fb950' : '#f85149';
+    g += '<line x1="'+cx+'" x2="'+cx+'" y1="'+y(b[2])+'" y2="'+y(b[3])+'" stroke="'+col+'" stroke-width="1"/>' +
+         '<rect x="'+(cx-bw/2)+'" y="'+y(Math.max(b[1],b[4]))+'" width="'+bw+'" height="'+Math.max(1, Math.abs(y(b[1])-y(b[4])))+'" fill="'+col+'" opacity="0.85"/>';
+  });
+  (function(){
+    const ePts = [], vPts = [];
+    ov.forEach(p => {
+      ePts.push(x(p[0]).toFixed(1)+','+y(p[1]).toFixed(1));
+      if (p[2] != null) vPts.push(x(p[0]).toFixed(1)+','+y(p[2]).toFixed(1));
+    });
+    if (ePts.length > 1) g += '<polyline points="'+ePts.join(' ')+'" fill="none" stroke="#58a6ff" stroke-width="1.3" opacity=".85"/>';
+    if (vPts.length > 1) g += '<polyline points="'+vPts.join(' ')+'" fill="none" stroke="#e8b339" stroke-width="1.3" stroke-dasharray="6 3" opacity=".8"/>';
+  })();
+  const placed = [];
+  const clampY = v => Math.max(padT+12, Math.min(H-padB-6, v));   // labels stay INSIDE the plot
+  function labelY(xp, yp) {
+    let yy = clampY(yp);
+    for (let tries = 0; tries < 8; tries++) {
+      if (!placed.some(b => Math.abs(b.x - xp) < 150 && Math.abs(b.y - yy) < 12)) break;
+      yy = yy + 13 > H-padB-6 ? yy - 13 : yy + 13;                 // push down, flip up at the floor
+    }
+    yy = clampY(yy);
+    placed.push({x: xp, y: yy});
+    return yy;
+  }
+  const inPlot = v => v >= padT && v <= H-padB;
+  ((rlCur.trades)||[]).filter(t => t.sym === sym).forEach(t => {
+    if (tMin(t.t) < V0 || tMin(t.t) > V1) return;
+    const xe = x(t.t), ye = y(t.entry);
+    const eA = xe > W-180 ? ' text-anchor="end"' : '';
+    g += '<circle cx="'+xe+'" cy="'+Math.max(padT, Math.min(H-padB, ye))+'" r="5" fill="#3fb950" stroke="#fff" stroke-width="1.2"/>' +
+         '<text x="'+(xe + (eA? -7 : 7))+'" y="'+labelY(xe, ye-7)+'"'+eA+' fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+fmtET(t.t)+' ET</text>';
+    if (t.stop && inPlot(y(t.stop))) {
+      g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.stop)+'" y2="'+y(t.stop)+'" stroke="#f85149" stroke-dasharray="5 4" stroke-width="1"/>' +
+           '<text x="'+(W-padR-2)+'" y="'+clampY(y(t.stop)-3)+'" text-anchor="end" fill="#f85149" font-size="9">stop '+t.stop+'</text>';
+    }
+    if (t.target && inPlot(y(t.target))) {
+      g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.target)+'" y2="'+y(t.target)+'" stroke="#3fb950" stroke-dasharray="5 4" stroke-width="1" opacity=".7"/>' +
+           '<text x="'+(W-padR-2)+'" y="'+clampY(y(t.target)-3)+'" text-anchor="end" fill="#3fb950" font-size="9">target '+t.target+'</text>';
+    }
+    if (t.exit_t && tMin(t.exit_t) >= V0 && tMin(t.exit_t) <= V1) {
+      const xx = x(t.exit_t), yx = y(t.exit);
+      const xA = xx > W-220 ? ' text-anchor="end"' : '';
+      g += '<circle cx="'+xx+'" cy="'+Math.max(padT, Math.min(H-padB, yx))+'" r="5" fill="#f85149" stroke="#fff" stroke-width="1.2"/>' +
+           '<text x="'+(xx + (xA? -7 : 7))+'" y="'+labelY(xx, yx+13)+'"'+xA+' fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+fmtET(t.exit_t)+' ET ('+t.why+')</text>';
+    }
+  });
+  g += '<line id="'+cid+'-x" x1="0" x2="0" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.35)" stroke-dasharray="2 3" visibility="hidden"/>';
+  return g;
+}
+
+const RL_W = 1040, RL_PADL = 46, RL_PADR = 8, RL_H = 252, RL_PADT = 10, RL_PADB = 40;
+function rlRedraw(cid, sym) {
+  const svg = document.getElementById(cid);
+  if (svg) svg.innerHTML = rlChartBody(sym, cid);
+}
+function rlAttachHover(cid, sym) {
+  const svg = document.getElementById(cid);
+  if (!svg || svg._rlWired) return;
+  svg._rlWired = true;
+  svg.addEventListener('mousemove', ev => {
+    if (svg._rlDrag) {
+      const view = window._rlView[cid];
+      const r = svg.getBoundingClientRect();
+      const d = svg._rlDrag;
+      const dmin = (d.x - ev.clientX) / r.width * (d.v1 - d.v0);
+      let t0 = d.v0 + dmin, t1 = d.v1 + dmin;
+      if (t0 < T0) { t1 += T0-t0; t0 = T0; } if (t1 > T1) { t0 -= t1-T1; t1 = T1; }
+      view.t0 = t0; view.t1 = t1;
+      // vertical pan engages after 8px so a pure time-pan keeps Y on auto-fit
+      if (Math.abs(ev.clientY - d.cy) > 8) d.vy = true;
+      if (d.vy) {
+        const dpr = (ev.clientY - d.cy) / r.height * RL_H / (RL_H-RL_PADT-RL_PADB) * (d.dHi - d.dLo);
+        view.p0 = d.dLo + dpr; view.p1 = d.dHi + dpr;
+      }
+      rlRedraw(cid, sym); return;
+    }
+    rlHover(ev, cid);
+  });
+  svg.addEventListener('mouseleave', () => { svg._rlDrag = null; rlHoverOff(cid); });
+  svg.addEventListener('mousedown', ev => {
+    const v = window._rlView[cid];
+    svg._rlDrag = { x: ev.clientX, cy: ev.clientY, v0: v.t0, v1: v.t1, dLo: v._dLo, dHi: v._dHi, vy: false };
+    ev.preventDefault();
+  });
+  svg.addEventListener('mouseup', () => { svg._rlDrag = null; });
+  svg.addEventListener('dblclick', () => { window._rlView[cid] = { t0: T0, t1: T1 }; rlRedraw(cid, sym); });  // fresh view = auto-fit price
+  svg.addEventListener('wheel', ev => {
+    ev.preventDefault();
+    const view = window._rlView[cid];
+    const r = svg.getBoundingClientRect();
+    if (ev.shiftKey) {                                    // shift+scroll = PRICE zoom anchored at cursor
+      const dLo = view._dLo, dHi = view._dHi;
+      if (dLo == null || dHi == null) return;
+      const fy = Math.max(0, Math.min(1, ((ev.clientY - r.top)/r.height*RL_H - RL_PADT) / (RL_H-RL_PADT-RL_PADB)));
+      const cp = dHi - fy * (dHi - dLo);
+      const z = ev.deltaY > 0 ? 1.25 : 0.8;
+      const p0 = cp - (cp - dLo) * z, p1 = cp + (dHi - cp) * z;
+      if ((p1 - p0) / Math.max(Math.abs(cp), 0.01) < 0.002) return;
+      view.p0 = p0; view.p1 = p1; rlRedraw(cid, sym); return;
+    }
+    const fx = Math.max(0, Math.min(1, ((ev.clientX - r.left)/r.width*RL_W - RL_PADL) / (RL_W-RL_PADL-RL_PADR)));
+    const cm = view.t0 + fx * (view.t1 - view.t0);
+    const z = ev.deltaY > 0 ? 1.25 : 0.8;
+    let t0 = Math.max(T0, cm - (cm - view.t0) * z), t1 = Math.min(T1, cm + (view.t1 - cm) * z);
+    if (t1 - t0 < 30) return;
+    view.t0 = t0; view.t1 = t1; rlRedraw(cid, sym);
+  }, { passive: false });
+}
+function rlHover(ev, cid) {
+  const view = (window._rlView||{})[cid]; if (!view) return;
+  const bars = ((window._rlBars||{})[cid]||[]).filter(b => tMin(b[0]) >= view.t0 && tMin(b[0]) <= view.t1);
+  if (!bars.length) return;
+  const svg = document.getElementById(cid); if (!svg) return;
+  const r = svg.getBoundingClientRect();
+  const xf = (ev.clientX - r.left) / r.width * RL_W;
+  const span = RL_W - RL_PADL - RL_PADR;
+  let best = 0, bd = 1e9;
+  bars.forEach((b,i) => { const bx = RL_PADL + (tMin(b[0])-view.t0)/(view.t1-view.t0)*span; const d = Math.abs(bx - xf); if (d < bd) { bd = d; best = i; } });
+  const b = bars[best];
+  const xx = RL_PADL + (tMin(b[0])-view.t0)/(view.t1-view.t0)*span;
+  const xl = document.getElementById(cid+'-x'); if (xl) { xl.setAttribute('x1', xx); xl.setAttribute('x2', xx); xl.setAttribute('visibility','visible'); }
+  const m = tMin(b[0]); const et = (m-240+1440)%1440;
+  const tip = document.getElementById(cid+'-tip');
+  if (tip) { tip.style.display=''; tip.innerHTML = '<b>'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET</b> &nbsp; O '+b[1]+' · H '+b[2]+' · L '+b[3]+' · C '+b[4]+' · Vol '+Number(b[5]).toLocaleString(); }
+}
+function rlHoverOff(cid) {
+  const xl = document.getElementById(cid+'-x'); if (xl) xl.setAttribute('visibility','hidden');
+  const tip = document.getElementById(cid+'-tip'); if (tip) tip.style.display='none';
+}
+
+async function rlLoadHistory() {
+  try {
+    const j = await (await fetch('/api/trading/momentum/replay/list')).json();
+    document.getElementById('rl-hist').innerHTML = (j.results||[]).map(r =>
+      '<tr class="hist" onclick="rlLoadResult(\''+rlEsc(r.date)+'\', \''+(r.armed_source||'asof')+'\')"><td><b>'+rlEsc(r.date)+'</b></td>'+
+      '<td class="'+(Number(r.total_usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(r.total_usd||0).toLocaleString()+'</td>'+
+      '<td>'+(r.n_trades||0)+'</td><td>'+(r.wins||0)+'/'+(r.losses||0)+'</td>'+
+      '<td>'+(r.tape_symbols||0)+'</td><td>'+(r.candidates||0)+'</td><td>'+(r.halt_windows||0)+'</td>'+
+      '<td style="color:var(--text-secondary);">'+rlEsc((r.ran_at_utc||'').slice(0,16).replace('T',' '))+'</td></tr>'
+    ).join('') || '<tr><td colspan="8" style="color:var(--text-secondary);">No replays yet — run your first one above.</td></tr>';
+  } catch (e) { /* ignore */ }
+}
+
+(function init() {
+  document.getElementById('rl-date').value = new Date().toISOString().slice(0,10);
+  rlLoadHistory(); rlCheck();
+  // auto-open the newest persisted result kung meron
+  fetch('/api/trading/momentum/replay/list').then(r=>r.json()).then(j => {
+    const first = (j.results||[])[0]; if (first) rlLoadResult(first.date);
+  }).catch(()=>{});
+})();

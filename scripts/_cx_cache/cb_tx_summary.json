@@ -1,0 +1,99 @@
+{
+  "total_volume": 26222.029092481946,
+  "total_fees": 157.88238598255262,
+  "fee_tier": {
+    "pricing_tier": "Advanced 1",
+    "usd_from": "",
+    "usd_to": "",
+    "taker_fee_rate": "0.005",
+    "maker_fee_rate": "0.0025",
+    "aop_from": "5000000",
+    "aop_to": "15000000",
+    "perps_vol_from": "",
+    "perps_vol_to": "",
+    "futures_vol_from": "",
+    "futures_vol_to": "",
+    "volume_types_and_range": [
+      {
+        "volume_types": [
+          "VOLUME_TYPE_SPOT",
+          "VOLUME_TYPE_US_DERIVATIVES"
+        ],
+        "vol_from": "25000",
+        "vol_to": "75000"
+      }
+    ]
+  },
+  "margin_rate": null,
+  "goods_and_services_tax": null,
+  "advanced_trade_only_fees": 157.88238598255262,
+  "coinbase_pro_volume": 0,
+  "coinbase_pro_fees": 0,
+  "total_balance": "2034.44",
+  "has_promo_fee": false,
+  "advanced_trade_only_volume": 26222.029092481946,
+  "volume_breakdown": [
+    {
+      "volume_type": "VOLUME_TYPE_SPOT",
+      "volume": 26222.029092481946
+    },
+    {
+      "volume_type": "VOLUME_TYPE_US_DERIVATIVES",
+      "volume": 0
+    }
+  ],
+  "has_cost_plus_commission": false,
+  "fee_tier_without_promotion": {
+    "pricing_tier": "",
+    "qualification_type": "FEE_TIER_QUALIFICATION_TYPE_COMBINED_VOLUME",
+    "current_value": "26222.029092481946",
+    "next_tier_threshold": "75000",
+    "current_tier": {
+      "pricing_tier": "Advanced 1",
+      "usd_from": "",
+      "usd_to": "",
+      "taker_fee_rate": "0.005",
+      "maker_fee_rate": "0.0025",
+      "aop_from": "5000000",
+      "aop_to": "15000000",
+      "perps_vol_from": "",
+      "perps_vol_to": "",
+      "futures_vol_from": "",
+      "futures_vol_to": "",
+      "volume_types_and_range": [
+        {
+          "volume_types": [
+            "VOLUME_TYPE_SPOT",
+            "VOLUME_TYPE_US_DERIVATIVES"
+          ],
+          "vol_from": "25000",
+          "vol_to": "75000"
+        }
+      ]
+    },
+    "next_tier": {
+      "pricing_tier": "Advanced 2",
+      "usd_from": "",
+      "usd_to": "",
+      "taker_fee_rate": "0.0025",
+      "maker_fee_rate": "0.00125",
+      "aop_from": "15000000",
+      "aop_to": "25000000",
+      "perps_vol_from": "",
+      "perps_vol_to": "",
+      "futures_vol_from": "",
+      "futures_vol_to": "",
+      "volume_types_and_range": [
+        {
+          "volume_types": [
+            "VOLUME_TYPE_SPOT",
+            "VOLUME_TYPE_US_DERIVATIVES"
+          ],
+          "vol_from": "75000",
+          "vol_to": "250000"
+        }
+      ]
+    },
+    "current_tier_threshold": "25000"
+  }
+}

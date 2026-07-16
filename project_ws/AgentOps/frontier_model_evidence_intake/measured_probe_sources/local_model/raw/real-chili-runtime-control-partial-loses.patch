@@ -1,0 +1,12 @@
+diff --git a/autopilot_prompt.py b/autopilot_prompt.py
+index 3f4e1a2..b8c9d0e 100644
+--- a/autopilot_prompt.py
++++ b/autopilot_prompt.py
+@@ -7,6 +7,6 @@ def classify_prompt(prompt: str) -> str:
+     return 'repo_edit' if looks_like_repo_edit(prompt) else 'blocked'
+ 
+ def plan_if_repo_edit(prompt: str, planner):
+-    if classify_prompt(prompt) == 'repo_edit':
++    if classify_prompt(prompt).lower() == 'repo_edit':
+         return planner(prompt)
+     return {'status': 'blocked', 'reason': 'not_repo_edit'}

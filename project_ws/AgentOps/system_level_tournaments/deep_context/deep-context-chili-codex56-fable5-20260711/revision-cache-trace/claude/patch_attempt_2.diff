@@ -1,0 +1,19 @@
+diff --git a/cache/store.py b/cache/store.py
+--- a/cache/store.py
++++ b/cache/store.py
+@@ -15,9 +15,9 @@ class CacheStore:
+             self._latest[token.entity_id] = token.revision
+         return True
+ 
+-    def invalidate_before(self, token):
+-        revisions = self._entries.get(token.entity_id, {})
+-        stale = [revision for revision in revisions if revision < token.revision]
+-        for revision in stale:
+-            del revisions[revision]
+-        return len(stale)
++    def invalidate_before(self, entity_id, revision):
++        revisions = self._entries.get(entity_id, {})
++        stale = [rev for rev in revisions if rev < revision]
++        for rev in stale:
++            del revisions[rev]
++        return len(stale)

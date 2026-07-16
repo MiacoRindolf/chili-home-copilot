@@ -1,0 +1,19 @@
+{
+  "candidate_id": "codex-real-chili-broker-timeout-partial-loses",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "collected_at": "2026-07-03T23:32:02.805260Z",
+  "cost_units": 10.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 10.0,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "gpt-5.5",
+  "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case.",
+  "patch_file": "real-chili-broker-timeout-partial-loses.patch",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "codex"
+}

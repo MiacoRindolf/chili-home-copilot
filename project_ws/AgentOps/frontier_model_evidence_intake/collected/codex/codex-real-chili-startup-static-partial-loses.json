@@ -1,0 +1,31 @@
+{
+  "candidate_id": "codex-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "collected_at": "2026-07-03T23:32:02.803623Z",
+  "cost_units": 10.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 10.0,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "gpt-5.5",
+  "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case.",
+  "patch_file": "real-chili-startup-static-partial-loses.patch",
+  "planned_file": "startup_contracts.py",
+  "provenance": {
+    "collector": "autopilot_model_candidate_drop_collector",
+    "prompt_pack_file": "codex-gpt-5.5-thread-20260703-frontier-evidence.prompt-pack.md",
+    "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+    "prompt_pack_sha256": "5e927a48d3757fe3a3cb7535b3e0081b854846ef88c32983b5d97f41a2c4b1f1",
+    "run_id": "codex-gpt-5.5-thread-20260703-frontier-evidence",
+    "schema": "chili.model-candidate-drop-provenance.v1",
+    "source_command": "Codex Desktop thread 019e84ac-de67-75b1-93a6-bb523c3c1914 response-only frontier evidence import",
+    "transcript_events": 3,
+    "transcript_file": "codex-gpt-5.5-thread-20260703-frontier-evidence.transcript.jsonl",
+    "transcript_sha256": "4ed0a15aad84c4043abe55ad607cad01c8a47faa3c556b1cbc155b31ed853f56"
+  },
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "codex"
+}

@@ -1,0 +1,2 @@
+"diff": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py
+index 8a9b8c--- a/autopilot_prompt.py+++ b/autopilot_prompt.py@@ -4,7 +4,6 @@def looks_like_repo_edit(prompt: str) -> bool:    text = (prompt or '').lower()    return any(word in text for word in ('fix', 'update', 'change', 'add', 'deploy'))"        }

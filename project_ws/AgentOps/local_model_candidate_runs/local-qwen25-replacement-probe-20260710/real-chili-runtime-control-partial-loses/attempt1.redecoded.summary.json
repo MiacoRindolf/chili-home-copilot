@@ -1,0 +1,11 @@
+{
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "passed": false,
+  "reason": "behavior_tests_failed",
+  "status": "failed",
+  "test_output_tail": "F.                                                                       [100%]\n================================== FAILURES ===================================\n______________ test_runtime_control_prompt_blocks_before_planner ______________\n\n    def test_runtime_control_prompt_blocks_before_planner():\n        calls = []\n    \n        def planner(prompt):\n            calls.append(prompt)\n            return {'status': 'planned'}\n    \n        result = plan_if_repo_edit('docker compose restart chili and scheduler-worker', planner)\n    \n>       assert result['status'] == 'blocked'\nE       AssertionError: assert 'planned' == 'blocked'\nE         \nE         - blocked\nE         + planned\n\ntest_autopilot_prompt.py:13: AssertionError\n=========================== short test summary info ===========================\nFAILED test_autopilot_prompt.py::test_runtime_control_prompt_blocks_before_planner\n1 failed, 1 passed in 0.08s\n",
+  "used_replacement": true
+}

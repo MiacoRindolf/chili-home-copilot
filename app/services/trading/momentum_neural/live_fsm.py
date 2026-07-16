@@ -57,6 +57,31 @@ LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY = frozenset(
     }
 )
 
+# ── decouple_watching taxonomy (concurrency) ────────────────────────────────
+# Positions are BORN at FILL (live_pending_entry → live_entered). Only these four
+# hold capital + a live stop → the simultaneous-open-RISK budget cap charges THESE
+# (byte-identical to the set aggregate_open_risk_usd trusts).
+LIVE_POSITION_HOLDING_STATES = frozenset(
+    {
+        STATE_LIVE_ENTERED,
+        STATE_LIVE_SCALING_OUT,
+        STATE_LIVE_TRAILING,
+        STATE_LIVE_BAILOUT,
+    }
+)
+# Zero capital, zero stop, $0 at risk → governed by the watch-FANOUT cap, NOT the
+# risk cap. live_pending_entry sits here: a resting gfd order encumbers nothing
+# material (cancelled/re-watched on ack-timeout) and contributes $0 to open risk.
+LIVE_WATCHING_PREFILL_STATES = frozenset(
+    {
+        STATE_ARMED_PENDING_RUNNER,
+        STATE_QUEUED_LIVE,
+        STATE_WATCHING_LIVE,
+        STATE_LIVE_ENTRY_CANDIDATE,
+        STATE_LIVE_PENDING_ENTRY,
+    }
+)
+
 # In-flight live runner (for Automation summary “active” count).
 LIVE_RUNNER_ACTIVE_SUMMARY_STATES = frozenset(
     {
@@ -112,6 +137,12 @@ _ALLOWED_LIVE: frozenset[tuple[str, str]] = frozenset(
         (STATE_LIVE_EXITED, STATE_LIVE_COOLDOWN),
         (STATE_LIVE_COOLDOWN, STATE_LIVE_FINISHED),
         (STATE_LIVE_COOLDOWN, STATE_WATCHING_LIVE),  # recycle: loop back for next trade
+        # Completed-cycle cleanup: if restart/manual mutation leaves a previously
+        # traded Ross equity session back in a pre-entry state with no active
+        # order/position, terminalize it as finished instead of letting it re-enter.
+        (STATE_WATCHING_LIVE, STATE_LIVE_FINISHED),
+        (STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_FINISHED),
+        (STATE_LIVE_PENDING_ENTRY, STATE_LIVE_FINISHED),
         (STATE_ARMED_PENDING_RUNNER, STATE_LIVE_ERROR),
         (STATE_QUEUED_LIVE, STATE_LIVE_ERROR),
         (STATE_WATCHING_LIVE, STATE_LIVE_ERROR),
@@ -121,6 +152,25 @@ _ALLOWED_LIVE: frozenset[tuple[str, str]] = frozenset(
         (STATE_LIVE_SCALING_OUT, STATE_LIVE_ERROR),
         (STATE_LIVE_TRAILING, STATE_LIVE_ERROR),
         (STATE_LIVE_BAILOUT, STATE_LIVE_ERROR),
+        # CLEAN PRE-ENTRY DECLINE TERMINAL (2026-06-29): a deterministic policy decline at
+        # the entry instant (no_bbo / not-live-eligible / spread-too-wide / product-not-
+        # tradable — a KNOWN risk-eval BLOCK on a name that never held a position) terminalizes
+        # CLEANLY in live_cancelled instead of the alarm-coloured live_error. live_error stays
+        # reserved for genuine unexpected failures (zero-fill, place isError, missing snapshot).
+        # These edges originate ONLY from pre-entry, no-position states, so a decline can never
+        # short-circuit a held position's exit management. live_cancelled is ALREADY terminal
+        # across every consumer (focus-set, reaper, feedback learner, busy-set, canonical
+        # status), so this only changes the terminal LABEL — never whether the session trades.
+        (STATE_ARMED_PENDING_RUNNER, STATE_LIVE_CANCELLED),
+        (STATE_QUEUED_LIVE, STATE_LIVE_CANCELLED),
+        (STATE_WATCHING_LIVE, STATE_LIVE_CANCELLED),
+        (STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_CANCELLED),
+        # A live_pending_entry can be pre-submit: the runner first moves
+        # candidate -> pending, then places the broker order on the next guarded
+        # pass. If the schedule flips late before submit, no order exists to
+        # reconcile, so the automation can terminalize cleanly. Call sites must
+        # still keep submitted/tracked orders on the pending reconcile path.
+        (STATE_LIVE_PENDING_ENTRY, STATE_LIVE_CANCELLED),
     }
 )
 

@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import inspect as sa_inspect, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,67 @@ _log = logging.getLogger(__name__)
 
 KEY_PAPER_EXEC = "momentum_paper_execution"
 KEY_LIVE_EXEC = "momentum_live_execution"
+VIABILITY_PERSISTENCE_LOCK_KEY = 2026070201
+
+
+def _viability_row_lock_order_key(row: dict[str, Any]) -> tuple[str, str, int]:
+    symbol = str(row.get("symbol") or "")
+    family_id = str(row.get("family_id") or "")
+    try:
+        family_version = int(row.get("family_version") or 1)
+    except (TypeError, ValueError):
+        family_version = 1
+    return (symbol, family_id, family_version)
+
+
+def _try_acquire_viability_persistence_lock(db: Session) -> bool:
+    bind = db.get_bind()
+    if getattr(bind.dialect, "name", "") != "postgresql":
+        return True
+    return bool(
+        db.execute(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+            {"lock_key": VIABILITY_PERSISTENCE_LOCK_KEY},
+        ).scalar()
+    )
+
+
+def _ross_equity_live_eligibility(
+    symbol: str,
+    *,
+    live_eligible: bool,
+    execution_readiness_json: dict[str, Any],
+    explain_json: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Keep Ross equity live eligibility from falling back to generic rows."""
+    if not live_eligible:
+        return False, explain_json
+    sym = str(symbol or "").strip().upper()
+    if not sym or "-USD" in sym:
+        return bool(live_eligible), explain_json
+    try:
+        from ....config import settings
+
+        if not bool(getattr(settings, "chili_momentum_ross_equity_universe_required", True)):
+            return bool(live_eligible), explain_json
+        from .tick_scalp import ross_signal_for_symbol
+        from .universe import ross_smallcap_profile_evidence
+
+        signal = ross_signal_for_symbol(execution_readiness_json, sym)
+        ok, reason, debug = ross_smallcap_profile_evidence(sym, signal=signal)
+    except Exception as exc:
+        ok, reason, debug = False, "ross_universe_persistence_check_error", {"error": str(exc)[:160]}
+    if ok:
+        return True, explain_json
+    explain = dict(explain_json)
+    warnings = list(explain.get("warnings") or [])
+    warnings.append(f"Ross equity live eligibility demoted: {reason}")
+    explain["warnings"] = warnings
+    explain["ross_live_eligible_demoted"] = True
+    explain["ross_live_eligible_demoted_by"] = "persistence_ross_equity_universe"
+    explain["ross_live_eligible_demoted_reason"] = str(reason)
+    explain["ross_live_eligible_demoted_debug"] = dict(debug or {})
+    return False, explain
 
 
 def _strategy_variant_key(family_id: str, version: int) -> tuple[str, str, int]:
@@ -70,21 +131,26 @@ def ensure_momentum_strategy_variants(db: Session) -> None:
     variants_by_key = _strategy_variants_by_key(db, families)
     for fam in families:
         row = variants_by_key.get(_strategy_variant_key(fam.family_id, int(fam.version)))
+        defaults = {
+            "label": fam.label,
+            "params_json": family_default_params(fam.family_id),
+            "is_active": True,
+            "execution_family": "coinbase_spot",
+            "refinement_meta_json": {},
+            "updated_at": datetime.utcnow(),
+        }
         if row is None:
-            db.add(
-                MomentumStrategyVariant(
-                    family=fam.family_id,
-                    variant_key=fam.family_id,
-                    version=int(fam.version),
-                    label=fam.label,
-                    params_json=family_default_params(fam.family_id),
-                    is_active=True,
-                    execution_family="coinbase_spot",
-                    refinement_meta_json={},
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
-                )
+            stmt = pg_insert(MomentumStrategyVariant.__table__).values(
+                family=fam.family_id,
+                variant_key=fam.family_id,
+                version=int(fam.version),
+                created_at=datetime.utcnow(),
+                **defaults,
+            ).on_conflict_do_update(
+                index_elements=["family", "variant_key", "version"],
+                set_=defaults,
             )
+            db.execute(stmt)
             continue
         row.label = fam.label
         row.execution_family = row.execution_family or "coinbase_spot"
@@ -414,13 +480,16 @@ def persist_neural_momentum_tick(
     if not _momentum_tables_present(db):
         _log.debug("momentum persistence skipped (tables missing)")
         return 0
+    if not _try_acquire_viability_persistence_lock(db):
+        _log.info("momentum persistence skipped (viability writer lock busy)")
+        return 0
 
     ensure_momentum_strategy_variants(db)
 
     exec_json = features.to_public_dict()
     now = datetime.utcnow()
     n = 0
-    for row in row_dicts:
+    for row in sorted(row_dicts, key=_viability_row_lock_order_key):
         fam_id = row.get("family_id")
         fam_ver = int(row.get("family_version") or 1)
         if not fam_id:
@@ -445,14 +514,21 @@ def persist_neural_momentum_tick(
             "freshness_hint": row.get("freshness_hint"),
         }
         evidence_window: dict[str, Any] = {"note": "phase2_placeholder"}
+        symbol = str(row.get("symbol") or "")
+        row_live_eligible, explain = _ross_equity_live_eligibility(
+            symbol,
+            live_eligible=bool(row.get("live_eligible", False)),
+            execution_readiness_json=dict(exec_json),
+            explain_json=explain,
+        )
 
         stmt = pg_insert(MomentumSymbolViability).values(
-            symbol=str(row.get("symbol") or ""),
-            scope=infer_viability_scope(row.get("symbol"), explicit=row.get("scope")),
+            symbol=symbol,
+            scope=infer_viability_scope(symbol, explicit=row.get("scope")),
             variant_id=vid,
             viability_score=float(row.get("viability") or 0.0),
             paper_eligible=bool(row.get("paper_eligible", True)),
-            live_eligible=bool(row.get("live_eligible", False)),
+            live_eligible=bool(row_live_eligible),
             freshness_ts=now,
             regime_snapshot_json=dict(regime_snapshot),
             execution_readiness_json=dict(exec_json),
@@ -467,9 +543,9 @@ def persist_neural_momentum_tick(
             constraint="uq_momentum_symbol_viability_sym_var",
             set_={
                 "viability_score": float(row.get("viability") or 0.0),
-                "scope": infer_viability_scope(row.get("symbol"), explicit=row.get("scope")),
+                "scope": infer_viability_scope(symbol, explicit=row.get("scope")),
                 "paper_eligible": bool(row.get("paper_eligible", True)),
-                "live_eligible": bool(row.get("live_eligible", False)),
+                "live_eligible": bool(row_live_eligible),
                 "freshness_ts": now,
                 "regime_snapshot_json": dict(regime_snapshot),
                 "execution_readiness_json": dict(exec_json),

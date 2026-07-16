@@ -1,0 +1,35 @@
+{
+  "entries": [
+    {
+      "bytes": 14532,
+      "model_name": "gpt-5.6-sol",
+      "path": "codex/prompt_pack.md",
+      "sha256": "9cbe83ddae80311e5a6edfcb58c39f8b7ce450ae2d2279bb738e810194707834",
+      "source_kind": "codex"
+    },
+    {
+      "bytes": 14572,
+      "model_name": "claude-fable-5",
+      "path": "claude/prompt_pack.md",
+      "sha256": "78e81b1c4d9c29c3053ddf79273694e750389e27b73933c6eada66db10f77fba",
+      "source_kind": "claude"
+    },
+    {
+      "bytes": 14654,
+      "model_name": "qwen2.5-coder:7b",
+      "path": "local_model/prompt_pack.md",
+      "sha256": "52c16819597afc284021acaa89dc74fbb98c914b0b1c9eff7437a4a867460960",
+      "source_kind": "local_model"
+    }
+  ],
+  "generated_utc": "2026-07-10T23:00:17.924744Z",
+  "output_dir": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_prompt_packs",
+  "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+  "required_frontier_model_targets": "codex=gpt-5.6-sol, claude=fable-5",
+  "required_source_kinds": [
+    "codex",
+    "claude",
+    "local_model"
+  ],
+  "schema": "chili.frontier-prompt-pack-bundle.v1"
+}

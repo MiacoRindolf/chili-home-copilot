@@ -164,3 +164,40 @@ def test_project_autonomy_list_requires_paired_client(client):
 
     assert response.status_code == 403
     assert response.json()["detail"]["ok"] is False
+
+
+def test_autonomy_worker_publishes_live_event_pulses(monkeypatch):
+    import app.db as app_db
+    import app.routers.brain_project as brain_project_router
+
+    class FakeSession:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    session = FakeSession()
+    pulse = brain_project_router._AutonomyEventPulse(max_runs=2)
+    captured = {}
+
+    def fake_run_autonomy_sync(db, run_id, on_event=None):
+        captured["db"] = db
+        captured["on_event"] = on_event
+        on_event({"event": "step", "run_id": run_id, "id": 7})
+        return {"run_id": run_id, "status": "completed"}
+
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: session)
+    monkeypatch.setattr(brain_project_router, "_AUTONOMY_EVENT_PULSE", pulse)
+    monkeypatch.setattr(
+        brain_project_router.project_autonomy,
+        "run_autonomy_sync",
+        fake_run_autonomy_sync,
+    )
+    before = pulse.version("pa_live_stream")
+
+    brain_project_router._run_autonomy_worker("pa_live_stream")
+
+    assert captured["db"] is session
+    assert callable(captured["on_event"])
+    assert pulse.wait_for_change("pa_live_stream", before, timeout=0.0) > before
+    assert session.closed is True

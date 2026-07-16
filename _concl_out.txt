@@ -1,0 +1,66 @@
+==== CONCLUSION SECTION ====
+9. Conclusion 
+ 
+This study investigates the presence of intraday momentum and return predictability in the  
+Swedish financial market, focusing on the OMXS30 index and its selected constituent stocks.  
+The findings reveal that while there is some evidence of intraday momentum in individual  
+stocks such as SBB and Sinch, the overall effect is weak compared to larger markets like US  
+and China, specifically when comparing index to index such as OMXS30, Shanghai Composite 
+(Zhang et al. 2019) and S&P 500 (Gao et al. 2018). Despite mixed results, this study contributes 
+to the existing literature by providing insights to the dynamics of intraday returns in the Swedish 
+market. The findings indicate that while intraday momentum exists, it is not strong or consistent 
+enough to form the basis for reliable trading strategies across all stocks.  
+ 
+The study’s limitations include the short time -period and focus on a single market. Future  
+research could extend the analysis to longer timeframes, incorporate additional stocks, and  
+explore other market. Investigating the first half-hour of the trading day using minute -by-
+minute data, particularly during periods of high volume and volatility, could provide further  
+insights. Additionally, developing sentiment analysis algorithms to evaluate the impact of news 
+on intraday returns could enhance the predictability of trading strategies. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+38 
+ 
+Reference list 
+ 
+Amihud, Y., 2002. Illiquidity and stock returns: cross -section and time-series effects. Journal 
+of Financial Markets, 5(1), pp.31-56 
+Baker, M. and Wurgler, J., 2006. 'Investor sentiment and the cross -section of stock returns', 
+Journal of Finance, Vol. 61, No. 4, pp. 1645-1680. 
+Bodie, Z., Kane, A., & Marcus, A. (2014). Investments (10 th global ed ition). Berkshire: 
+McGraw-Hill Education. 
+Bogousslavsky, V. (2016). Infrequent Rebalancing, Return Autocorrelation, and Seasonality. 
+The Journal of Finance, 71(6), pp. 2967-3006. 
+Cohen, L. and Frazzini, A., 2008. 'Economic links and predictable returns', The Journal of 
+Finance, Vol. 63, No. 4, pp. 1977-2011. 
+Gao, L., Han, Y., Li, S.Z. & Zhou, G., 2018. Market intraday momentum. Journal of Financial 
+Economics, 129(2), pp.394-414. Available at: https://doi.org/10.1016/j.jfineco.2018.05.009  
+ 
+Huang, S., Jiang, F., Tu, J. and Zhou, G., 2015. 'Investor sentiment aligned: A powerful 
+predictor of stock returns', Review of Financial Studies, Vol. 28, No. 3, pp. 791-837. 
+ 
+Investopedia. (2024) ‘Intraday:Definition, Intraday Trading, and Intraday Strategies’, 
+Investopedia. Available at: https://www.investopedia.com/terms/i/intraday.asp (Accessed: 
+2024). 
+ 
+Li, Z., Sakkas, A. and Urquhart, A., 2022. Intraday time series momentum: Global evidence 
+and links to market characteristics. Journal of Financial Markets, 57, p.100619 
+Limkriangkrai, M., Chai, D., and Zheng, G. (2023). Market intraday momentum: APAC 
+evidence. Pacific-Basin Finance Journal, 80, 102086 
+Moskowitz, T.J., Ooi, Y.H., & Pedersen, L.H. (2012). Time Series Momentum. Journal of 
+Financial Economics, 104(2), 228-250. https://doi.org/10.1016/j.jfineco.2011.11.003 
+39 
+ 
+Murphy, D.P., and Thirumala

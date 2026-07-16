@@ -1,8 +1,22 @@
-# Scheduled Fast Orderbook Retention Maintenance
+﻿# Scheduled Fast Orderbook Retention Maintenance
 # Runs a bounded, low-impact purge of old fast_orderbook_default rows.
 # Keep this conservative: this task runs on the operator PC, not a
 # dedicated batch host.
 
+
+# ── MARKET-WINDOW GUARD (added 2026-06-11): the momentum lane now trades the FULL
+# US data session (premarket 4:00 AM ET -> after-hours 8:00 PM ET = 01:00-17:00 PT
+# on this box). Heavy DB/CPU work in that window contends with LIVE trading (this
+# task's old slot landed mid-premarket / pre-open). Inside the window: defer — the
+# CHILI-Evening-* companion task runs this same script after the session closes.
+$__nowLocal = Get-Date
+if ($__nowLocal.DayOfWeek -ne 'Saturday' -and $__nowLocal.DayOfWeek -ne 'Sunday') {
+    $__mod = $__nowLocal.Hour * 60 + $__nowLocal.Minute
+    if ($__mod -ge 60 -and $__mod -lt 1020) {
+        Write-Output "[market-window-guard] deferred (PT $($__nowLocal.ToString('HH:mm')) inside data session); evening task covers this."
+        exit 0
+    }
+}
 $ErrorActionPreference = "Stop"
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $logFile = "$projectPath\fast_orderbook_retention_scheduled.log"
@@ -92,7 +106,14 @@ try {
 
     Add-RunLog "scheduled retention starting batch=$batchSize max_batches=$maxBatches max_runtime_minutes=$maxRuntimeMinutes"
 
-    $pgReadyArgs = @("compose", "exec", "-T", "postgres", "pg_isready", "-U", "chili", "-d", "chili")
+    # Deployed container names (raw `docker run` deploy model; the old
+    # compose project is retired - `docker compose exec` here failed every
+    # night with 'service "chili" is not running'). Override via env if a
+    # deploy renames them.
+    $postgresContainer = if ($env:CHILI_POSTGRES_CONTAINER) { $env:CHILI_POSTGRES_CONTAINER } else { "chili-home-copilot-postgres-1" }
+    $appContainer = if ($env:CHILI_APP_CONTAINER) { $env:CHILI_APP_CONTAINER } else { "chili-clean-recovery-scheduler" }
+
+    $pgReadyArgs = @("exec", $postgresContainer, "pg_isready", "-U", "chili", "-d", "chili")
     & docker @pgReadyArgs *> $null
     if ($LASTEXITCODE -ne 0) {
         Add-RunLog "postgres is not ready; skipping"
@@ -100,8 +121,8 @@ try {
     }
 
     $maintenanceArgs = @(
-        "compose", "exec", "-T", "chili",
-        "python", "/workspace/scripts/maintain_fast_orderbook_retention.py",
+        "exec", $appContainer,
+        "python", "/app/scripts/maintain_fast_orderbook_retention.py",
         "--execute",
         "--batch-size", "$batchSize",
         "--max-batches", "$maxBatches",

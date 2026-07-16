@@ -1,0 +1,38 @@
+diff --git a/app/api.py b/app/api.py
+index 4185f81..86fa2f2 100644
+--- a/app/api.py
++++ b/app/api.py
+@@ -6,5 +6,5 @@ from app.query import parse_page
+ 
+ 
+ def build_page(items: Sequence[Any], raw_page: str | None, page_size: int) -> dict[str, Any]:
+-    page = parse_page(raw_page)
++    page = parse_page(raw_page, default=1)
+     return {"page": page, "items": page_slice(items, page, page_size)}
+diff --git a/app/paging.py b/app/paging.py
+index 99f1ee1..ff51939 100644
+--- a/app/paging.py
++++ b/app/paging.py
+@@ -5,5 +5,5 @@ T = TypeVar("T")
+ 
+ 
+ def page_slice(items: Sequence[T], page: int, page_size: int) -> list[T]:
+-    start = page * page_size
++    start = (page - 1) * page_size
+     return list(items[start : start + page_size])
+diff --git a/app/query.py b/app/query.py
+index 2910476..7927abe 100644
+--- a/app/query.py
++++ b/app/query.py
+@@ -1,4 +1,9 @@
+-def parse_page(raw: str | None) -> int:
++def parse_page(raw: str | None, default: int = 1) -> int:
+     if raw is None:
+         return 0
+-    return int(raw)
++    if raw is None or raw.strip() == '':
++        return default
++try:
++        return max(1, int(raw))
++    except ValueError:
++        raise ValueError('page must be a positive integer') from None

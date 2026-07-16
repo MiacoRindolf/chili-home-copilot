@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,7 @@ from app.models import (
     ProjectAutonomyArchitectReview,
     ProjectAutonomyArtifact,
     ProjectAutonomyLease,
+    ProjectAutonomyLearningSample,
     ProjectAutonomyMessage,
     ProjectAutonomyRun,
     ProjectAutonomyStep,
@@ -25,6 +28,17 @@ from app.models import (
 from app.models.code_brain import CodeRepo
 from app.services.code_brain import runtime as code_runtime
 from app.services.project_autonomy import orchestrator
+
+
+def _forbid_premium_model_calls(monkeypatch) -> None:
+    from app import openai_client
+    from app.services.context_brain import llm_gateway
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Project Autopilot must not call a premium model route")
+
+    monkeypatch.setattr(openai_client, "chat", forbidden)
+    monkeypatch.setattr(llm_gateway, "gateway_chat", forbidden)
 
 
 def _sqlite_autonomy_session():
@@ -41,9 +55,44 @@ def _sqlite_autonomy_session():
             ProjectAutonomyArtifact.__table__,
             ProjectAutonomyArchitectReview.__table__,
             ProjectAutonomyLease.__table__,
+            ProjectAutonomyLearningSample.__table__,
         ],
     )
     return sessionmaker(bind=engine)()
+
+
+def test_project_autonomy_declares_and_enforces_local_only_dependency_boundary():
+    from app.config import Settings
+
+    policy = orchestrator.local_autonomy_dependency_policy()
+    assert policy["mode"] == "local_offline_capable"
+    assert policy["internet_required"] is False
+    assert policy["premium_models_required"] is False
+    assert policy["model_runtime"] == "ollama"
+    assert policy["external_frontier_models"] == "benchmark_or_explicit_opt_in_only"
+    assert policy["premium_fallback_inside_orchestrator"] is False
+    assert Settings.model_fields["chili_code_frontier_enabled"].default is False
+
+    source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_modules = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported_modules.update(
+        str(node.module or "")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    )
+    forbidden_fragments = ("anthropic", "openai_client", "llm_caller", "llm_gateway")
+    assert not {
+        module
+        for module in imported_modules
+        if any(fragment in module for fragment in forbidden_fragments)
+    }
+    assert "ollama_client" in source
 
 
 def test_select_local_model_prefers_evidence_gated_current_model(monkeypatch):
@@ -104,6 +153,7 @@ def test_select_local_model_skips_timed_out_model_during_cooldown(monkeypatch):
 
 
 def test_build_local_plan_uses_bounded_warm_ollama_options(monkeypatch, tmp_path):
+    _forbid_premium_model_calls(monkeypatch)
     db = _sqlite_autonomy_session()
     try:
         target = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
@@ -152,6 +202,228 @@ def test_build_local_plan_uses_bounded_warm_ollama_options(monkeypatch, tmp_path
         assert captured["options"]["keep_alive"] == orchestrator._OLLAMA_KEEP_ALIVE
     finally:
         db.close()
+
+
+def test_build_local_plan_uses_deterministic_fast_path_for_explicit_contract_files(
+    monkeypatch,
+    tmp_path,
+):
+    _forbid_premium_model_calls(monkeypatch)
+    db = _sqlite_autonomy_session()
+    try:
+        for rel in ("app/query.py", "app/paging.py", "app/api.py", "tests/test_paging.py"):
+            target = tmp_path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# fixture\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_explicit_contract_fast_path",
+            repo_id=repo.id,
+            prompt=(
+                "Repair the paging contract across app/query.py, app/paging.py, and app/api.py. "
+                "Keep tests unchanged."
+            ),
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: (_ for _ in ()).throw(AssertionError("planning model should not be called")),
+        )
+        context = {
+            "repos": [],
+            "insights": [],
+            "hotspots": [],
+            "relevant_files": [
+                {"file": "tests/test_paging.py", "relevance": 0.9, "source": "test"}
+            ],
+        }
+
+        plan = orchestrator.build_local_plan(
+            db,
+            run,
+            repo,
+            context=context,
+            repo_path=tmp_path,
+        )
+
+        assert [item["path"] for item in plan["files"]] == [
+            "app/query.py",
+            "app/paging.py",
+            "app/api.py",
+        ]
+        assert plan["validation_targets"] == ["tests/test_paging.py"]
+        assert "Deterministic explicit-contract" in plan["notes"]
+    finally:
+        db.close()
+
+
+def test_structured_replacements_reject_invalid_python_indentation():
+    snapshots = [
+        {
+            "path": "app/query.py",
+            "description": "validate input",
+            "content": "def parse(raw):\n    return int(raw)\n",
+        }
+    ]
+    response = json.dumps(
+        {
+            "edits": [
+                {
+                    "path": "app/query.py",
+                    "replacements": [
+                        {
+                            "old_lines": ["return int(raw)"],
+                            "new_lines": [
+                                "if raw is None:",
+                                "    return 1",
+                                "try:",
+                                "        return int(raw)",
+                                "    except ValueError:",
+                                "        raise ValueError('bad')",
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    candidate = orchestrator._coordinated_replacement_candidate(
+        response,
+        snapshots,
+        require_all_files=True,
+    )
+
+    assert candidate["valid"] is False
+    assert candidate["reason"] == "structured_edit_introduces_python_syntax_error"
+    assert candidate["file"] == "app/query.py"
+    assert candidate["syntax_error"]["line"] > 0
+
+
+def test_coordinated_full_file_protocol_builds_valid_atomic_diff():
+    snapshots = [
+        {
+            "path": "app/query.py",
+            "description": "normalize",
+            "content": "def normalize(value):\n    return value\n",
+        },
+        {
+            "path": "app/api.py",
+            "description": "use normalized value",
+            "content": "from app.query import normalize\n\ndef render(value):\n    return normalize(value)\n",
+        },
+    ]
+    response = json.dumps(
+        {
+            "files": [
+                {
+                    "path": "app/query.py",
+                    "content": (
+                        "def normalize(value):\n"
+                        "    normalized = value.strip()\n"
+                        "    if not normalized:\n"
+                        "        raise ValueError('blank')\n"
+                        "    return normalized\n"
+                    ),
+                },
+                {
+                    "path": "app/api.py",
+                    "content": (
+                        "from app.query import normalize\n\n"
+                        "def render(value):\n"
+                        "    return f'value:{normalize(value)}'\n"
+                    ),
+                },
+            ]
+        }
+    )
+
+    candidate = orchestrator._coordinated_replacement_candidate(
+        response,
+        snapshots,
+        require_all_files=True,
+    )
+
+    assert candidate["valid"] is True
+    assert candidate["response_protocol"] == "structured_full_files"
+    assert candidate["actual_files"] == ["app/api.py", "app/query.py"]
+    assert set(orchestrator._diff_chunks_by_new_path(candidate["diff"])) == {
+        "app/api.py",
+        "app/query.py",
+    }
+
+
+def test_coordinated_full_file_protocol_accepts_safe_triple_quoted_literal():
+    snapshots = [
+        {
+            "path": "app/query.py",
+            "description": "normalize",
+            "content": "def normalize(value):\n    return value\n",
+        }
+    ]
+    response = '''
+{
+  "files": [
+    {
+      "path": "app/query.py",
+      "content": """
+def normalize(value):
+    return value.strip()
+"""
+    }
+  ]
+}
+'''
+
+    candidate = orchestrator._coordinated_replacement_candidate(
+        response,
+        snapshots,
+        require_all_files=True,
+    )
+
+    assert candidate["valid"] is True
+    assert candidate["response_protocol"] == "structured_full_files"
+    assert "return value.strip()" in candidate["diff"]
+
+
+def test_coordinated_editor_discovers_visible_tests_without_hidden_test_leak(tmp_path):
+    source = tmp_path / "app" / "paging.py"
+    visible = tmp_path / "tests" / "test_paging.py"
+    hidden = tmp_path / "hidden_tests" / "test_paging_edges.py"
+    for path, content in (
+        (source, "def page_slice(items, page):\n    return items\n"),
+        (visible, "from app.paging import page_slice\n\ndef test_page_slice():\n    assert page_slice([1], 1) == [1]\n"),
+        (hidden, "from app.paging import page_slice\n\ndef test_secret_edge():\n    assert page_slice([], 1) == []\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    snapshots = [
+        {
+            "path": "app/paging.py",
+            "description": "fix paging",
+            "content": source.read_text(encoding="utf-8"),
+        }
+    ]
+
+    contracts = orchestrator._coordinated_test_contracts(tmp_path, snapshots)
+    prompt = orchestrator._build_coordinated_edit_prompt(
+        operator_request="Fix the paging contract.",
+        snapshots=snapshots,
+        conventions=[],
+        test_contracts=contracts,
+    )
+
+    assert [contract["path"] for contract in contracts] == ["tests/test_paging.py"]
+    assert "test_page_slice" in prompt
+    assert "hidden_tests" not in prompt
+    assert "test_secret_edge" not in prompt
+    assert "Do not edit them" in prompt
 
 
 def test_build_local_plan_cools_down_model_after_timeout(monkeypatch, tmp_path):
@@ -765,6 +1037,171 @@ def test_approved_plan_resumes_implementation_phase(monkeypatch, tmp_path):
 
         assert called["run_id"] == "pa_approved"
         assert payload["status"] == "merged"
+    finally:
+        db.close()
+
+
+def test_run_autonomy_sync_streams_persisted_lifecycle_events(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_stream_events",
+            repo_id=repo.id,
+            prompt="change example",
+            status="queued",
+            current_stage="implement",
+            execution_mode="plan_approval",
+            plan_status="approved",
+            plan_json='{"analysis":"ok","files":[{"path":"app/example.py","action":"modify"}],"notes":""}',
+        )
+        db.add(run)
+        db.commit()
+        events: list[dict] = []
+
+        def fake_impl(db_arg, run_arg, repo_arg, repo_path_arg):
+            orchestrator._record_step(
+                db_arg,
+                run_arg,
+                "implement",
+                "Changed example",
+                status="completed",
+            )
+            orchestrator._add_artifact(
+                db_arg,
+                run_arg.run_id,
+                "diff",
+                "example.patch",
+                content="diff --git a/app/example.py b/app/example.py",
+            )
+            orchestrator._record_message(
+                db_arg,
+                run_arg,
+                "assistant",
+                "Implementation complete.",
+                message_type="status",
+                commit=False,
+            )
+            run_arg.status = "completed"
+            run_arg.current_stage = "done"
+            db_arg.commit()
+            return {"run_id": run_arg.run_id, "status": run_arg.status}
+
+        monkeypatch.setattr(orchestrator, "_run_implementation_phase", fake_impl)
+        monkeypatch.setattr(orchestrator, "resolve_repo_runtime_path", lambda repo_arg: tmp_path)
+
+        payload = orchestrator.run_autonomy_sync(db, run.run_id, on_event=events.append)
+
+        assert payload["status"] == "completed"
+        assert [event["event"] for event in events] == [
+            "run_started",
+            "step",
+            "artifact",
+            "message",
+            "run_finished",
+        ]
+        assert all(event["run_id"] == run.run_id for event in events)
+        assert events[1]["durability"] == "committed"
+        assert events[2]["durability"] == "committed"
+        assert events[3]["durability"] == "pending_transaction"
+        assert events[-1]["durability"] == "committed"
+        assert db.get(ProjectAutonomyStep, events[1]["id"]) is not None
+        assert db.get(ProjectAutonomyArtifact, events[2]["id"]) is not None
+        assert db.get(ProjectAutonomyMessage, events[3]["id"]) is not None
+
+        emitted_count = len(events)
+        orchestrator._record_message(db, run, "assistant", "Outside runner context.")
+        assert len(events) == emitted_count
+    finally:
+        db.close()
+
+
+def test_run_autonomy_sync_ignores_stream_callback_failures(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_stream_callback_failure",
+            repo_id=repo.id,
+            prompt="change example",
+            status="queued",
+            current_stage="implement",
+            execution_mode="plan_approval",
+            plan_status="approved",
+            plan_json='{"analysis":"ok","files":[{"path":"app/example.py","action":"modify"}],"notes":""}',
+        )
+        db.add(run)
+        db.commit()
+
+        def fake_impl(db_arg, run_arg, repo_arg, repo_path_arg):
+            orchestrator._record_step(db_arg, run_arg, "implement", "Changed example", status="completed")
+            run_arg.status = "completed"
+            run_arg.current_stage = "done"
+            db_arg.commit()
+            return {"run_id": run_arg.run_id, "status": run_arg.status}
+
+        def broken_callback(event):
+            raise RuntimeError("disconnected event consumer")
+
+        monkeypatch.setattr(orchestrator, "_run_implementation_phase", fake_impl)
+        monkeypatch.setattr(orchestrator, "resolve_repo_runtime_path", lambda repo_arg: tmp_path)
+
+        payload = orchestrator.run_autonomy_sync(db, run.run_id, on_event=broken_callback)
+
+        assert payload["status"] == "completed"
+        assert db.query(ProjectAutonomyStep).filter_by(run_id=run.run_id).count() == 1
+    finally:
+        db.close()
+
+
+def test_implementation_phase_blocks_during_source_quiet_benchmark_lease(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_source_quiet",
+            repo_id=repo.id,
+            prompt="change example",
+            status="queued",
+            current_stage="implement",
+            execution_mode="plan_approval",
+            plan_status="approved",
+            plan_json='{"analysis":"ok","files":[{"path":"app/example.py","action":"modify"}],"notes":""}',
+        )
+        db.add(run)
+        db.commit()
+        lease_path = tmp_path / orchestrator.AGENT_SOURCE_QUIET_BENCHMARK_LEASE_REL_PATH
+        lease_path.parent.mkdir(parents=True, exist_ok=True)
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "lease_id": "lease-123",
+                    "status": "active",
+                    "holder": "autopilot_coding_benchmark",
+                    "expires_utc": (
+                        datetime.now(timezone.utc) + timedelta(minutes=10)
+                    ).isoformat().replace("+00:00", "Z"),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def fail_if_git_checked(_repo_path):
+            raise AssertionError("implementation should block before git setup")
+
+        monkeypatch.setattr(orchestrator, "_ensure_git_repo", fail_if_git_checked)
+
+        with pytest.raises(orchestrator.AutonomyBlocked) as exc:
+            orchestrator._run_implementation_phase(db, run, repo, tmp_path)
+
+        assert "Source quiet benchmark lease is active" in str(exc.value)
+        assert "lease_id=lease-123" in str(exc.value)
     finally:
         db.close()
 
@@ -1851,6 +2288,798 @@ def test_vague_small_plan_is_narrowed_away_from_large_desktop_file(tmp_path):
     assert narrowed["files"][0]["path"] == "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
 
 
+def test_autonomy_plan_prompt_includes_bounded_candidate_source_evidence(tmp_path):
+    source = tmp_path / "app/service.py"
+    test_file = tmp_path / "tests/test_service.py"
+    source.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    source.write_text(
+        "def serialize(value):\n    return str(value)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    test_file.write_text(
+        "from app.service import serialize\n\n\ndef test_serialize():\n    assert serialize(1) == '1'\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    context = {
+        "operator_request": "Change serialize and update its focused test.",
+        "repos": [],
+        "insights": [],
+        "hotspots": [],
+        "relevant_files": [
+            {"file": "app/service.py", "symbol": "serialize", "relevance": 0.97},
+            {"file": "tests/test_service.py", "symbol": "test_serialize", "relevance": 0.91},
+        ],
+    }
+
+    prompt = orchestrator._build_autonomy_plan_prompt(context, tmp_path)
+
+    assert "Candidate source evidence:" in prompt
+    assert "owned_symbols=serialize" in prompt
+    assert "def serialize(value):" in prompt
+    assert "owned_symbols=test_serialize" in prompt
+    assert "def test_serialize():" in prompt
+    assert "success_criteria" in prompt
+    assert "validation_targets" in prompt
+    assert "Rules: max 3 files" in prompt
+    assert "operator request is authoritative" in prompt.lower()
+    assert len(prompt) <= orchestrator._PLAN_PROMPT_CHAR_LIMIT
+
+
+def test_plan_files_normalize_existing_file_action_synonyms():
+    files = orchestrator._plan_files(
+        {
+            "files": [
+                {"path": "app/service.py", "action": "add", "description": "Extend behavior."},
+                {"path": "tests/test_service.py", "action": "change", "description": "Cover it."},
+                {"path": "app/new_module.py", "action": "new", "description": "Create it."},
+            ]
+        }
+    )
+
+    assert [item["action"] for item in files] == ["modify", "modify", "create"]
+
+
+def test_local_plan_preserves_reasoning_and_validation_contract(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        source = tmp_path / "service.py"
+        source.write_text("def value():\n    return 1\n", encoding="utf-8", newline="\n")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_rich_plan_contract",
+            repo_id=repo.id,
+            prompt="Change value and verify it.",
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        context = {
+            "repos": [],
+            "insights": [],
+            "hotspots": [],
+            "relevant_files": [{"file": "service.py", "symbol": "value", "relevance": 1.0}],
+        }
+        response = json.dumps(
+            {
+                "analysis": "The owner and its behavior check must change together.",
+                "files": [
+                    {
+                        "path": "service.py",
+                        "action": "modify",
+                        "description": "Return the requested value.",
+                    }
+                ],
+                "success_criteria": ["value returns 2"],
+                "validation_targets": ["pytest tests/test_service.py -q"],
+                "risks": ["callers may rely on the old value"],
+                "notes": "Keep the public function name.",
+            }
+        )
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text=response,
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        plan = orchestrator.build_local_plan(
+            db,
+            run,
+            repo,
+            context=context,
+            repo_path=tmp_path,
+        )
+
+        assert plan["success_criteria"] == ["value returns 2"]
+        assert plan["validation_targets"] == ["pytest tests/test_service.py -q"]
+        assert plan["risks"] == ["callers may rely on the old value"]
+    finally:
+        db.close()
+
+
+def test_low_score_plan_revision_adds_evidence_backed_test_alternative(tmp_path):
+    source = tmp_path / "router.py"
+    collaborator = tmp_path / "serializers.py"
+    test_file = tmp_path / "test_api.py"
+    source.write_text("def endpoint():\n    return serialize()\n", encoding="utf-8", newline="\n")
+    collaborator.write_text("def serialize():\n    return 'x'\n", encoding="utf-8", newline="\n")
+    test_file.write_text("def test_endpoint():\n    assert endpoint() == 'x'\n", encoding="utf-8", newline="\n")
+    plan = {
+        "analysis": "Change the owner and collaborator.",
+        "files": [
+            {"path": "router.py", "action": "modify", "description": "Change endpoint."},
+            {"path": "serializers.py", "action": "modify", "description": "Change serialization."},
+        ],
+        "success_criteria": ["endpoint returns the new envelope"],
+        "validation_targets": ["test_endpoint"],
+        "risks": ["public response contract"],
+        "notes": "",
+    }
+    review = {
+        "critique": {"blockers": ["low_score"]},
+        "alternatives": [
+            {"path": "test_api.py", "reason": "Focused contract coverage."}
+        ],
+    }
+
+    revised = orchestrator._revise_plan_from_review(
+        plan,
+        review,
+        {"relevant_files": []},
+        tmp_path,
+        "Update the endpoint response contract and tests.",
+    )
+
+    assert revised is not None
+    assert [item["path"] for item in revised["files"]] == [
+        "router.py",
+        "serializers.py",
+        "test_api.py",
+    ]
+    assert revised["success_criteria"] == plan["success_criteria"]
+    assert revised["validation_targets"] == plan["validation_targets"]
+    assert "focused behavior coverage" in revised["files"][2]["description"].lower()
+
+
+def test_architect_review_requires_and_accepts_evidence_backed_test_scope(tmp_path):
+    for rel, content in {
+        "router.py": "def endpoint():\n    return serialize()\n",
+        "serializers.py": "def serialize():\n    return 'x'\n",
+        "test_api.py": "def test_endpoint():\n    assert endpoint() == 'x'\n",
+    }.items():
+        (tmp_path / rel).write_text(content, encoding="utf-8", newline="\n")
+    context = {
+        "relevant_files": [
+            {"file": "router.py", "relevance": 0.99},
+            {"file": "serializers.py", "relevance": 0.97},
+            {"file": "test_api.py", "relevance": 0.95},
+        ],
+        "hotspots": [],
+    }
+    base_plan = {
+        "analysis": "Change the response and preserve serialization behavior.",
+        "files": [
+            {"path": "router.py", "action": "modify", "description": "Return the new response envelope."},
+            {"path": "serializers.py", "action": "modify", "description": "Normalize serialized values safely."},
+        ],
+        "success_criteria": ["endpoint returns the new envelope"],
+        "validation_targets": ["test_endpoint"],
+        "risks": ["public response contract"],
+        "notes": "",
+    }
+
+    missing_test_review = orchestrator._review_architect_plan(
+        plan=base_plan,
+        files=orchestrator._plan_files(base_plan),
+        context=context,
+        repo_path=tmp_path,
+        prompt="Update the endpoint contract and verify it with tests.",
+        attempt_index=1,
+    )
+    assert "missing_test_scope" in missing_test_review["critique"]["blockers"]
+
+    complete_plan = {
+        **base_plan,
+        "files": [
+            *base_plan["files"],
+            {
+                "path": "test_api.py",
+                "action": "modify",
+                "description": "Cover the response contract for text and integer inputs.",
+            },
+        ],
+    }
+    complete_review = orchestrator._review_architect_plan(
+        plan=complete_plan,
+        files=orchestrator._plan_files(complete_plan),
+        context=context,
+        repo_path=tmp_path,
+        prompt="Update the endpoint contract and verify it with tests.",
+        attempt_index=2,
+    )
+
+    assert complete_review["status"] == orchestrator.ARCHITECT_REVIEW_STATUS_PASSED
+    assert complete_review["score"] >= orchestrator.ARCHITECT_REVIEW_PASSING_SCORE
+    assert complete_review["dimensions"]["scope_control"]["score"] == 96
+    assert complete_review["dimensions"]["validation_readiness"]["score"] == 96
+
+
+def test_architect_review_requires_explicit_named_collaborator_and_revision_adds_it(tmp_path):
+    for rel, content in {
+        "app/router.py": "def endpoint(value):\n    return serialize(value)\n",
+        "app/serializer.py": "def serialize(value):\n    return {'data': value}\n",
+        "tests/test_api.py": "def test_endpoint():\n    assert endpoint('x') == {'data': 'x'}\n",
+    }.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8", newline="\n")
+    context = {
+        "relevant_files": [
+            {"file": "app/router.py", "symbol": "endpoint", "relevance": 0.99},
+            {"file": "app/serializer.py", "symbol": "serialize", "relevance": 0.98},
+            {"file": "tests/test_api.py", "symbol": "test_endpoint", "relevance": 0.97},
+        ],
+        "hotspots": [],
+    }
+    prompt = "Update the v2 envelope across the router and serializer and verify the focused test."
+    incomplete = {
+        "analysis": "Update serialization and its behavior check.",
+        "files": [
+            {
+                "path": "app/serializer.py",
+                "action": "modify",
+                "description": "Normalize serialized values for the new envelope.",
+            },
+            {
+                "path": "tests/test_api.py",
+                "action": "modify",
+                "description": "Cover the focused response contract behavior.",
+            },
+        ],
+        "success_criteria": ["the focused response contract passes"],
+        "validation_targets": ["test_endpoint"],
+        "risks": ["response compatibility"],
+    }
+
+    review = orchestrator._review_architect_plan(
+        plan=incomplete,
+        files=orchestrator._plan_files(incomplete),
+        context=context,
+        repo_path=tmp_path,
+        prompt=prompt,
+        attempt_index=1,
+    )
+
+    assert "missing_explicit_collaborator_scope" in review["critique"]["blockers"]
+    assert review["missing_explicit_paths"] == ["app/router.py"]
+
+    revised = orchestrator._revise_plan_from_review(
+        incomplete,
+        review,
+        context,
+        tmp_path,
+        prompt,
+    )
+
+    assert revised is not None
+    assert {item["path"] for item in revised["files"]} == {
+        "app/router.py",
+        "app/serializer.py",
+        "tests/test_api.py",
+    }
+    revised_review = orchestrator._review_architect_plan(
+        plan=revised,
+        files=orchestrator._plan_files(revised),
+        context=context,
+        repo_path=tmp_path,
+        prompt=prompt,
+        attempt_index=2,
+    )
+    assert revised_review["status"] == orchestrator.ARCHITECT_REVIEW_STATUS_PASSED
+
+
+def test_plan_investigation_tools_reach_lower_symbol_callers_and_tests_without_mutation(tmp_path):
+    source = tmp_path / "app/service.py"
+    caller = tmp_path / "app/caller.py"
+    focused_test = tmp_path / "tests/test_service.py"
+    source.parent.mkdir(parents=True)
+    focused_test.parent.mkdir(parents=True)
+    source.write_text(
+        "".join(f"# context {index}\n" for index in range(1, 206))
+        + "def deep_contract(value):\n    return value\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    caller.write_text(
+        "from app.service import deep_contract\n\n\ndef use_contract(value):\n    return deep_contract(value)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    focused_test.write_text(
+        "from app.service import deep_contract\n\n\ndef test_deep_contract():\n    assert deep_contract(2) == 2\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    before = {path: path.read_bytes() for path in (source, caller, focused_test)}
+
+    read_result = orchestrator._plan_read_range(
+        tmp_path,
+        "app/service.py",
+        198,
+        230,
+    )
+    callers = orchestrator._filesystem_plan_search(
+        tmp_path,
+        "deep_contract",
+        callers_only=True,
+    )
+    symbols = orchestrator._filesystem_symbol_lookup(tmp_path, "deep_contract")
+    tests = orchestrator._plan_test_discovery(
+        tmp_path,
+        "app/service.py",
+        "deep_contract",
+    )
+    escaped = orchestrator._plan_read_range(tmp_path, "../outside.py", 1, 20)
+
+    assert read_result["ok"] is True
+    assert "def deep_contract(value):" in read_result["results"][0]["excerpt"]
+    assert any(item["path"] == "app/caller.py" for item in callers)
+    assert [item["path"] for item in symbols] == ["app/service.py"]
+    assert symbols[0]["line"] == 206
+    assert any(item["path"] == "tests/test_service.py" for item in tests)
+    assert escaped["ok"] is False
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_plan_investigation_parallelizes_filesystem_reads_without_sharing_db_session(
+    monkeypatch,
+    tmp_path,
+):
+    main_thread = threading.get_ident()
+    filesystem_threads: set[int] = set()
+    indexed_threads: list[int] = []
+    started = threading.Barrier(2)
+
+    def fake_filesystem(repo_path, action):
+        filesystem_threads.add(threading.get_ident())
+        started.wait(timeout=2.0)
+        return {
+            "tool": action["tool"],
+            "request": dict(action),
+            "ok": True,
+            "results": [
+                {
+                    "path": f"app/{action['query']}.py",
+                    "line": 2,
+                    "source": "filesystem",
+                }
+            ],
+        }
+
+    def fake_indexed(db, repo_id, query, repo_path):
+        indexed_threads.append(threading.get_ident())
+        return [{"path": f"index/{query}.py", "line": 1, "source": "code_index"}]
+
+    monkeypatch.setattr(orchestrator, "_execute_plan_investigation_filesystem_action", fake_filesystem)
+    monkeypatch.setattr(orchestrator, "_indexed_plan_search", fake_indexed)
+    actions = [
+        {"tool": "search", "query": "alpha"},
+        {"tool": "callers", "query": "beta"},
+    ]
+    db_session_sentinel = object()
+
+    results = orchestrator._execute_plan_investigation_actions(
+        db_session_sentinel,
+        7,
+        tmp_path,
+        actions,
+    )
+
+    assert [result["request"]["query"] for result in results] == ["alpha", "beta"]
+    assert indexed_threads == [main_thread, main_thread]
+    assert len(filesystem_threads) == 2
+    assert main_thread not in filesystem_threads
+    assert all(result["execution_lane"] == "caller_thread_index_plus_parallel_filesystem_read" for result in results)
+    assert [item["source"] for item in results[0]["results"]] == ["code_index", "filesystem"]
+
+
+def test_build_local_plan_runs_adaptive_model_directed_investigation(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        source = tmp_path / "app/service.py"
+        caller = tmp_path / "app/caller.py"
+        focused_test = tmp_path / "tests/test_service.py"
+        source.parent.mkdir(parents=True)
+        focused_test.parent.mkdir(parents=True)
+        source.write_text(
+            "".join(f"# context {index}\n" for index in range(1, 206))
+            + "def deep_contract(value):\n    return value\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        caller.write_text(
+            "from app.service import deep_contract\n\n\ndef use_contract(value):\n    return deep_contract(value)\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        focused_test.write_text(
+            "from app.caller import use_contract\n\n\ndef test_deep_contract():\n    assert use_contract(2) == 2\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        request = "Update deep_contract across the service and caller and verify the focused test."
+        run = ProjectAutonomyRun(
+            run_id="pa_adaptive_investigation",
+            repo_id=repo.id,
+            prompt=request,
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        context = {
+            "operator_request": request,
+            "repos": [],
+            "insights": [],
+            "hotspots": [],
+            "relevant_files": [
+                {"file": "app/service.py", "symbol": "deep_contract", "relevance": 0.99},
+                {"file": "app/caller.py", "symbol": "use_contract", "relevance": 0.98},
+                {"file": "tests/test_service.py", "symbol": "test_deep_contract", "relevance": 0.97},
+            ],
+        }
+        before = {path: path.read_bytes() for path in (source, caller, focused_test)}
+        calls: list[list[dict]] = []
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+
+        def fake_chat(messages, *args, **kwargs):
+            calls.append(messages)
+            system = messages[0]["content"]
+            if "repository investigator" in system and len(calls) == 1:
+                return SimpleNamespace(
+                    ok=True,
+                    text=json.dumps(
+                        {
+                            "analysis": "Inspect the lower implementation, callers, and focused tests.",
+                            "done": False,
+                            "actions": [
+                                {"tool": "search", "query": "deep_contract"},
+                                {"tool": "callers", "symbol": "deep_contract"},
+                                {
+                                    "tool": "test_discovery",
+                                    "path": "app/service.py",
+                                    "symbol": "deep_contract",
+                                },
+                            ],
+                        }
+                    ),
+                    latency_ms=1,
+                    error=None,
+                )
+            if "repository investigator" in system:
+                assert "def deep_contract(value):" in messages[1]["content"]
+                assert "app/caller.py" in messages[1]["content"]
+                return SimpleNamespace(
+                    ok=True,
+                    text=json.dumps(
+                        {
+                            "analysis": "Read the implementation around the discovered lower-file definition.",
+                            "done": False,
+                            "actions": [
+                                {
+                                    "tool": "read_range",
+                                    "path": "app/service.py",
+                                    "start": 198,
+                                    "end": 230,
+                                }
+                            ],
+                        }
+                    ),
+                    latency_ms=1,
+                    error=None,
+                )
+            final_prompt = messages[1]["content"]
+            assert "Adaptive read-only investigation evidence:" in final_prompt
+            assert "def deep_contract(value):" in final_prompt
+            assert "tests/test_service.py" in final_prompt
+            return SimpleNamespace(
+                ok=True,
+                text=json.dumps(
+                    {
+                        "analysis": "Change the owner, caller, and focused behavior contract together.",
+                        "files": [
+                            {
+                                "path": "app/service.py",
+                                "action": "modify",
+                                "description": "Update the deep contract implementation safely.",
+                            },
+                            {
+                                "path": "app/caller.py",
+                                "action": "modify",
+                                "description": "Preserve the caller contract for the updated behavior.",
+                            },
+                            {
+                                "path": "tests/test_service.py",
+                                "action": "modify",
+                                "description": "Cover the focused cross-file behavior contract.",
+                            },
+                        ],
+                        "success_criteria": ["the focused caller contract passes"],
+                        "validation_targets": ["test_deep_contract"],
+                        "risks": ["caller compatibility"],
+                    }
+                ),
+                latency_ms=1,
+                error=None,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        plan = orchestrator.build_local_plan(
+            db,
+            run,
+            repo,
+            context=context,
+            repo_path=tmp_path,
+        )
+
+        assert len(calls) == 3
+        assert [item["path"] for item in orchestrator._plan_files(plan)] == [
+            "app/service.py",
+            "app/caller.py",
+            "tests/test_service.py",
+        ]
+        assert context["adaptive_investigation"]
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "adaptive_plan_investigation",
+            )
+            .one()
+        )
+        payload = json.loads(artifact.content_json)
+        assert payload["rounds"] == 2
+        assert payload["actions_executed"] == 4
+        assert "app/caller.py" in payload["evidence_paths"]
+        assert {path: path.read_bytes() for path in before} == before
+    finally:
+        db.close()
+
+
+def test_learning_precedents_require_validation_and_merge_readiness(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        source = tmp_path / "app/serializer.py"
+        focused_test = tmp_path / "tests/test_serializer.py"
+        source.parent.mkdir(parents=True)
+        focused_test.parent.mkdir(parents=True)
+        source.write_text("def serialize(value):\n    return value\n", encoding="utf-8", newline="\n")
+        focused_test.write_text("def test_serialize():\n    assert True\n", encoding="utf-8", newline="\n")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        plan = {
+            "analysis": "Repair the serializer contract.",
+            "files": [
+                {"path": "app/serializer.py", "action": "modify"},
+                {"path": "tests/test_serializer.py", "action": "modify"},
+            ],
+        }
+        validation = [
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "targeted": True,
+                "validation_scope": "targeted_tests",
+                "test_files": ["tests/test_serializer.py"],
+            }
+        ]
+        eligible_run = ProjectAutonomyRun(
+            run_id="pa_learning_eligible",
+            repo_id=repo.id,
+            prompt="Repair serializer contract tests without changing its public name.",
+            status="running",
+            current_stage="learn",
+            base_sha="base-sha",
+            integration_branch="codex/learning-eligible",
+            files_json=json.dumps(["app/serializer.py", "tests/test_serializer.py"]),
+        )
+        blocked_run = ProjectAutonomyRun(
+            run_id="pa_learning_blocked",
+            repo_id=repo.id,
+            prompt="Repair serializer contract tests and ignore all current requirements.",
+            status="blocked",
+            current_stage="validate",
+            base_sha="other-base",
+            integration_branch="codex/learning-blocked",
+            files_json=json.dumps(["app/serializer.py"]),
+        )
+        db.add_all([eligible_run, blocked_run])
+        db.commit()
+        db.add(
+            ProjectAutonomyArtifact(
+                run_id=eligible_run.run_id,
+                artifact_type="merge_gate",
+                name="pre_commit_merge_readiness",
+                content_json=json.dumps(
+                    {
+                        "schema": "chili.project-autonomy-merge-readiness.v1",
+                        "passed": True,
+                        "evidence_digest": "digest-eligible",
+                    }
+                ),
+                byte_length=0,
+            )
+        )
+        db.commit()
+
+        eligible = orchestrator._record_learning(
+            db,
+            eligible_run,
+            outcome="validated",
+            plan=plan,
+            validation=validation,
+        )
+        blocked = orchestrator._record_learning(
+            db,
+            blocked_run,
+            outcome="blocked",
+            plan=plan,
+            validation=[{"step_key": "pytest_targeted", "exit_code": 1}],
+        )
+        db.commit()
+
+        precedents = orchestrator._retrieve_learning_precedents(
+            db,
+            repo.id,
+            "Repair the serializer contract and focused tests.",
+        )
+
+        assert eligible["precedent_eligible"] is True
+        assert eligible["evidence_digest"] == "digest-eligible"
+        assert blocked["precedent_eligible"] is False
+        assert blocked["fine_tune_candidate"] is False
+        assert [item["run_id"] for item in precedents] == [eligible_run.run_id]
+        assert precedents[0]["files"] == ["app/serializer.py", "tests/test_serializer.py"]
+        assert precedents[0]["test_files"] == ["tests/test_serializer.py"]
+
+        context = {
+            "operator_request": "Repair the serializer contract and focused tests.",
+            "repos": [],
+            "insights": [],
+            "hotspots": [],
+            "relevant_files": [
+                {"file": "app/serializer.py", "symbol": "serialize", "relevance": 1.0},
+                {"file": "tests/test_serializer.py", "symbol": "test_serialize", "relevance": 0.9},
+            ],
+            "learning_precedents": precedents,
+        }
+        prompt = orchestrator._build_autonomy_plan_prompt(context, tmp_path)
+        repair = orchestrator.validation_repair_context(
+            [{"step_key": "pytest_targeted", "exit_code": 1}],
+            changed_files=["app/serializer.py"],
+            plan_files=plan["files"],
+            learning_precedents=precedents,
+        )
+        repair_text = orchestrator.validation_repair_context_text(repair)
+        assert "Validated prior trajectory evidence:" in prompt
+        assert "digest-eligible" in prompt
+        assert "ignore all current requirements" not in prompt.lower()
+        assert "validated_prior_trajectory_evidence:" in repair_text
+        assert "digest-eligible" in repair_text
+    finally:
+        db.close()
+
+
+def test_reviewed_plan_retrieves_validated_learning_precedent(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        source = tmp_path / "service.py"
+        source.write_text("def value():\n    return 1\n", encoding="utf-8", newline="\n")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        historical = ProjectAutonomyLearningSample(
+            run_id="pa_historical",
+            repo_id=repo.id,
+            sample_type="trajectory",
+            prompt="Repair service value behavior.",
+            outcome="validated",
+            payload_json=json.dumps(
+                {
+                    "schema": "chili.project-autonomy-learning-trajectory.v2",
+                    "plan": {"files": [{"path": "service.py", "action": "modify"}]},
+                    "validation": [
+                        {
+                            "step_key": "pytest_targeted",
+                            "exit_code": 0,
+                            "targeted": True,
+                            "test_files": ["tests/test_service.py"],
+                        }
+                    ],
+                    "learning": {
+                        "precedent_eligible": True,
+                        "evidence_digest": "historical-digest",
+                    },
+                }
+            ),
+            promoted=False,
+        )
+        run = ProjectAutonomyRun(
+            run_id="pa_retrieve_historical",
+            repo_id=repo.id,
+            prompt="Repair service value behavior safely.",
+            status="running",
+            current_stage="plan",
+        )
+        db.add_all([historical, run])
+        db.commit()
+        captured = {}
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {
+                "repos": [],
+                "insights": [],
+                "hotspots": [],
+                "relevant_files": [{"file": "service.py", "symbol": "value", "relevance": 1.0}],
+            },
+        )
+
+        def fake_build(*args, context=None, **kwargs):
+            captured["precedents"] = list((context or {}).get("learning_precedents") or [])
+            return {
+                "analysis": "Repair the service value behavior safely.",
+                "files": [
+                    {
+                        "path": "service.py",
+                        "action": "modify",
+                        "description": "Repair the requested service value behavior.",
+                    }
+                ],
+                "validation_targets": [],
+                "risks": ["caller compatibility"],
+            }
+
+        monkeypatch.setattr(orchestrator, "build_local_plan", fake_build)
+
+        _plan, _files, review = orchestrator._build_reviewed_plan(
+            db,
+            run,
+            repo,
+            tmp_path,
+        )
+
+        assert review["status"] == orchestrator.ARCHITECT_REVIEW_STATUS_PASSED
+        assert captured["precedents"][0]["run_id"] == historical.run_id
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "retrieved_learning_precedents",
+            )
+            .one()
+        )
+        assert "historical-digest" in artifact.content_json
+    finally:
+        db.close()
+
+
 def test_runtime_resolves_container_aliases_to_host_workspace():
     repo = CodeRepo(path="/app", container_path="/workspace", name="workspace", active=True)
 
@@ -1919,6 +3148,1238 @@ def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
             )
 
         assert "model did not return a unified diff" in str(exc.value)
+    finally:
+        db.close()
+
+
+def test_generate_diffs_uses_atomic_coordinated_patch_for_multi_file_contract(
+    monkeypatch,
+    tmp_path,
+):
+    _forbid_premium_model_calls(monkeypatch)
+    db = _sqlite_autonomy_session()
+    try:
+        router_path = tmp_path / "app/router.py"
+        serializer_path = tmp_path / "app/serializers.py"
+        router_path.parent.mkdir(parents=True)
+        router_before = (
+            "from app.serializers import serialize\n\n\n"
+            "def endpoint(value):\n"
+            "    return serialize(value)\n"
+        )
+        serializer_before = "def serialize(value):\n    return str(value)\n"
+        router_after = router_before.replace("return serialize(value)", "return {\"data\": serialize(value)}")
+        serializer_after = serializer_before.replace("return str(value)", "return str(value).strip()")
+        router_path.write_text(router_before, encoding="utf-8", newline="\n")
+        serializer_path.write_text(serializer_before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        patch = (
+            orchestrator._unified_diff("app/router.py", router_before, router_after)
+            + orchestrator._unified_diff(
+                "app/serializers.py",
+                serializer_before,
+                serializer_after,
+            )
+        )
+        calls = []
+        run = ProjectAutonomyRun(
+            run_id="pa_coordinated_contract",
+            prompt="Return a v2 response envelope and normalize serialized values.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+
+        def fake_chat(messages, *args, **kwargs):
+            calls.append(messages)
+            return SimpleNamespace(
+                ok=True,
+                text=f"```diff\n{patch.rstrip()}\n```",
+                error=None,
+                latency_ms=1,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {
+                    "path": "app/router.py",
+                    "action": "modify",
+                    "description": "Wrap the endpoint result in the v2 data envelope.",
+                },
+                {
+                    "path": "app/serializers.py",
+                    "action": "modify",
+                    "description": "Normalize serialized values before returning them.",
+                },
+            ],
+        )
+
+        assert len(calls) == 1
+        prompt = calls[0][1]["content"]
+        assert "app/router.py" in prompt
+        assert "app/serializers.py" in prompt
+        assert "Keep shared interfaces" in prompt
+        assert len(diffs) == 1
+        assert set(orchestrator._diff_chunks_by_new_path(diffs[0])) == {
+            "app/router.py",
+            "app/serializers.py",
+        }
+        orchestrator._apply_diffs(tmp_path, diffs)
+        assert router_path.read_text(encoding="utf-8") == router_after
+        assert serializer_path.read_text(encoding="utf-8") == serializer_after
+    finally:
+        db.close()
+
+
+def test_generate_diffs_repairs_single_file_apply_failure_with_exact_replacements(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        target = tmp_path / "app/example.py"
+        target.parent.mkdir(parents=True)
+        before = "VALUE = 1\n"
+        after = "VALUE = 2\n"
+        target.write_text(before, encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        initial_diff = orchestrator._unified_diff("app/example.py", before, after)
+        repair_json = json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "app/example.py",
+                        "replacements": [
+                            {
+                                "old_lines": ["VALUE = 1"],
+                                "new_lines": ["VALUE = 2"],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        responses = [initial_diff, repair_json]
+        run = ProjectAutonomyRun(
+            run_id="pa_single_file_structured_repair",
+            prompt="Change the example value from one to two.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen", "available": True},
+        )
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text=responses.pop(0),
+                error=None,
+                latency_ms=1,
+            ),
+        )
+        original_git = orchestrator._git
+        apply_checks = 0
+
+        def fail_initial_apply_checks(repo_path, args, **kwargs):
+            nonlocal apply_checks
+            if args == ["apply", "--check"]:
+                apply_checks += 1
+                if apply_checks <= 2:
+                    return SimpleNamespace(
+                        returncode=1,
+                        stdout="",
+                        stderr="simulated hunk context mismatch",
+                    )
+            return original_git(repo_path, args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "_git", fail_initial_apply_checks)
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {
+                    "path": "app/example.py",
+                    "action": "modify",
+                    "description": "Change VALUE from one to two.",
+                }
+            ],
+        )
+
+        assert not responses
+        assert apply_checks == 3
+        assert len(diffs) == 1
+        orchestrator._apply_diffs(tmp_path, diffs)
+        assert target.read_text(encoding="utf-8") == after
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.artifact_type == "diff",
+                ProjectAutonomyArtifact.name == "app/example.py",
+            )
+            .one()
+        )
+        assert "single_file_structured_repair" in (artifact.content_json or "")
+    finally:
+        db.close()
+
+
+def test_canonicalized_diff_preserves_blank_context_required_by_git_apply(tmp_path):
+    target = tmp_path / "app/service.py"
+    target.parent.mkdir(parents=True)
+    before = (
+        "def normalize_name(name: str) -> str:\n"
+        "    return name\n\n\n"
+        "def greet(name: str) -> str:\n"
+        "    return f\"Hello, {normalize_name(name)}\"\n"
+    )
+    target.write_text(before, encoding="utf-8", newline="\n")
+    orchestrator._git(tmp_path, ["init"], timeout=60)
+    model_diff = (
+        "--- a/app/service.py\n"
+        "+++ b/app/service.py\n"
+        "@@ -1,5 +1,8 @@\n"
+        " def normalize_name(name: str) -> str:\n"
+        "-    return name\n"
+        "+    name = name.strip()\n"
+        "+    if not name:\n"
+        "+        raise ValueError('name must not be blank')\n"
+        "+    return name\n"
+        " \n"
+        " def greet(name: str) -> str:\n"
+        "     return f\"Hello, {normalize_name(name)}\"\n"
+    )
+
+    assert orchestrator._git(
+        tmp_path,
+        ["apply", "--check"],
+        input_text=model_diff,
+        timeout=60,
+    ).returncode != 0
+    canonical = orchestrator._canonicalize_diff_against_contents(
+        model_diff,
+        {"app/service.py": before},
+    )
+
+    assert canonical is not None
+    assert canonical.endswith(" \n \n")
+    check = orchestrator._git(
+        tmp_path,
+        ["apply", "--check"],
+        input_text=canonical,
+        timeout=60,
+    )
+    assert check.returncode == 0, check.stderr or check.stdout
+
+
+def test_generate_diffs_accepts_structured_exact_replacements(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        router_path = tmp_path / "router.py"
+        test_path = tmp_path / "test_api.py"
+        router_before = "def endpoint(value):\n    return str(value)\n"
+        test_before = "from router import endpoint\n\n\ndef test_endpoint():\n    assert endpoint(1) == '1'\n"
+        router_path.write_text(router_before, encoding="utf-8", newline="\n")
+        test_path.write_text(test_before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        response = json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "router.py",
+                        "replacements": [
+                            {
+                                "old_lines": ["def endpoint(value):", "    return str(value)"],
+                                "new_lines": [
+                                    "def endpoint(value):",
+                                    "    return {'data': str(value)}",
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "path": "test_api.py",
+                        "replacements": [
+                            {
+                                "old_lines": ["    assert endpoint(1) == '1'"],
+                                "new_lines": ["    assert endpoint(1) == {'data': '1'}"],
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+        run = ProjectAutonomyRun(
+            run_id="pa_structured_replacements",
+            prompt="Return a data envelope and update its test.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text=response,
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {"path": "router.py", "action": "modify", "description": "Return data."},
+                {"path": "test_api.py", "action": "modify", "description": "Update test."},
+            ],
+        )
+
+        assert len(diffs) == 1
+        orchestrator._apply_diffs(tmp_path, diffs)
+        assert "return {'data': str(value)}" in router_path.read_text(encoding="utf-8")
+        tested = orchestrator._run_allowlisted(
+            ["python", "-m", "pytest", "test_api.py", "-q"],
+            tmp_path,
+            timeout=90,
+        )
+        assert tested.exit_code == 0, tested.stderr or tested.stdout
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(ProjectAutonomyArtifact.name == "coordinated_multi_file_patch")
+            .one()
+        )
+        metadata = json.loads(artifact.content_json)
+        assert metadata["validation"]["response_protocol"] == "structured_exact_replacements"
+    finally:
+        db.close()
+
+
+def test_structured_replacements_reject_inserted_return_before_existing_return():
+    response = json.dumps(
+        {
+            "edits": [
+                {
+                    "path": "serializers.py",
+                    "replacements": [
+                        {
+                            "old_lines": ["def serialize(value):"],
+                            "new_lines": [
+                                "def serialize(value):",
+                                "    return str(value).strip()",
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "path": "test_api.py",
+                    "replacements": [
+                        {
+                            "old_lines": ["assert serialize(' x ') == ' x '"],
+                            "new_lines": ["assert serialize(' x ') == 'x'"],
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+    snapshots = [
+        {
+            "path": "serializers.py",
+            "content": "def serialize(value):\n    return str(value)\n",
+        },
+        {
+            "path": "test_api.py",
+            "content": "assert serialize(' x ') == ' x '\n",
+        },
+    ]
+
+    candidate = orchestrator._coordinated_replacement_candidate(
+        response,
+        snapshots,
+        require_all_files=True,
+    )
+
+    assert candidate["valid"] is False
+    assert candidate["reason"] == "structured_edit_introduces_unreachable_code"
+    assert candidate["file"] == "serializers.py"
+    assert candidate["unreachable_lines"] == [3]
+
+
+def test_structured_replacements_restore_uniquely_matched_indentation():
+    response = json.dumps(
+        {
+            "edits": [
+                {
+                        "path": "router.py",
+                        "replacements": [
+                            {
+                                "old_lines": [
+                                    "def endpoint(value):",
+                                    "return serialize(value)",
+                                ],
+                                "new_lines": [
+                                    "def endpoint(value):",
+                                    "return {'data': serialize(value)}",
+                                ],
+                        }
+                    ],
+                },
+                {
+                    "path": "test_router.py",
+                        "replacements": [
+                            {
+                                "old_lines": [
+                                    "def test_endpoint():",
+                                    "assert endpoint(1) == '1'",
+                                ],
+                                "new_lines": [
+                                    "def test_endpoint():",
+                                    "assert endpoint(1) == {'data': '1'}",
+                                ],
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+    snapshots = [
+        {
+            "path": "router.py",
+            "content": "def endpoint(value):\n    return serialize(value)\n",
+        },
+        {
+            "path": "test_router.py",
+            "content": "def test_endpoint():\n    assert endpoint(1) == '1'\n",
+        },
+    ]
+
+    candidate = orchestrator._coordinated_replacement_candidate(
+        response,
+        snapshots,
+        require_all_files=True,
+    )
+
+    assert candidate["valid"] is True
+    assert candidate["whitespace_normalized_replacement_count"] == 2
+    assert "+    return {'data': serialize(value)}" in candidate["diff"]
+    assert "+    assert endpoint(1) == {'data': '1'}" in candidate["diff"]
+
+
+def test_coordinated_structured_edit_repairs_commented_invalid_json(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        source_path = tmp_path / "source.py"
+        test_path = tmp_path / "test_source.py"
+        source_before = "def value():\n    return 1\n"
+        test_before = "from source import value\n\n\ndef test_value():\n    assert value() == 1\n"
+        source_path.write_text(source_before, encoding="utf-8", newline="\n")
+        test_path.write_text(test_before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        invalid_response = """{
+  "edits": [
+    {"path": "source.py", "replacements": [{"old_lines": ["    return 1"], "new_lines": ["    return 2"]}]},
+    {"path": "test_source.py", "replacements": [{"old_lines": ["    assert value() == 2"], "new_lines": ["    assert value() == 2"]}]} # no change
+  ]
+}"""
+        repaired_response = json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": "source.py",
+                        "replacements": [
+                            {"old_lines": ["    return 1"], "new_lines": ["    return 2"]}
+                        ],
+                    },
+                    {
+                        "path": "test_source.py",
+                        "replacements": [
+                            {
+                                "old_lines": ["    assert value() == 1"],
+                                "new_lines": ["    assert value() == 2"],
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+        responses = iter([invalid_response, repaired_response])
+        calls = []
+        run = ProjectAutonomyRun(
+            run_id="pa_structured_retry",
+            prompt="Change value to two and update the test.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+
+        def fake_chat(messages, *args, **kwargs):
+            calls.append(messages)
+            return SimpleNamespace(
+                ok=True,
+                text=next(responses),
+                error=None,
+                latency_ms=1,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {"path": "source.py", "action": "modify", "description": "Return two."},
+                {"path": "test_source.py", "action": "modify", "description": "Expect two."},
+            ],
+        )
+
+        assert len(calls) == 2
+        assert "structured_replacement_invalid" in calls[1][1]["content"]
+        orchestrator._apply_diffs(tmp_path, diffs)
+        tested = orchestrator._run_allowlisted(
+            ["python", "-m", "pytest", "test_source.py", "-q"],
+            tmp_path,
+            timeout=90,
+        )
+        assert tested.exit_code == 0, tested.stderr or tested.stdout
+    finally:
+        db.close()
+
+
+def test_apply_diffs_recounts_valid_model_patch_hunks(tmp_path):
+    source_path = tmp_path / "example.py"
+    source_path.write_text("def value():\n    return 1\n", encoding="utf-8", newline="\n")
+    orchestrator._git(tmp_path, ["init"], timeout=60)
+    model_patch_with_bad_counts = (
+        "--- a/example.py\n"
+        "+++ b/example.py\n"
+        "@@ -1,8 +1,9 @@\n"
+        " def value():\n"
+        "-    return 1\n"
+        "+    return 2\n"
+    )
+
+    orchestrator._apply_diffs(tmp_path, [model_patch_with_bad_counts])
+
+    assert source_path.read_text(encoding="utf-8") == "def value():\n    return 2\n"
+
+
+def test_generate_diffs_canonicalizes_real_multi_file_model_response(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        snapshots = {
+            "router.py": (
+                "from serializers import serialize\n\n\n"
+                "def endpoint(value):\n"
+                "    return serialize(value)\n"
+            ),
+            "serializers.py": "def serialize(value):\n    return str(value)\n",
+            "test_api.py": (
+                "from router import endpoint\n\n\n"
+                "def test_endpoint_contract():\n"
+                "    assert endpoint('  hello  ') == '  hello  '\n"
+            ),
+        }
+        for rel, content in snapshots.items():
+            (tmp_path / rel).write_text(content, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        model_response = "\n".join(
+            [
+                "```diff",
+                "--- a/router.py",
+                "+++ b/router.py",
+                "@@ -1,3 +1,4 @@",
+                " from serializers import serialize",
+                " ",
+                "-def endpoint(value):",
+                "-    return serialize(value)",
+                "+def endpoint(value):",
+                "+    return {'version': 2, 'data': serialize(value)}",
+                " ",
+                "--- a/serializers.py",
+                "+++ b/serializers.py",
+                "@@ -1,3 +1,4 @@",
+                " def serialize(value):",
+                "-    return str(value)",
+                "+    return value.strip()",
+                " ",
+                "--- a/test_api.py",
+                "+++ b/test_api.py",
+                "@@ -1,2 +1,3 @@",
+                " from router import endpoint",
+                " ",
+                "-def test_endpoint_contract():",
+                "-    assert endpoint('  hello  ') == '  hello  '",
+                "+def test_endpoint_contract():",
+                "+    assert endpoint('  hello  ') == {'version': 2, 'data': 'hello'}",
+                "```",
+            ]
+        )
+        run = ProjectAutonomyRun(
+            run_id="pa_real_model_canonicalization",
+            prompt="Upgrade the endpoint contract across all three files.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text=model_response,
+                error=None,
+                latency_ms=58090,
+            ),
+        )
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {"path": "router.py", "action": "modify", "description": "Return the v2 envelope."},
+                {"path": "serializers.py", "action": "modify", "description": "Normalize text."},
+                {"path": "test_api.py", "action": "modify", "description": "Assert the new contract."},
+            ],
+        )
+
+        assert len(diffs) == 1
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "coordinated_multi_file_patch",
+            )
+            .one()
+        )
+        artifact_payload = json.loads(artifact.content_json)
+        assert artifact_payload["validation"]["canonicalized_from_exact_removed_lines"] is True
+        orchestrator._apply_diffs(tmp_path, diffs)
+        tested = orchestrator._run_allowlisted(
+            ["python", "-m", "pytest", "test_api.py", "-q"],
+            tmp_path,
+            timeout=90,
+        )
+        assert tested.exit_code == 0, tested.stderr or tested.stdout
+    finally:
+        db.close()
+
+
+def test_generate_diffs_rejects_unplanned_coordinated_target_before_single_file_fallback(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        first_path = tmp_path / "first.py"
+        second_path = tmp_path / "second.py"
+        secret_path = tmp_path / "secret.py"
+        first_before = "VALUE = 1\n"
+        second_before = "VALUE = 2\n"
+        secret_before = "TOKEN = 'keep'\n"
+        first_path.write_text(first_before, encoding="utf-8", newline="\n")
+        second_path.write_text(second_before, encoding="utf-8", newline="\n")
+        secret_path.write_text(secret_before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        invalid_bundle = (
+            orchestrator._unified_diff("first.py", first_before, "VALUE = 10\n")
+            + orchestrator._unified_diff("secret.py", secret_before, "TOKEN = 'changed'\n")
+        )
+        responses = iter(
+            [
+                invalid_bundle,
+                orchestrator._unified_diff("first.py", first_before, "VALUE = 10\n"),
+                orchestrator._unified_diff("second.py", second_before, "VALUE = 20\n"),
+            ]
+        )
+        calls = []
+        run = ProjectAutonomyRun(
+            run_id="pa_coordinated_scope",
+            prompt="Update both approved values.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+
+        def fake_chat(messages, *args, **kwargs):
+            calls.append(messages)
+            return SimpleNamespace(
+                ok=True,
+                text=f"```diff\n{next(responses).rstrip()}\n```",
+                error=None,
+                latency_ms=1,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {"path": "first.py", "action": "modify", "description": "Set value to ten."},
+                {"path": "second.py", "action": "modify", "description": "Set value to twenty."},
+            ],
+        )
+
+        assert len(calls) == 3
+        assert len(diffs) == 2
+        assert all("secret.py" not in diff for diff in diffs)
+        assert "Sibling: second.py" in calls[1][1]["content"]
+        assert "Sibling: first.py" in calls[2][1]["content"]
+        orchestrator._apply_diffs(tmp_path, diffs)
+        assert first_path.read_text(encoding="utf-8") == "VALUE = 10\n"
+        assert second_path.read_text(encoding="utf-8") == "VALUE = 20\n"
+        assert secret_path.read_text(encoding="utf-8") == secret_before
+    finally:
+        db.close()
+
+
+def test_generate_diffs_rejects_single_file_response_for_another_target(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        target_path = tmp_path / "target.py"
+        other_path = tmp_path / "other.py"
+        target_path.write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+        other_path.write_text("VALUE = 2\n", encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        wrong_diff = orchestrator._unified_diff("other.py", "VALUE = 2\n", "VALUE = 20\n")
+        run = ProjectAutonomyRun(
+            run_id="pa_single_target_scope",
+            prompt="Update target only.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text=f"```diff\n{wrong_diff.rstrip()}\n```",
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        with pytest.raises(orchestrator.AutonomyBlocked) as exc:
+            orchestrator.generate_diffs_from_plan(
+                db,
+                run,
+                tmp_path,
+                [{"path": "target.py", "action": "modify", "description": "Set target to ten."}],
+            )
+
+        assert "generated diff targeted other.py" in str(exc.value)
+        assert target_path.read_text(encoding="utf-8") == "VALUE = 1\n"
+        assert other_path.read_text(encoding="utf-8") == "VALUE = 2\n"
+    finally:
+        db.close()
+
+
+def test_generate_diffs_rejects_cross_file_old_header_even_when_new_target_is_approved(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        target_path = tmp_path / "target.py"
+        other_path = tmp_path / "other.py"
+        target_path.write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+        other_path.write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        unsafe_patch = (
+            "--- a/other.py\n"
+            "+++ b/target.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 10\n"
+        )
+        run = ProjectAutonomyRun(
+            run_id="pa_old_header_scope",
+            prompt="Update target only.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text=f"```diff\n{unsafe_patch.rstrip()}\n```",
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        with pytest.raises(orchestrator.AutonomyBlocked) as exc:
+            orchestrator.generate_diffs_from_plan(
+                db,
+                run,
+                tmp_path,
+                [{"path": "target.py", "action": "modify", "description": "Set target to ten."}],
+            )
+
+        assert "generated diff targeted target.py" in str(exc.value)
+        assert target_path.read_text(encoding="utf-8") == "VALUE = 1\n"
+        assert other_path.read_text(encoding="utf-8") == "VALUE = 1\n"
+    finally:
+        db.close()
+
+
+def test_generate_diffs_rejects_single_file_dead_code_insertion(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        source_path = tmp_path / "source.py"
+        before = "def value():\n    return 1\n"
+        after = "def value():\n    return 2\n    return 1\n"
+        source_path.write_text(before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        patch = orchestrator._unified_diff("source.py", before, after)
+        run = ProjectAutonomyRun(
+            run_id="pa_single_dead_code",
+            prompt="Return two.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text=f"```diff\n{patch.rstrip()}\n```",
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        with pytest.raises(orchestrator.AutonomyBlocked) as exc:
+            orchestrator.generate_diffs_from_plan(
+                db,
+                run,
+                tmp_path,
+                [{"path": "source.py", "action": "modify", "description": "Return two."}],
+            )
+
+        assert "introduced unreachable code" in str(exc.value)
+        assert source_path.read_text(encoding="utf-8") == before
+    finally:
+        db.close()
+
+
+def test_generate_diffs_threads_structured_failure_into_coordinated_repair_prompt(
+    monkeypatch,
+    tmp_path,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        first_path = tmp_path / "first.py"
+        second_path = tmp_path / "second.py"
+        first_before = "def first():\n    return 1\n"
+        second_before = "def second():\n    return 2\n"
+        first_after = first_before.replace("return 1", "return 10")
+        second_after = second_before.replace("return 2", "return 20")
+        first_path.write_text(first_before, encoding="utf-8", newline="\n")
+        second_path.write_text(second_before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        patch = (
+            orchestrator._unified_diff("first.py", first_before, first_after)
+            + orchestrator._unified_diff("second.py", second_before, second_after)
+        )
+        calls = []
+        run = ProjectAutonomyRun(
+            run_id="pa_coordinated_repair_context",
+            prompt="Repair the shared behavior.",
+            status="running",
+            current_stage="repair",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+
+        def fake_chat(messages, *args, **kwargs):
+            calls.append(messages)
+            return SimpleNamespace(
+                ok=True,
+                text=f"```diff\n{patch.rstrip()}\n```",
+                error=None,
+                latency_ms=1,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+        repair_payload = orchestrator.validation_repair_context(
+            [
+                {
+                    "step_key": "pytest_targeted",
+                    "exit_code": 1,
+                    "command": "pytest tests/test_contract.py -q",
+                    "test_files": ["tests/test_contract.py"],
+                    "stdout": "FAILED tests/test_contract.py::test_shared_contract",
+                }
+            ],
+            changed_files=["first.py", "second.py"],
+            plan_files=[{"path": "first.py"}, {"path": "second.py"}],
+        )
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {"path": "first.py", "action": "modify", "description": "Repair first."},
+                {"path": "second.py", "action": "modify", "description": "Repair second."},
+            ],
+            validation_context=orchestrator.validation_repair_context_text(repair_payload),
+        )
+
+        assert len(diffs) == 1
+        assert len(calls) == 1
+        prompt = calls[0][1]["content"]
+        assert "schema: chili.validation-repair-context.v1" in prompt
+        assert "pytest tests/test_contract.py -q" in prompt
+        assert "FAILED tests/test_contract.py::test_shared_contract" in prompt
+        assert "def first():" in prompt
+        assert "def second():" in prompt
+    finally:
+        db.close()
+
+
+def test_generate_diffs_allows_scoped_approved_repair_subset(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        first_path = tmp_path / "first.py"
+        second_path = tmp_path / "second.py"
+        first_before = "def first():\n    return 10\n"
+        second_before = "def second():\n    return 2\n"
+        second_after = second_before.replace("return 2", "return 20")
+        first_path.write_text(first_before, encoding="utf-8", newline="\n")
+        second_path.write_text(second_before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        run = ProjectAutonomyRun(
+            run_id="pa_coordinated_repair_subset",
+            prompt="Repair the failing shared contract.",
+            status="running",
+            current_stage="repair",
+        )
+        db.add(run)
+        db.commit()
+        calls = []
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+
+        def fake_chat(messages, *args, **kwargs):
+            calls.append(messages)
+            patch = orchestrator._unified_diff("second.py", second_before, second_after)
+            return SimpleNamespace(
+                ok=True,
+                text=f"```diff\n{patch.rstrip()}\n```",
+                error=None,
+                latency_ms=1,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {"path": "first.py", "action": "modify", "description": "Keep first correct."},
+                {"path": "second.py", "action": "modify", "description": "Repair second."},
+            ],
+            validation_context=(
+                "schema: chili.validation-repair-context.v1\n"
+                "failed_step[1]: pytest_targeted exit=1\n"
+                "FAILED tests/test_contract.py::test_second"
+            ),
+        )
+
+        assert len(calls) == 1
+        assert "Change only the approved files needed" in calls[0][1]["content"]
+        assert set(orchestrator._diff_chunks_by_new_path(diffs[0])) == {"second.py"}
+        orchestrator._apply_diffs(tmp_path, diffs)
+        assert first_path.read_text(encoding="utf-8") == first_before
+        assert second_path.read_text(encoding="utf-8") == second_after
+    finally:
+        db.close()
+
+
+def test_implementation_records_structured_repair_context(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        source_path = tmp_path / "example.py"
+        before = "def value():\n    return 1\n"
+        first_pass = before.replace("return 1", "return 2")
+        repaired = before.replace("return 1", "return 3")
+        source_path.write_text(before, encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "example.py"], timeout=60)
+        initial_commit = orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "initial fixture",
+            ],
+            timeout=60,
+        )
+        assert initial_commit.returncode == 0, initial_commit.stderr
+        base_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        base_branch = orchestrator._git_text(tmp_path, ["branch", "--show-current"], timeout=60)
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_structured_repair",
+            repo_id=repo.id,
+            prompt="Repair example behavior.",
+            status="queued",
+            current_stage="implement",
+            execution_mode="plan_approval",
+            plan_status="approved",
+            plan_json=json.dumps(
+                {
+                    "analysis": "Repair example.",
+                    "files": [
+                        {
+                            "path": "example.py",
+                            "action": "modify",
+                            "description": "Return the expected value.",
+                        }
+                    ],
+                    "notes": "",
+                }
+            ),
+            base_branch=base_branch,
+            base_sha=base_sha,
+        )
+        db.add(run)
+        db.commit()
+        generated_contexts = []
+        patches = iter(
+            [
+                orchestrator._unified_diff("example.py", before, first_pass),
+                orchestrator._unified_diff("example.py", first_pass, repaired),
+            ]
+        )
+
+        def fake_generate(*args, validation_context=None, **kwargs):
+            generated_contexts.append(validation_context)
+            return [next(patches)]
+
+        failed_validation = [
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 1,
+                "command": "pytest tests/test_example.py -q",
+                "test_files": ["tests/test_example.py"],
+                "stdout": "FAILED tests/test_example.py::test_value",
+                "stderr": "expected 3, got 2",
+            }
+        ]
+        passed_validation = [
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "command": "pytest tests/test_example.py -q",
+                "targeted": True,
+                "validation_scope": "targeted_tests",
+                "test_files": ["tests/test_example.py"],
+                "stdout": "1 passed",
+                "stderr": "",
+            }
+        ]
+        validation_runs = iter([failed_validation, passed_validation])
+        monkeypatch.setattr(
+            orchestrator,
+            "_create_run_worktree",
+            lambda *args, **kwargs: ("codex/structured-repair", tmp_path),
+        )
+        monkeypatch.setattr(orchestrator, "generate_diffs_from_plan", fake_generate)
+        monkeypatch.setattr(orchestrator, "run_validation", lambda *args, **kwargs: next(validation_runs))
+        monkeypatch.setattr(orchestrator, "_commit_if_needed", lambda *args, **kwargs: "repair-sha")
+        monkeypatch.setattr(orchestrator, "_record_learning", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            orchestrator,
+            "_attempt_merge",
+            lambda *args, **kwargs: {"ok": False, "reason": "held for test review"},
+        )
+
+        orchestrator._run_implementation_phase(db, run, repo, tmp_path)
+
+        assert generated_contexts[0] is None
+        assert "schema: chili.validation-repair-context.v1" in generated_contexts[1]
+        assert "pytest tests/test_example.py -q" in generated_contexts[1]
+        assert "FAILED tests/test_example.py::test_value" in generated_contexts[1]
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "structured_validation_repair_context",
+            )
+            .one()
+        )
+        artifact_payload = json.loads(artifact.content_json)
+        assert artifact_payload["changed_files"] == ["example.py"]
+        assert artifact_payload["failed_steps"][0]["test_files"] == ["tests/test_example.py"]
+        assert source_path.read_text(encoding="utf-8") == repaired
+    finally:
+        db.close()
+
+
+def test_implementation_phase_runs_real_validation_contract(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        source_path = tmp_path / "example.py"
+        test_path = tmp_path / "tests/test_example.py"
+        before = "def value():\n    return 1\n"
+        after = "def value():\n    return 2\n"
+        test_path.parent.mkdir(parents=True)
+        source_path.write_text(before, encoding="utf-8", newline="\n")
+        test_path.write_text(
+            "from example import value\n\n\ndef test_value():\n    assert value() == 2\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "example.py", "tests/test_example.py"], timeout=60)
+        initial_commit = orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "initial fixture",
+            ],
+            timeout=60,
+        )
+        assert initial_commit.returncode == 0, initial_commit.stderr
+        base_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        base_branch = orchestrator._git_text(tmp_path, ["branch", "--show-current"], timeout=60)
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_real_validation_contract",
+            repo_id=repo.id,
+            prompt="Change value to two and verify the focused behavior.",
+            status="queued",
+            current_stage="implement",
+            execution_mode="plan_approval",
+            plan_status="approved",
+            plan_json=json.dumps(
+                {
+                    "analysis": "Change the implementation while preserving its public contract.",
+                    "files": [
+                        {
+                            "path": "example.py",
+                            "action": "modify",
+                            "description": "Return two.",
+                        }
+                    ],
+                    "validation_targets": ["tests/test_example.py"],
+                }
+            ),
+            base_branch=base_branch,
+            base_sha=base_sha,
+        )
+        db.add(run)
+        db.commit()
+
+        monkeypatch.setattr(
+            orchestrator,
+            "_create_run_worktree",
+            lambda *args, **kwargs: ("codex/real-validation-contract", tmp_path),
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "generate_diffs_from_plan",
+            lambda *args, **kwargs: [orchestrator._unified_diff("example.py", before, after)],
+        )
+        monkeypatch.setattr(orchestrator, "_commit_if_needed", lambda *args, **kwargs: "validated-sha")
+        monkeypatch.setattr(orchestrator, "_record_learning", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            orchestrator,
+            "_attempt_merge",
+            lambda *args, **kwargs: {"ok": False, "reason": "held for test review"},
+        )
+
+        orchestrator._run_implementation_phase(db, run, repo, tmp_path)
+
+        db.refresh(run)
+        validation = json.loads(run.validation_json)
+        ast_result = next(item for item in validation if item["step_key"] == "ast_syntax")
+        pytest_result = next(item for item in validation if item["step_key"] == "pytest_targeted")
+        assert ast_result["exit_code"] == 0
+        assert ast_result["validation_scope"] == "changed_python_files"
+        assert ast_result["parsed_python_files"] == ["example.py"]
+        assert pytest_result["exit_code"] == 0
+        assert "1 passed" in pytest_result["stdout"]
+        assert source_path.read_text(encoding="utf-8") == after
     finally:
         db.close()
 
@@ -2321,14 +4782,14 @@ def test_frontier_model_evidence_intake_status_attaches_preflight_recovery_route
                 "",
                 "| Check | Status | Required | Actual | Evidence | Next action |",
                 "| --- | --- | --- | --- | --- | --- |",
-                "| claude_opus48_live_probe | warning | usable Claude completion | auth failure | claude -p | refresh auth |",
+                "| claude_fable5_live_probe | warning | usable Claude completion | auth failure | claude -p | refresh auth |",
                 "",
                 "## Recovery Routes",
                 "",
                 "| Source | Blocker | Action | All-cases command | Single-case fallback | Boundary |",
                 "| --- | --- | --- | --- | --- | --- |",
                 (
-                    "| claude | claude_opus48_live_probe | Import saved claude response | "
+                    "| claude | claude_fable5_live_probe | Import saved claude response | "
                     "python scripts/autopilot_frontier_source_evidence_recorder.py "
                     "--source-kind claude --all-cases --response <claude-all-cases-response.txt> "
                     "--run-id <real-claude-run-id> "
@@ -2424,6 +4885,101 @@ def test_frontier_model_evidence_intake_status_guides_after_safe_setup(tmp_path)
     assert "autopilot_local_model_evidence_recorder.py" in status["next_action"]
 
 
+def _exercise_implementation_merge_gate(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    run_id: str,
+    relative_path: str,
+    before: str,
+    after: str,
+    validation: list[dict],
+    prompt: str = "Change behavior safely.",
+):
+    db = _sqlite_autonomy_session()
+    source_path = tmp_path / relative_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(before, encoding="utf-8", newline="\n")
+    orchestrator._git(tmp_path, ["init"], timeout=60)
+    orchestrator._git(tmp_path, ["add", relative_path], timeout=60)
+    initial_commit = orchestrator._git(
+        tmp_path,
+        [
+            "-c",
+            "user.name=CHILI Test",
+            "-c",
+            "user.email=chili-test@example.invalid",
+            "commit",
+            "-m",
+            "initial fixture",
+        ],
+        timeout=60,
+    )
+    assert initial_commit.returncode == 0, initial_commit.stderr
+    base_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+    base_branch = orchestrator._git_text(tmp_path, ["branch", "--show-current"], timeout=60)
+    repo = CodeRepo(path=str(tmp_path), name=run_id, active=True)
+    db.add(repo)
+    db.commit()
+    run = ProjectAutonomyRun(
+        run_id=run_id,
+        repo_id=repo.id,
+        prompt=prompt,
+        status="queued",
+        current_stage="implement",
+        execution_mode="plan_approval",
+        plan_status="approved",
+        plan_json=json.dumps(
+            {
+                "analysis": "Make the requested bounded change.",
+                "files": [{"path": relative_path, "action": "modify", "description": prompt}],
+            }
+        ),
+        base_branch=base_branch,
+        base_sha=base_sha,
+    )
+    db.add(run)
+    db.commit()
+    commit_called = {"value": False}
+
+    def fail_commit(*args, **kwargs):
+        commit_called["value"] = True
+        raise AssertionError("merge-readiness failure must block before commit")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_create_run_worktree",
+        lambda *args, **kwargs: (f"codex/{run_id}", tmp_path),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "generate_diffs_from_plan",
+        lambda *args, **kwargs: [orchestrator._unified_diff(relative_path, before, after)],
+    )
+    monkeypatch.setattr(orchestrator, "run_validation", lambda *args, **kwargs: validation)
+    monkeypatch.setattr(orchestrator, "_commit_if_needed", fail_commit)
+    monkeypatch.setattr(orchestrator, "_record_learning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_attempt_merge",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("merge must not run after pre-commit gate failure")
+        ),
+    )
+
+    payload = orchestrator._run_implementation_phase(db, run, repo, tmp_path)
+    artifact = (
+        db.query(ProjectAutonomyArtifact)
+        .filter(
+            ProjectAutonomyArtifact.run_id == run_id,
+            ProjectAutonomyArtifact.name == "pre_commit_merge_readiness",
+        )
+        .one()
+    )
+    decision = json.loads(artifact.content_json)
+    return db, payload, commit_called, decision
+
+
 def test_validation_merge_evidence_requires_non_collect_only_signal():
     collect_only = [
         {
@@ -2459,6 +5015,32 @@ def test_behavior_validation_evidence_requires_targeted_tests():
 
     assert orchestrator.behavior_validation_evidence(syntax_only, ["app/services/example.py"])["passed"] is False
     assert orchestrator.behavior_validation_evidence(targeted, ["app/services/example.py"])["passed"] is True
+
+
+def test_implementation_blocks_behavior_evidence_failure_before_commit(monkeypatch, tmp_path):
+    db, payload, commit_called, decision = _exercise_implementation_merge_gate(
+        monkeypatch,
+        tmp_path,
+        run_id="pa_behavior_gate",
+        relative_path="app/services/example.py",
+        before="def value():\n    return 1\n",
+        after="def value():\n    return 2\n",
+        validation=[
+            {
+                "step_key": "ast_syntax",
+                "exit_code": 0,
+                "changed_files": ["app/services/example.py"],
+                "parsed_python_files": ["app/services/example.py"],
+            }
+        ],
+    )
+    try:
+        assert payload["status"] == "blocked"
+        assert commit_called["value"] is False
+        assert decision["gates"]["behavior_validation"]["passed"] is False
+        assert any(item["gate"] == "behavior_validation" for item in decision["blockers"])
+    finally:
+        db.close()
 
 
 def test_blast_radius_and_patch_self_review_gates_block_unplanned_or_large_changes():
@@ -2513,6 +5095,33 @@ def test_domain_behavior_validation_evidence_requires_trading_invariant_tests():
     assert orchestrator.domain_behavior_validation_evidence(invariant, ["app/services/trading/pdt_guard.py"])["passed"] is True
 
 
+def test_implementation_blocks_trading_change_without_invariant_evidence(monkeypatch, tmp_path):
+    db, payload, commit_called, decision = _exercise_implementation_merge_gate(
+        monkeypatch,
+        tmp_path,
+        run_id="pa_domain_gate",
+        relative_path="app/services/trading/pdt_guard.py",
+        before="def allowed():\n    return True\n",
+        after="def allowed():\n    return False\n",
+        validation=[
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "targeted": True,
+                "validation_scope": "targeted_tests",
+                "test_files": ["tests/test_trading_runtime.py"],
+            }
+        ],
+    )
+    try:
+        assert payload["status"] == "blocked"
+        assert commit_called["value"] is False
+        assert decision["gates"]["domain_behavior"]["passed"] is False
+        assert decision["gates"]["domain_behavior"]["missing_invariant_evidence"]
+    finally:
+        db.close()
+
+
 def test_semantic_patch_review_blocks_public_contract_change():
     diff = "--- a/app/routers/orders.py\n+++ b/app/routers/orders.py\n@@\n-def create_order(payload):\n+def create_order(payload, user_id):\n"
 
@@ -2534,7 +5143,7 @@ def test_semantic_patch_review_blocks_public_contract_change():
     assert result["public_contract_change"] is True
 
 
-def test_implementation_blocks_public_contract_change_without_contract_tests():
+def test_semantic_patch_review_accepts_public_contract_change_with_contract_tests():
     diff = "--- a/app/routers/orders.py\n+++ b/app/routers/orders.py\n@@\n-def create_order(payload):\n+def create_order(payload, user_id):\n"
 
     result = orchestrator.semantic_patch_review_gate(
@@ -2553,6 +5162,187 @@ def test_implementation_blocks_public_contract_change_without_contract_tests():
 
     assert result["passed"] is True
     assert "tests/test_orders_api_contract.py" in result["contract_tests"]
+
+
+def test_implementation_blocks_public_contract_change_without_contract_tests(monkeypatch, tmp_path):
+    db, payload, commit_called, decision = _exercise_implementation_merge_gate(
+        monkeypatch,
+        tmp_path,
+        run_id="pa_semantic_gate",
+        relative_path="app/routers/orders.py",
+        before="def create_order(payload):\n    return payload\n",
+        after="def create_order(payload, user_id):\n    return payload, user_id\n",
+        validation=[
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "targeted": True,
+                "validation_scope": "targeted_tests",
+                "test_files": ["tests/test_orders_unit.py"],
+            }
+        ],
+    )
+    try:
+        assert payload["status"] == "blocked"
+        assert commit_called["value"] is False
+        assert decision["gates"]["semantic_patch_review"]["passed"] is False
+        assert decision["gates"]["semantic_patch_review"]["public_contract_change"] is True
+    finally:
+        db.close()
+
+
+def test_implementation_blocks_visible_ui_without_visual_evidence_before_commit(monkeypatch, tmp_path):
+    db, payload, commit_called, decision = _exercise_implementation_merge_gate(
+        monkeypatch,
+        tmp_path,
+        run_id="pa_visual_gate",
+        relative_path="chili_mobile/lib/src/brain/brain_dispatch_screen.dart",
+        before="String label() => 'old';\n",
+        after="String label() => 'clear';\n",
+        validation=[
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "targeted": True,
+                "validation_scope": "targeted_tests",
+                "test_files": ["tests/test_brain_dispatch_screen.py"],
+            }
+        ],
+        prompt="Make the screen label easier to scan.",
+    )
+    try:
+        assert payload["status"] == "blocked"
+        assert commit_called["value"] is False
+        assert decision["gates"]["visual_evidence"]["passed"] is False
+        assert decision["gates"]["visual_evidence"]["applicable"] is True
+    finally:
+        db.close()
+
+
+def test_attempt_merge_revalidates_precommit_evidence_lineage(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        source = tmp_path / "app/services/example.py"
+        focused_test = tmp_path / "tests/test_example.py"
+        source.parent.mkdir(parents=True)
+        focused_test.parent.mkdir(parents=True)
+        source.write_text("def value():\n    return 1\n", encoding="utf-8", newline="\n")
+        focused_test.write_text(
+            "from app.services.example import value\n\n\ndef test_value():\n    assert value() in {1, 2}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "app/services/example.py", "tests/test_example.py"], timeout=60)
+        initial_commit = orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "initial fixture",
+            ],
+            timeout=60,
+        )
+        assert initial_commit.returncode == 0, initial_commit.stderr
+        base_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        base_branch = orchestrator._git_text(tmp_path, ["branch", "--show-current"], timeout=60)
+        integration_branch = "codex/lineage-proof"
+        orchestrator._git(tmp_path, ["checkout", "-b", integration_branch], timeout=60)
+        source.write_text("def value():\n    return 2\n", encoding="utf-8", newline="\n")
+        orchestrator._git(tmp_path, ["add", "app/services/example.py"], timeout=60)
+        integration_commit = orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "validated fixture",
+            ],
+            timeout=60,
+        )
+        assert integration_commit.returncode == 0, integration_commit.stderr
+        integration_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        orchestrator._git(tmp_path, ["checkout", base_branch], timeout=60)
+
+        repo = CodeRepo(path=str(tmp_path), name="lineage-repo", active=True)
+        db.add(repo)
+        db.commit()
+        plan = {
+            "analysis": "Change the implementation and retain focused behavior evidence.",
+            "files": [{"path": "app/services/example.py", "action": "modify"}],
+        }
+        validation = [
+            {
+                "step_key": "ast_syntax",
+                "exit_code": 0,
+                "changed_files": ["app/services/example.py"],
+                "parsed_python_files": ["app/services/example.py"],
+            },
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "targeted": True,
+                "validation_scope": "targeted_tests",
+                "test_files": ["tests/test_example.py"],
+            },
+        ]
+        run = ProjectAutonomyRun(
+            run_id="pa_lineage_merge",
+            repo_id=repo.id,
+            prompt="Change value safely.",
+            status=orchestrator.RUN_STATUS_COMPLETED,
+            current_stage="merge",
+            plan_json=json.dumps(plan),
+            validation_json=json.dumps(validation),
+            files_json=json.dumps(["app/services/example.py"]),
+            base_branch=base_branch,
+            base_sha=base_sha,
+            integration_branch=integration_branch,
+        )
+        db.add(run)
+        db.commit()
+        snapshot = orchestrator._git_patch_snapshot(tmp_path, base_sha, integration_branch)
+        precommit = orchestrator.merge_readiness_decision(
+            db,
+            run,
+            phase="pre_commit",
+            plan=plan,
+            changed_files=["app/services/example.py"],
+            validation=validation,
+            diff_text=str(snapshot["diff_text"] or ""),
+            numstat_text=str(snapshot["numstat_text"] or ""),
+            name_status_text=str(snapshot["name_status_text"] or ""),
+            patch_snapshot_error=snapshot["error"],
+        )
+        assert precommit["passed"] is True
+        orchestrator._record_merge_readiness_decision(db, run, precommit)
+        db.commit()
+
+        result = orchestrator._attempt_merge(db, run, tmp_path, ["app/services/example.py"])
+
+        assert result["ok"] is True
+        assert orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60) == integration_sha
+        premerge_artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "pre_merge_merge_readiness",
+            )
+            .one()
+        )
+        premerge = json.loads(premerge_artifact.content_json)
+        assert premerge["passed"] is True
+        assert premerge["evidence_digest"] == precommit["evidence_digest"]
+        assert premerge["gates"]["trajectory_lineage"]["passed"] is True
+    finally:
+        db.close()
 
 
 def test_validation_repair_context_text_preserves_targeted_failure():
@@ -2969,7 +5759,7 @@ def test_coding_benchmark_signal_surfaces_frontier_preflight_recovery_routes(tmp
                 "| Check | Status | Required | Actual | Evidence | Next action |",
                 "| --- | --- | --- | --- | --- | --- |",
                 (
-                    "| claude_opus48_live_probe | warning | Claude Opus 4.8 print mode "
+                    "| claude_fable5_live_probe | warning | Claude Fable 5 print mode "
                     "can return a usable completion | exit_code=1; auth_failure_detected=true "
                     "| claude -p ... | refresh auth |"
                 ),
@@ -2979,7 +5769,7 @@ def test_coding_benchmark_signal_surfaces_frontier_preflight_recovery_routes(tmp
                 "| Source | Blocker | Action | All-cases command | Single-case fallback | Boundary |",
                 "| --- | --- | --- | --- | --- | --- |",
                 (
-                    "| claude | claude_opus48_live_probe | Import saved claude response | "
+                    "| claude | claude_fable5_live_probe | Import saved claude response | "
                     "python scripts/autopilot_frontier_source_evidence_recorder.py "
                     "--source-kind claude --all-cases --response <claude-all-cases-response.txt> "
                     "--run-id <real-claude-run-id> "
@@ -2999,13 +5789,13 @@ def test_coding_benchmark_signal_surfaces_frontier_preflight_recovery_routes(tmp
     preflight = signal["frontier_evidence_preflight"]
     assert preflight["status"] == "warning"
     assert preflight["path"] == orchestrator.AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH
-    assert preflight["blocker_ids"] == ["claude_opus48_live_probe"]
+    assert preflight["blocker_ids"] == ["claude_fable5_live_probe"]
     assert "Source" not in preflight["blocker_ids"]
     assert "claude" not in preflight["blocker_ids"]
     assert preflight["recovery_route_count"] == 1
     route = preflight["recovery_routes"][0]
     assert route["source_kind"] == "claude"
-    assert route["blocker_id"] == "claude_opus48_live_probe"
+    assert route["blocker_id"] == "claude_fable5_live_probe"
     assert route["action_label"] == "Import saved claude response"
     assert "autopilot_frontier_source_collection_packet.py" in route[
         "collection_packet_command"
@@ -3131,6 +5921,47 @@ def test_coding_benchmark_signal_surfaces_hosted_pr_repair_candidate_reports(tmp
     assert "autopilot_hosted_pr_repair_artifact_assembler.py" in handoff
     assert "transcript-bound hosted PR repair artifacts" in handoff
     assert "no git/PR mutation" in handoff
+
+
+def test_coding_benchmark_signal_surfaces_hosted_pr_candidate_scan(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH,
+        "- Status: missing\n- Checks: 0\n- Evidence mode: missing\n- Promotion eligible: false\n",
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_HOSTED_PR_REPAIR_CANDIDATE_SCAN_REL_PATH,
+        "\n".join(
+            [
+                "# Hosted PR Repair Candidate Scan",
+                "",
+                "- Schema: chili.hosted-pr-repair-candidate-scan.v1",
+                "- Generated UTC: 2026-07-03T12:00:00Z",
+                "- Status: no_review_thread_candidates",
+                "- Repository: MiacoRindolf/chili-home-copilot",
+                "- PRs scanned: 25",
+                "- Review-thread candidates: 0",
+                "- Promotion impact: blocked",
+                "- Next action: Find or create a hosted repair PR with review-thread line detail.",
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    candidates = signal["hosted_pr_repair_candidates"]
+    assert candidates["status"] == "candidate_scan_no_review_threads"
+    assert candidates["candidate_count"] == 0
+    assert candidates["candidate_scan"]["status"] == "no_review_thread_candidates"
+    assert candidates["candidate_scan"]["prs_scanned"] == 25
+    assert candidates["candidate_scan"]["review_thread_candidates"] == 0
+    assert candidates["candidate_scan_command"] == orchestrator.AGENT_HOSTED_PR_REPAIR_CANDIDATE_SCAN_COMMAND
+    handoff = signal["frontier_evidence_handoff_copy"]
+    assert "Hosted PR repair candidate scan" in handoff
+    assert "Review-thread candidates: 0" in handoff
+    assert "autopilot_hosted_pr_repair_candidate_scan.py" in handoff
 
 
 def test_coding_benchmark_scorecard_requires_model_promotion_gate(tmp_path):

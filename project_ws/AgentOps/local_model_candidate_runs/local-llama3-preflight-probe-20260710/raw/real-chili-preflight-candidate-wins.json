@@ -1,0 +1,19 @@
+{
+  "candidate_id": "local_model-extracted-candidate",
+  "case_id": "real-chili-preflight-candidate-wins",
+  "collected_at": "2026-07-10T02:14:56.518597Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 35.90071240000543,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "llama3:latest",
+  "notes": "Patch extracted from non-JSON local-model response.",
+  "patch_file": "real-chili-preflight-candidate-wins.patch",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

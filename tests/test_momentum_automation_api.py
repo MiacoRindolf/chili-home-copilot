@@ -286,6 +286,91 @@ def test_automation_routes_paired_shape(paired_client, db: Session) -> None:
     assert r4.status_code == 200
 
 
+def test_automation_fsm_replay_route_scopes_to_user_live_sessions(
+    paired_client, db: Session, monkeypatch
+) -> None:
+    c, user = paired_client
+    v = _variant(db)
+    live = create_trading_automation_session(
+        db,
+        user_id=user.id,
+        symbol="FSM",
+        variant_id=v.id,
+        state="live_entered",
+        mode="live",
+    )
+    paper = create_trading_automation_session(
+        db,
+        user_id=user.id,
+        symbol="PAPER",
+        variant_id=v.id,
+        state="entered",
+        mode="paper",
+    )
+    other_uid = _uid(db)
+    other_live = create_trading_automation_session(
+        db,
+        user_id=other_uid,
+        symbol="OTHER",
+        variant_id=v.id,
+        state="live_entered",
+        mode="live",
+    )
+    db.commit()
+
+    calls: list[dict] = []
+
+    def fake_replay(_db, **kwargs):
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "read_only": True,
+            "inputs": {
+                "session_rows": len(kwargs.get("session_ids") or ()),
+                "scheduler_snapshot_steps": 1,
+                "broker_outcomes": 0,
+            },
+            "scheduler": {
+                "selected_count": 0,
+                "terminalized_count": 0,
+                "pending_count": 0,
+                "selected_expected_pnl_usd": 0.0,
+            },
+            "certification": {
+                "missing_evidence": ["replay_selected_sessions"],
+                "scheduler_priority_claim_ready": False,
+                "adapter_unavailable_starvation_claim_ready": False,
+                "broker_outcome_attribution_ready": False,
+                "realized_vs_selected_expected_claim_ready": False,
+                "pnl_minmax_claim_ready": False,
+            },
+            "setup_trace": {"certification": {"setup_trace_coverage_ready": False}},
+            "replay_evidence_debt": [],
+        }
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.live_replay_audit.run_live_replay_audit",
+        fake_replay,
+    )
+
+    r = c.get("/api/trading/momentum/automation/replay/fsm?limit=10&capacity_limit=7")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["read_only"] is True
+    assert body["scope"]["session_ids"] == [live.id]
+    assert calls[-1]["session_ids"] == (live.id,)
+    assert calls[-1]["capacity_limit"] == 7
+    assert other_live.id not in body["scope"]["session_ids"]
+
+    r2 = c.get(f"/api/trading/momentum/automation/replay/fsm?session_ids={live.id}")
+    assert r2.status_code == 200
+    assert calls[-1]["session_ids"] == (live.id,)
+
+    r3 = c.get(f"/api/trading/momentum/automation/replay/fsm?session_ids={paper.id}")
+    assert r3.status_code == 400
+    assert "live sessions" in r3.json()["detail"]
+
+
 def test_session_payload_includes_controls_and_runner_health(db: Session) -> None:
     uid = _uid(db)
     v = _variant(db)

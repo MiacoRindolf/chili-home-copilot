@@ -87,9 +87,8 @@ class WorkflowSnapshot:
 def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) -> WorkflowSnapshot:
     """Derive the workflow state for ``task`` from persisted signals.
 
-    The derivation is monotonic in practice — once a stage's signal exists it
-    counts toward the highest state, and transient negative signals (failed
-    apply, failed validation) do not drop the state below the last green.
+    The derivation follows the newest coherent trajectory. A newer suggestion,
+    failed apply, or failed validation supersedes stale green history.
     """
     profile = (
         db.query(PlanTaskCodingProfile)
@@ -109,12 +108,13 @@ def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) ->
         )
     )
 
-    has_snapshot = (
-        db.query(CodingAgentSuggestion.id)
+    latest_snapshot_row = (
+        db.query(CodingAgentSuggestion)
         .filter(CodingAgentSuggestion.task_id == task.id)
+        .order_by(CodingAgentSuggestion.created_at.desc(), CodingAgentSuggestion.id.desc())
         .first()
-        is not None
     )
+    has_snapshot = latest_snapshot_row is not None
     latest_snapshot = (
         db.query(CodingAgentSuggestion.created_at)
         .filter(CodingAgentSuggestion.task_id == task.id)
@@ -138,35 +138,54 @@ def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) ->
         and (latest_snapshot_at is None or latest_suggest_at > latest_snapshot_at)
     )
 
-    last_dry_run_passed = (
-        db.query(CodingAgentSuggestionApply.id)
-        .filter(
-            CodingAgentSuggestionApply.task_id == task.id,
-            CodingAgentSuggestionApply.dry_run.is_(True),
-            CodingAgentSuggestionApply.status == "completed",
+    latest_dry_run = None
+    latest_real_apply = None
+    if latest_snapshot_row is not None:
+        latest_dry_run = (
+            db.query(CodingAgentSuggestionApply)
+            .filter(
+                CodingAgentSuggestionApply.task_id == task.id,
+                CodingAgentSuggestionApply.suggestion_id == latest_snapshot_row.id,
+                CodingAgentSuggestionApply.dry_run.is_(True),
+            )
+            .order_by(CodingAgentSuggestionApply.created_at.desc(), CodingAgentSuggestionApply.id.desc())
+            .first()
         )
-        .first()
-        is not None
+        latest_real_apply = (
+            db.query(CodingAgentSuggestionApply)
+            .filter(
+                CodingAgentSuggestionApply.task_id == task.id,
+                CodingAgentSuggestionApply.suggestion_id == latest_snapshot_row.id,
+                CodingAgentSuggestionApply.dry_run.is_(False),
+            )
+            .order_by(CodingAgentSuggestionApply.created_at.desc(), CodingAgentSuggestionApply.id.desc())
+            .first()
+        )
+    last_dry_run_passed = bool(latest_dry_run and latest_dry_run.status == "completed")
+    last_real_apply_passed = bool(
+        last_dry_run_passed
+        and latest_real_apply
+        and latest_real_apply.status == "completed"
     )
-    last_real_apply_passed = (
-        db.query(CodingAgentSuggestionApply.id)
-        .filter(
-            CodingAgentSuggestionApply.task_id == task.id,
-            CodingAgentSuggestionApply.dry_run.is_(False),
-            CodingAgentSuggestionApply.status == "completed",
-        )
+    latest_validation = (
+        db.query(CodingTaskValidationRun)
+        .filter(CodingTaskValidationRun.task_id == task.id)
+        .order_by(CodingTaskValidationRun.id.desc())
         .first()
-        is not None
     )
-    has_completed_validation = (
-        db.query(CodingTaskValidationRun.id)
-        .filter(
-            CodingTaskValidationRun.task_id == task.id,
-            CodingTaskValidationRun.status == "completed",
-            CodingTaskValidationRun.exit_code == 0,
-        )
-        .first()
-        is not None
+    validation_after_apply = bool(
+        latest_validation
+        and latest_real_apply
+        and latest_validation.started_at
+        and latest_real_apply.created_at
+        and latest_validation.started_at >= latest_real_apply.created_at
+    )
+    has_completed_validation = bool(
+        last_real_apply_passed
+        and validation_after_apply
+        and latest_validation
+        and latest_validation.status == "completed"
+        and latest_validation.exit_code == 0
     )
 
     if has_completed_validation and last_real_apply_passed:

@@ -85,7 +85,8 @@ _ACTIONABLE_PATTERN_SIGNAL_RE = re.compile(
     r"\b("
     r"breakout|break\s+out|squeeze|bollinger|bb\s+squeeze|"
     r"rsi|ema|sma|vwap|macd|adx|relative\s+volume|rel\s+vol|rvol|"
-    r"narrow\s+range|nr\s*[47]|vcp|resistance|support|retest|"
+    r"narrow\s+range|nr\s*[47]|vcp|volatility\s+contraction|volume\s+contraction|"
+    r"resistance|support|retest|"
     r"pullback|momentum|trend|volume\s+(?:surge|spike|expansion)"
     r")\b",
     re.IGNORECASE,

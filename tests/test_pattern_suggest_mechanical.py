@@ -109,6 +109,79 @@ def test_mechanical_pattern_suggestion_parses_bearish_trader_shorthand():
     assert {"indicator": "macd_hist", "op": "<", "value": 0.0} in parsed["conditions"]
 
 
+def test_mechanical_pattern_suggestion_parses_bullish_ema_stack():
+    parsed = _mechanical_pattern_suggestion("EMA stacking bullish and RSI neutral")
+
+    assert parsed is not None
+    assert {"indicator": "price", "op": ">", "ref": "ema_20"} in parsed["conditions"]
+    assert {"indicator": "ema_20", "op": ">", "ref": "ema_50"} in parsed["conditions"]
+    assert {"indicator": "ema_50", "op": ">", "ref": "ema_100"} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": "between", "value": [40.0, 65.0]} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_bearish_ema_stack():
+    parsed = _mechanical_pattern_suggestion("bearish EMA stack and MACD negative")
+
+    assert parsed is not None
+    assert {"indicator": "price", "op": "<", "ref": "ema_20"} in parsed["conditions"]
+    assert {"indicator": "ema_20", "op": "<", "ref": "ema_50"} in parsed["conditions"]
+    assert {"indicator": "ema_50", "op": "<", "ref": "ema_100"} in parsed["conditions"]
+    assert {"indicator": "macd_hist", "op": "<", "value": 0.0} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_squeeze_firing():
+    parsed = _mechanical_pattern_suggestion("squeeze firing and RSI neutral")
+
+    assert parsed is not None
+    assert {"indicator": "bb_squeeze", "op": "==", "value": True} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": "between", "value": [40.0, 65.0]} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_vwap_hold():
+    parsed = _mechanical_pattern_suggestion(
+        "pullback holds VWAP and relative volume above 2x"
+    )
+
+    assert parsed is not None
+    assert {"indicator": "vwap_reclaim", "op": "==", "value": True} in parsed["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 2.0} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_ema_support():
+    parsed = _mechanical_pattern_suggestion("20 EMA support and volume surge")
+
+    assert parsed is not None
+    assert {"indicator": "price", "op": ">", "ref": "ema_20"} in parsed["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_tape_speed_shorthand():
+    parsed = _mechanical_pattern_suggestion(
+        "volume burst with RSI rising and MACD histogram expanding"
+    )
+
+    assert parsed is not None
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": ">", "value": 55.0} in parsed["conditions"]
+    assert {"indicator": "macd_hist", "op": ">", "value": 0.0} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_tight_range_coil():
+    parsed = _mechanical_pattern_suggestion("tight range coiling and RSI neutral")
+
+    assert parsed is not None
+    assert {"indicator": "narrow_range", "op": "any_of", "value": ["NR4", "NR7"]} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": "between", "value": [40.0, 65.0]} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_vcp_plus_count():
+    parsed = _mechanical_pattern_suggestion("VCP 3+ and RSI neutral")
+
+    assert parsed is not None
+    assert {"indicator": "vcp_count", "op": ">=", "value": 3.0} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": "between", "value": [40.0, 65.0]} in parsed["conditions"]
+
+
 def test_mechanical_pattern_suggestion_requires_two_conditions():
     assert _mechanical_pattern_suggestion("breakout after good news") is None
     assert _mechanical_pattern_suggestion("RSI above 55") is None

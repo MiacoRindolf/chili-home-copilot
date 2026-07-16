@@ -1,0 +1,21 @@
+diff --git a/preflight.py b/preflight.py
+index 0000000..e4a5f6c
+--- a/preflight.py
++++ b/preflight.py
+@@ -1,12 +1,13 @@
+- def can_enter(
++ def can_enter(ticker: str,
+     ticker: str,
+     broker_position_qty: float,
+     buying_power: float,
+     required_cash: float,
++    *,
+     broker_timeout: bool = False,
+ ) -> bool:
+  if broker_position_qty > 0:
+-   return False
++   return True
+  if buying_power < required_cash:
+-   return False
++   return True
+  return True

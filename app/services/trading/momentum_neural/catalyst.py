@@ -106,6 +106,33 @@ def catalyst_score(symbol: str, catalyst_symbols: set[str] | None) -> float:
     return 1.0 if _norm(symbol) in catalyst_symbols else 0.5
 
 
+def catalyst_grade_rank(
+    symbol: str,
+    *,
+    strong_symbols: set[str] | None = None,
+    weak_symbols: set[str] | None = None,
+    fake_symbols: set[str] | None = None,
+) -> int:
+    """Rank catalyst strength for sizing-only conviction math.
+
+    Fake/weak evidence dominates and returns 0. Explicit strong evidence returns 3.
+    Generic catalyst membership is intentionally not upgraded here; that broader
+    signal already lives in the viability tilt. Conviction sizing must have
+    explicit grade evidence or fail neutral.
+    """
+    sym = _norm(symbol)
+    if not sym or "-USD" in str(symbol or "").upper():
+        return 0
+    fake = {_norm(s) for s in (fake_symbols or set())}
+    weak = {_norm(s) for s in (weak_symbols or set())}
+    strong = {_norm(s) for s in (strong_symbols or set())}
+    if sym in fake or sym in weak:
+        return 0
+    if sym in strong:
+        return 3
+    return 0
+
+
 def catalyst_viability_delta(symbol: str, catalyst_symbols: set[str] | None) -> float:
     """The additive viability tilt for a symbol: CATALYST_TILT x (score - 0.5).
 

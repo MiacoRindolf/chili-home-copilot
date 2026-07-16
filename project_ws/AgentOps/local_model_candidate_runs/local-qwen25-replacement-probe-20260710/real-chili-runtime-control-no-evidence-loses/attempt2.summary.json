@@ -1,0 +1,13 @@
+{
+  "case_id": "real-chili-runtime-control-no-evidence-loses",
+  "changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=4096 temperature=0 < compact_prompt_pack.md (CPU fallback after forced API replacement-content real-chili-runtime-control-no-evidence-loses attempt 2)",
+  "duration_seconds": 113.13569080000161,
+  "passed": true,
+  "reason": "behavior_tests_passed",
+  "status": "passed",
+  "test_output_tail": "..                                                                       [100%]\n2 passed in 0.01s\n",
+  "used_replacement": true
+}

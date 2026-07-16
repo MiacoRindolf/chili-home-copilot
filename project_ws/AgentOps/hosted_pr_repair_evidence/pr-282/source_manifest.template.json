@@ -1,0 +1,27 @@
+{
+  "branch": "codex/stock-momentum-context-gate",
+  "current_head_sha_observed": "6160d0f82d749fc04d0f74ea7030d2fd482b3e6d",
+  "current_hosted_green_run_observed": "26879809423",
+  "hosted_run_id": "26879809423",
+  "line_thread": {
+    "comment_id": "<line-thread-comment-id>",
+    "line": "<reviewed-line>",
+    "path": "<reviewed-file-path>",
+    "thread_id": "<review-thread-id>"
+  },
+  "post_repair_check_receipt_file": "post_repair_check_receipt.json",
+  "post_repair_head_sha": "6160d0f82d749fc04d0f74ea7030d2fd482b3e6d",
+  "pr_url": "https://github.com/MiacoRindolf/chili-home-copilot/pull/282",
+  "publication_transcript_file": "publication_transcript.jsonl",
+  "remote_publication": {
+    "commit_sha": "6160d0f82d749fc04d0f74ea7030d2fd482b3e6d",
+    "pr_url": "https://github.com/MiacoRindolf/chili-home-copilot/pull/282",
+    "url": "<hosted-run-or-pr-publication-url>"
+  },
+  "repair_report": "project_ws/AgentOps/PR_282_CI_REPAIR.md",
+  "repaired_head_sha": "6160d0f82d749fc04d0f74ea7030d2fd482b3e6d",
+  "review_thread_id": "<review-thread-id>",
+  "review_thread_transcript_file": "review_thread_transcript.jsonl",
+  "schema": "chili.hosted-pr-repair-source-manifest.v1",
+  "source_run_id": "<real-hosted-pr-repair-source-run-id>"
+}

@@ -1,0 +1,86 @@
+You are competing in a measured multi-file repository repair tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve public behavior not changed by the goal.
+
+Goal: Repair the ledger event contract across app/model.py, app/store.py, and app/service.py. Event.from_payload must trim and require non-empty event_id and account_id, parse amount through Decimal(str(value)), and reject non-finite or non-positive amounts with ValueError('invalid event'). LedgerStore.add_once must deduplicate by (account_id, event_id), return whether it inserted, and balance must sum Decimal amounts for one account. record_event must return accepted, event_id, account_id, and the account balance formatted with two decimal places; a duplicate must not change the balance. Keep every test file unchanged.
+Approved source files: app/model.py, app/service.py, app/store.py
+
+Repository snapshot:
+### app/model.py
+```python
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class Event:
+    event_id: str
+    account_id: str
+    amount: Decimal
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "Event":
+        return cls(
+            event_id=str(payload.get("event_id", "")),
+            account_id=str(payload.get("account_id", "")),
+            amount=Decimal(payload.get("amount", 0)),
+        )
+```
+
+### app/service.py
+```python
+from typing import Any, Mapping
+
+from app.model import Event
+from app.store import LedgerStore
+
+
+def record_event(payload: Mapping[str, Any], store: LedgerStore) -> dict[str, Any]:
+    event = Event.from_payload(payload)
+    store.add_once(event)
+    return {"balance": str(store.balance(event.account_id))}
+```
+
+### app/store.py
+```python
+from decimal import Decimal
+
+from app.model import Event
+
+
+class LedgerStore:
+    def __init__(self) -> None:
+        self.events: list[Event] = []
+
+    def add_once(self, event: Event) -> bool:
+        self.events.append(event)
+        return True
+
+    def balance(self, account_id: str) -> Decimal:
+        return sum((event.amount for event in self.events), Decimal("0"))
+```
+
+### tests/test_ledger.py
+```python
+from app.service import record_event
+from app.store import LedgerStore
+
+
+def test_duplicate_event_is_idempotent():
+    store = LedgerStore()
+    payload = {"event_id": " evt-1 ", "account_id": " acct-1 ", "amount": "2.50"}
+    assert record_event(payload, store) == {
+        "accepted": True,
+        "event_id": "evt-1",
+        "account_id": "acct-1",
+        "balance": "2.50",
+    }
+    assert record_event(payload, store) == {
+        "accepted": False,
+        "event_id": "evt-1",
+        "account_id": "acct-1",
+        "balance": "2.50",
+    }
+```

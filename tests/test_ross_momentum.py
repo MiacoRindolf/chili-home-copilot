@@ -145,3 +145,40 @@ def test_crypto_breakout_schema_keys_work():
     assert res["HOT-USD"].rvol_pct > res["COLD-USD"].rvol_pct
     # must NOT be flat — the bug was both scoring identically at base
     assert res["HOT-USD"].score != res["COLD-USD"].score
+
+
+def test_rvol_pace_preferred_over_cumulative_participation():
+    """Ignition may carry day/ADV participation for audit, but the trusted Ross
+    RVOL pillar is time-normalized pace."""
+    res = score_universe(
+        {
+            "PACE": {
+                "rvol": 0.03,
+                "rvol_basis": "cumulative_day_over_prev_day",
+                "rvol_pace": 6.0,
+                "rvol_source": "market_session_curve",
+                "daily_change_pct": 20.0,
+            },
+            "MID": _sig(vol_ratio=2.0, daily=10.0),
+        }
+    )
+    assert res["PACE"].breakdown["rvol"] == 6.0
+    assert "rvol" in res["PACE"].breakdown["pillars_present"]
+    assert res["PACE"].rank == 1
+
+
+def test_cumulative_day_adv_basis_is_not_trusted_rvol():
+    """Raw cumulative day volume / full-day ADV must not become low RVOL."""
+    res = score_universe(
+        {
+            "CUM": {
+                "rvol": 0.03,
+                "rvol_basis": "cumulative_day_over_prev_day",
+                "daily_change_pct": 30.0,
+            },
+            "REAL": _sig(vol_ratio=2.0, daily=5.0),
+        }
+    )
+    assert res["CUM"].breakdown["rvol"] is None
+    assert "rvol" not in res["CUM"].breakdown["pillars_present"]
+    assert res["CUM"].breakdown["rvol_basis"] == "cumulative_day_over_prev_day"

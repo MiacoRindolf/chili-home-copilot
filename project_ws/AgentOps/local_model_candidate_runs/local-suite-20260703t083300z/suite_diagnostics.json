@@ -1,0 +1,66 @@
+{
+  "attempted_cases": 1,
+  "case_ids": [
+    "real-chili-preflight-candidate-wins",
+    "real-chili-runtime-control-partial-loses",
+    "real-chili-startup-static-partial-loses",
+    "real-chili-broker-timeout-partial-loses",
+    "real-chili-runtime-control-no-evidence-loses",
+    "real-chili-runtime-control-unscoped-loses"
+  ],
+  "case_results": [
+    {
+      "case_id": "real-chili-preflight-candidate-wins",
+      "duration_seconds": 29.205402499996126,
+      "error": "local model command failed with exit 1: \u001b[?2026h\u001b[?25l\u001b[1G\u2819 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2839 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2838 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u283c \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2834 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2826 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2827 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2807 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u280f \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u280b \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2819 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2839 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2838 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u283c",
+      "prompt": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-suite-20260703t083300z\\cases\\real-chili-preflight-candidate-wins.prompt.md",
+      "status": "model_failed"
+    },
+    {
+      "case_id": "real-chili-runtime-control-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-startup-static-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-broker-timeout-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-runtime-control-no-evidence-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-runtime-control-unscoped-loses",
+      "status": "pending"
+    }
+  ],
+  "duration_seconds": 29.205402499996126,
+  "failed_case_id": "real-chili-preflight-candidate-wins",
+  "failure_reason": "real-chili-preflight-candidate-wins: local model command failed with exit 1: \u001b[?2026h\u001b[?25l\u001b[1G\u2819 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2839 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2838 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u283c \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2834 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2826 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2827 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2807 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u280f \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u280b \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2819 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2839 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u2838 \u001b[K\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[1G\u283c",
+  "failure_stage": "model",
+  "generated_utc": "2026-07-03T08:33:30.251452Z",
+  "model_name": "qwen3:4b",
+  "parsed_cases": 0,
+  "permission_boundary": "local model suite diagnostics only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading",
+  "recovery_routes": [
+    {
+      "action_label": "Retry failed local-model case",
+      "all_cases_retry_command": "python scripts/autopilot_local_model_candidate_runner.py --all-cases --model-name qwen3:4b --timeout-seconds 600 --json",
+      "case_id": "real-chili-preflight-candidate-wins",
+      "import_response_command": "python scripts/autopilot_local_model_candidate_runner.py --retry-from-diagnostics D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-suite-20260703t083300z\\suite_diagnostics.json --response-file <local-model-real-chili-preflight-candidate-wins-response.txt> --run-id <real-local-run-id> --source-command <exact-local-model-command> --json",
+      "permission_boundary": "local model diagnostics and evidence import only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading",
+      "prompt_path": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-suite-20260703t083300z\\cases\\real-chili-preflight-candidate-wins.prompt.md",
+      "reason": "The local-model suite stopped before all cases produced verified candidates.",
+      "response_path": "",
+      "retry_command": "python scripts/autopilot_local_model_candidate_runner.py --retry-from-diagnostics D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-suite-20260703t083300z\\suite_diagnostics.json --timeout-seconds 600 --json",
+      "status": "available"
+    }
+  ],
+  "run_id": "local-suite-20260703T083300Z",
+  "schema": "chili.local-model-suite-diagnostics.v1",
+  "source_command": "ollama run qwen3:4b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses)",
+  "status": "failed"
+}

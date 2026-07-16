@@ -1,0 +1,174 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-401",
+  "problem_statement": "A regional archive's image-derivative queue began repeatedly retrying large preservation scans. Uploads complete and small previews appear, but archival JPEG derivatives for a subset of high-resolution TIFF files never become available.",
+  "observations": [
+    {
+      "evidence_id": "bh4-401-e01",
+      "statement": "The first sustained retry increase began at 2026-06-18T02:20:00Z, twenty minutes after a worker pool replacement and seven hours after the latest application release.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained queue-depth and deployment timeline export",
+      "independence_key": "queue-deploy-timeline",
+      "reliability": 0.96,
+      "discriminating": true,
+      "timestamps": {
+        "application_release": "2026-06-17T19:05:00Z",
+        "pool_replacement": "2026-06-18T02:00:00Z",
+        "retry_increase": "2026-06-18T02:20:00Z"
+      },
+      "correlation": {
+        "cohort": "replacement-pool",
+        "retry_rate": 0.71
+      }
+    },
+    {
+      "evidence_id": "bh4-401-e02",
+      "statement": "Failed jobs decode the source TIFF and write the preview before the derivative process exits without publishing its final artifact.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "retained per-job stage events",
+      "independence_key": "job-stage-events",
+      "reliability": 0.94,
+      "discriminating": true,
+      "sequence": [
+        "source_verified",
+        "tiff_decoded",
+        "preview_published",
+        "derivative_started",
+        "worker_lost",
+        "retry_scheduled"
+      ],
+      "entity": "derivative-job"
+    },
+    {
+      "evidence_id": "bh4-401-e03",
+      "statement": "The retained application log ends after allocation of the final raster buffer; it contains no decoder exception, storage error, or application shutdown hook message.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "immutable worker log bundle",
+      "independence_key": "application-log-bundle",
+      "reliability": 0.91,
+      "discriminating": true,
+      "artifact_hash": "sha256:4be4b302c81bc9a2656be169af41f2e602f52a5c2bb25508d1946b947f884fea",
+      "events": [
+        "raster_buffer_allocated",
+        "log_stream_closed"
+      ]
+    },
+    {
+      "evidence_id": "bh4-401-e04",
+      "statement": "Host records for the same process IDs show memory-control termination, and the container memory event counter increments once for each lost worker.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read-only host journal and cgroup event snapshots",
+      "independence_key": "host-memory-events",
+      "reliability": 0.99,
+      "discriminating": true,
+      "runtime_revision": "node-image-2026.06-cgv2",
+      "fingerprints": {
+        "host_event": "memory-control-kill",
+        "process_exit": "signal-9",
+        "counter_delta": 1
+      },
+      "causal_parents": [
+        "derivative-memory-peak",
+        "container-memory-boundary"
+      ]
+    },
+    {
+      "evidence_id": "bh4-401-e05",
+      "statement": "The replacement pool reports a 1536 MiB effective container boundary although the scheduler request and limit retained in the workload description are both 3072 MiB.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "scheduler manifest and read-only cgroup snapshot",
+      "independence_key": "effective-memory-boundary",
+      "reliability": 0.98,
+      "discriminating": true,
+      "expected_state": "3072-MiB-boundary",
+      "actual_state": "1536-MiB-boundary",
+      "comparison": {
+        "legacy_pool": "3072-MiB-effective",
+        "replacement_pool": "1536-MiB-effective"
+      }
+    },
+    {
+      "evidence_id": "bh4-401-e06",
+      "statement": "Large scans routed to the unreplaced pool during the overlap window completed with the same application image, source hashes, and storage destination.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "retained overlap-window routing report",
+      "independence_key": "pool-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "overlap-cohort-20260618",
+      "comparison": {
+        "replacement_pool_completion": 0.18,
+        "legacy_pool_completion": 1.0,
+        "matched_job_count": 22
+      }
+    },
+    {
+      "evidence_id": "bh4-401-e07",
+      "statement": "Small TIFF files complete on both pools, providing a negative control for credentials, queue delivery, encoder availability, and object-store reachability.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained completion matrix grouped by decoded pixel count",
+      "independence_key": "small-file-negative-control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "comparison": {
+        "under_120_megapixels": 0.998,
+        "over_420_megapixels_replacement_pool": 0.12
+      }
+    },
+    {
+      "evidence_id": "bh4-401-e08",
+      "statement": "Storage service audit logs contain successful preview writes and no rejected derivative write attempts for affected jobs, so the visible missing object is downstream of process loss rather than evidence of a storage rejection.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "independently retained object-store audit export",
+      "independence_key": "storage-audit",
+      "reliability": 0.96,
+      "discriminating": true,
+      "component_flow": [
+        "decoder",
+        "preview-writer",
+        "derivative-encoder",
+        "object-store"
+      ],
+      "edge_states": {
+        "preview-write": "success",
+        "derivative-write": "not-reached"
+      }
+    },
+    {
+      "evidence_id": "bh4-401-e09",
+      "statement": "A read-only calculation from retained peak resident-set samples places every affected job above 1536 MiB and below 3072 MiB; unaffected large jobs on the legacy pool occupy the same range.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "offline analysis of retained process metrics",
+      "independence_key": "rss-boundary-analysis",
+      "reliability": 0.93,
+      "discriminating": true,
+      "experiment_id": "rss-threshold-fit-v1",
+      "correlation": {
+        "affected_above_lower_boundary": 1.0,
+        "affected_below_declared_limit": 1.0
+      }
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

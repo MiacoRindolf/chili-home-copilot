@@ -1,0 +1,19 @@
+```json
+{
+  "candidate_id": "local_model-real-chili-preflight-candidate-wins",
+  "case_id": "real-chili-preflight-candidate-wins",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 0.0,
+  "expected_changed_files": ["preflight.py"],
+  "model_name": "phi4-mini:latest",
+  "notes": "<no changes required>",
+  "patch": "-diff --git a/preflight.py b/preflight.py
+index f9ae5e8..ebdfaf7 100644\n--- /dev/null\n+++ /dev/null\n@@ -1,0 +1 @@\nNo changes detected in preflight.py that would affect the behavior of can_enter function.",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}
+```

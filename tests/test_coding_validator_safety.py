@@ -39,6 +39,36 @@ def test_ast_syntax_does_not_mutate_source_file(tmp_path: Path) -> None:
     assert r.step_key == "ast_syntax"
 
 
+def test_ast_syntax_targets_changed_python_files_and_records_scope(tmp_path: Path) -> None:
+    changed = tmp_path / "app/changed.py"
+    untouched = tmp_path / "app/untouched.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("value = 1\n", encoding="utf-8")
+    untouched.write_text("def broken(:\n", encoding="utf-8")
+
+    result = run_ast_syntax(tmp_path, ["app/changed.py", "README.md"])
+
+    assert result.exit_code == 0
+    assert result.metadata == {
+        "validation_scope": "changed_python_files",
+        "changed_files": ["app/changed.py", "README.md"],
+        "parsed_python_files": ["app/changed.py"],
+        "ignored_files": ["README.md"],
+    }
+
+
+def test_ast_syntax_rejects_changed_path_outside_worktree(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("def broken(:\n", encoding="utf-8")
+
+    result = run_ast_syntax(tmp_path, ["../outside.py"])
+
+    assert result.exit_code == 0
+    assert result.metadata is not None
+    assert result.metadata["parsed_python_files"] == []
+    assert result.metadata["ignored_files"] == ["../outside.py"]
+
+
 def test_subprocess_timeout_kills_long_running_step(tmp_path: Path) -> None:
     with patch("app.services.coding_task.validator_runner._timeout", return_value=0.08):
         code, timed_out, out, err = _run_subprocess_allowlisted(
@@ -77,3 +107,38 @@ def test_pytest_targeted_skips_when_safe_test_database_is_not_configured(tmp_pat
     assert result.skipped is True
     assert result.skip_reason == "safe TEST_DATABASE_URL not configured"
     assert "TEST_DATABASE_URL" in result.stderr
+
+
+def test_pytest_targeted_records_selected_behavior_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "app/example.py"
+    test_file = tmp_path / "tests/test_example.py"
+    source.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    source.write_text("def value():\n    return 2\n", encoding="utf-8")
+    test_file.write_text(
+        "from app.example import value\n\n\ndef test_value():\n    assert value() == 2\n",
+        encoding="utf-8",
+    )
+
+    result = run_pytest_targeted(tmp_path, ["app/example.py"])
+
+    assert result.exit_code == 0
+    assert result.metadata is not None
+    assert result.metadata["targeted"] is True
+    assert result.metadata["fallback_collect_only"] is False
+    assert result.metadata["validation_scope"] == "targeted_tests"
+    assert result.metadata["test_files"] == ["tests/test_example.py"]
+    assert result.metadata["test_selection"][0]["test_file"] == "tests/test_example.py"
+
+
+def test_pytest_targeted_runs_changed_test_file_directly(tmp_path: Path) -> None:
+    test_file = tmp_path / "tests/test_contract.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_contract():\n    assert True\n", encoding="utf-8")
+
+    result = run_pytest_targeted(tmp_path, ["tests/test_contract.py"])
+
+    assert result.exit_code == 0
+    assert result.metadata is not None
+    assert result.metadata["test_files"] == ["tests/test_contract.py"]
+    assert result.metadata["targeted"] is True

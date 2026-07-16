@@ -38,3 +38,25 @@ ALL_OUTCOME_CLASSES: frozenset[str] = frozenset(
         OUTCOME_FLAT_UNKNOWN,
     }
 )
+
+NEVER_ENTERED_OUTCOME_CLASSES: frozenset[str] = frozenset(
+    {
+        OUTCOME_RISK_BLOCK,
+        OUTCOME_STALE_DATA_ABORT,
+        OUTCOME_NO_FILL,
+        OUTCOME_CANCELLED_PRE_ENTRY,
+        OUTCOME_EXPIRED_PRE_RUN,
+        OUTCOME_ARCHIVED,
+        OUTCOME_FLAT_UNKNOWN,
+    }
+)
+
+
+def is_real_entry_outcome(outcome_class: object) -> bool:
+    """Return True only for terminal outcomes that imply an entry actually existed.
+
+    Feedback/risk math must not let cancelled/no-fill/pre-entry rows dilute streak,
+    run-R, or expectancy windows. Unknown labels fail closed as not-real-entry.
+    """
+    label = str(outcome_class or "").strip().lower()
+    return bool(label and label in ALL_OUTCOME_CLASSES and label not in NEVER_ENTERED_OUTCOME_CLASSES)

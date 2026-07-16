@@ -1,0 +1,13 @@
+diff --git a/autopilot_prompt.py b/autopilot_prompt.py
+--- a/autopilot_prompt.py
++++ b/autopilot_prompt.py
+@@ -1,6 +1,8 @@
+ def looks_like_repo_edit(prompt: str) -> bool:
+     text = (prompt or '').lower()
+-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))
++    runtime_control_phrases = {'docker compose', 'restart', 'deploy', 'migration', 'live trading'}
++    normal_source_edit_words = {'fix', 'update', 'change', 'add'}
++    return any(word in text for word in normal_source_edit_words) and not any(phrase in text for phrase in runtime_control_phrases)
+ 
+ 
+ def classify_prompt(prompt: str) -> str:

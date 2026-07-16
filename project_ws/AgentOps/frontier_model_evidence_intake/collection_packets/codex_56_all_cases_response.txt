@@ -1,0 +1,110 @@
+[
+  {
+    "candidate_id": "codex-real-chili-preflight-candidate-wins",
+    "case_id": "real-chili-preflight-candidate-wins",
+    "cost_units": 0.0,
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+    ],
+    "duration_seconds": 0.0,
+    "expected_changed_files": [
+      "preflight.py"
+    ],
+    "model_name": "gpt-5.6-sol",
+    "notes": "Fail closed when the broker position lookup times out.",
+    "patch": "diff --git a/preflight.py b/preflight.py\n--- a/preflight.py\n+++ b/preflight.py\n@@ -7,6 +7,8 @@ def can_enter(\n     broker_timeout: bool = False,\n ) -> bool:\n+    if broker_timeout:\n+        return False\n     if broker_position_qty > 0:\n         return False\n     if buying_power < required_cash:\n",
+    "planned_file": "preflight.py",
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex"
+  },
+  {
+    "candidate_id": "codex-real-chili-runtime-control-partial-loses",
+    "case_id": "real-chili-runtime-control-partial-loses",
+    "cost_units": 0.0,
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+    ],
+    "duration_seconds": 0.0,
+    "expected_changed_files": [
+      "autopilot_prompt.py"
+    ],
+    "model_name": "gpt-5.6-sol",
+    "notes": "Exclude runtime-control verbs from repository-edit detection.",
+    "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -1,6 +1,6 @@\n def looks_like_repo_edit(prompt: str) -> bool:\n     text = (prompt or '').lower()\n-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n+    return any(word in text for word in ('fix', 'update', 'change', 'add'))\n \n \n def classify_prompt(prompt: str) -> str:\n",
+    "planned_file": "autopilot_prompt.py",
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex"
+  },
+  {
+    "candidate_id": "codex-real-chili-startup-static-partial-loses",
+    "case_id": "real-chili-startup-static-partial-loses",
+    "cost_units": 0.0,
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contracts.py -q"
+    ],
+    "duration_seconds": 0.0,
+    "expected_changed_files": [
+      "startup_contracts.py"
+    ],
+    "model_name": "gpt-5.6-sol",
+    "notes": "Add the required stylesheet to the static asset manifest.",
+    "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\n--- a/startup_contracts.py\n+++ b/startup_contracts.py\n@@ -5,6 +5,7 @@ REQUIRED_ASSETS = (\n \n ASSET_MANIFEST = {\n     'app/static/components/brain-project-domain.js': 'sha-js',\n+    'app/static/components/brain-project-domain.css': 'sha-css',\n }\n \n \n",
+    "planned_file": "startup_contracts.py",
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex"
+  },
+  {
+    "candidate_id": "codex-real-chili-broker-timeout-partial-loses",
+    "case_id": "real-chili-broker-timeout-partial-loses",
+    "cost_units": 0.0,
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+    ],
+    "duration_seconds": 0.0,
+    "expected_changed_files": [
+      "preflight.py"
+    ],
+    "model_name": "gpt-5.6-sol",
+    "notes": "Block entry when broker state cannot be confirmed.",
+    "patch": "diff --git a/preflight.py b/preflight.py\n--- a/preflight.py\n+++ b/preflight.py\n@@ -7,6 +7,8 @@ def can_enter(\n     broker_timeout: bool = False,\n ) -> bool:\n+    if broker_timeout:\n+        return False\n     if broker_position_qty > 0:\n         return False\n     if buying_power < required_cash:\n",
+    "planned_file": "preflight.py",
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex"
+  },
+  {
+    "candidate_id": "codex-real-chili-runtime-control-no-evidence-loses",
+    "case_id": "real-chili-runtime-control-no-evidence-loses",
+    "cost_units": 0.0,
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+    ],
+    "duration_seconds": 0.0,
+    "expected_changed_files": [
+      "autopilot_prompt.py"
+    ],
+    "model_name": "gpt-5.6-sol",
+    "notes": "Keep restart and deploy requests out of the planning path.",
+    "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -1,6 +1,6 @@\n def looks_like_repo_edit(prompt: str) -> bool:\n     text = (prompt or '').lower()\n-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n+    return any(word in text for word in ('fix', 'update', 'change', 'add'))\n \n \n def classify_prompt(prompt: str) -> str:\n",
+    "planned_file": "autopilot_prompt.py",
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex"
+  },
+  {
+    "candidate_id": "codex-real-chili-runtime-control-unscoped-loses",
+    "case_id": "real-chili-runtime-control-unscoped-loses",
+    "cost_units": 0.0,
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+    ],
+    "duration_seconds": 0.0,
+    "expected_changed_files": [
+      "autopilot_prompt.py"
+    ],
+    "model_name": "gpt-5.6-sol",
+    "notes": "Narrow repository-edit matching to source-change verbs.",
+    "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -1,6 +1,6 @@\n def looks_like_repo_edit(prompt: str) -> bool:\n     text = (prompt or '').lower()\n-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n+    return any(word in text for word in ('fix', 'update', 'change', 'add'))\n \n \n def classify_prompt(prompt: str) -> str:\n",
+    "planned_file": "autopilot_prompt.py",
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex"
+  }
+]

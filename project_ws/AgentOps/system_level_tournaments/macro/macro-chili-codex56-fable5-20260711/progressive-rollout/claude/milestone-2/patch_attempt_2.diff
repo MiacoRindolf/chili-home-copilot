@@ -1,0 +1,13 @@
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -18,7 +18,9 @@
+     raise ValueError(_INVALID_CONFIG)
+ 
+ 
+ def _parse_percentage(value: Any) -> int:
++    if value is None:
++        return 0
+     if isinstance(value, bool):
+         raise ValueError(_INVALID_CONFIG)
+     if isinstance(value, int):

@@ -1,0 +1,144 @@
+{
+  "artifact_root": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\system_level_tournaments\\meso\\meso-local-page-syntax-gated",
+  "evidence_mode": "real_artifacts",
+  "generated_utc": "2026-07-11T00:52:28.473032Z",
+  "model_names": {
+    "local_model": "qwen2.5-coder:7b"
+  },
+  "premium_independent_local_results": 1,
+  "run_id": "meso-local-page-syntax-gated",
+  "runtime_measurements": {
+    "measured": 1,
+    "unmeasured": 0
+  },
+  "safety": "isolated temporary repositories only; premium frontier models are benchmark opponents; CHILI premium routes are fatal; no real source edit, git publication, deployment, database migration, broker, or live-trading action",
+  "schema": "chili.meso-project-workflow-tournament.v1",
+  "source_kinds": [
+    "local_model"
+  ],
+  "status": "failed",
+  "task_results": [
+    {
+      "results": [
+        {
+          "attempts": 2,
+          "behavior_passed": false,
+          "changed_files": [
+            "app/query.py"
+          ],
+          "coordinated_files_changed": false,
+          "duration_seconds": 443.657,
+          "eligible": false,
+          "failure": "validation failed: t_default_page_is_one():\n>       assert parse_page(None) == 1\n               ^^^^^^^^^^^^^^^^\ntests\\test_paging.py:6:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nraw = None\n    def parse_page(raw: str | None) -> int:\n        if raw is None:\n>           raise ValueError('page must be a positive integer')\nE           ValueError: page must be a positive integer\napp\\query.py:3: ValueError\n__________________ test_second_page_has_navigation_metadata ___________________\n    def test_second_page_has_navigation_metadata():\n        result = build_page([1, 2, 3, 4, 5], \"2\", 2)\n>       assert result == {\n            \"page\": 2,\n            \"items\": [3, 4],\n            \"has_next\": True,\n            \"next_page\": 3,\n        }\nE       AssertionError: assert {'items': [5], 'page': 2} == {'has_next': ... 3, 'page': 2}\nE\nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'items': [5]} != {'items': [3, 4]}\nE         Right contains 2 more items:\nE         {'has_next': True, 'next_page': 3}\nE         Use -v to get more diff\ntests\\test_paging.py:12: AssertionError\n________________________ test_bad_pages_fail_closed[0] ________________________\nraw = '0'\n    @pytest.mark.parametrize(\"raw\", [\"0\", \"-2\", \"abc\"])\n    def test_bad_pages_fail_closed(raw):\n>       with pytest.raises(ValueError, match=\"page must be a positive integer\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE <class 'ValueError'>\nhidden_tests\\test_paging_edges.py:10: Failed\n_______________________ test_bad_pages_fail_closed[-2] ________________________\nraw = '-2'\n    @pytest.mark.parametrize(\"raw\", [\"0\", \"-2\", \"abc\"])\n    def test_bad_pages_fail_closed(raw):\n>       with py",
+          "model_events": [
+            {
+              "error": "",
+              "latency_ms": 43195,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 37699,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 21597,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 45433,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 24455,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 11805,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 41160,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 36830,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 38200,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 20903,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 40751,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 20851,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 37358,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            },
+            {
+              "error": "",
+              "latency_ms": 17457,
+              "model": "qwen2.5-coder:7b",
+              "ok": true
+            }
+          ],
+          "model_name": "qwen2.5-coder:7b",
+          "premium_calls": 0,
+          "quality_score": 20,
+          "scope_valid": true,
+          "semantic_review_passed": false,
+          "source_kind": "local_model",
+          "task_id": "one-based-page-envelope",
+          "tests_unchanged": true,
+          "validation_output": "t(raw)\n               ^^^^^^^^\nE       ValueError: invalid literal for int() with base 10: 'abc'\napp\\query.py:4: ValueError\nDuring handling of the above exception, another exception occurred:\nraw = 'abc'\n    @pytest.mark.parametrize(\"raw\", [\"0\", \"-2\", \"abc\"])\n    def test_bad_pages_fail_closed(raw):\n>       with pytest.raises(ValueError, match=\"page must be a positive integer\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: Regex pattern did not match.\nE        Regex: 'page must be a positive integer'\nE        Input: \"invalid literal for int() with base 10: 'abc'\"\nhidden_tests\\test_paging_edges.py:10: AssertionError\n_______________________ test_page_size_must_be_positive _______________________\n    def test_page_size_must_be_positive():\n>       with pytest.raises(ValueError, match=\"page_size must be positive\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE <class 'ValueError'>\nhidden_tests\\test_paging_edges.py:15: Failed\n_______________________ test_last_page_has_no_next_page _______________________\n    def test_last_page_has_no_next_page():\n>       assert build_page([1, 2, 3], \"2\", 2) == {\n            \"page\": 2,\n            \"items\": [3],\n            \"has_next\": False,\n            \"next_page\": None,\n        }\nE       AssertionError: assert {'items': [], 'page': 2} == {'has_next': ...ne, 'page': 2}\nE\nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'items': []} != {'items': [3]}\nE         Right contains 2 more items:\nE         {'has_next': False, 'next_page': None}\nE         Use -v to get more diff\nhidden_tests\\test_paging_edges.py:20: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_paging.py::test_default_page_is_one - ValueError: page must...\nFAILED tests/test_paging.py::test_second_page_has_navigation_metadata - Asser...\nFAILED hidden_tests/test_paging_edges.py::test_bad_pages_fail_closed[0] - Fai...\nFAILED hidden_tests/test_paging_edges.py::test_bad_pages_fail_closed[-2] - Fa...\nFAILED hidden_tests/test_paging_edges.py::test_bad_pages_fail_closed[abc] - A...\nFAILED hidden_tests/test_paging_edges.py::test_page_size_must_be_positive - F...\nFAILED hidden_tests/test_paging_edges.py::test_last_page_has_no_next_page - A...\n7 failed in 0.13s"
+        }
+      ],
+      "task_id": "one-based-page-envelope",
+      "title": "One-based page envelope contract",
+      "winner": "none",
+      "winner_model": "none",
+      "winner_reason": "no contestant passed all correctness and safety gates"
+    }
+  ],
+  "tasks": 1,
+  "winner_counts": {
+    "claude": 0,
+    "codex": 0,
+    "local_model": 0,
+    "none": 1
+  }
+}

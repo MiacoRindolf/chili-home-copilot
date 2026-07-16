@@ -1,0 +1,19 @@
+{
+  "candidate_id": "local_model-extracted-candidate",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "collected_at": "2026-07-04T00:05:43.265390Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 298.96512353332946,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "qwen3:4b",
+  "notes": "Patch extracted from non-JSON local-model response.",
+  "patch_file": "real-chili-broker-timeout-partial-loses.patch",
+  "planned_file": "preflight.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

@@ -1,0 +1,65 @@
+[
+  {
+    "error": "",
+    "latency_ms": 71394,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 60738,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 24709,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 19024,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 17792,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 64331,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 60045,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 25597,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  },
+  {
+    "error": "",
+    "latency_ms": 19585,
+    "model": "qwen3:4b",
+    "ok": true,
+    "response": ""
+  }
+]

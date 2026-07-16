@@ -1,0 +1,74 @@
+{
+  "case_count": 6,
+  "model_name": "qwen2.5-coder:7b",
+  "response_file": "project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/local_qwen25_replacement_repair_allcases_response.txt",
+  "run_id": "local-qwen25-replacement-repair-allcases-20260710",
+  "validation": [
+    {
+      "case_id": "real-chili-preflight-candidate-wins",
+      "changed_files": [
+        "preflight.py"
+      ],
+      "passed": true,
+      "reason": "behavior_tests_passed",
+      "source": "project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/local_qwen25_replay_repair_allcases_response.txt",
+      "status": "passed",
+      "uses_replacement": false
+    },
+    {
+      "case_id": "real-chili-runtime-control-partial-loses",
+      "changed_files": [
+        "autopilot_prompt.py"
+      ],
+      "passed": true,
+      "reason": "behavior_tests_passed",
+      "source": "project_ws/AgentOps/local_model_candidate_runs/local-qwen25-replacement-probe-20260710/real-chili-runtime-control-partial-loses/attempt4.response.txt",
+      "status": "passed",
+      "uses_replacement": true
+    },
+    {
+      "case_id": "real-chili-startup-static-partial-loses",
+      "changed_files": [
+        "startup_contracts.py"
+      ],
+      "passed": true,
+      "reason": "behavior_tests_passed",
+      "source": "project_ws/AgentOps/local_model_candidate_runs/local-qwen25-replacement-probe-20260710/real-chili-startup-static-partial-loses/attempt1.response.txt",
+      "status": "passed",
+      "uses_replacement": true
+    },
+    {
+      "case_id": "real-chili-broker-timeout-partial-loses",
+      "changed_files": [
+        "preflight.py"
+      ],
+      "passed": true,
+      "reason": "behavior_tests_passed",
+      "source": "project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/local_qwen25_replay_repair_allcases_response.txt",
+      "status": "passed",
+      "uses_replacement": false
+    },
+    {
+      "case_id": "real-chili-runtime-control-no-evidence-loses",
+      "changed_files": [
+        "autopilot_prompt.py"
+      ],
+      "passed": true,
+      "reason": "behavior_tests_passed",
+      "source": "project_ws/AgentOps/local_model_candidate_runs/local-qwen25-replacement-probe-20260710/real-chili-runtime-control-no-evidence-loses/attempt2.response.txt",
+      "status": "passed",
+      "uses_replacement": true
+    },
+    {
+      "case_id": "real-chili-runtime-control-unscoped-loses",
+      "changed_files": [
+        "autopilot_prompt.py"
+      ],
+      "passed": true,
+      "reason": "behavior_tests_passed",
+      "source": "project_ws/AgentOps/local_model_candidate_runs/local-qwen25-replacement-probe-20260710/real-chili-runtime-control-unscoped-loses/attempt2.response.txt",
+      "status": "passed",
+      "uses_replacement": true
+    }
+  ]
+}

@@ -65,6 +65,41 @@ def is_topping_tail(
     return True
 
 
+def _ema(values: list[float], span: int) -> list[float]:
+    """Simple EMA series helper used by micro pullback detectors."""
+    try:
+        vals = [float(v) for v in values if v is not None]
+        n = max(1, int(span))
+        if not vals:
+            return []
+        alpha = 2.0 / (n + 1.0)
+        out: list[float] = []
+        cur = vals[0]
+        for v in vals:
+            cur = alpha * v + (1.0 - alpha) * cur
+            out.append(cur)
+        return out
+    except Exception:
+        return []
+
+
+def is_bounce_curl_candle(
+    o: float, h: float, l: float, c: float,
+    *, min_close_pos: float = 0.55, max_upper_wick_frac: float = 0.55,
+) -> bool:
+    """Green curl candle that reclaims into the upper part of its range."""
+    rng, body, upper, _ = _ohlc(o, h, l, c)
+    if rng <= 0 or body <= 0:
+        return False
+    if float(c) <= float(o):
+        return False
+    if (float(c) - float(l)) / rng < float(min_close_pos):
+        return False
+    if upper / rng > float(max_upper_wick_frac):
+        return False
+    return True
+
+
 def _last_ohlc_from_df(df: Any) -> tuple[float, float, float, float] | None:
     """(o,h,l,c) of the last bar of an OHLCV frame, or None if unavailable."""
     try:
@@ -93,3 +128,30 @@ def topping_tail_from_df(df: Any, **kw: Any) -> bool:
     is unreadable so missing data never forces an exit."""
     ohlc = _last_ohlc_from_df(df)
     return False if ohlc is None else is_topping_tail(*ohlc, **kw)
+
+
+def bounce_curl_from_df(df: Any, **kw: Any) -> bool:
+    """``is_bounce_curl_candle`` on the last bar; unreadable data fails safe."""
+    ohlc = _last_ohlc_from_df(df)
+    return False if ohlc is None else is_bounce_curl_candle(*ohlc, **kw)
+
+
+def macd_hist_rollover_from_df(df: Any) -> bool:
+    """MACD histogram rollover on the last completed bars; unreadable data is False."""
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 4:
+            return False
+        cols = {x.lower(): x for x in df.columns}
+        closes = [float(x) for x in df[cols["close"]].tolist()]
+        if len(closes) < 4:
+            return False
+        ema12 = _ema(closes, 12)
+        ema26 = _ema(closes, 26)
+        macd = [a - b for a, b in zip(ema12, ema26)]
+        signal = _ema(macd, 9)
+        hist = [m - s for m, s in zip(macd, signal)]
+        if len(hist) < 3:
+            return False
+        return hist[-3] < hist[-2] and hist[-1] < hist[-2]
+    except Exception:
+        return False

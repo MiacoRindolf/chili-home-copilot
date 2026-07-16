@@ -1,0 +1,118 @@
+```diff
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,4 +1,4 @@
+-from app.graph import dependency_waves
++from app.graph import dependency_waves, plan_fingerprint
+ from app.state import DeploymentState
+ 
+ 
+@@ -19,9 +19,11 @@ def execute_deployment(
+     rollback=_noop_rollback,
+     state=None,
+ ):
++    services = tuple(services)
+     waves = dependency_waves(services)
++    fingerprint = plan_fingerprint(services)
+     state = state if state is not None else DeploymentState()
+-    state.begin(waves)
++    state.begin(waves, fingerprint)
+ 
+     if (
+         deploy is _noop_deploy
+@@ -31,7 +33,10 @@ def execute_deployment(
+     ):
+         return state.result()
+ 
+-    for wave in waves:
++    for wave_index, wave in enumerate(waves):
++        if wave_index in state.completed_waves:
++            continue
++
+         for name in wave:
+             deploy(name)
+             state.deployed.append(name)
+@@ -48,6 +53,8 @@ def execute_deployment(
+             state.status = "rolled_back"
+             return state.result()
+ 
++        state.completed_waves.add(wave_index)
++
+     state.status = "completed"
+     return state.result()
+diff --git a/app/graph.py b/app/graph.py
+--- a/app/graph.py
++++ b/app/graph.py
+@@ -1,3 +1,16 @@
++import hashlib
++import json
++
++
++def plan_fingerprint(services):
++    services = tuple(services)
++    dependency_waves(services)
++    plan = sorted(
++        (service.name, sorted(service.dependencies))
++        for service in services
++    )
++    encoded = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
++    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
++
++
+ def dependency_waves(services):
+     services = tuple(services)
+     names = [service.name for service in services]
+diff --git a/app/state.py b/app/state.py
+--- a/app/state.py
++++ b/app/state.py
+@@ -1,20 +1,38 @@
+ class DeploymentState:
+-    def __init__(self):
++    def __init__(
++        self,
++        fingerprint=None,
++        completed_waves=None,
++        deployed=None,
++    ):
+         self.status = "planned"
+         self.waves = ()
+-        self.deployed = []
++        self.fingerprint = fingerprint
++        self.completed_waves = set(
++            completed_waves if completed_waves is not None else ()
++        )
++        self.deployed = list(deployed if deployed is not None else ())
+         self.rolled_back = []
++        self.resumed = False
+ 
+-    def begin(self, waves):
++    def begin(self, waves, fingerprint=None):
++        if (
++            self.fingerprint is not None
++            and fingerprint is not None
++            and self.fingerprint != fingerprint
++        ):
++            raise ValueError("deployment plan changed")
++
++        self.resumed = self.fingerprint is not None and bool(
++            self.completed_waves or self.deployed
++        )
++        if fingerprint is not None:
++            self.fingerprint = fingerprint
+         self.status = "planned"
+         self.waves = tuple(waves)
+-        self.deployed.clear()
+         self.rolled_back.clear()
+ 
+     def result(self):
+         return {
+             "status": self.status,
+             "waves": self.waves,
++            "fingerprint": self.fingerprint,
++            "completed_waves": tuple(sorted(self.completed_waves)),
+             "deployed": list(self.deployed),
+             "rolled_back": list(self.rolled_back),
++            "resumed": self.resumed,
+         }
+```

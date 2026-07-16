@@ -8,11 +8,15 @@ from ....config import settings
 from app.services.broker_manager import get_all_broker_statuses
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import (
+    EXECUTION_FAMILY_COINBASE_SPOT,
+    EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     is_momentum_automation_implemented,
     normalize_execution_family,
+    resolve_live_spot_adapter_factory,
 )
 from ..governance import get_kill_switch_status
+from .feature_flags import audit_momentum_settings_fallbacks, build_momentum_feature_flag_readiness
 
 
 def _scheduler_includes_web_light() -> bool:
@@ -22,20 +26,106 @@ def _scheduler_includes_web_light() -> bool:
     return role in ("all", "web")
 
 
+def _agentic_mcp_token_bundle_status() -> dict[str, Any]:
+    """Cheap, secret-safe Agentic auth-bundle status for operator diagnostics."""
+    try:
+        from ..venue.rh_mcp_client import _load_token_bundle, bundle_is_routable, resolve_mcp_token
+
+        bundle = _load_token_bundle()
+        token = resolve_mcp_token()
+        return {
+            "token_present": bool(token),
+            "token_bundle_present": isinstance(bundle, dict),
+            "token_bundle_routable": bool(bundle_is_routable()),
+        }
+    except Exception as exc:
+        return {
+            "token_present": False,
+            "token_bundle_present": False,
+            "token_bundle_routable": False,
+            "token_status_error": exc.__class__.__name__,
+        }
+
+
+def _agentic_mcp_adapter_status() -> dict[str, Any]:
+    """Auth-aware readiness for the sanctioned RH Agentic rail, with a safe reason.
+
+    This intentionally exposes only booleans and coarse reason strings: no token,
+    account number, endpoint, or raw broker text is returned.
+    """
+    status: dict[str, Any] = {
+        "enabled": False,
+        "reason": "not_checked",
+        **_agentic_mcp_token_bundle_status(),
+    }
+    try:
+        factory = resolve_live_spot_adapter_factory(EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP)
+        adapter = factory()
+        is_enabled = getattr(adapter, "is_enabled", None)
+        if not callable(is_enabled):
+            status["reason"] = "adapter_missing_is_enabled"
+            return status
+        enabled = bool(is_enabled())
+        status["enabled"] = enabled
+        if enabled:
+            status["reason"] = "agentic_adapter_enabled"
+            return status
+        if bool(getattr(adapter, "_pin_invalid", False)):
+            status["reason"] = "pinned_account_not_agentic"
+            return status
+        auth_error = str(getattr(adapter, "_execution_auth_error", "") or "").strip()
+        if auth_error:
+            prefix = "execution_auth_transient" if bool(
+                getattr(adapter, "_execution_auth_transient_unavailable", False)
+            ) else "execution_auth"
+            status["reason"] = f"{prefix}:{auth_error[:120]}"
+            return status
+        if not status.get("token_present"):
+            status["reason"] = "no_token"
+            return status
+        if status.get("token_bundle_present") and not status.get("token_bundle_routable"):
+            status["reason"] = "token_bundle_not_routable"
+            return status
+        status["reason"] = "adapter_is_enabled_false"
+        return status
+    except Exception as exc:
+        status["reason"] = f"adapter_status_error:{exc.__class__.__name__}"
+        return status
+
+
+def _agentic_mcp_adapter_enabled() -> bool:
+    """Backward-compatible bool surface for tests/callers."""
+    return bool(_agentic_mcp_adapter_status().get("enabled"))
+
+
+def _default_readiness_execution_family(symbol: Optional[str] = None) -> str:
+    """Infer the live readiness venue when callers do not pass one explicitly."""
+    sym = str(symbol or "").strip().upper()
+    if sym.endswith("-USD"):
+        return EXECUTION_FAMILY_COINBASE_SPOT
+    return str(getattr(settings, "chili_equity_execution_rail", None) or EXECUTION_FAMILY_ROBINHOOD_SPOT)
+
+
 def build_momentum_operator_readiness(
     *,
-    execution_family: str = "coinbase_spot",
+    execution_family: str | None = None,
     symbol: Optional[str] = None,
 ) -> dict[str, Any]:
     """Structured readiness for paper/live momentum automation (no DB)."""
-    ef = normalize_execution_family(execution_family)
+    ef = normalize_execution_family(execution_family or _default_readiness_execution_family(symbol))
     exec_impl = is_momentum_automation_implemented(ef)
 
     mesh_on = bool(mesh_enabled())
     neural_on = bool(settings.chili_momentum_neural_enabled)
     coinbase_adapter = bool(settings.chili_coinbase_spot_adapter_enabled)
     robinhood_adapter = bool(getattr(settings, "chili_robinhood_spot_adapter_enabled", False))
-    is_robinhood = ef == EXECUTION_FAMILY_ROBINHOOD_SPOT
+    is_robinhood_spot = ef == EXECUTION_FAMILY_ROBINHOOD_SPOT
+    is_robinhood_agentic = ef == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+    agentic_status = _agentic_mcp_adapter_status() if is_robinhood_agentic else {
+        "enabled": False,
+        "reason": "not_agentic_execution_family",
+    }
+    agentic_adapter = bool(agentic_status.get("enabled"))
 
     paper_runner = bool(settings.chili_momentum_paper_runner_enabled)
     live_runner = bool(settings.chili_momentum_live_runner_enabled)
@@ -72,7 +162,10 @@ def build_momentum_operator_readiness(
 
     # Broker readiness is per-venue: a robinhood_spot session must NOT be gated on
     # Coinbase (it would block with "connect Coinbase" even when RH is trade-ready).
-    if is_robinhood:
+    if is_robinhood_agentic:
+        broker_ready_for_live = agentic_adapter
+        execution_ready = exec_impl and agentic_adapter
+    elif is_robinhood_spot:
         broker_ready_for_live = robinhood_connected and robinhood_adapter and robinhood_can_trade
         execution_ready = exec_impl and robinhood_adapter
     else:
@@ -103,10 +196,16 @@ def build_momentum_operator_readiness(
         "momentum_neural_enabled": neural_on,
         "coinbase_spot_adapter_enabled": coinbase_adapter,
         "robinhood_spot_adapter_enabled": robinhood_adapter,
+        "robinhood_agentic_mcp_adapter_enabled": agentic_adapter,
+        "robinhood_agentic_mcp_adapter_reason": agentic_status.get("reason"),
+        "robinhood_agentic_mcp_token_present": bool(agentic_status.get("token_present")),
+        "robinhood_agentic_mcp_token_bundle_present": bool(agentic_status.get("token_bundle_present")),
+        "robinhood_agentic_mcp_token_bundle_routable": bool(agentic_status.get("token_bundle_routable")),
         "broker_coinbase_connected": coinbase_connected,
         "broker_coinbase_can_trade": coinbase_can_trade,
         "broker_robinhood_connected": robinhood_connected,
         "broker_robinhood_can_trade": robinhood_can_trade,
+        "broker_robinhood_agentic_connected": agentic_adapter,
         "broker_ready_for_live": broker_ready_for_live,
         "paper_runner_enabled": paper_runner,
         "live_runner_enabled": live_runner,
@@ -123,6 +222,12 @@ def build_momentum_operator_readiness(
         "execution_ready": execution_ready,
         "runnable_paper_now": runnable_paper_now,
         "runnable_live_now": runnable_live_now,
+        "momentum_feature_flags": build_momentum_feature_flag_readiness(settings),
+        "momentum_settings_fallback_audit": {
+            key: value
+            for key, value in audit_momentum_settings_fallbacks(settings).items()
+            if key != "rows" and key != "missing_rows"
+        },
     }
 
 
@@ -177,7 +282,10 @@ def next_action_required(
 ) -> str:
     """Short operator-facing CTA string."""
     if blocked == "broker_not_ready":
-        if (readiness.get("execution_family") or "") == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+        ef = readiness.get("execution_family") or ""
+        if ef == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
+            return "Refresh Robinhood Agentic MCP auth/token and verify the pinned Agentic account before live equity execution."
+        if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
             return "Connect Robinhood + enable CHILI_ROBINHOOD_SPOT_ADAPTER_ENABLED for live equity execution."
         return "Connect Coinbase Advanced (or fix credentials) for live execution."
     if blocked == "paper_runner_disabled" and (mode or "").lower() == "paper":

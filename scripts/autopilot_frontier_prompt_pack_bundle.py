@@ -32,9 +32,9 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "project_ws" / "AgentOps" / "frontier_model_pro
 DEFAULT_SUMMARY_OUTPUT = REPO_ROOT / "project_ws" / "AgentOps" / "FRONTIER_MODEL_PROMPT_PACK_BUNDLE.md"
 FRONTIER_PROMPT_PACK_BUNDLE_SCHEMA_VERSION = "chili.frontier-prompt-pack-bundle.v1"
 DEFAULT_MODEL_NAMES = {
-    "codex": "gpt-5.5",
-    "claude": "claude-opus-4-8",
-    "local_model": "qwen3:4b",
+    "codex": "gpt-5.6-sol",
+    "claude": "claude-fable-5",
+    "local_model": "qwen2.5-coder:7b",
 }
 PROMPT_PACK_FILE = "prompt_pack.md"
 MANIFEST_FILE = "manifest.json"
@@ -107,17 +107,32 @@ def build_prompt_pack_bundle(
         )
         if target_error:
             raise PromptPackBundleError(target_error)
-        markdown = render_prompt_pack(
-            source_kind=source_kind,
-            model_name=model_name,
-            response_only=True,
-        )
+        path = output_dir / source_kind / PROMPT_PACK_FILE
+        markdown = ""
+        if write and path.is_file():
+            existing_markdown = path.read_text(encoding="utf-8", errors="replace")
+            try:
+                _validate_prompt_pack(
+                    existing_markdown,
+                    source_kind=source_kind,
+                    model_name=model_name,
+                )
+            except PromptPackBundleError:
+                pass
+            else:
+                markdown = existing_markdown
+        if not markdown:
+            markdown = render_prompt_pack(
+                source_kind=source_kind,
+                model_name=model_name,
+                response_only=True,
+            )
         _validate_prompt_pack(markdown, source_kind=source_kind, model_name=model_name)
         relative_path = f"{source_kind}/{PROMPT_PACK_FILE}"
         if write:
-            path = output_dir / source_kind / PROMPT_PACK_FILE
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(markdown, encoding="utf-8")
+            if not path.is_file() or path.read_text(encoding="utf-8", errors="replace") != markdown:
+                path.write_text(markdown, encoding="utf-8")
             digest = sha256_file(path)
             size = path.stat().st_size
         else:

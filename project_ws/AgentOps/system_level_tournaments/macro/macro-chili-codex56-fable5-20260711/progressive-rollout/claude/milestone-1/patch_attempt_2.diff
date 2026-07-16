@@ -1,0 +1,20 @@
+diff --git a/app/cohort.py b/app/cohort.py
+--- a/app/cohort.py
++++ b/app/cohort.py
+@@ -7,4 +7,4 @@ def stable_bucket(subject_id: str, salt: str) -> int:
+     if not isinstance(salt, str) or not salt.strip():
+         raise ValueError("salt must be a non-empty string")
+     digest = hashlib.sha256(f"{salt}:{subject_id}".encode("utf-8")).digest()
+-    return int.from_bytes(digest, "big") % 100
++    return int.from_bytes(digest[:8], "big") % 100
+diff --git a/app/decision.py b/app/decision.py
+--- a/app/decision.py
++++ b/app/decision.py
+@@ -8,4 +8,6 @@ def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
+     if not config.enabled:
+         return {"enabled": False, "reason": "disabled", "bucket": None}
+     bucket = stable_bucket(subject_id, config.salt)
+-    return {"enabled": bucket < config.percentage, "reason": "cohort", "bucket": bucket}
++    if bucket < config.percentage:
++        return {"enabled": True, "reason": "cohort", "bucket": bucket}
++    return {"enabled": False, "reason": "outside_cohort", "bucket": bucket}

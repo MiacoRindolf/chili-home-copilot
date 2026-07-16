@@ -1,0 +1,75 @@
+CHILI LIVE DEPLOY STATUS - READABLE COPY
+Generated: 2026-07-01
+
+Short answer
+------------
+Codex took over the deploy. The live scheduler is now running:
+
+  chili-app:main-clean-subagent-hotfix-20260701-035955
+  revision: subagent-hotfix-20260701-035955
+
+The scheduler container is running, not paused, and live-runner ticks were verified as phase=ok.
+
+
+What changed
+------------
+1. Deployed the subagent bundle work:
+   - Adaptive anticipation starter and event-driven remainder path.
+   - Replay v3 sizing/PnL harness updates.
+   - RVOL/volume pace math support.
+   - Ross setup audit artifact.
+   - Exit lifecycle improvements.
+
+2. Added a live-exit hotfix discovered during deploy validation:
+   - Equity exits outside the tradable window no longer submit market sells first.
+   - CHILI now records a deferred exit intent based on the market/session profile.
+   - Deferred exits with an old exit_order_id skip broker polling until the tradable window.
+   - Stale last_exit_submit_failed telemetry is cleared when the exit lifecycle becomes valid deferred.
+
+3. Disabled self-mutating code dispatch in the live scheduler:
+   - CHILI_DISPATCH_ENABLED=0
+   - CHILI_CODE_FRONTIER_ENABLED=0
+
+   Reason: the reactive code-brain loop rewrote source inside the production scheduler container after startup, causing import mismatches. Trading scheduler jobs still run.
+
+
+Validation
+----------
+Focused deploy suite:
+  57 passed, 65 deselected
+
+Verified live:
+  - Scheduler image is the new hotfix image.
+  - Container is running and not paused.
+  - live_runner imports successfully inside the container.
+  - Momentum live runner ticks are phase=ok.
+  - No repeated unauthorized get_order loop after the final hotfix.
+  - No repeated market-order submit loop while the equity is non-tradable.
+
+
+LGPS status
+-----------
+Session:
+  10125
+
+Final DB state:
+  symbol: LGPS
+  state: live_exited
+  last_exit_reason: operator_manual_sold_lgps
+  position: null
+  last_exit_submit_failed: blank
+
+
+Remaining operator caveat
+-------------------------
+Equity execution is configured for:
+  CHILI_EQUITY_EXECUTION_RAIL=robinhood_agentic_mcp
+
+That rail requires the local Robinhood Agentic token to be valid for new live equity orders. Earlier logs showed the token was missing or expired. The code/deploy side is healthy, but Agentic equity order execution still needs a valid local token.
+
+
+Files touched for the hotfix
+----------------------------
+  app/services/trading/momentum_neural/live_runner.py
+  tests/test_momentum_live_runner.py
+

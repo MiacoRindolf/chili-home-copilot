@@ -1,0 +1,19 @@
+{
+  "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-no-evidence-loses",
+  "case_id": "real-chili-runtime-control-no-evidence-loses",
+  "collected_at": "2026-07-10T14:12:09.467898Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 95.61933289997978,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Replay-guided runtime quarantine synthesized after the local model failed to keep restart/deploy prompts out of the repo-edit planner path.",
+  "patch_file": "real-chili-runtime-control-no-evidence-loses.patch",
+  "planned_file": "autopilot_prompt.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

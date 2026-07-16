@@ -1,0 +1,23 @@
+{
+  "attempts": 1,
+  "behavior_passed": true,
+  "changed_files": [
+    "app/model.py",
+    "app/service.py",
+    "app/store.py"
+  ],
+  "coordinated_files_changed": true,
+  "duration_seconds": 185.732,
+  "eligible": true,
+  "failure": "",
+  "model_events": [],
+  "model_name": "claude-fable-5",
+  "premium_calls": null,
+  "quality_score": 100,
+  "scope_valid": true,
+  "semantic_review_passed": true,
+  "source_kind": "claude",
+  "task_id": "idempotent-ledger-event",
+  "tests_unchanged": true,
+  "validation_output": "......                                                                   [100%]\n6 passed in 0.04s"
+}

@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -89,6 +90,18 @@ _TERMINAL_OPERATOR_STATES = frozenset(
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _lock_live_symbol_arm(db: Session, *, user_id: int, symbol: str) -> None:
+    """Serialize live arms for one user/symbol across auto-arm and event admission."""
+    try:
+        bind = db.get_bind()
+        if getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
+            return
+        key = f"momentum_live_arm:{int(user_id)}:{str(symbol or '').strip().upper()}"
+        db.execute(text("select pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
+    except Exception:
+        _log.debug("[operator_actions] live symbol advisory lock unavailable", exc_info=True)
 
 
 def _paper_promotion_gate(paper: TradingAutomationSession) -> tuple[bool, str]:
@@ -323,12 +336,12 @@ def begin_live_arm(
     from ..portfolio_allocator import build_session_allocation_decision
 
     sym = symbol.strip().upper()
+    _lock_live_symbol_arm(db, user_id=int(user_id), symbol=sym)
     existing = (
         db.query(TradingAutomationSession)
         .filter(
             TradingAutomationSession.user_id == int(user_id),
             TradingAutomationSession.symbol == sym,
-            TradingAutomationSession.variant_id == int(variant_id),
             TradingAutomationSession.mode == "live",
             TradingAutomationSession.state != STATE_ARCHIVED,
         )
@@ -345,7 +358,7 @@ def begin_live_arm(
                 "state": row.state,
                 "mode": row.mode,
                 "deduped": True,
-                "message": "Existing live automation session reused for this symbol/variant.",
+                "message": "Existing live automation session reused for this symbol.",
             }
     row = (
         db.query(MomentumSymbolViability)

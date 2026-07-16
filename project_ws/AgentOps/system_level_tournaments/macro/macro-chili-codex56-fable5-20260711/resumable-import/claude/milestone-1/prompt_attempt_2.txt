@@ -1,0 +1,275 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Resumable import evolution
+Current milestone: milestone-1
+Completed milestones: none
+Goal: Milestone 1/3. Repair the resumable import workflow across app/model.py, app/store.py, app/processor.py, and app/service.py. ImportItem validates nonblank item_id, positive sequence, and mapping payload. CheckpointStore tracks per-job monotonic checkpoints and processed ids. execute_handler invokes the handler. run_import validates strictly increasing unique sequences, processes in order, skips already completed items, checkpoints only after success, and returns processed, skipped, and checkpoint. Preserve ImportItem, CheckpointStore, execute_handler, run_import, and tests.
+Approved source files: app/model.py, app/processor.py, app/service.py, app/store.py
+
+Current repository snapshot:
+### app/model.py
+```python
+from collections.abc import Mapping as MappingABC
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ImportItem:
+    item_id: str
+    sequence: int
+    payload: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id.strip():
+            raise ValueError("item_id must be a nonblank string")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise ValueError("sequence must be a positive integer")
+        if self.sequence <= 0:
+            raise ValueError("sequence must be a positive integer")
+        if not isinstance(self.payload, MappingABC):
+            raise ValueError("payload must be a mapping")
+```
+
+### app/processor.py
+```python
+def execute_handler(item, handler):
+    return handler(item)
+```
+
+### app/service.py
+```python
+from app.processor import execute_handler
+
+
+def run_import(items, job_id, store, handler):
+    batch = list(items)
+
+    previous = None
+    for item in batch:
+        if previous is not None and item.sequence <= previous:
+            raise ValueError("item sequences must be strictly increasing and unique")
+        previous = item.sequence
+
+    processed = 0
+    skipped = 0
+    for item in batch:
+        already_done = store.is_processed(job_id, item.item_id) or (
+            item.sequence <= store.get_checkpoint(job_id)
+        )
+        if already_done:
+            skipped += 1
+            continue
+        execute_handler(item, handler)
+        store.mark_processed(job_id, item.item_id)
+        store.advance_checkpoint(job_id, item.sequence)
+        processed += 1
+
+    return {
+        "processed": processed,
+        "skipped": skipped,
+        "checkpoint": store.get_checkpoint(job_id),
+    }
+```
+
+### app/store.py
+```python
+from typing import Dict, Set
+
+
+class CheckpointStore:
+    """Tracks per-job monotonic checkpoints and processed item ids."""
+
+    def __init__(self) -> None:
+        self._checkpoints: Dict[str, int] = {}
+        self._processed: Dict[str, Set[str]] = {}
+
+    def get_checkpoint(self, job_id: str) -> int:
+        return self._checkpoints.get(job_id, 0)
+
+    def advance_checkpoint(self, job_id: str, sequence: int) -> int:
+        if sequence > self._checkpoints.get(job_id, 0):
+            self._checkpoints[job_id] = sequence
+        return self.get_checkpoint(job_id)
+
+    # Checkpoints are monotonic: a lower value never rewinds the watermark.
+    set_checkpoint = advance_checkpoint
+
+    def is_processed(self, job_id: str, item_id: str) -> bool:
+        return item_id in self._processed.get(job_id, set())
+
+    def mark_processed(self, job_id: str, item_id: str) -> None:
+        self._processed.setdefault(job_id, set()).add(item_id)
+
+    def processed_ids(self, job_id: str) -> Set[str]:
+        return set(self._processed.get(job_id, set()))
+```
+
+### tests/test_import_contract_m1.py
+```python
+from app.model import ImportItem
+from app.service import run_import
+from app.store import CheckpointStore
+
+
+def test_import_is_idempotent_and_checkpointed():
+    items = [ImportItem("a", 1, {}), ImportItem("b", 2, {})]
+    store = CheckpointStore()
+    seen = []
+    first = run_import(items, "job", store, lambda item: seen.append(item.item_id))
+    second = run_import(items, "job", store, lambda item: seen.append(item.item_id))
+    assert {key: first[key] for key in ("processed", "skipped", "checkpoint")} == {
+        "processed": 2, "skipped": 0, "checkpoint": 2
+    }
+    assert {key: second[key] for key in ("processed", "skipped", "checkpoint")} == {
+        "processed": 0, "skipped": 2, "checkpoint": 2
+    }
+    assert seen == ["a", "b"]
+```
+
+The previous attempt failed cumulative validation. Repair the current state using this evidence:
+validation failed: .FF                                                                      [100%]
+================================== FAILURES ===================================
+_________________ test_checkpoint_advances_only_after_success _________________
+    def test_checkpoint_advances_only_after_success():
+        store = CheckpointStore()
+        items = [ImportItem("a", 1, {}), ImportItem("b", 2, {})]
+        with pytest.raises(RuntimeError, match="stop"):
+            run_import(items, "job", store, lambda item: (_ for _ in ()).throw(RuntimeError("stop")) if item.item_id == "b" else None)
+>       assert store.checkpoint("job") == 1
+               ^^^^^^^^^^^^^^^^
+E       AttributeError: 'CheckpointStore' object has no attribute 'checkpoint'. Did you mean: 'get_checkpoint'?
+hidden_tests\test_import_m1_edges.py:13: AttributeError
+_____________________ test_out_of_order_batch_is_rejected _____________________
+    def test_out_of_order_batch_is_rejected():
+        with pytest.raises(ValueError, match="invalid import batch"):
+>           run_import([ImportItem("b", 2, {}), ImportItem("a", 1, {})], "job", CheckpointStore(), lambda item: None)
+hidden_tests\test_import_m1_edges.py:18:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+items = [ImportItem(item_id='b', sequence=2, payload={}), ImportItem(item_id='a', sequence=1, payload={})]
+job_id = 'job', store = <app.store.CheckpointStore object at 0x0000026653990910>
+handler = <function test_out_of_order_batch_is_rejected.<locals>.<lambda> at 0x00000266539877E0>
+    def run_import(items, job_id, store, handler):
+        batch = list(items)
+        previous = None
+        for item in batch:
+            if previous is not None and item.sequence <= previous:
+>               raise ValueError("item sequences must be strictly increasing and unique")
+E               ValueError: item sequences must be strictly increasing and unique
+app\service.py:10: ValueError
+During handling of the above exception, another exception occurred:
+    def test_out_of_order_batch_is_rejected():
+>       with pytest.raises(ValueError, match="invalid import batch"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'invalid import batch'
+E         Actual message: 'item sequences must be strictly increasing and unique'
+hidden_tests\test_import_m1_edges.py:17: AssertionError
+=========================== short test summary info ===========================
+FAILED hidden_tests/test_import_m1_edges.py::test_checkpoint_advances_only_after_success
+FAILED hidden_tests/test_import_m1_edges.py::test_out_of_order_batch_is_rejected
+2 failed, 1 passed in 0.11s
+
+Previous response:
+```diff
+diff --git a/app/model.py b/app/model.py
+--- a/app/model.py
++++ b/app/model.py
+@@ -1,9 +1,20 @@
++from collections.abc import Mapping as MappingABC
+ from dataclasses import dataclass
+ from typing import Any, Mapping
+ 
+ 
+ @dataclass(frozen=True)
+ class ImportItem:
+     item_id: str
+     sequence: int
+     payload: Mapping[str, Any]
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.item_id, str) or not self.item_id.strip():
++            raise ValueError("item_id must be a nonblank string")
++        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
++            raise ValueError("sequence must be a positive integer")
++        if self.sequence <= 0:
++            raise ValueError("sequence must be a positive integer")
++        if not isinstance(self.payload, MappingABC):
++            raise ValueError("payload must be a mapping")
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,4 +1,31 @@
++from app.processor import execute_handler
++
++
+ def run_import(items, job_id, store, handler):
+-    for item in items:
+-        handler(item)
+-    return {"processed": len(items)}
++    batch = list(items)
++
++    previous = None
++    for item in batch:
++        if previous is not None and item.sequence <= previous:
++            raise ValueError("item sequences must be strictly increasing and unique")
++        previous = item.sequence
++
++    processed = 0
++    skipped = 0
++    for item in batch:
++        already_done = store.is_processed(job_id, item.item_id) or (
++            item.sequence <= store.get_checkpoint(job_id)
++        )
++        if already_done:
++            skipped += 1
++            continue
++        execute_handler(item, handler)
++        store.mark_processed(job_id, item.item_id)
++        store.advance_checkpoint(job_id, item.sequence)
++        processed += 1
++
++    return {
++        "processed": processed,
++        "skipped": skipped,
++        "checkpoint": store.get_checkpoint(job_id),
++    }
+diff --git a/app/store.py b/app/store.py
+--- a/app/store.py
++++ b/app/store.py
+@@ -1,3 +1,29 @@
++from typing import Dict, Set
++
++
+ class CheckpointStore:
++    """Tracks per-job monotonic checkpoints and processed item ids."""
++
+     def __init__(self) -> None:
+-        self.value = 0
++        self._checkpoints: Dict[str, int] = {}
++        self._processed: Dict[str, Set[str]] = {}
++
++    def get_checkpoint(self, job_id: str) -> int:
++        return self._checkpoints.get(job_id, 0)
++
++    def advance_checkpoint(self, job_id: str, sequence: int) -> int:
++        if sequence > self._checkpoints.get(job_id, 0):
++            self._checkpoints[job_id] = sequence
++        return self.get_checkpoint(job_id)
++
++    # Checkpoints are monotonic: a lower value never rewinds the watermark.
++    set_checkpoint = advance_checkpoint
++
++    def is_processed(self, job_id: str, item_id: str) -> bool:
++        return item_id in self._processed.get(job_id, set())
++
++    def mark_processed(self, job_id: str, item_id: str) -> None:
++        self._processed.setdefault(job_id, set()).add(item_id)
++
++    def processed_ids(self, job_id: str) -> Set[str]:
++        return set(self._processed.get(job_id, set()))
+```

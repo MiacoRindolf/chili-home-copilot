@@ -1,0 +1,12 @@
+{
+  "model_name": "qwen2.5-coder:7b",
+  "prompt_pack_file": "prompt_pack.md",
+  "prompt_pack_sha256": "cf6365ea57141b504f3da89eddac6e1e17120b55e35a8fda3405bb908f26605f",
+  "raw_dir": "raw",
+  "recorded_at": "2026-07-10T12:19:57.657140Z",
+  "recorder": "autopilot_local_model_evidence_recorder",
+  "run_id": "local-qwen25-measured-probe-20260710-051006",
+  "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses)",
+  "source_kind": "local_model",
+  "transcript_file": "transcript.jsonl"
+}

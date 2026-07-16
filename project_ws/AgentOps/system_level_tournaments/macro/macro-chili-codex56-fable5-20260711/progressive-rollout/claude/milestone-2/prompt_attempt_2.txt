@@ -1,0 +1,306 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Progressive rollout evolution
+Current milestone: milestone-2
+Completed milestones: milestone-1
+Goal: Milestone 2/3. Evolve the existing workflow across app/config.py, app/cohort.py, app/decision.py, and app/service.py without regressing milestone 1. Add trimmed comma-separated allowlist and denylist fields to RolloutConfig; overlap is invalid. Decision precedence is denylist, global disabled, allowlist, then cohort. evaluate_request accepts an optional audit list and appends a non-secret decision record that never exposes salt. Preserve RolloutConfig, stable_bucket, decide_rollout, evaluate_request, and every prior test.
+Approved source files: app/cohort.py, app/config.py, app/decision.py, app/service.py
+
+Current repository snapshot:
+### app/cohort.py
+```python
+import hashlib
+
+
+def stable_bucket(subject_id: str, salt: str) -> int:
+    if not isinstance(subject_id, str) or not subject_id.strip():
+        raise ValueError("subject_id must be a non-empty string")
+    if not isinstance(salt, str) or not salt.strip():
+        raise ValueError("salt must be a non-empty string")
+    digest = hashlib.sha256(f"{salt}:{subject_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % 100
+```
+
+### app/config.py
+```python
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+_INVALID_CONFIG = "invalid rollout config"
+_TRUE_VALUES = frozenset({"true", "1"})
+_FALSE_VALUES = frozenset({"false", "0"})
+
+
+def _parse_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _TRUE_VALUES:
+            return True
+        if lowered in _FALSE_VALUES:
+            return False
+    raise ValueError(_INVALID_CONFIG)
+
+
+def _parse_percentage(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(_INVALID_CONFIG)
+    if isinstance(value, int):
+        percentage = value
+    elif isinstance(value, str):
+        try:
+            percentage = int(value.strip())
+        except ValueError:
+            raise ValueError(_INVALID_CONFIG) from None
+    else:
+        raise ValueError(_INVALID_CONFIG)
+    if not 0 <= percentage <= 100:
+        raise ValueError(_INVALID_CONFIG)
+    return percentage
+
+
+def _parse_salt(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(_INVALID_CONFIG)
+    return value
+
+
+def _parse_subject_list(value: Any) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, str):
+        raise ValueError(_INVALID_CONFIG)
+    entries = (entry.strip() for entry in value.split(","))
+    return frozenset(entry for entry in entries if entry)
+
+
+@dataclass(frozen=True)
+class RolloutConfig:
+    enabled: bool = False
+    percentage: int = 0
+    salt: str = ""
+    allowlist: frozenset[str] = frozenset()
+    denylist: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if frozenset(self.allowlist) & frozenset(self.denylist):
+            raise ValueError(_INVALID_CONFIG)
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
+        return cls(
+            enabled=_parse_enabled(values.get("ENABLED")),
+            percentage=_parse_percentage(values.get("PERCENTAGE")),
+            salt=_parse_salt(values.get("SALT")),
+            allowlist=_parse_subject_list(values.get("ALLOWLIST")),
+            denylist=_parse_subject_list(values.get("DENYLIST")),
+        )
+```
+
+### app/decision.py
+```python
+from typing import Any
+
+from app.cohort import stable_bucket
+from app.config import RolloutConfig
+
+
+def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
+    if subject_id in config.denylist:
+        return {"enabled": False, "reason": "denylist", "bucket": None}
+    if not config.enabled:
+        return {"enabled": False, "reason": "disabled", "bucket": None}
+    if subject_id in config.allowlist:
+        return {"enabled": True, "reason": "allowlist", "bucket": None}
+    bucket = stable_bucket(subject_id, config.salt)
+    if bucket < config.percentage:
+        return {"enabled": True, "reason": "cohort", "bucket": bucket}
+    return {"enabled": False, "reason": "outside_cohort", "bucket": bucket}
+```
+
+### app/service.py
+```python
+from typing import Any, Mapping, Optional
+
+from app.config import RolloutConfig
+from app.decision import decide_rollout
+
+
+def evaluate_request(
+    subject_id: str,
+    raw_config: Mapping[str, str],
+    audit: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    config = RolloutConfig.from_mapping(raw_config)
+    decision = decide_rollout(subject_id, config)
+    if audit is not None:
+        audit.append({"subject_id": subject_id, **decision})
+    return decision
+```
+
+### tests/test_rollout_contract_m1.py
+```python
+from app.cohort import stable_bucket
+from app.service import evaluate_request
+
+
+def test_rollout_is_stable_and_one_hundred_percent_enables():
+    raw = {"ENABLED": "true", "PERCENTAGE": "100", "SALT": "pepper"}
+    first = evaluate_request("acct-1", raw)
+    second = evaluate_request("acct-1", raw)
+    assert first == second
+    assert first["enabled"] is True
+    assert first["reason"] == "cohort"
+    assert first["bucket"] == stable_bucket("acct-1", "pepper")
+
+
+def test_disabled_rollout_has_no_bucket():
+    result = evaluate_request("acct-1", {"ENABLED": "false", "PERCENTAGE": "100", "SALT": "x"})
+    assert result["enabled"] is False
+    assert result["reason"] == "disabled"
+    assert result["bucket"] is None
+```
+
+### tests/test_rollout_contract_m2.py
+```python
+from app.service import evaluate_request
+
+
+def test_lists_have_explicit_precedence_and_audit_is_safe():
+    audit = []
+    raw = {
+        "ENABLED": "true",
+        "PERCENTAGE": "0",
+        "SALT": "secret-salt",
+        "ALLOWLIST": " allow ",
+        "DENYLIST": "deny",
+    }
+    assert evaluate_request("allow", raw, audit)["reason"] == "allowlist"
+    assert evaluate_request("deny", raw, audit)["reason"] == "denylist"
+    assert "secret-salt" not in repr(audit)
+```
+
+The previous attempt failed cumulative validation. Repair the current state using this evidence:
+validation failed: .........F                                                               [100%]
+================================== FAILURES ===================================
+___________________ test_global_disable_precedes_allowlist ____________________
+    def test_global_disable_precedes_allowlist():
+>       result = evaluate_request("vip", {"ENABLED": "false", "SALT": "x", "ALLOWLIST": "vip"})
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+hidden_tests\test_rollout_m2_edges.py:13:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\service.py:12: in evaluate_request
+    config = RolloutConfig.from_mapping(raw_config)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\config.py:69: in from_mapping
+    percentage=_parse_percentage(values.get("PERCENTAGE")),
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+value = None
+    def _parse_percentage(value: Any) -> int:
+        if isinstance(value, bool):
+            raise ValueError(_INVALID_CONFIG)
+        if isinstance(value, int):
+            percentage = value
+        elif isinstance(value, str):
+            try:
+                percentage = int(value.strip())
+            except ValueError:
+                raise ValueError(_INVALID_CONFIG) from None
+        else:
+>           raise ValueError(_INVALID_CONFIG)
+E           ValueError: invalid rollout config
+app\config.py:32: ValueError
+=========================== short test summary info ===========================
+FAILED hidden_tests/test_rollout_m2_edges.py::test_global_disable_precedes_allowlist
+1 failed, 9 passed in 0.13s
+
+Previous response:
+```diff
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -38,19 +38,36 @@
+ def _parse_salt(value: Any) -> str:
+     if not isinstance(value, str) or not value.strip():
+         raise ValueError(_INVALID_CONFIG)
+     return value
+ 
+ 
++def _parse_subject_list(value: Any) -> frozenset[str]:
++    if value is None:
++        return frozenset()
++    if not isinstance(value, str):
++        raise ValueError(_INVALID_CONFIG)
++    entries = (entry.strip() for entry in value.split(","))
++    return frozenset(entry for entry in entries if entry)
++
++
+ @dataclass(frozen=True)
+ class RolloutConfig:
+     enabled: bool = False
+     percentage: int = 0
+     salt: str = ""
++    allowlist: frozenset[str] = frozenset()
++    denylist: frozenset[str] = frozenset()
++
++    def __post_init__(self) -> None:
++        if frozenset(self.allowlist) & frozenset(self.denylist):
++            raise ValueError(_INVALID_CONFIG)
+ 
+     @classmethod
+     def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
+         return cls(
+             enabled=_parse_enabled(values.get("ENABLED")),
+             percentage=_parse_percentage(values.get("PERCENTAGE")),
+             salt=_parse_salt(values.get("SALT")),
++            allowlist=_parse_subject_list(values.get("ALLOWLIST")),
++            denylist=_parse_subject_list(values.get("DENYLIST")),
+         )
+diff --git a/app/decision.py b/app/decision.py
+--- a/app/decision.py
++++ b/app/decision.py
+@@ -4,10 +4,14 @@
+ from app.config import RolloutConfig
+ 
+ 
+ def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
++    if subject_id in config.denylist:
++        return {"enabled": False, "reason": "denylist", "bucket": None}
+     if not config.enabled:
+         return {"enabled": False, "reason": "disabled", "bucket": None}
++    if subject_id in config.allowlist:
++        return {"enabled": True, "reason": "allowlist", "bucket": None}
+     bucket = stable_bucket(subject_id, config.salt)
+     if bucket < config.percentage:
+         return {"enabled": True, "reason": "cohort", "bucket": bucket}
+     return {"enabled": False, "reason": "outside_cohort", "bucket": bucket}
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,9 +1,16 @@
+-from typing import Any, Mapping
++from typing import Any, Mapping, Optional
+ 
+ from app.config import RolloutConfig
+ from app.decision import decide_rollout
+ 
+ 
+-def evaluate_request(subject_id: str, raw_config: Mapping[str, str]) -> dict[str, Any]:
++def evaluate_request(
++    subject_id: str,
++    raw_config: Mapping[str, str],
++    audit: Optional[list[dict[str, Any]]] = None,
++) -> dict[str, Any]:
+     config = RolloutConfig.from_mapping(raw_config)
+-    return decide_rollout(subject_id, config)
++    decision = decide_rollout(subject_id, config)
++    if audit is not None:
++        audit.append({"subject_id": subject_id, **decision})
++    return decision
+```

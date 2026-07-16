@@ -47,12 +47,12 @@ SELF_TEST_EVIDENCE_MODE = "self_test"
 REAL_ARTIFACT_EVIDENCE_MODE = "real_artifacts"
 REQUIRED_SOURCE_KINDS = ("codex", "claude", "local_model")
 REQUIRED_FRONTIER_MODEL_TARGETS = {
-    "codex": ("gpt-5.5",),
-    "claude": ("opus-4.8", "opus-4-8"),
+    "codex": ("gpt-5.6-sol",),
+    "claude": ("fable-5",),
 }
 REQUIRED_FRONTIER_MODEL_LABELS = {
-    "codex": "gpt-5.5",
-    "claude": "opus-4.8",
+    "codex": "gpt-5.6-sol",
+    "claude": "fable-5",
 }
 MIN_CASES = 6
 SYNTHETIC_MARKERS = ("self-test", "self_test", "synthetic", "fixture", "deterministic", "mock")
@@ -107,12 +107,32 @@ class TournamentResult:
         return self.score >= TARGET_SCORE
 
     @property
+    def available_source_leader(self) -> TournamentCandidateResult | None:
+        passing = [result for result in self.candidate_results if result.passed]
+        if not passing:
+            return None
+        return min(passing, key=_rank_key)
+
+    @property
     def evidence(self) -> str:
         source_counts = ",".join(sorted({result.record.source_kind for result in self.candidate_results}))
         rejected = [
             result.evidence
             for result in self.candidate_results
             if not result.passed
+        ]
+        passed_examples = [
+            (
+                f"{result.evidence}@{result.record.candidate.duration_seconds:.3f}s"
+                f"/cost={result.record.candidate.cost_units:.3f}"
+            )
+            for result in self.candidate_results
+            if result.passed
+        ]
+        unmeasured_runtime = [
+            f"{result.record.source_kind}/{result.record.candidate.candidate_id}"
+            for result in self.candidate_results
+            if result.passed and not _candidate_has_measured_runtime(result.record.candidate)
         ]
         details = [
             f"reason={self.reason}",
@@ -128,6 +148,22 @@ class TournamentResult:
             )
             details.append(f"winner_duration={self.winner.record.candidate.duration_seconds:.2f}s")
             details.append(f"winner_cost={self.winner.record.candidate.cost_units:.2f}")
+        available_leader = self.available_source_leader
+        if available_leader and available_leader is not self.winner:
+            details.append(
+                "available_source_leader="
+                + f"{available_leader.record.source_kind}/{available_leader.record.candidate.candidate_id}"
+            )
+            details.append(
+                f"available_source_leader_duration={available_leader.record.candidate.duration_seconds:.2f}s"
+            )
+            details.append(
+                f"available_source_leader_cost={available_leader.record.candidate.cost_units:.2f}"
+            )
+        if passed_examples:
+            details.append("passed_examples=" + ";".join(passed_examples[:3]))
+        if unmeasured_runtime:
+            details.append("unmeasured_runtime=" + ";".join(unmeasured_runtime[:3]))
         if rejected:
             details.append("rejected_examples=" + ";".join(rejected[:3]))
         return "; ".join(details)
@@ -272,7 +308,7 @@ def default_artifact() -> dict[str, object]:
         codex = _synthetic_candidate_record(
             base,
             source_kind="codex",
-            model_name="codex-gpt-5.5-candidate",
+            model_name="codex-gpt-5.6-sol-candidate",
             patch_candidate=base.incumbent,
             duration_seconds=10.0,
             cost_units=10.0,
@@ -280,7 +316,7 @@ def default_artifact() -> dict[str, object]:
         claude = _synthetic_candidate_record(
             base,
             source_kind="claude",
-            model_name="claude-opus-4.8-candidate",
+            model_name="claude-fable-5-candidate",
             patch_candidate=base.incumbent,
             duration_seconds=8.0,
             cost_units=8.5,
@@ -324,7 +360,11 @@ def load_artifact(path: Path) -> dict[str, object]:
     return dict(_as_mapping(raw, label="artifact"))
 
 
-def tournament_cases_from_artifact(artifact: Mapping[str, object]) -> list[TournamentCase]:
+def tournament_cases_from_artifact(
+    artifact: Mapping[str, object],
+    *,
+    allow_empty: bool = False,
+) -> list[TournamentCase]:
     schema = artifact.get("schema")
     if schema != MODEL_CANDIDATE_TOURNAMENT_ARTIFACT_SCHEMA_VERSION:
         raise TournamentError(
@@ -332,7 +372,11 @@ def tournament_cases_from_artifact(artifact: Mapping[str, object]) -> list[Tourn
             f"{MODEL_CANDIDATE_TOURNAMENT_ARTIFACT_SCHEMA_VERSION}"
         )
     entries = artifact.get("entries")
-    if not isinstance(entries, list) or not entries:
+    if not isinstance(entries, list):
+        raise TournamentError("artifact.entries must be a non-empty list")
+    if not entries:
+        if allow_empty:
+            return []
         raise TournamentError("artifact.entries must be a non-empty list")
     base_cases = {case.case_id: case for case in real_chili_default_cases()}
     cases: list[TournamentCase] = []
@@ -425,7 +469,9 @@ def build_artifact_from_drops(
     missing = missing_comparison_classes([base_cases[str(entry["case_id"])] for entry in entries])
     if missing and not allow_partial:
         raise TournamentError("missing comparison classes: " + ", ".join(missing))
-    source_missing = missing_source_kinds(tournament_cases_from_artifact(artifact))
+    source_missing = missing_source_kinds(
+        tournament_cases_from_artifact(artifact, allow_empty=allow_partial)
+    )
     if source_missing and not allow_partial:
         raise TournamentError("missing source kinds: " + ", ".join(source_missing))
     return artifact
@@ -493,9 +539,48 @@ def tournament_evidence_mode(artifact: Mapping[str, object]) -> str:
     return SELF_TEST_EVIDENCE_MODE
 
 
-def _rank_key(result: TournamentCandidateResult) -> tuple[float, float, str]:
+def _candidate_has_measured_runtime(candidate: PatchCandidate) -> bool:
+    return candidate.duration_seconds > 0
+
+
+def runtime_measurement_counts(cases: Sequence[TournamentCase]) -> dict[str, int]:
+    counts = {"measured": 0, "unmeasured": 0}
+    for case in cases:
+        for candidate in case.candidates:
+            key = (
+                "measured"
+                if _candidate_has_measured_runtime(candidate.candidate)
+                else "unmeasured"
+            )
+            counts[key] += 1
+    return counts
+
+
+def available_source_leader_counts(results: Sequence[TournamentResult]) -> dict[str, int]:
+    counts: dict[str, int] = {"none": 0}
+    for result in results:
+        leader = result.available_source_leader
+        source_kind = leader.record.source_kind if leader else "none"
+        counts[source_kind] = counts.get(source_kind, 0) + 1
+    return counts
+
+
+def _source_counts_summary(counts: Mapping[str, int]) -> str:
+    preferred = ("local_model", "codex", "claude", "none")
+    ordered = [f"{source}={counts.get(source, 0)}" for source in preferred]
+    ordered.extend(
+        f"{source}={counts[source]}"
+        for source in sorted(counts)
+        if source not in preferred
+    )
+    return ", ".join(ordered)
+
+
+def _rank_key(result: TournamentCandidateResult) -> tuple[int, float, float, str]:
     candidate = result.record.candidate
-    return (candidate.duration_seconds, candidate.cost_units, candidate.candidate_id)
+    runtime_unmeasured = 0 if _candidate_has_measured_runtime(candidate) else 1
+    duration = candidate.duration_seconds if _candidate_has_measured_runtime(candidate) else float("inf")
+    return (runtime_unmeasured, duration, candidate.cost_units, candidate.candidate_id)
 
 
 def decide_tournament_case(case: TournamentCase) -> TournamentResult:
@@ -573,6 +658,8 @@ def render_scorecard(
         f"- Required frontier model targets: {frontier_model_targets_summary()}",
         f"- Missing source kinds: {', '.join(missing_source_kinds(cases)) or 'none'}",
         f"- Source kinds: {', '.join(source_kinds(cases)) or 'none'}",
+        f"- Runtime measurements: measured={runtime_measurement_counts(cases)['measured']}, unmeasured={runtime_measurement_counts(cases)['unmeasured']}",
+        f"- Available-source leader counts: {_source_counts_summary(available_source_leader_counts(results))}",
         f"- Required comparison classes: {', '.join(REQUIRED_COMPARISON_CLASSES)}",
         f"- Missing comparison classes: {', '.join(missing_comparison_classes([case.base_case for case in cases])) or 'none'}",
         "- Required behavior: multi-source model outputs must be judged on scoped behavior-tested outcomes, with unsafe or regressing candidates rejected before any winner is selected.",
@@ -626,8 +713,12 @@ def run_tournament_benchmark(
     if artifact_path:
         artifact = load_artifact(artifact_path)
     elif drop_dir:
+        if allow_partial and drop_dir.is_dir() and not any(drop_dir.rglob("*.json")):
+            drops = []
+        else:
+            drops = load_drops(drop_dir)
         artifact = build_artifact_from_drops(
-            load_drops(drop_dir),
+            drops,
             allow_partial=allow_partial,
             allow_fixture=allow_fixture,
             require_provenance=require_provenance,
@@ -635,7 +726,7 @@ def run_tournament_benchmark(
         )
     else:
         artifact = default_artifact()
-    cases = tournament_cases_from_artifact(artifact)
+    cases = tournament_cases_from_artifact(artifact, allow_empty=allow_partial)
     results = [decide_tournament_case(case) for case in cases]
     markdown = render_scorecard(artifact, cases, results)
     if write:
@@ -686,6 +777,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "cases": len(results),
                     "source_kinds": source_kinds(cases),
                     "missing_source_kinds": missing_source_kinds(cases),
+                    "runtime_measurements": runtime_measurement_counts(cases),
+                    "available_source_leader_counts": available_source_leader_counts(results),
                     "output": str(output_path),
                     "results": [
                         {
@@ -697,6 +790,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 else None
                             ),
                             "winner_source_kind": result.winner.record.source_kind if result.winner else None,
+                            "available_source_leader": (
+                                result.available_source_leader.record.candidate.candidate_id
+                                if result.available_source_leader
+                                else None
+                            ),
+                            "available_source_leader_source_kind": (
+                                result.available_source_leader.record.source_kind
+                                if result.available_source_leader
+                                else None
+                            ),
                             "score": result.score,
                             "reason": result.reason,
                             "evidence": result.evidence,

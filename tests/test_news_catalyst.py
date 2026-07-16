@@ -10,6 +10,8 @@ prefers explosive movers that ALSO just printed news.
 from __future__ import annotations
 
 import app.services.trading.momentum_neural.catalyst as cat
+from app.config import settings
+from app.services.trading.momentum_neural.risk_policy import catalyst_conviction_size_multiplier
 
 
 def test_news_catalyst_normalizes_and_dedupes(monkeypatch):
@@ -47,8 +49,10 @@ def test_all_catalyst_survives_one_feed_failing(monkeypatch):
 
 
 def test_news_catalyst_max_age_default():
-    # default 120 min freshness window (the documented knob, unset -> default)
+    # Preserve the pre-registry contract: adding a first-class Settings row must
+    # not silently shrink the catalyst window.
     assert cat._news_catalyst_max_age_min() == cat.NEWS_CATALYST_MAX_AGE_MIN == 120
+    assert settings.chili_momentum_news_catalyst_max_age_min == 120.0
 
 
 def test_news_catalyst_name_gets_viability_boost():
@@ -58,3 +62,26 @@ def test_news_catalyst_name_gets_viability_boost():
     assert cat.catalyst_viability_delta("MRVL", cat_syms) > 0
     assert cat.catalyst_viability_delta("ZZZZ", cat_syms) == 0.0
     assert cat.catalyst_viability_delta("BTC-USD", cat_syms) == 0.0
+
+
+def test_catalyst_grade_rank_strong_weak_fake_dominance(monkeypatch):
+    assert cat.catalyst_grade_rank("RVSN", strong_symbols={"RVSN"}) == 3
+    assert cat.catalyst_grade_rank("RVSN", strong_symbols={"RVSN"}, weak_symbols={"RVSN"}) == 0
+    assert cat.catalyst_grade_rank("RVSN", strong_symbols={"RVSN"}, fake_symbols={"RVSN"}) == 0
+    monkeypatch.setattr(cat, "all_catalyst_symbols", lambda: {"ASTC"})
+    assert cat.catalyst_grade_rank("ASTC") == 0
+    assert cat.catalyst_grade_rank("BTC-USD", strong_symbols={"BTC"}) == 0
+
+
+def test_catalyst_conviction_size_multiplier_uses_grade_rank_without_hard_block(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_catalyst_conviction_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_catalyst_conviction_step", 0.1)
+    monkeypatch.setattr(settings, "chili_momentum_catalyst_conviction_max_multiplier", 1.5)
+
+    strong_mult, strong_dbg = catalyst_conviction_size_multiplier("RVSN", strong_symbols={"RVSN"})
+    weak_mult, weak_dbg = catalyst_conviction_size_multiplier("RVSN", strong_symbols={"RVSN"}, weak_symbols={"RVSN"})
+
+    assert strong_mult == 1.3
+    assert strong_dbg["grade_rank"] == 3
+    assert weak_mult == 1.0
+    assert weak_dbg["grade_rank"] == 0

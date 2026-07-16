@@ -1,0 +1,131 @@
+{
+  "attempted_cases": 1,
+  "case_id": "all",
+  "case_ids": [
+    "real-chili-preflight-candidate-wins",
+    "real-chili-runtime-control-partial-loses",
+    "real-chili-startup-static-partial-loses",
+    "real-chili-broker-timeout-partial-loses",
+    "real-chili-runtime-control-no-evidence-loses",
+    "real-chili-runtime-control-unscoped-loses"
+  ],
+  "case_results": [
+    {
+      "attempts": [
+        {
+          "attempt": 1,
+          "duration_seconds": 62.42415419995086,
+          "prompt": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.prompt.md",
+          "repair": false,
+          "replay": {
+            "candidate_id": "local_model-extracted-candidate",
+            "changed_files": [],
+            "passed": false,
+            "reason": "apply_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "error: corrupt patch at line 6"
+          },
+          "response": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.response.txt",
+          "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        },
+        {
+          "attempt": 2,
+          "duration_seconds": 10.764800400007516,
+          "prompt": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.repair-1.prompt.md",
+          "repair": true,
+          "replay": {
+            "candidate_id": "local_model-extracted-candidate",
+            "changed_files": [],
+            "passed": false,
+            "reason": "apply_failed",
+            "score": 0,
+            "status": "failed",
+            "test_output": "error: corrupt patch at line 6"
+          },
+          "response": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.repair-1.response.txt",
+          "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md",
+          "status": "behavior_replay_failed",
+          "timeout_salvaged": false
+        }
+      ],
+      "case_id": "real-chili-preflight-candidate-wins",
+      "duration_seconds": 73.18895459995838,
+      "error": "apply_failed: error: corrupt patch at line 6",
+      "prompt": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.repair-1.prompt.md",
+      "replay": {
+        "candidate_id": "local_model-extracted-candidate",
+        "changed_files": [],
+        "passed": false,
+        "reason": "apply_failed",
+        "score": 0,
+        "status": "failed",
+        "test_output": "error: corrupt patch at line 6"
+      },
+      "replay_passed": false,
+      "replay_reason": "apply_failed",
+      "response": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.repair-1.response.txt",
+      "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md",
+      "status": "behavior_replay_failed",
+      "timeout_salvaged": false
+    },
+    {
+      "case_id": "real-chili-runtime-control-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-startup-static-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-broker-timeout-partial-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-runtime-control-no-evidence-loses",
+      "status": "pending"
+    },
+    {
+      "case_id": "real-chili-runtime-control-unscoped-loses",
+      "status": "pending"
+    }
+  ],
+  "cases": 6,
+  "compact_prompt_pack": "",
+  "diagnostics": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model\\suite_diagnostics.json",
+  "failed_case_id": "real-chili-preflight-candidate-wins",
+  "failure_reason": "real-chili-preflight-candidate-wins: apply_failed",
+  "failure_stage": "behavior_replay",
+  "full_prompt_pack": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\full_prompt_pack.md",
+  "generated_utc": "2026-07-10T12:51:13.768417Z",
+  "model_name": "qwen2.5-coder:7b",
+  "next_action": "Use the recovery route in suite_diagnostics.json to retry or import the failed local-model case, then rerun --all-cases after the failed case parses; otherwise import a stronger Codex/Claude all-cases response before publishing promotion scorecards.",
+  "parsed_cases": 1,
+  "permission_boundary": "local model suite diagnostics only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading",
+  "promotion_ready": false,
+  "prompt_pack": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\frontier_model_evidence_intake\\raw_sources\\local_model\\prompt_pack.md",
+  "ready_source_count_delta": 0,
+  "recovery_routes": [
+    {
+      "action_label": "Repair failed candidate with replay feedback",
+      "all_cases_retry_command": "python scripts/autopilot_local_model_candidate_runner.py --all-cases --model-name qwen2.5-coder:7b --timeout-seconds 360 --json",
+      "case_id": "real-chili-preflight-candidate-wins",
+      "import_response_command": "python scripts/autopilot_local_model_candidate_runner.py --case-id real-chili-preflight-candidate-wins --model-name qwen2.5-coder:7b --response-file <local-model-real-chili-preflight-candidate-wins-response.txt> --run-id <real-local-run-id> --source-command <exact-local-model-command> --json",
+      "permission_boundary": "local model diagnostics and evidence import only; no source/test edits, git/PR action, runtime restart, deployment, database migration, broker call, or live trading",
+      "prompt_path": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.repair-1.prompt.md",
+      "reason": "The local model produced a candidate, but CHILI replayed it and behavior checks failed.",
+      "response_path": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\cases\\real-chili-preflight-candidate-wins.repair-1.response.txt",
+      "retry_command": "python scripts/autopilot_local_model_candidate_runner.py --case-id real-chili-preflight-candidate-wins --model-name qwen2.5-coder:7b --timeout-seconds 360 --json",
+      "status": "available"
+    }
+  ],
+  "response": "C:\\Users\\rindo\\AppData\\Local\\Temp\\chili_local_model_candidate_suite_sz00qu4m\\model_response.txt",
+  "run_dir": "D:\\dev\\chili-home-copilot\\project_ws\\AgentOps\\local_model_candidate_runs\\local-qwen25-repair-dryrun-20260710-054952",
+  "run_id": "local-qwen25-repair-dryrun-20260710-054952",
+  "schema": "chili.local-model-candidate-runner.v1",
+  "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses)",
+  "status": "failed",
+  "write": false
+}

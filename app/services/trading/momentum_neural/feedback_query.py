@@ -59,6 +59,11 @@ def list_recent_momentum_outcomes(
 def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
     summary = r.extracted_summary_json if isinstance(r.extracted_summary_json, dict) else {}
     credit = summary.get("evolution_credit") if isinstance(summary.get("evolution_credit"), dict) else {}
+    process_adherence = (
+        summary.get("process_adherence")
+        if isinstance(summary.get("process_adherence"), dict)
+        else {}
+    )
     regrade = (
         summary.get("evolution_credit_regrade_v1")
         if isinstance(summary.get("evolution_credit_regrade_v1"), dict)
@@ -82,6 +87,10 @@ def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
         "contributes_to_evolution": bool(r.contributes_to_evolution),
         "evolution_credit": credit,
         "evolution_credit_reason_codes": list(credit.get("reason_codes") or []),
+        "process_adherence": process_adherence,
+        "process_adherence_label": process_adherence.get("label"),
+        "process_adherence_score": process_adherence.get("score"),
+        "process_adherence_violations": list(process_adherence.get("violations") or []),
         "evolution_credit_regrade": regrade,
         "evolution_ingest": ingest,
         "reingest_required": _reingest_required(r),
@@ -110,6 +119,144 @@ def _credit_rate(credited: int, total: int) -> float | None:
     if total <= 0:
         return None
     return round(float(credited) / float(total), 4)
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
+def _avg(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / float(len(values)), 6)
+
+
+def process_adherence_diagnostic(
+    db: Session,
+    *,
+    days: int = 30,
+    user_id: Optional[int] = None,
+    mode: Optional[str] = None,
+    execution_family: Optional[str] = None,
+    limit: int = 1000,
+) -> dict[str, Any]:
+    """Read-only process-vs-outcome diagnostic; never gates live entries.
+
+    This is the calibration step before any future Ross/RH101 process-based risk
+    consumer. It self-normalizes by comparing observed process buckets in the same
+    query window and reports evidence balance instead of a fixed sample threshold.
+    """
+    out: dict[str, Any] = {
+        "table_present": momentum_outcomes_table_present(db),
+        "window_days": max(1, int(days)),
+        "enablement_gate": False,
+        "claim_gate": True,
+        "total": 0,
+        "with_process_adherence": 0,
+        "missing_process_adherence": 0,
+        "label_buckets": [],
+        "violation_counts": [],
+        "evidence_balance": None,
+        "diagnostic_status": "table_missing",
+    }
+    if not out["table_present"]:
+        return out
+
+    since = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    q = (
+        db.query(MomentumAutomationOutcome)
+        .filter(MomentumAutomationOutcome.terminal_at >= since)
+        .order_by(MomentumAutomationOutcome.terminal_at.desc(), MomentumAutomationOutcome.id.desc())
+    )
+    if user_id is not None:
+        q = q.filter(MomentumAutomationOutcome.user_id == int(user_id))
+    if mode:
+        q = q.filter(MomentumAutomationOutcome.mode == mode.lower().strip())
+    if execution_family:
+        q = q.filter(MomentumAutomationOutcome.execution_family == execution_family.strip().lower())
+
+    rows = q.limit(max(1, min(int(limit), 5000))).all()
+    out["total"] = len(rows)
+    buckets: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "count": 0,
+            "scores": [],
+            "return_bps": [],
+            "realized_pnl_usd": [],
+            "wins": 0,
+            "losses": 0,
+        }
+    )
+    violation_counts: Counter[str] = Counter()
+    missing = 0
+
+    for row in rows:
+        summary = row.extracted_summary_json if isinstance(row.extracted_summary_json, dict) else {}
+        process = summary.get("process_adherence") if isinstance(summary.get("process_adherence"), dict) else {}
+        label = str(process.get("label") or "").strip() if process else ""
+        if not label:
+            missing += 1
+            continue
+        bucket = buckets[label]
+        bucket["count"] += 1
+        score = _finite_number(process.get("score"))
+        if score is not None:
+            bucket["scores"].append(score)
+        rbps = _finite_number(row.return_bps)
+        pnl = _finite_number(row.realized_pnl_usd)
+        if rbps is not None:
+            bucket["return_bps"].append(rbps)
+            if rbps > 0:
+                bucket["wins"] += 1
+            elif rbps < 0:
+                bucket["losses"] += 1
+        elif pnl is not None:
+            if pnl > 0:
+                bucket["wins"] += 1
+            elif pnl < 0:
+                bucket["losses"] += 1
+        if pnl is not None:
+            bucket["realized_pnl_usd"].append(pnl)
+        for violation in process.get("violations") or []:
+            if str(violation):
+                violation_counts[str(violation)] += 1
+
+    total_with_process = sum(int(b["count"]) for b in buckets.values())
+    out["with_process_adherence"] = total_with_process
+    out["missing_process_adherence"] = missing
+    bucket_rows: list[dict[str, Any]] = []
+    for label, data in sorted(buckets.items(), key=lambda kv: (-int(kv[1]["count"]), kv[0])):
+        decisive = int(data["wins"]) + int(data["losses"])
+        bucket_rows.append(
+            {
+                "label": label,
+                "count": int(data["count"]),
+                "share": round(int(data["count"]) / float(total_with_process), 6) if total_with_process else None,
+                "avg_score": _avg(data["scores"]),
+                "avg_return_bps": _avg(data["return_bps"]),
+                "avg_realized_pnl_usd": _avg(data["realized_pnl_usd"]),
+                "win_rate": round(int(data["wins"]) / float(decisive), 6) if decisive else None,
+                "decisive_outcomes": decisive,
+            }
+        )
+    out["label_buckets"] = bucket_rows
+    out["violation_counts"] = [
+        {"violation": key, "count": count}
+        for key, count in sorted(violation_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    if bucket_rows:
+        counts = [int(row["count"]) for row in bucket_rows if int(row["count"]) > 0]
+        out["evidence_balance"] = (
+            round(min(counts) / float(max(counts)), 6) if counts and max(counts) > 0 else None
+        )
+        out["diagnostic_status"] = "ready" if len(bucket_rows) >= 2 else "single_process_bucket"
+    else:
+        out["diagnostic_status"] = "missing_process_adherence"
+    return out
 
 
 def _regrade_payload(row: MomentumAutomationOutcome) -> dict[str, Any]:

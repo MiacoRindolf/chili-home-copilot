@@ -1,0 +1,19 @@
+{
+  "candidate_id": "codex-real-chili-startup-static-partial-loses",
+  "case_id": "real-chili-startup-static-partial-loses",
+  "collected_at": "2026-07-10T20:57:31.127033Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contracts.py -q"
+  ],
+  "duration_seconds": 19.791736799999853,
+  "expected_changed_files": [
+    "startup_contracts.py"
+  ],
+  "model_name": "gpt-5.6-sol",
+  "notes": "Register the required CSS asset in the startup manifest.",
+  "patch_file": "real-chili-startup-static-partial-loses.patch",
+  "planned_file": "startup_contracts.py",
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "codex"
+}

@@ -1,0 +1,101 @@
+{
+  "attempts": 2,
+  "behavior_passed": false,
+  "changed_files": [
+    "app/paging.py",
+    "app/query.py"
+  ],
+  "coordinated_files_changed": false,
+  "duration_seconds": 369.619,
+  "eligible": false,
+  "failure": "validation failed: FFFFF.F                                                                  [100%]\n================================== FAILURES ===================================\n__________________________ test_default_page_is_one ___________________________\n    def test_default_page_is_one():\n>       assert parse_page(None) == 1\n               ^^^^^^^^^^^^^^^^\ntests\\test_paging.py:6:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nraw = None\n    def parse_page(raw: str | None) -> int:\n        if raw is None:\n>           raise ValueError('page must be a positive integer')\nE           ValueError: page must be a positive integer\napp\\query.py:3: ValueError\n__________________ test_second_page_has_navigation_metadata ___________________\n    def test_second_page_has_navigation_metadata():\n        result = build_page([1, 2, 3, 4, 5], \"2\", 2)\n>       assert result == {\n            \"page\": 2,\n            \"items\": [3, 4],\n            \"has_next\": True,\n            \"next_page\": 3,\n        }\nE       AssertionError: assert {'items': [3, 4], 'page': 2} == {'has_next': ... 3, 'page': 2}\nE\nE         Omitting 2 identical items, use -vv to show\nE         Right contains 2 more items:\nE         {'has_next': True, 'next_page': 3}\nE         Use -v to get more diff\ntests\\test_paging.py:12: AssertionError\n________________________ test_bad_pages_fail_closed[0] ________________________\nraw = '0'\n    @pytest.mark.parametrize(\"raw\", [\"0\", \"-2\", \"abc\"])\n    def test_bad_pages_fail_closed(raw):\n>       with pytest.raises(ValueError, match=\"page must be a positive integer\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE <class 'ValueError'>\nhidden_tests\\test_paging_edges.py:10: Failed\n______________________",
+  "model_events": [
+    {
+      "error": "",
+      "latency_ms": 29836,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 25191,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 31185,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 33023,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 31657,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 10899,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 33432,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 29552,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 22758,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 43231,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 26305,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 29521,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    },
+    {
+      "error": "",
+      "latency_ms": 17054,
+      "model": "qwen2.5-coder:7b",
+      "ok": true
+    }
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "premium_calls": 0,
+  "quality_score": 20,
+  "scope_valid": true,
+  "semantic_review_passed": false,
+  "source_kind": "local_model",
+  "task_id": "one-based-page-envelope",
+  "tests_unchanged": true,
+  "validation_output": "___________\nraw = 'abc'\n    @pytest.mark.parametrize(\"raw\", [\"0\", \"-2\", \"abc\"])\n    def test_bad_pages_fail_closed(raw):\n        with pytest.raises(ValueError, match=\"page must be a positive integer\"):\n>           parse_page(raw)\nhidden_tests\\test_paging_edges.py:11:\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _\nraw = 'abc'\n    def parse_page(raw: str | None) -> int:\n        if raw is None:\n            raise ValueError('page must be a positive integer')\n>       return int(raw)\n               ^^^^^^^^\nE       ValueError: invalid literal for int() with base 10: 'abc'\napp\\query.py:4: ValueError\nDuring handling of the above exception, another exception occurred:\nraw = 'abc'\n    @pytest.mark.parametrize(\"raw\", [\"0\", \"-2\", \"abc\"])\n    def test_bad_pages_fail_closed(raw):\n>       with pytest.raises(ValueError, match=\"page must be a positive integer\"):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AssertionError: Regex pattern did not match.\nE        Regex: 'page must be a positive integer'\nE        Input: \"invalid literal for int() with base 10: 'abc'\"\nhidden_tests\\test_paging_edges.py:10: AssertionError\n_______________________ test_last_page_has_no_next_page _______________________\n    def test_last_page_has_no_next_page():\n>       assert build_page([1, 2, 3], \"2\", 2) == {\n            \"page\": 2,\n            \"items\": [3],\n            \"has_next\": False,\n            \"next_page\": None,\n        }\nE       AssertionError: assert {'items': [3], 'page': 2} == {'has_next': ...ne, 'page': 2}\nE\nE         Omitting 2 identical items, use -vv to show\nE         Right contains 2 more items:\nE         {'has_next': False, 'next_page': None}\nE         Use -v to get more diff\nhidden_tests\\test_paging_edges.py:20: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_paging.py::test_default_page_is_one - ValueError: page must...\nFAILED tests/test_paging.py::test_second_page_has_navigation_metadata - Asser...\nFAILED hidden_tests/test_paging_edges.py::test_bad_pages_fail_closed[0] - Fai...\nFAILED hidden_tests/test_paging_edges.py::test_bad_pages_fail_closed[-2] - Fa...\nFAILED hidden_tests/test_paging_edges.py::test_bad_pages_fail_closed[abc] - A...\nFAILED hidden_tests/test_paging_edges.py::test_last_page_has_no_next_page - A...\n6 failed, 1 passed in 0.12s"
+}

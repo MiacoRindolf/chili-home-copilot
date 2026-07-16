@@ -1,0 +1,471 @@
+You are competing in a measured long-horizon repository evolution tournament.
+Return one applicable unified diff only, preferably in a ```diff fence.
+Do not edit tests, add dependencies, use placeholders, or touch files outside the approved source files.
+Preserve all behavior and tests from prior milestones; this repository is the durable workflow state.
+Held-out tests are not shown and will be cumulative.
+
+Project: Resumable import evolution
+Current milestone: milestone-3
+Completed milestones: milestone-1, milestone-2
+Goal: Milestone 3/3. Finish the import workflow across app/model.py, app/store.py, app/processor.py, and app/service.py while preserving milestones 1 and 2. CheckpointStore must provide owner leases with expiry, stale takeover, and owner-only release. run_import accepts owner, now, and positive lease_ttl, fails with RuntimeError('import lease unavailable') on an active foreign lease, always releases its own lease, and appends payload-free audit summaries. Preserve ImportItem, CheckpointStore, execute_handler, run_import, and all tests.
+Approved source files: app/model.py, app/processor.py, app/service.py, app/store.py
+
+Current repository snapshot:
+### app/model.py
+```python
+from collections.abc import Mapping as MappingABC
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ImportItem:
+    item_id: str
+    sequence: int
+    payload: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id.strip():
+            raise ValueError("item_id must be a nonblank string")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise ValueError("sequence must be a positive integer")
+        if self.sequence <= 0:
+            raise ValueError("sequence must be a positive integer")
+        if not isinstance(self.payload, MappingABC):
+            raise ValueError("payload must be a mapping")
+```
+
+### app/processor.py
+```python
+import time
+
+
+class TransientImportError(Exception):
+    """Failure that may succeed if the same item is attempted again."""
+
+
+class PermanentImportError(Exception):
+    """Failure that will never succeed; the item is dead-lettered instead."""
+
+
+def execute_handler(item, handler, max_attempts=3, sleep=None):
+    """Invoke ``handler(item)``, retrying transient failures.
+
+    Only ``TransientImportError`` is retried, up to ``max_attempts`` total
+    attempts, sleeping exponentially (1, 2, 4, ... seconds) between
+    attempts. Returns the number of retries performed (0 when the first
+    attempt succeeds). An exhausted transient failure is re-raised; any
+    other exception (including ``PermanentImportError``) propagates
+    immediately.
+    """
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+        raise ValueError("max_attempts must be a positive integer")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be a positive integer")
+    if sleep is None:
+        sleep = time.sleep
+
+    retries = 0
+    while True:
+        try:
+            handler(item)
+            return retries
+        except TransientImportError:
+            if retries + 1 >= max_attempts:
+                raise
+            sleep(float(2 ** retries))
+            retries += 1
+```
+
+### app/service.py
+```python
+import time
+
+from app.processor import PermanentImportError, execute_handler
+
+
+def run_import(
+    items,
+    job_id,
+    store,
+    handler,
+    max_attempts=3,
+    sleep=None,
+    owner="importer",
+    now=None,
+    lease_ttl=60.0,
+):
+    if not isinstance(owner, str) or not owner.strip():
+        raise ValueError("owner must be a nonblank string")
+    if (
+        isinstance(lease_ttl, bool)
+        or not isinstance(lease_ttl, (int, float))
+        or lease_ttl <= 0
+    ):
+        raise ValueError("lease_ttl must be a positive number")
+    if now is None:
+        now = time.time()
+
+    if not store.acquire(job_id, owner, now, lease_ttl):
+        raise RuntimeError("import lease unavailable")
+    try:
+        batch = list(items)
+
+        previous = None
+        for item in batch:
+            if previous is not None and item.sequence <= previous:
+                raise ValueError(
+                    "invalid import batch: sequences must be strictly increasing and unique"
+                )
+            previous = item.sequence
+
+        processed = 0
+        skipped = 0
+        retried = 0
+        dead_lettered = 0
+        for item in batch:
+            already_done = store.is_processed(job_id, item.item_id) or (
+                item.sequence <= store.get_checkpoint(job_id)
+            )
+            if already_done:
+                skipped += 1
+                continue
+            try:
+                retried += execute_handler(
+                    item, handler, max_attempts=max_attempts, sleep=sleep
+                )
+            except PermanentImportError as exc:
+                # A poison item advances the checkpoint so resumes never replay
+                # it; the dead letter keeps ids and reason, never the payload.
+                store.add_dead_letter(job_id, item.item_id, str(exc))
+                store.advance_checkpoint(job_id, item.sequence)
+                dead_lettered += 1
+                continue
+            store.mark_processed(job_id, item.item_id)
+            store.advance_checkpoint(job_id, item.sequence)
+            processed += 1
+
+        summary = {
+            "processed": processed,
+            "skipped": skipped,
+            "checkpoint": store.get_checkpoint(job_id),
+            "retried": retried,
+            "dead_lettered": dead_lettered,
+            "status": "completed",
+            "owner": owner,
+        }
+        # Audit summaries keep the run's counters and status, never payloads.
+        store.add_audit(job_id, summary)
+        return summary
+    finally:
+        # The run's own lease is always dropped, even when the batch or the
+        # handler raises; release is owner-scoped, so a takeover is safe.
+        store.release(job_id, owner)
+```
+
+### app/store.py
+```python
+from typing import Any, Dict, List, Set
+
+
+class CheckpointStore:
+    """Tracks per-job monotonic checkpoints, processed ids, and dead letters."""
+
+    def __init__(self) -> None:
+        self._checkpoints: Dict[str, int] = {}
+        self._processed: Dict[str, Set[str]] = {}
+        self.dead_letters: List[Dict[str, str]] = []
+        self.leases: Dict[str, Dict[str, Any]] = {}
+        self.audit_log: List[Dict[str, Any]] = []
+
+    def get_checkpoint(self, job_id: str) -> int:
+        return self._checkpoints.get(job_id, 0)
+
+    def checkpoint(self, job_id: str) -> int:
+        return self.get_checkpoint(job_id)
+
+    def advance_checkpoint(self, job_id: str, sequence: int) -> int:
+        if sequence > self._checkpoints.get(job_id, 0):
+            self._checkpoints[job_id] = sequence
+        return self.get_checkpoint(job_id)
+
+    # Checkpoints are monotonic: a lower value never rewinds the watermark.
+    set_checkpoint = advance_checkpoint
+
+    def is_processed(self, job_id: str, item_id: str) -> bool:
+        return item_id in self._processed.get(job_id, set())
+
+    def mark_processed(self, job_id: str, item_id: str) -> None:
+        self._processed.setdefault(job_id, set()).add(item_id)
+
+    def processed_ids(self, job_id: str) -> Set[str]:
+        return set(self._processed.get(job_id, set()))
+
+    def add_dead_letter(self, job_id: str, item_id: str, reason: str) -> None:
+        # Dead letters intentionally never include the item payload.
+        self.dead_letters.append(
+            {"job_id": job_id, "item_id": item_id, "reason": reason}
+        )
+
+    def acquire(self, job_id: str, owner: str, now: float, ttl: float) -> bool:
+        """Lease the job to ``owner`` until ``now + ttl``.
+
+        Returns True when granted: an unexpired lease held by another
+        owner blocks acquisition, an expired (stale) lease is taken
+        over, and the current owner may re-acquire to renew its expiry.
+        """
+        lease = self.leases.get(job_id)
+        if lease is not None and lease["owner"] != owner and now < lease["expires_at"]:
+            return False
+        self.leases[job_id] = {"owner": owner, "expires_at": now + ttl}
+        return True
+
+    def release(self, job_id: str, owner: str) -> bool:
+        """Drop the job lease, but only when ``owner`` still holds it."""
+        lease = self.leases.get(job_id)
+        if lease is None or lease["owner"] != owner:
+            return False
+        del self.leases[job_id]
+        return True
+
+    def add_audit(self, job_id: str, summary: Dict[str, Any]) -> None:
+        # Audit summaries keep ids, counters, and status, never payloads.
+        self.audit_log.append({"job_id": job_id, **summary})
+```
+
+### tests/test_import_contract_m1.py
+```python
+from app.model import ImportItem
+from app.service import run_import
+from app.store import CheckpointStore
+
+
+def test_import_is_idempotent_and_checkpointed():
+    items = [ImportItem("a", 1, {}), ImportItem("b", 2, {})]
+    store = CheckpointStore()
+    seen = []
+    first = run_import(items, "job", store, lambda item: seen.append(item.item_id))
+    second = run_import(items, "job", store, lambda item: seen.append(item.item_id))
+    assert {key: first[key] for key in ("processed", "skipped", "checkpoint")} == {
+        "processed": 2, "skipped": 0, "checkpoint": 2
+    }
+    assert {key: second[key] for key in ("processed", "skipped", "checkpoint")} == {
+        "processed": 0, "skipped": 2, "checkpoint": 2
+    }
+    assert seen == ["a", "b"]
+```
+
+### tests/test_import_contract_m2.py
+```python
+from app.model import ImportItem
+from app.processor import PermanentImportError, TransientImportError
+from app.service import run_import
+from app.store import CheckpointStore
+
+
+def test_retry_and_dead_letter_are_bounded():
+    store = CheckpointStore()
+    attempts = {"a": 0}
+    sleeps = []
+
+    def handler(item):
+        if item.item_id == "a":
+            attempts["a"] += 1
+            if attempts["a"] == 1:
+                raise TransientImportError("later")
+        if item.item_id == "b":
+            raise PermanentImportError("bad row")
+
+    result = run_import(
+        [ImportItem("a", 1, {}), ImportItem("b", 2, {"secret": 1})],
+        "job", store, handler, sleep=sleeps.append
+    )
+    assert {key: result[key] for key in ("processed", "skipped", "checkpoint", "retried", "dead_lettered")} == {
+        "processed": 1, "skipped": 0, "checkpoint": 2, "retried": 1, "dead_lettered": 1
+    }
+    assert sleeps == [1.0]
+    assert store.dead_letters == [{"job_id": "job", "item_id": "b", "reason": "bad row"}]
+```
+
+### tests/test_import_contract_m3.py
+```python
+import pytest
+
+from app.model import ImportItem
+from app.service import run_import
+from app.store import CheckpointStore
+
+
+def test_active_foreign_lease_blocks_and_stale_lease_is_taken_over():
+    store = CheckpointStore()
+    assert store.acquire("job", "old", 0.0, 10.0) is True
+    with pytest.raises(RuntimeError, match="import lease unavailable"):
+        run_import([], "job", store, lambda item: None, owner="new", now=5.0)
+    result = run_import([ImportItem("a", 1, {})], "job", store, lambda item: None, owner="new", now=11.0)
+    assert result["status"] == "completed"
+    assert result["owner"] == "new"
+    assert "job" not in store.leases
+```
+
+The previous attempt failed cumulative validation. Repair the current state using this evidence:
+validation failed: ......F                                                                  [100%]
+================================== FAILURES ===================================
+________ test_audit_is_summary_only_and_resume_skips_checkpointed_rows ________
+    def test_audit_is_summary_only_and_resume_skips_checkpointed_rows():
+        store = CheckpointStore()
+        item = ImportItem("a", 1, {"password": "secret"})
+        run_import([item], "job", store, lambda value: None, owner="one", now=0.0)
+        run_import([item], "job", store, lambda value: None, owner="two", now=1.0)
+>       assert "secret" not in repr(store.audit)
+                                    ^^^^^^^^^^^
+E       AttributeError: 'CheckpointStore' object has no attribute 'audit'
+hidden_tests\test_import_m3_edges.py:11: AttributeError
+=========================== short test summary info ===========================
+FAILED hidden_tests/test_import_m3_edges.py::test_audit_is_summary_only_and_resume_skips_checkpointed_rows
+1 failed, 6 passed in 1.10s
+
+Previous response:
+     """Drop the job lease, but only when ``owner`` still holds it."""
++        lease = self.leases.get(job_id)
++        if lease is None or lease["owner"] != owner:
++            return False
++        del self.leases[job_id]
++        return True
++
++    def add_audit(self, job_id: str, summary: Dict[str, Any]) -> None:
++        # Audit summaries keep ids, counters, and status, never payloads.
++        self.audit_log.append({"job_id": job_id, **summary})
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,47 +1,82 @@
+-from app.processor import PermanentImportError, execute_handler
+-
+-
+-def run_import(items, job_id, store, handler, max_attempts=3, sleep=None):
+-    batch = list(items)
+-
+-    previous = None
+-    for item in batch:
+-        if previous is not None and item.sequence <= previous:
+-            raise ValueError(
+-                "invalid import batch: sequences must be strictly increasing and unique"
+-            )
+-        previous = item.sequence
+-
+-    processed = 0
+-    skipped = 0
+-    retried = 0
+-    dead_lettered = 0
+-    for item in batch:
+-        already_done = store.is_processed(job_id, item.item_id) or (
+-            item.sequence <= store.get_checkpoint(job_id)
+-        )
+-        if already_done:
+-            skipped += 1
+-            continue
+-        try:
+-            retried += execute_handler(
+-                item, handler, max_attempts=max_attempts, sleep=sleep
+-            )
+-        except PermanentImportError as exc:
+-            # A poison item advances the checkpoint so resumes never replay
+-            # it; the dead letter keeps ids and reason, never the payload.
+-            store.add_dead_letter(job_id, item.item_id, str(exc))
+-            store.advance_checkpoint(job_id, item.sequence)
+-            dead_lettered += 1
+-            continue
+-        store.mark_processed(job_id, item.item_id)
+-        store.advance_checkpoint(job_id, item.sequence)
+-        processed += 1
+-
+-    return {
+-        "processed": processed,
+-        "skipped": skipped,
+-        "checkpoint": store.get_checkpoint(job_id),
+-        "retried": retried,
+-        "dead_lettered": dead_lettered,
+-    }
++import time
++
++from app.processor import PermanentImportError, execute_handler
++
++
++def run_import(
++    items,
++    job_id,
++    store,
++    handler,
++    max_attempts=3,
++    sleep=None,
++    owner="importer",
++    now=None,
++    lease_ttl=60.0,
++):
++    if not isinstance(owner, str) or not owner.strip():
++        raise ValueError("owner must be a nonblank string")
++    if (
++        isinstance(lease_ttl, bool)
++        or not isinstance(lease_ttl, (int, float))
++        or lease_ttl <= 0
++    ):
++        raise ValueError("lease_ttl must be a positive number")
++    if now is None:
++        now = time.time()
++
++    if not store.acquire(job_id, owner, now, lease_ttl):
++        raise RuntimeError("import lease unavailable")
++    try:
++        batch = list(items)
++
++        previous = None
++        for item in batch:
++            if previous is not None and item.sequence <= previous:
++                raise ValueError(
++                    "invalid import batch: sequences must be strictly increasing and unique"
++                )
++            previous = item.sequence
++
++        processed = 0
++        skipped = 0
++        retried = 0
++        dead_lettered = 0
++        for item in batch:
++            already_done = store.is_processed(job_id, item.item_id) or (
++                item.sequence <= store.get_checkpoint(job_id)
++            )
++            if already_done:
++                skipped += 1
++                continue
++            try:
++                retried += execute_handler(
++                    item, handler, max_attempts=max_attempts, sleep=sleep
++                )
++            except PermanentImportError as exc:
++                # A poison item advances the checkpoint so resumes never replay
++                # it; the dead letter keeps ids and reason, never the payload.
++                store.add_dead_letter(job_id, item.item_id, str(exc))
++                store.advance_checkpoint(job_id, item.sequence)
++                dead_lettered += 1
++                continue
++            store.mark_processed(job_id, item.item_id)
++            store.advance_checkpoint(job_id, item.sequence)
++            processed += 1
++
++        summary = {
++            "processed": processed,
++            "skipped": skipped,
++            "checkpoint": store.get_checkpoint(job_id),
++            "retried": retried,
++            "dead_lettered": dead_lettered,
++            "status": "completed",
++            "owner": owner,
++        }
++        # Audit summaries keep the run's counters and status, never payloads.
++        store.add_audit(job_id, summary)
++        return summary
++    finally:
++        # The run's own lease is always dropped, even when the batch or the
++        # handler raises; release is owner-scoped, so a takeover is safe.
++        store.release(job_id, owner)
+```

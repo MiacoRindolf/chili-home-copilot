@@ -1,0 +1,110 @@
+[
+  {
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex",
+    "model_name": "gpt-5.5",
+    "case_id": "real-chili-preflight-candidate-wins",
+    "candidate_id": "codex-real-chili-preflight-candidate-wins",
+    "planned_file": "preflight.py",
+    "expected_changed_files": [
+      "preflight.py"
+    ],
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+    ],
+    "duration_seconds": 8.0,
+    "cost_units": 8.5,
+    "patch": "diff --git a/preflight.py b/preflight.py\n--- a/preflight.py\n+++ b/preflight.py\n@@ -6,6 +6,8 @@ def can_enter(\n     *,\n     broker_timeout: bool = False,\n ) -> bool:\n+    if broker_timeout:\n+        return False\n     if broker_position_qty > 0:\n         return False\n     if buying_power < required_cash:\n",
+    "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case."
+  },
+  {
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex",
+    "model_name": "gpt-5.5",
+    "case_id": "real-chili-runtime-control-partial-loses",
+    "candidate_id": "codex-real-chili-runtime-control-partial-loses",
+    "planned_file": "autopilot_prompt.py",
+    "expected_changed_files": [
+      "autopilot_prompt.py"
+    ],
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+    ],
+    "duration_seconds": 10.0,
+    "cost_units": 10.0,
+    "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -1,6 +1,8 @@\n def looks_like_repo_edit(prompt: str) -> bool:\n     text = (prompt or '').lower()\n-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n+    if any(word in text for word in ('docker compose', 'restart', 'deploy', 'migration', 'live trading')):\n+        return False\n+    return any(word in text for word in ('fix', 'update', 'change', 'add'))\n \n \n def classify_prompt(prompt: str) -> str:\n",
+    "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case."
+  },
+  {
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex",
+    "model_name": "gpt-5.5",
+    "case_id": "real-chili-startup-static-partial-loses",
+    "candidate_id": "codex-real-chili-startup-static-partial-loses",
+    "planned_file": "startup_contracts.py",
+    "expected_changed_files": [
+      "startup_contracts.py"
+    ],
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_startup_contracts.py -q"
+    ],
+    "duration_seconds": 10.0,
+    "cost_units": 10.0,
+    "patch": "diff --git a/startup_contracts.py b/startup_contracts.py\n--- a/startup_contracts.py\n+++ b/startup_contracts.py\n@@ -5,6 +5,7 @@ REQUIRED_ASSETS = (\n \n ASSET_MANIFEST = {\n     'app/static/components/brain-project-domain.js': 'sha-js',\n+    'app/static/components/brain-project-domain.css': 'sha-css',\n }\n \n \n",
+    "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case."
+  },
+  {
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex",
+    "model_name": "gpt-5.5",
+    "case_id": "real-chili-broker-timeout-partial-loses",
+    "candidate_id": "codex-real-chili-broker-timeout-partial-loses",
+    "planned_file": "preflight.py",
+    "expected_changed_files": [
+      "preflight.py"
+    ],
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+    ],
+    "duration_seconds": 10.0,
+    "cost_units": 10.0,
+    "patch": "diff --git a/preflight.py b/preflight.py\n--- a/preflight.py\n+++ b/preflight.py\n@@ -6,6 +6,8 @@ def can_enter(\n     *,\n     broker_timeout: bool = False,\n ) -> bool:\n+    if broker_timeout:\n+        return False\n     if broker_position_qty > 0:\n         return False\n     if buying_power < required_cash:\n",
+    "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case."
+  },
+  {
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex",
+    "model_name": "gpt-5.5",
+    "case_id": "real-chili-runtime-control-no-evidence-loses",
+    "candidate_id": "codex-real-chili-runtime-control-no-evidence-loses",
+    "planned_file": "autopilot_prompt.py",
+    "expected_changed_files": [
+      "autopilot_prompt.py"
+    ],
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+    ],
+    "duration_seconds": 10.0,
+    "cost_units": 10.0,
+    "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -1,6 +1,8 @@\n def looks_like_repo_edit(prompt: str) -> bool:\n     text = (prompt or '').lower()\n-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n+    if any(word in text for word in ('docker compose', 'restart', 'deploy', 'migration', 'live trading')):\n+        return False\n+    return any(word in text for word in ('fix', 'update', 'change', 'add'))\n \n \n def classify_prompt(prompt: str) -> str:\n",
+    "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case."
+  },
+  {
+    "schema": "chili.model-candidate-drop.v1",
+    "source_kind": "codex",
+    "model_name": "gpt-5.5",
+    "case_id": "real-chili-runtime-control-unscoped-loses",
+    "candidate_id": "codex-real-chili-runtime-control-unscoped-loses",
+    "planned_file": "autopilot_prompt.py",
+    "expected_changed_files": [
+      "autopilot_prompt.py"
+    ],
+    "declared_commands": [
+      "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+    ],
+    "duration_seconds": 10.0,
+    "cost_units": 10.0,
+    "patch": "diff --git a/autopilot_prompt.py b/autopilot_prompt.py\n--- a/autopilot_prompt.py\n+++ b/autopilot_prompt.py\n@@ -1,6 +1,8 @@\n def looks_like_repo_edit(prompt: str) -> bool:\n     text = (prompt or '').lower()\n-    return any(word in text for word in ('fix', 'update', 'change', 'add', 'restart', 'deploy'))\n+    if any(word in text for word in ('docker compose', 'restart', 'deploy', 'migration', 'live trading')):\n+        return False\n+    return any(word in text for word in ('fix', 'update', 'change', 'add'))\n \n \n def classify_prompt(prompt: str) -> str:\n",
+    "notes": "Codex-generated candidate response for CHILI frontier evidence intake; patch selected to preserve behavior-test evidence and scope for this case."
+  }
+]

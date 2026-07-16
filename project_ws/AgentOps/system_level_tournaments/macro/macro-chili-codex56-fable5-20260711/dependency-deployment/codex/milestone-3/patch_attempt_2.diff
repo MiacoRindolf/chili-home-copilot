@@ -1,0 +1,10 @@
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -48,5 +48,6 @@ def execute_deployment(
+             for name in reversed(state.deployed):
+                 rollback(name)
+                 state.rolled_back.append(name)
++            state.completed_waves.clear()
+             state.status = "rolled_back"
+             return state.result()

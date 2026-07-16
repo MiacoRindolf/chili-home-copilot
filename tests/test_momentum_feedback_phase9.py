@@ -12,24 +12,34 @@ from app.models.core import User
 from app.models.trading import (
     MomentumAutomationOutcome,
     MomentumStrategyVariant,
+    MomentumSymbolViability,
     TradingAutomationSession,
     TradingDecisionPacket,
 )
 from app.services.trading.decision_ledger import seal_decision_packet_snapshot
 from app.services.trading.momentum_neural import evolution as evolution_mod
-from app.services.trading.momentum_neural.evolution import _aggregate_rows, paper_vs_live_performance_slices
+from app.services.trading.momentum_neural.evolution import (
+    _aggregate_rows,
+    paper_live_parity_diagnostic_from_slices,
+    paper_vs_live_performance_slices,
+)
 from app.services.trading.momentum_neural.feedback_emit import (
     reingest_regraded_momentum_outcomes,
     regrade_momentum_outcome_evolution_credit,
     try_emit_momentum_session_feedback,
 )
+from app.services.trading.momentum_neural.brain_desk_summary import get_momentum_variants_brain_summary
 from app.services.trading.momentum_neural.feedback_query import evolution_credit_diagnostics
 from app.services.trading.momentum_neural.outcome_extract import derive_outcome_class, session_terminal_for_feedback
 from app.services.trading.momentum_neural.outcome_labels import (
+    OUTCOME_BAILOUT,
     OUTCOME_CANCELLED_PRE_ENTRY,
     OUTCOME_NO_FILL,
+    OUTCOME_RISK_BLOCK,
     OUTCOME_SMALL_WIN,
+    OUTCOME_STOP_LOSS,
     OUTCOME_SUCCESS,
+    is_real_entry_outcome,
 )
 from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants
 from app.services.trading.momentum_neural.risk_policy import RISK_SNAPSHOT_KEY
@@ -58,6 +68,17 @@ def test_aggregate_rows_preserves_zero_evidence_weight() -> None:
     assert out["weighted_return_bps_sum"] == -10.0
     assert out["weighted_pnl_sum"] == -1.0
     assert out["mean_return_bps"] == -10.0
+
+
+def test_is_real_entry_outcome_filters_never_entered_rows() -> None:
+    assert is_real_entry_outcome(OUTCOME_SUCCESS) is True
+    assert is_real_entry_outcome(OUTCOME_SMALL_WIN) is True
+    assert is_real_entry_outcome(OUTCOME_STOP_LOSS) is True
+    assert is_real_entry_outcome(OUTCOME_BAILOUT) is True
+    assert is_real_entry_outcome(OUTCOME_CANCELLED_PRE_ENTRY) is False
+    assert is_real_entry_outcome(OUTCOME_NO_FILL) is False
+    assert is_real_entry_outcome(OUTCOME_RISK_BLOCK) is False
+    assert is_real_entry_outcome(None) is False
 
 
 def test_apply_outcome_feedback_preserves_zero_evidence_weight(monkeypatch) -> None:
@@ -287,6 +308,119 @@ def test_paper_vs_live_slices_separate(db: Session) -> None:
     assert pv["paper"]["n"] >= 1
     assert pv["live"]["n"] >= 1
     assert pv["paper"]["mean_return_bps"] is not None or pv["live"]["mean_return_bps"] is not None
+
+
+def test_paper_live_parity_diagnostic_is_non_blocking_and_self_normalized() -> None:
+    diag = paper_live_parity_diagnostic_from_slices(
+        {
+            "variant_id": 99,
+            "window_days": 30,
+            "paper": {"n": 8, "mean_setup_adjusted_return_bps": 20.0},
+            "live": {"n": 2, "mean_setup_adjusted_return_bps": 10.0},
+            "live_sample_caution": True,
+        }
+    )
+
+    assert diag["mode"] == "diagnostic_only"
+    assert diag["not_live_gate"] is True
+    assert diag["status"] == "paper_live_direction_aligned"
+    assert diag["evidence_balance"] == pytest.approx(0.25)
+    assert diag["live_minus_paper_bps"] == pytest.approx(-10.0)
+    assert diag["direction_aligned"] is True
+    assert diag["live_sample_caution"] is True
+
+
+def test_paper_live_parity_diagnostic_surfaces_missing_live_without_gate() -> None:
+    diag = paper_live_parity_diagnostic_from_slices(
+        {
+            "variant_id": 100,
+            "window_days": 14,
+            "paper": {"n": 3, "mean_return_bps": 12.0},
+            "live": {"n": 0, "mean_return_bps": None},
+            "live_sample_caution": True,
+        }
+    )
+
+    assert diag["status"] == "paper_only_live_unknown"
+    assert diag["not_live_gate"] is True
+    assert "live_sample_missing" in diag["reason_codes"]
+
+
+def test_variant_brain_summary_surfaces_paper_live_parity_diagnostic(db: Session) -> None:
+    from sqlalchemy import inspect as sa_inspect
+
+    if "momentum_automation_outcomes" not in set(sa_inspect(db.bind).get_table_names()):
+        pytest.skip("momentum_automation_outcomes table not present")
+
+    ensure_momentum_strategy_variants(db)
+    db.commit()
+    v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.family == "impulse_breakout").one()
+    u = User(name="FbParitySurface")
+    db.add(u)
+    db.add(
+        MomentumSymbolViability(
+            symbol="PVD-USD",
+            variant_id=v.id,
+            viability_score=0.7,
+            paper_eligible=True,
+            live_eligible=True,
+            freshness_ts=datetime.utcnow(),
+            regime_snapshot_json={},
+            execution_readiness_json={},
+            explain_json={},
+            evidence_window_json={},
+            source_node_id="test",
+        )
+    )
+    db.commit()
+    db.refresh(u)
+
+    for mode, rb in (("paper", 18.0), ("live", 9.0)):
+        sess = TradingAutomationSession(
+            user_id=u.id,
+            mode=mode,
+            symbol="PVD-USD",
+            variant_id=v.id,
+            state="finished" if mode == "paper" else "live_finished",
+            risk_snapshot_json={RISK_SNAPSHOT_KEY: {"allowed": True}},
+            ended_at=datetime.utcnow(),
+        )
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        db.add(
+            MomentumAutomationOutcome(
+                session_id=sess.id,
+                user_id=u.id,
+                variant_id=v.id,
+                symbol=sess.symbol,
+                mode=mode,
+                execution_family="coinbase_spot",
+                terminal_state=sess.state,
+                terminal_at=sess.ended_at or datetime.utcnow(),
+                outcome_class="small_win",
+                realized_pnl_usd=rb / 10.0,
+                return_bps=rb,
+                regime_snapshot_json={},
+                entry_regime_snapshot_json={},
+                exit_regime_snapshot_json={},
+                readiness_snapshot_json={},
+                admission_snapshot_json={},
+                governance_context_json={},
+                extracted_summary_json={"evolution_credit": {"contributes_to_evolution": True}},
+                evidence_weight=1.0,
+                contributes_to_evolution=True,
+            )
+        )
+        db.commit()
+
+    payload = get_momentum_variants_brain_summary(db, days=14)
+    variant_id = int(v.id)
+    item = next(row for row in payload["variants"] if int(row["variant_id"]) == variant_id)
+    diag = item["paper_live_parity_diagnostic"]
+    assert diag["mode"] == "diagnostic_only"
+    assert diag["not_live_gate"] is True
+    assert diag["status"] == "paper_live_direction_aligned"
 
 
 def test_evolution_credit_diagnostics_counts_training_grade_outcomes(db: Session) -> None:

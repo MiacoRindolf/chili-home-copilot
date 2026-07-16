@@ -1,0 +1,19 @@
+{
+  "attempts": 1,
+  "behavior_passed": false,
+  "changed_files": [],
+  "coordinated_files_changed": false,
+  "duration_seconds": 0.0,
+  "eligible": false,
+  "failure": "RuntimeError: Error: Exceeded USD budget (2)",
+  "model_events": [],
+  "model_name": "claude-fable-5",
+  "premium_calls": null,
+  "quality_score": 10,
+  "scope_valid": false,
+  "semantic_review_passed": false,
+  "source_kind": "claude",
+  "task_id": "bounded-retry-contract",
+  "tests_unchanged": true,
+  "validation_output": "validation not run"
+}

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timedelta, timezone
+from types import ModuleType
 from types import SimpleNamespace
 
 from app.config import settings
@@ -432,6 +434,137 @@ def test_scheduler_worker_role_registers_heavy_without_legacy_breakout(monkeypat
         assert "stock_breakout_scanner" not in job_ids
         assert "brain_market_snapshots" in job_ids
         assert HEARTBEAT_JOB_ID in job_ids
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+
+def test_momentum_exec_scheduler_auto_arm_requires_explicit_fallback(monkeypatch):
+    """Ross event admission can be live while periodic auto-arm remains off."""
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_batch_fallback_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_fallback_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_ross_feed_health_enabled", True, raising=False)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "momentum_auto_arm_live" not in job_ids
+        assert "ross_feed_health_check" in job_ids
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_fallback_enabled", True, raising=False)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "momentum_auto_arm_live" in job_ids
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+
+def test_momentum_exec_event_loop_does_not_require_live_scheduler(monkeypatch):
+    """Ross live lane stays event-driven when the slow scheduler fallback is off."""
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    calls: list[str] = []
+
+    live_loop = ModuleType("app.services.trading.momentum_neural.live_runner_loop")
+    live_loop.start_live_runner_loop = lambda: calls.append("live_loop")  # type: ignore[attr-defined]
+    tape = ModuleType("app.services.trading.momentum_neural.tape_ws_recorder")
+    tape.start_tape_ws_recorder = lambda: calls.append("tape")  # type: ignore[attr-defined]
+    ignition = ModuleType("app.services.trading.momentum_neural.ignition_loop")
+    ignition.start_ignition_loop = lambda: calls.append("ignition")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.services.trading.momentum_neural.live_runner_loop", live_loop)
+    monkeypatch.setitem(sys.modules, "app.services.trading.momentum_neural.tape_ws_recorder", tape)
+    monkeypatch.setitem(sys.modules, "app.services.trading.momentum_neural.ignition_loop", ignition)
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_batch_fallback_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_fallback_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_ws_ignition_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_ross_feed_health_enabled", True, raising=False)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "momentum_live_runner_batch" not in job_ids
+        assert "momentum_auto_arm_live" not in job_ids
+        assert "ross_feed_health_check" in job_ids
+        assert "live_loop" in calls
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+
+def test_momentum_live_batch_requires_explicit_batch_fallback(monkeypatch):
+    """A stale scheduler-enabled env var must not resurrect the slow live runner."""
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_loop_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_batch_fallback_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_fallback_enabled", False, raising=False)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "momentum_live_runner_batch" not in job_ids
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_batch_fallback_enabled", True, raising=False)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "momentum_live_runner_batch" in job_ids
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+
+def test_momentum_exec_role_registers_selection_prewarm_without_entry_fallback(monkeypatch):
+    """The isolated Ross worker owns selector prewarm even when heavy jobs are absent."""
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "momentum_exec_only")
+    monkeypatch.setattr(settings, "chili_autopilot_price_bus_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_scheduler_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_batch_fallback_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_auto_arm_live_scheduler_fallback_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_event_select_primary_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_nbbo_tape_enabled", True, raising=False)
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "equity_viability_refresh" in job_ids
+        assert "tape_delta_ignite" in job_ids
+        assert "momentum_nbbo_sample" in job_ids
+        assert "momentum_live_runner_batch" not in job_ids
+        assert "momentum_auto_arm_live" not in job_ids
     finally:
         stop_scheduler()
         monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)

@@ -287,6 +287,104 @@ def paper_vs_live_performance_slices(
     }
 
 
+def paper_live_parity_diagnostic_from_slices(slices: dict[str, Any]) -> dict[str, Any]:
+    """Explain paper/live parity without turning it into a hidden live gate.
+
+    The math is intentionally self-normalizing:
+    - evidence_balance is min(paper_n, live_n) / max(paper_n, live_n), so it scales
+      with the observed sample mix and needs no separate "enough rows" threshold.
+    - adjusted/live-paper gaps use the same setup-adjusted channel as viability
+      feedback when available, falling back to raw realized return.
+    - status is descriptive only; callers must not use it as an enable/disable gate.
+    """
+    paper = dict(slices.get("paper") or {})
+    live = dict(slices.get("live") or {})
+    p_n = int(paper.get("n") or 0)
+    l_n = int(live.get("n") or 0)
+
+    def _mean(side: dict[str, Any]) -> float | None:
+        value = side.get("mean_setup_adjusted_return_bps")
+        if value is None:
+            value = side.get("mean_return_bps")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    p_mean = _mean(paper)
+    l_mean = _mean(live)
+    total = p_n + l_n
+    evidence_balance = None
+    if p_n > 0 or l_n > 0:
+        evidence_balance = round(min(p_n, l_n) / max(1, max(p_n, l_n)), 4)
+
+    gap = None
+    aligned = None
+    if p_mean is not None and l_mean is not None:
+        gap = round(l_mean - p_mean, 4)
+        aligned = (p_mean >= 0 and l_mean >= 0) or (p_mean < 0 and l_mean < 0)
+
+    reasons: list[str] = []
+    if p_n <= 0:
+        reasons.append("paper_sample_missing")
+    if l_n <= 0:
+        reasons.append("live_sample_missing")
+    if p_mean is None:
+        reasons.append("paper_return_missing")
+    if l_mean is None:
+        reasons.append("live_return_missing")
+    if not reasons and aligned is False:
+        reasons.append("paper_live_sign_divergence")
+    if not reasons and gap is not None and p_mean is not None and l_mean is not None:
+        reasons.append("paper_live_observed")
+
+    if total <= 0:
+        status = "no_evidence"
+    elif p_n > 0 and l_n <= 0:
+        status = "paper_only_live_unknown"
+    elif l_n > 0 and p_n <= 0:
+        status = "live_only_paper_missing"
+    elif p_mean is None or l_mean is None:
+        status = "return_channel_incomplete"
+    elif aligned:
+        status = "paper_live_direction_aligned"
+    else:
+        status = "paper_live_direction_diverged"
+
+    return {
+        "mode": "diagnostic_only",
+        "not_live_gate": True,
+        "window_days": int(slices.get("window_days") or 0),
+        "variant_id": slices.get("variant_id"),
+        "status": status,
+        "reason_codes": reasons,
+        "paper_n": p_n,
+        "live_n": l_n,
+        "total_n": total,
+        "evidence_balance": evidence_balance,
+        "paper_mean_bps": round(p_mean, 4) if p_mean is not None else None,
+        "live_mean_bps": round(l_mean, 4) if l_mean is not None else None,
+        "live_minus_paper_bps": gap,
+        "direction_aligned": aligned,
+        "live_sample_caution": bool(slices.get("live_sample_caution")),
+    }
+
+
+def paper_live_parity_diagnostic(
+    db: Session,
+    *,
+    variant_id: int,
+    days: int = 14,
+) -> dict[str, Any]:
+    """Read-only graduation diagnostic; never blocks live entries by itself."""
+    slices = paper_vs_live_performance_slices(db, variant_id=int(variant_id), days=days)
+    out = paper_live_parity_diagnostic_from_slices(slices)
+    out["paper_vs_live"] = slices
+    return out
+
+
 def _post_exit_label(row: Any) -> dict[str, Any]:
     """The deferred shake-out label stamped onto the outcome's extracted_summary_json
     by post_exit_excursion.run_post_exit_excursion_pass (empty dict when absent)."""

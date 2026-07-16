@@ -1,0 +1,31 @@
+{
+  "candidate_id": "local_model-synth-runtime-quarantine-real-chili-runtime-control-partial-loses",
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "collected_at": "2026-07-10T21:42:08.347487Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 100.85505669999839,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Replay-guided runtime quarantine synthesized after the local model failed to keep restart/deploy prompts out of the repo-edit planner path.",
+  "patch_file": "real-chili-runtime-control-partial-loses.patch",
+  "planned_file": "autopilot_prompt.py",
+  "provenance": {
+    "collector": "autopilot_model_candidate_drop_collector",
+    "prompt_pack_file": "chili-agent-qwen25-early-repair-20260710t213200z.prompt-pack.md",
+    "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+    "prompt_pack_sha256": "dadf7c23fdfc556db90d2281aec2a019eaaf12b764c7082653f04f1f0589f073",
+    "run_id": "chili-agent-qwen25-early-repair-20260710T213200Z",
+    "schema": "chili.model-candidate-drop-provenance.v1",
+    "source_command": "ollama run qwen2.5-coder:7b < compact_prompt_pack.md (sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses); synthesized replay repairs: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses",
+    "transcript_events": 3,
+    "transcript_file": "chili-agent-qwen25-early-repair-20260710t213200z.transcript.jsonl",
+    "transcript_sha256": "f86f1502f58d2ee5c339e8828abdf4a8be95f43d4884a65702490c90914276f1"
+  },
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

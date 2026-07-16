@@ -1,0 +1,86 @@
+diff --git a/app/executor.py b/app/executor.py
+--- a/app/executor.py
++++ b/app/executor.py
+@@ -1,8 +1,52 @@
+ from app.graph import dependency_waves
++from app.state import DeploymentState
+ 
+ 
+-def execute_deployment(services, deploy=lambda name: None, healthy=lambda name: True, rollback=lambda name: None, state=None):
+-    return {
+-        "status": "planned",
+-        "waves": dependency_waves(services),
+-    }
++def _noop_deploy(name):
++    pass
++
++
++def _always_healthy(name):
++    return True
++
++
++def _noop_rollback(name):
++    pass
++
++
++def execute_deployment(
++    services,
++    deploy=_noop_deploy,
++    healthy=_always_healthy,
++    rollback=_noop_rollback,
++    state=None,
++):
++    waves = dependency_waves(services)
++    state = state if state is not None else DeploymentState()
++    state.begin(waves)
++
++    if (
++        deploy is _noop_deploy
++        and healthy is _always_healthy
++        and rollback is _noop_rollback
++    ):
++        return state.result()
++
++    for wave in waves:
++        for name in wave:
++            deploy(name)
++            state.deployed.append(name)
++
++        wave_health = []
++        for name in wave:
++            wave_health.append(bool(healthy(name)))
++
++        if not all(wave_health):
++            for name in reversed(state.deployed):
++                rollback(name)
++                state.rolled_back.append(name)
++            state.status = "rolled_back"
++            return state.result()
++
++    state.status = "deployed"
++    return state.result()
+diff --git a/app/state.py b/app/state.py
+--- a/app/state.py
++++ b/app/state.py
+@@ -1,2 +1,20 @@
+ class DeploymentState:
+-    pass
++    def __init__(self):
++        self.status = "planned"
++        self.waves = ()
++        self.deployed = []
++        self.rolled_back = []
++
++    def begin(self, waves):
++        self.status = "planned"
++        self.waves = tuple(waves)
++        self.deployed.clear()
++        self.rolled_back.clear()
++
++    def result(self):
++        return {
++            "status": self.status,
++            "waves": self.waves,
++            "deployed": list(self.deployed),
++            "rolled_back": list(self.rolled_back),
++        }

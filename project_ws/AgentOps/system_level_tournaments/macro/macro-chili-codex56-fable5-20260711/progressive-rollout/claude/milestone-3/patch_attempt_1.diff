@@ -1,0 +1,140 @@
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -16,6 +16,12 @@
+         if lowered in _FALSE_VALUES:
+             return False
+     raise ValueError(_INVALID_CONFIG)
+ 
+ 
++def _parse_kill_switch(value: Any) -> bool:
++    if value is None:
++        return False
++    return _parse_enabled(value)
++
++
+ def _parse_percentage(value: Any) -> int:
+@@ -35,6 +41,25 @@
+     if not 0 <= percentage <= 100:
+         raise ValueError(_INVALID_CONFIG)
+     return percentage
+ 
+ 
++def _parse_config_version(value: Any) -> int:
++    if value is None:
++        return 1
++    if isinstance(value, bool):
++        raise ValueError(_INVALID_CONFIG)
++    if isinstance(value, int):
++        version = value
++    elif isinstance(value, str):
++        try:
++            version = int(value.strip())
++        except ValueError:
++            raise ValueError(_INVALID_CONFIG) from None
++    else:
++        raise ValueError(_INVALID_CONFIG)
++    if version < 1:
++        raise ValueError(_INVALID_CONFIG)
++    return version
++
++
+ def _parse_salt(value: Any) -> str:
+@@ -55,21 +80,29 @@
+ @dataclass(frozen=True)
+ class RolloutConfig:
+     enabled: bool = False
+     percentage: int = 0
+     salt: str = ""
+     allowlist: frozenset[str] = frozenset()
+     denylist: frozenset[str] = frozenset()
++    kill_switch: bool = False
++    config_version: int = 1
+ 
+     def __post_init__(self) -> None:
+         if frozenset(self.allowlist) & frozenset(self.denylist):
+             raise ValueError(_INVALID_CONFIG)
++        if isinstance(self.config_version, bool) or not isinstance(self.config_version, int):
++            raise ValueError(_INVALID_CONFIG)
++        if self.config_version < 1:
++            raise ValueError(_INVALID_CONFIG)
+ 
+     @classmethod
+     def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
+         return cls(
+             enabled=_parse_enabled(values.get("ENABLED")),
+             percentage=_parse_percentage(values.get("PERCENTAGE")),
+             salt=_parse_salt(values.get("SALT")),
+             allowlist=_parse_subject_list(values.get("ALLOWLIST")),
+             denylist=_parse_subject_list(values.get("DENYLIST")),
++            kill_switch=_parse_kill_switch(values.get("KILL_SWITCH")),
++            config_version=_parse_config_version(values.get("CONFIG_VERSION")),
+         )
+diff --git a/app/decision.py b/app/decision.py
+--- a/app/decision.py
++++ b/app/decision.py
+@@ -1,17 +1,33 @@
++import hashlib
+ from typing import Any
+ 
+ from app.cohort import stable_bucket
+ from app.config import RolloutConfig
+ 
+ 
++def _decision_id(subject_id: str, config_version: int, enabled: bool, reason: str) -> str:
++    payload = f"{subject_id}|{config_version}|{enabled}|{reason}"
++    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
++
++
+ def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
+-    if subject_id in config.denylist:
+-        return {"enabled": False, "reason": "denylist", "bucket": None}
+-    if not config.enabled:
+-        return {"enabled": False, "reason": "disabled", "bucket": None}
+-    if subject_id in config.allowlist:
+-        return {"enabled": True, "reason": "allowlist", "bucket": None}
+-    bucket = stable_bucket(subject_id, config.salt)
+-    if bucket < config.percentage:
+-        return {"enabled": True, "reason": "cohort", "bucket": bucket}
+-    return {"enabled": False, "reason": "outside_cohort", "bucket": bucket}
++    decision: dict[str, Any]
++    if config.kill_switch:
++        decision = {"enabled": False, "reason": "kill_switch", "bucket": None}
++    elif subject_id in config.denylist:
++        decision = {"enabled": False, "reason": "denylist", "bucket": None}
++    elif not config.enabled:
++        decision = {"enabled": False, "reason": "disabled", "bucket": None}
++    elif subject_id in config.allowlist:
++        decision = {"enabled": True, "reason": "allowlist", "bucket": None}
++    else:
++        bucket = stable_bucket(subject_id, config.salt)
++        if bucket < config.percentage:
++            decision = {"enabled": True, "reason": "cohort", "bucket": bucket}
++        else:
++            decision = {"enabled": False, "reason": "outside_cohort", "bucket": bucket}
++    decision["config_version"] = config.config_version
++    decision["decision_id"] = _decision_id(
++        subject_id, config.config_version, decision["enabled"], decision["reason"]
++    )
++    return decision
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,4 +1,4 @@
+-from typing import Any, Mapping, Optional
++from typing import Any, Iterable, Mapping, Optional
+ 
+ from app.config import RolloutConfig
+ from app.decision import decide_rollout
+@@ -14,3 +14,11 @@
+     if audit is not None:
+         audit.append({"subject_id": subject_id, **decision})
+     return decision
++
++
++def summarize_decisions(audit: Iterable[Mapping[str, Any]]) -> dict[str, int]:
++    counts: dict[str, int] = {}
++    for entry in audit:
++        reason = entry["reason"]
++        counts[reason] = counts.get(reason, 0) + 1
++    return counts

@@ -142,11 +142,13 @@ services:
       - CHILI_SCHEDULER_ROLE=none
       # Tell operator readiness that a scheduler-worker runs web-light jobs externally.
       - CHILI_SCHEDULER_RUNS_EXTERNALLY=1
-      # Local Autopilot default: paper + live sessions should advance without extra env setup.
+      # Local Autopilot default: paper sessions can advance without extra env setup.
+      # Live runner must be an explicit operator decision; do not let a compose/web
+      # restart silently resurrect live order code.
       - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
-      - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1
-      - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=1
+      - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=0
+      - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=0
       # Trading Brain desk: neural mesh graph + APIs (overrides host .env when unset/false).
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
@@ -589,8 +591,10 @@ services:
       - CHILI_DISPATCH_GIT_BASE_BRANCH=${CHILI_DISPATCH_GIT_BASE_BRANCH:-main}
       - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
-      - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1
-      - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=1
+      # Live runner must be opted in by the operator. This prevents a generic
+      # scheduler-worker restart from becoming a live trading restart.
+      - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=0
+      - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=0
       # Bumped from 15/25 → 25/50 because trading scheduler bursts (auto trader
       # tick, paper runner, neural mesh, bracket reconciliation, market data
       # integrity) intermittently exhausted the pool, blocking dispatch's LLM
@@ -678,6 +682,103 @@ services:
         reservations:
           cpus: "1.5"
           memory: 2G
+
+  # Momentum live execution lane. Ross equity momentum is a live, tick-driven
+  # lane when this profile is launched; broad equities are still blocked by the
+  # Ross universe gate below and crypto/autotrader remain disabled.
+  # this service is the controlled replacement for ad-hoc
+  # ``chili-clean-recovery-momentum-exec`` containers. It runs only the
+  # momentum_exec_only scheduler role.
+  momentum-exec-worker:
+    image: ${CHILI_MOMENTUM_EXEC_IMAGE:-chili-app:local}
+    container_name: chili-clean-recovery-momentum-exec
+    profiles:
+      - live-momentum
+    restart: "${CHILI_MOMENTUM_EXEC_RESTART_POLICY:-unless-stopped}"
+    labels:
+      com.chili.service: momentum-exec-worker
+      com.chili.entrypoint: scheduler_worker
+      com.chili.lane: momentum_exec_only
+    command: ["python", "scripts/scheduler_worker.py"]
+    env_file:
+      - path: .env
+        required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "scripts/verify_momentum_exec_process_health.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - CHILI_SCHEDULER_ROLE=momentum_exec_only
+      - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
+      - CHILI_RUNNING_IN_DOCKER=1
+      - CHILI_CONTAINER_CPU_LIMIT=2
+      - PYTHONUNBUFFERED=1
+      - CHILI_AUTOTRADER_ENABLED=false
+      - CHILI_AUTOTRADER_CRYPTO_ENABLED=false
+      - COINBASE_AUTOTRADER_LIVE=0
+      - CHILI_COINBASE_AUTOTRADER_LIVE=0
+      - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=${CHILI_MOMENTUM_EXEC_LIVE_RUNNER_ENABLED:-true}
+      - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=${CHILI_MOMENTUM_EXEC_LIVE_RUNNER_SCHEDULER_ENABLED:-false}
+      - CHILI_MOMENTUM_LIVE_RUNNER_LOOP_ENABLED=${CHILI_MOMENTUM_EXEC_LIVE_RUNNER_LOOP_ENABLED:-true}
+      - CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_TAPE_ENABLED=${CHILI_MOMENTUM_EXEC_IQFEED_TAPE_ENABLED:-true}
+      - CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_NOTIFY_ENABLED=${CHILI_MOMENTUM_EXEC_IQFEED_NOTIFY_ENABLED:-true}
+      - CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_POLL_FALLBACK_ENABLED=${CHILI_MOMENTUM_EXEC_IQFEED_POLL_FALLBACK_ENABLED:-true}
+      - CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_POLL_SECONDS=${CHILI_MOMENTUM_EXEC_IQFEED_POLL_SECONDS:-0.25}
+      - CHILI_MOMENTUM_LIVE_RUNNER_BATCH_FALLBACK_ENABLED=${CHILI_MOMENTUM_EXEC_BATCH_FALLBACK_ENABLED:-false}
+      - CHILI_MOMENTUM_ROSS_EVENT_ADMISSION_ENABLED=${CHILI_MOMENTUM_EXEC_ROSS_EVENT_ADMISSION_ENABLED:-true}
+      - CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED=${CHILI_MOMENTUM_EXEC_AUTO_ARM_LIVE_ENABLED:-true}
+      - CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_ENABLED=${CHILI_MOMENTUM_EXEC_AUTO_ARM_SCHEDULER_ENABLED:-false}
+      - CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_FALLBACK_ENABLED=${CHILI_MOMENTUM_EXEC_AUTO_ARM_SCHEDULER_FALLBACK_ENABLED:-false}
+      - CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED=${CHILI_MOMENTUM_EXEC_ROSS_EQUITY_UNIVERSE_REQUIRED:-true}
+      - CHILI_EQUITY_EXECUTION_RAIL=${CHILI_EQUITY_EXECUTION_RAIL:-robinhood_agentic_mcp}
+      - CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL=${CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL:-1m}
+      - CHILI_MOMENTUM_EARLY_PREMARKET_MIN_MOVERS=${CHILI_MOMENTUM_EARLY_PREMARKET_MIN_MOVERS:-1}
+      # Load-bearing Ross runner/add/exit controls. These are intentionally
+      # durable on the canonical momentum worker so a rebuild cannot silently
+      # drop the behavior currently enabled on the live container.
+      - CHILI_MOMENTUM_TICK_FIRST_PULLBACK_ENABLED=${CHILI_MOMENTUM_TICK_FIRST_PULLBACK_ENABLED:-true}
+      # OPERATOR DIRECTIVE 2026-07-04 (capture-gap G1a, PR #837): micropull default ON —
+      # the 15s micro-frame first-pullback path; replay-verified on SVRE 06-30.
+      - CHILI_MOMENTUM_MICROPULL_ENABLED=${CHILI_MOMENTUM_MICROPULL_ENABLED:-true}
+      - CHILI_MOMENTUM_MICRO_PULLBACK_PRIMARY_ENABLED=${CHILI_MOMENTUM_MICRO_PULLBACK_PRIMARY_ENABLED:-true}
+      - CHILI_MOMENTUM_MICROPULL_BAR_SECONDS=${CHILI_MOMENTUM_MICROPULL_BAR_SECONDS:-15}
+      - CHILI_MOMENTUM_MIDDAY_DEWEIGHT_ENABLED=${CHILI_MOMENTUM_MIDDAY_DEWEIGHT_ENABLED:-true}
+      - CHILI_MOMENTUM_PYRAMID_ENABLED=${CHILI_MOMENTUM_PYRAMID_ENABLED:-true}
+      - CHILI_MOMENTUM_PYRAMID_DISCRETE_ADD_ENABLED=${CHILI_MOMENTUM_PYRAMID_DISCRETE_ADD_ENABLED:-true}
+      - CHILI_MOMENTUM_PYRAMID_SKIP_VIABILITY_RECHECK=${CHILI_MOMENTUM_PYRAMID_SKIP_VIABILITY_RECHECK:-true}
+      - CHILI_MOMENTUM_PYRAMID_ADD_SUBMIT_RETRY_MAX=${CHILI_MOMENTUM_PYRAMID_ADD_SUBMIT_RETRY_MAX:-2}
+      - CHILI_MOMENTUM_SCALE_GRID_ENABLED=${CHILI_MOMENTUM_SCALE_GRID_ENABLED:-true}
+      - CHILI_MOMENTUM_ADD_INTO_HALT_ENABLED=${CHILI_MOMENTUM_ADD_INTO_HALT_ENABLED:-true}
+      - CHILI_MOMENTUM_STOP_L2_CONFIRM_ENABLED=${CHILI_MOMENTUM_STOP_L2_CONFIRM_ENABLED:-true}
+      - CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED=${CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED:-false}
+      - CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED=${CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED:-false}
+      - CHILI_MOMENTUM_CATALYST_CONVICTION_ENABLED=${CHILI_MOMENTUM_CATALYST_CONVICTION_ENABLED:-false}
+    volumes:
+      - D:/CHILI-Docker/chili-data:/app/data
+      # OPERATOR DIRECTIVE 2026-07-03: NO code bind-mounts on the live exec worker —
+      # the IMAGE code (CHILI_MOMENTUM_EXEC_IMAGE, main-lineage) is what runs; intraday
+      # hot-edits are ended. See docs/STRATEGY/CC_REPORTS/2026-07-02_master-fix-plan-ross-parity.md.
+      - chili_rh_agentic_secrets:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
 
   # FIX 45b (2026-04-29): broker-sync hot lane. Owns ALL broker-call jobs:
   # Robinhood order+position sync, bracket reconciliation, stuck-order
@@ -945,3 +1046,7 @@ volumes:
   # Opt-in target for moving Postgres off the Windows bind mount. The default
   # remains D:/CHILI-Docker/postgres until CHILI_POSTGRES_DATA_SOURCE is set.
   chili-postgres-data:
+  # Existing Docker volume containing the Robinhood Agentic token material.
+  # Mounted read-only by the opt-in momentum execution worker.
+  chili_rh_agentic_secrets:
+    external: true

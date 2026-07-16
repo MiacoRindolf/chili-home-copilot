@@ -1,0 +1,31 @@
+{
+  "candidate_id": "local_model-synth-fail-closed-real-chili-broker-timeout-partial-loses",
+  "case_id": "real-chili-broker-timeout-partial-loses",
+  "collected_at": "2026-07-10T14:47:16.226648Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_preflight.py -q"
+  ],
+  "duration_seconds": 0.0002586999908089638,
+  "expected_changed_files": [
+    "preflight.py"
+  ],
+  "model_name": "qwen2.5-coder:7b",
+  "notes": "Replay-guided fail-closed guard synthesized after the local model left `can_enter(..., broker_timeout=True)` passing open.",
+  "patch_file": "real-chili-broker-timeout-partial-loses.patch",
+  "planned_file": "preflight.py",
+  "provenance": {
+    "collector": "autopilot_model_candidate_drop_collector",
+    "prompt_pack_file": "local-synthesize-first-allcases-20260710-1450.prompt-pack.md",
+    "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+    "prompt_pack_sha256": "a52a2506e3c612ba2dec9fecd809ac6150cb4fb889b76a104baa53343ac32443",
+    "run_id": "local-synthesize-first-allcases-20260710-1450",
+    "schema": "chili.model-candidate-drop-provenance.v1",
+    "source_command": "chili replay-guided synthesis-first local candidate run (fallback: ollama run qwen2.5-coder:7b < compact_prompt_pack.md; sequential all-cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses); synthesized-first cases: real-chili-preflight-candidate-wins, real-chili-runtime-control-partial-loses, real-chili-startup-static-partial-loses, real-chili-broker-timeout-partial-loses, real-chili-runtime-control-no-evidence-loses, real-chili-runtime-control-unscoped-loses",
+    "transcript_events": 3,
+    "transcript_file": "local-synthesize-first-allcases-20260710-1450.transcript.jsonl",
+    "transcript_sha256": "b52f55b931f3772ee52360e943e80710c0cf106499fe25aacb80e4557741bc3c"
+  },
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "local_model"
+}

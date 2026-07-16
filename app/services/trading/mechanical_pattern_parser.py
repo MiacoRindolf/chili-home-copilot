@@ -69,6 +69,24 @@ _MECHANICAL_OPERATOR_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 _NUMBER_RE = r"[-+]?\d+(?:\.\d+)?"
+_COUNT_WORDS = {
+    "two": 2.0,
+    "twice": 2.0,
+    "three": 3.0,
+    "third": 3.0,
+    "thrice": 3.0,
+    "four": 4.0,
+    "fourth": 4.0,
+}
+_COUNT_RE = rf"(?:{_NUMBER_RE}|{'|'.join(_COUNT_WORDS)})"
+_WEB_SAFE_EMA_SUPPORT_INDICATORS = {"ema_20", "ema_50", "ema_100"}
+
+
+def _mechanical_count_value(raw: str) -> float:
+    normalized = raw.strip().lower()
+    if normalized in _COUNT_WORDS:
+        return _COUNT_WORDS[normalized]
+    return float(normalized)
 
 
 def _mechanical_split_segments(description: str) -> list[str]:
@@ -77,6 +95,13 @@ def _mechanical_split_segments(description: str) -> list[str]:
         r"\1 __MECH_AND__ \2",
         description.strip().lower(),
     )
+    protected = re.sub(r"\bvcp\s*(\d+)\s*\+", r"vcp \1 contractions", protected)
+    protected = re.sub(
+        r"\b(\d+)\s*\+\s+(?=(?:successive\s+)?(?:volatility\s+)?contractions?\b)",
+        r"\1 ",
+        protected,
+    )
+    protected = re.sub(r"\bmacd\s*\+", "macd positive", protected)
     parts = re.split(r"\s*(?:,|;|\+|\bwith\b|\bplus\b|\band\b)\s*", protected)
     return [
         p.replace("__MECH_AND__", "and").replace("__mech_and__", "and").strip()
@@ -128,38 +153,179 @@ def _mechanical_number_after(segment: str, start: int) -> float | None:
     return float(match.group(0))
 
 
-def _mechanical_condition_from_segment(segment: str) -> dict[str, Any] | None:
+def _mechanical_condition_from_segment(segment: str) -> dict[str, Any] | list[dict[str, Any]] | None:
     if not segment:
         return None
 
+    if re.search(
+        r"\b(?:bearish|broken)\s+ema\s+stack(?:ing)?\b|\bema\s+stack(?:ing)?\s+(?:bearish|broken)\b|"
+        r"\bfull\s+bearish\s+ema\s+stack\b",
+        segment,
+    ):
+        return [
+            {"indicator": "price", "op": "<", "ref": "ema_20"},
+            {"indicator": "ema_20", "op": "<", "ref": "ema_50"},
+            {"indicator": "ema_50", "op": "<", "ref": "ema_100"},
+        ]
+    if re.search(
+        r"\b(?:bullish\s+)?ema\s+stack(?:ing)?\b|\bema\s+stack(?:ing)?\s+bullish\b|"
+        r"\bfull\s+(?:bullish\s+)?ema\s+stack\b",
+        segment,
+    ):
+        return [
+            {"indicator": "price", "op": ">", "ref": "ema_20"},
+            {"indicator": "ema_20", "op": ">", "ref": "ema_50"},
+            {"indicator": "ema_50", "op": ">", "ref": "ema_100"},
+        ]
     if re.search(r"\bgolden\s+cross\b", segment):
         return {"indicator": "ema_50", "op": ">", "ref": "ema_200"}
     if re.search(r"\bdeath\s+cross\b", segment):
         return {"indicator": "ema_50", "op": "<", "ref": "ema_200"}
-    if re.search(r"\bmacd\b.*\b(?:positive|bullish|above\s+zero|over\s+zero)\b", segment):
+    if re.search(
+        r"\bmacd\s*\+\b|"
+        r"\bmacd\b.*\b(?:positive|bullish|above\s+zero|over\s+zero|cross(?:es|ing)?\s+bullish)\b|"
+        r"\bmacd\s+(?:hist(?:ogram)?\s+)?(?:expanding|rising|improving|turning\s+up)\b|"
+        r"\b(?:positive|bullish)\s+macd\b",
+        segment,
+    ):
         return {"indicator": "macd_hist", "op": ">", "value": 0.0}
-    if re.search(r"\bmacd\b.*\b(?:negative|bearish|below\s+zero|under\s+zero)\b", segment):
+    if re.search(
+        r"\bmacd\s*-\b|"
+        r"\bmacd\b.*\b(?:negative|bearish|below\s+zero|under\s+zero|cross(?:es|ing)?\s+bearish)\b|"
+        r"\b(?:negative|bearish)\s+macd\b",
+        segment,
+    ):
         return {"indicator": "macd_hist", "op": "<", "value": 0.0}
+    if re.search(r"\brsi\b.*\bnear[-\s]?oversold\b|\bnear[-\s]?oversold\b.*\brsi\b", segment):
+        return {"indicator": "rsi_14", "op": "<", "value": 40.0}
+    if re.search(r"\brsi\b.*\b(?:deeply\s+)?oversold\b|\b(?:deeply\s+)?oversold\b.*\brsi\b", segment):
+        return {"indicator": "rsi_14", "op": "<", "value": 30.0}
+    if re.search(r"\brsi\b.*\boverbought\b|\boverbought\b.*\brsi\b", segment):
+        return {"indicator": "rsi_14", "op": ">", "value": 70.0}
+    if re.search(r"\brsi\b.*\b(?:not\s+overbought|room\s+to\s+run)\b", segment):
+        return {"indicator": "rsi_14", "op": "<=", "value": 70.0}
+    if re.search(r"\brsi\b.*\b(?:rising|improving|turning\s+up|strengthening)\b", segment):
+        return {"indicator": "rsi_14", "op": ">", "value": 55.0}
+    if re.search(r"\brsi\b.*\bneutral\b|\bneutral\b.*\brsi\b", segment):
+        return {"indicator": "rsi_14", "op": "between", "value": [40.0, 65.0]}
+    if re.search(
+        r"\badx\b.*\b(?:low|weak|quiet|compression|consolidation|range(?:bound)?)\b|"
+        r"\b(?:low|weak|quiet|compression|consolidation|range(?:bound)?)\b.*\badx\b",
+        segment,
+    ):
+        return {"indicator": "adx", "op": "<", "value": 20.0}
+    if re.search(
+        r"\badx\b.*\b(?:strong|elevated|trend(?:ing)?|trend\s+strength|confirmation)\b|"
+        r"\b(?:strong|elevated|trend(?:ing)?|trend\s+strength|confirmation)\b.*\badx\b",
+        segment,
+    ):
+        return {"indicator": "adx", "op": ">=", "value": 20.0}
+    volume_multiple_match = re.search(
+        rf"\b({_NUMBER_RE})\s*x\s+(?:relative\s+)?volume\b|"
+        rf"\b(?:relative\s+volume|rel[\s_-]?vol|rvol|volume)\s+"
+        rf"(?:at\s+least|over|above|greater\s+than|>=?)\s*({_NUMBER_RE})\s*x?\b",
+        segment,
+    )
+    if volume_multiple_match:
+        raw_value = next(group for group in volume_multiple_match.groups() if group is not None)
+        return {"indicator": "rel_vol", "op": ">=", "value": float(raw_value)}
     if re.search(
         r"\b(?:volume\s+spike|volume\s+breakout|high\s+volume|"
+        r"volume\s+surge|volume\s+burst|unusual\s+volume|"
         r"surging\s+volume|rising\s+volume|increasing\s+volume|"
         r"volume\s+expansion|expanding\s+volume|rvol\s+spike)\b",
         segment,
     ):
         return {"indicator": "rel_vol", "op": ">=", "value": 1.5}
+    if re.search(
+        r"\b(?:squeeze\s+(?:firing|releasing|release|fires?)|"
+        r"(?:volatility|bollinger|bb)\s+squeeze\s+(?:firing|releasing|release|fires?))\b",
+        segment,
+    ):
+        return {"indicator": "bb_squeeze", "op": "==", "value": True}
     if re.search(r"\b(?:bb|bollinger)\b.*\bsqueeze\b|\bsqueeze\b.*\b(?:bb|bollinger)\b", segment):
         return {"indicator": "bb_squeeze", "op": "==", "value": True}
+    if re.search(
+        r"\bvwap\b.*\b(?:support|hold(?:s|ing)?|held)\b|"
+        r"\b(?:support|hold(?:s|ing)?|held)\b.*\bvwap\b",
+        segment,
+    ):
+        return {"indicator": "vwap_reclaim", "op": "==", "value": True}
     if re.search(
         r"\bvwap\b.*\b(?:reclaim|cross|break|above|over)\b|"
         r"\b(?:reclaim|cross|break|above|over)\b.*\bvwap\b",
         segment,
     ):
         return {"indicator": "vwap_reclaim", "op": "==", "value": True}
+    if (
+        re.search(
+            r"\b(?:support|hold(?:s|ing)?|held)\b.*\bema\b|"
+            r"\bema\b.*\b(?:support|hold(?:s|ing)?|held)\b",
+            segment,
+        )
+        and not re.search(
+            r"\b(?:fail(?:s|ed)?\s+to\s+hold|lost|los(?:e|es|ing)|below|under|"
+            r"break(?:s|ing)?\s+below)\b",
+            segment,
+        )
+    ):
+        for indicator in _mechanical_indicators(segment):
+            if indicator in _WEB_SAFE_EMA_SUPPORT_INDICATORS:
+                return {"indicator": "price", "op": ">", "ref": indicator}
     nr_match = re.search(r"\bnr\s*([47])\b", segment)
     if nr_match:
         return {"indicator": "narrow_range", "op": "==", "value": f"NR{nr_match.group(1)}"}
-    if re.search(r"\bnarrow\s+range\b", segment):
+    if re.search(
+        r"\bnarrow\s+range\b|\btight(?:est)?\s+range\b|\bcoiling\b|\bcoil(?:ed|s)?\b",
+        segment,
+    ):
         return {"indicator": "narrow_range", "op": "any_of", "value": ["NR4", "NR7"]}
+    resistance_retest_match = re.search(
+        rf"\b({_COUNT_RE})\s+resistance\s+(?:retests?|tests?|touches?)\b|"
+        rf"\b({_COUNT_RE})\s+tests?\s+of\s+resistance\b|"
+        rf"\bresistance\b.*\b(?:retested|tested|touched)\s+({_COUNT_RE})\s+times?\b",
+        segment,
+    )
+    if resistance_retest_match:
+        raw_count = next(group for group in resistance_retest_match.groups() if group is not None)
+        return {
+            "indicator": "resistance_retests",
+            "op": ">=",
+            "value": _mechanical_count_value(raw_count),
+        }
+    if re.search(r"\b(?:multiple|several)\s+resistance\s+(?:retests?|tests?|touches?)\b", segment):
+        return {"indicator": "resistance_retests", "op": ">=", "value": 2.0}
+    resistance_distance_match = re.search(
+        rf"\b(?:price|close|last|stock|ticker)?\s*(?:is\s+)?"
+        rf"(?:within|inside|no\s+more\s+than|less\s+than|under)\s+({_COUNT_RE})\s*(?:%|percent)?"
+        rf"\s+(?:of|below|from)\s+resistance\b",
+        segment,
+    )
+    if resistance_distance_match:
+        return {
+            "indicator": "dist_to_resistance_pct",
+            "op": "<=",
+            "value": _mechanical_count_value(resistance_distance_match.group(1)),
+        }
+    if re.search(r"\b(?:near|close\s+to|just\s+below)\s+resistance\b", segment):
+        return {"indicator": "dist_to_resistance_pct", "op": "<=", "value": 2.0}
+    contraction_count_match = re.search(
+        r"\b(\d+)\s*\+?\s+(?:successive\s+)?(?:volatility\s+)?contractions?\b",
+        segment,
+    )
+    if contraction_count_match:
+        return {"indicator": "vcp_count", "op": ">=", "value": float(contraction_count_match.group(1))}
+    vcp_match = re.search(
+        r"\b(?:vcp|volatility\s+contraction\s+pattern|volume\s+contraction\s+pattern)\b",
+        segment,
+    )
+    if vcp_match:
+        count_match = re.search(
+            r"\bvcp\s*(\d+)\b|\b(\d+)\s*\+?\s+(?:successive\s+)?contractions?\b",
+            segment,
+        )
+        value = float(next(group for group in count_match.groups() if group is not None)) if count_match else 2.0
+        return {"indicator": "vcp_count", "op": ">=", "value": value}
 
     indicators = _mechanical_indicators(segment)
     if not indicators:
@@ -202,14 +368,16 @@ def mechanical_pattern_suggestion(description: str) -> dict[str, Any] | None:
     conditions: list[dict[str, Any]] = []
     seen: set[str] = set()
     for segment in _mechanical_split_segments(description):
-        condition = _mechanical_condition_from_segment(segment)
-        if not condition:
+        parsed = _mechanical_condition_from_segment(segment)
+        if not parsed:
             continue
-        signature = json.dumps(condition, sort_keys=True, default=str)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        conditions.append(condition)
+        segment_conditions = parsed if isinstance(parsed, list) else [parsed]
+        for condition in segment_conditions:
+            signature = json.dumps(condition, sort_keys=True, default=str)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            conditions.append(condition)
 
     if len(conditions) < 2:
         return None

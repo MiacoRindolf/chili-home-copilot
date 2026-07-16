@@ -1,0 +1,92 @@
+```diff
+diff --git a/app/cohort.py b/app/cohort.py
+--- a/app/cohort.py
++++ b/app/cohort.py
+@@ -1,2 +1,11 @@
++import hashlib
++
++
+ def stable_bucket(subject_id: str, salt: str) -> int:
+-    return hash((subject_id, salt)) % 100
++    if not isinstance(subject_id, str) or not subject_id.strip():
++        raise ValueError("subject_id and salt must be non-empty")
++    if not isinstance(salt, str) or not salt.strip():
++        raise ValueError("subject_id and salt must be non-empty")
++
++    digest = hashlib.sha256(f"{salt}:{subject_id}".encode("utf-8")).digest()
++    return int.from_bytes(digest, byteorder="big") % 100
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -10,5 +10,24 @@ class RolloutConfig:
+     salt: str = ""
+ 
+     @classmethod
+     def from_mapping(cls, values: Mapping[str, str]) -> "RolloutConfig":
+-        return cls(bool(values.get("ENABLED")), int(values.get("PERCENTAGE", "0")), values.get("SALT", ""))
++        try:
++            enabled_value = values["ENABLED"]
++            if not isinstance(enabled_value, str):
++                raise ValueError
++
++            normalized_enabled = enabled_value.strip().lower()
++            if normalized_enabled == "true":
++                enabled = True
++            elif normalized_enabled == "false":
++                enabled = False
++            else:
++                raise ValueError
++
++            percentage_value = values["PERCENTAGE"]
++            if not isinstance(percentage_value, str):
++                raise ValueError
++            percentage = int(percentage_value)
++            if not 0 <= percentage <= 100:
++                raise ValueError
++
++            salt = values["SALT"]
++            if not isinstance(salt, str) or not salt.strip():
++                raise ValueError
++        except (KeyError, TypeError, ValueError):
++            raise ValueError("invalid rollout config") from None
++
++        return cls(enabled=enabled, percentage=percentage, salt=salt)
+diff --git a/app/decision.py b/app/decision.py
+--- a/app/decision.py
++++ b/app/decision.py
+@@ -1,7 +1,17 @@
+ from typing import Any
+ 
++from app.cohort import stable_bucket
+ from app.config import RolloutConfig
+ 
+ 
+ def decide_rollout(subject_id: str, config: RolloutConfig) -> dict[str, Any]:
+-    return {"enabled": config.enabled}
++    if not config.enabled:
++        return {"enabled": False, "reason": "disabled", "bucket": None}
++
++    bucket = stable_bucket(subject_id, config.salt)
++    if bucket < config.percentage:
++        return {"enabled": True, "reason": "cohort", "bucket": bucket}
++
++    return {
++        "enabled": False,
++        "reason": "outside_cohort",
++        "bucket": bucket,
++    }
+diff --git a/app/service.py b/app/service.py
+--- a/app/service.py
++++ b/app/service.py
+@@ -1,5 +1,8 @@
+ from typing import Any, Mapping
+ 
++from app.config import RolloutConfig
++from app.decision import decide_rollout
++
+ 
+ def evaluate_request(subject_id: str, raw_config: Mapping[str, str]) -> dict[str, Any]:
+-    return {"enabled": False}
++    config = RolloutConfig.from_mapping(raw_config)
++    return decide_rollout(subject_id, config)
+```

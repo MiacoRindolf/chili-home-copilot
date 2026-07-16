@@ -1,0 +1,31 @@
+{
+  "candidate_id": "codex-real-chili-runtime-control-unscoped-loses",
+  "case_id": "real-chili-runtime-control-unscoped-loses",
+  "collected_at": "2026-07-10T20:57:31.130510Z",
+  "cost_units": 0.0,
+  "declared_commands": [
+    "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest test_autopilot_prompt.py -q"
+  ],
+  "duration_seconds": 19.791736799999853,
+  "expected_changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "model_name": "gpt-5.6-sol",
+  "notes": "Scope the correction to repository-edit prompt classification.",
+  "patch_file": "real-chili-runtime-control-unscoped-loses.patch",
+  "planned_file": "autopilot_prompt.py",
+  "provenance": {
+    "collector": "autopilot_model_candidate_drop_collector",
+    "prompt_pack_file": "codex-gpt-5-6-sol-measured-20260710t205500z.prompt-pack.md",
+    "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+    "prompt_pack_sha256": "9cbe83ddae80311e5a6edfcb58c39f8b7ce450ae2d2279bb738e810194707834",
+    "run_id": "codex-gpt-5-6-sol-measured-20260710T205500Z",
+    "schema": "chili.model-candidate-drop-provenance.v1",
+    "source_command": "codex exec --ignore-user-config --ignore-rules --model gpt-5.6-sol --ephemeral --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=\"xhigh\" -",
+    "transcript_events": 3,
+    "transcript_file": "codex-gpt-5-6-sol-measured-20260710t205500z.transcript.jsonl",
+    "transcript_sha256": "5b97cef6855dcff5fc254ebf0d3854c530fbc444261c68a6296ce229ceb96be3"
+  },
+  "schema": "chili.model-candidate-drop.v1",
+  "source_kind": "codex"
+}

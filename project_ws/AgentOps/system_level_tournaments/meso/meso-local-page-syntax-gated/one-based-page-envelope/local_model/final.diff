@@ -1,0 +1,10 @@
+diff --git a/app/query.py b/app/query.py
+index 2910476..d322ce0 100644
+--- a/app/query.py
++++ b/app/query.py
+@@ -1,4 +1,4 @@
+ def parse_page(raw: str | None) -> int:
+     if raw is None:
+-        return 0
++        raise ValueError('page must be a positive integer')
+     return int(raw)

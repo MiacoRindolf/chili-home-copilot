@@ -1,0 +1,13 @@
+{
+  "case_id": "real-chili-runtime-control-partial-loses",
+  "changed_files": [
+    "autopilot_prompt.py"
+  ],
+  "command": "ollama api generate qwen2.5-coder:7b options.num_gpu=0 options.num_predict=4096 temperature=0 < compact_prompt_pack.md (CPU fallback after forced API replacement-content repair attempt 3)",
+  "duration_seconds": 94.5176304000197,
+  "passed": false,
+  "reason": "behavior_tests_failed",
+  "status": "failed",
+  "test_output_tail": "mpt_blocks_before_planner():\n        calls = []\n    \n        def planner(prompt):\n            calls.append(prompt)\n            return {'status': 'planned'}\n    \n        result = plan_if_repo_edit('docker compose restart chili and scheduler-worker', planner)\n    \n>       assert result['status'] == 'blocked'\nE       AssertionError: assert 'planned' == 'blocked'\nE         \nE         - blocked\nE         + planned\n\ntest_autopilot_prompt.py:13: AssertionError\n____________________ test_repo_edit_still_reaches_planner _____________________\n\n    def test_repo_edit_still_reaches_planner():\n        result = plan_if_repo_edit(\n            'update app/example.py to fix the button',\n            lambda prompt: {'status': 'planned'},\n        )\n    \n>       assert result['status'] == 'planned'\nE       AssertionError: assert 'blocked' == 'planned'\nE         \nE         - planned\nE         + blocked\n\ntest_autopilot_prompt.py:23: AssertionError\n=========================== short test summary info ===========================\nFAILED test_autopilot_prompt.py::test_runtime_control_prompt_blocks_before_planner\nFAILED test_autopilot_prompt.py::test_repo_edit_still_reaches_planner - Asser...\n2 failed in 0.07s\n",
+  "used_replacement": true
+}
