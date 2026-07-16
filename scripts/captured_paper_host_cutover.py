@@ -3446,7 +3446,12 @@ def _validate_candidate_task_semantics(raw: bytes, *, candidate_root: str) -> No
             "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate Exec projection is not exact"
         )
     projection = _task_exec_projection_from_xml(raw)
-    if projection["working_directory"] != candidate_root:
+    # The launcher projection stores normcased paths while ValidateOnly/Apply
+    # callers pass the resolved (proper-case) candidate root; Windows path
+    # identity is case-insensitive, so compare like _strict_system32_profile.
+    if os.path.normcase(projection["working_directory"]) != os.path.normcase(
+        candidate_root
+    ):
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate working directory is not exact"
         )
