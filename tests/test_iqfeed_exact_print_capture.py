@@ -100,17 +100,17 @@ def _frame(
         "Symbol": symbol,
         "Most Recent Trade": price,
         "Most Recent Trade Size": size,
-        "Most Recent Trade TimeMS": trade_time,
+        "Most Recent Trade Time": trade_time,
         "Most Recent Trade Date": trade_date,
         "Most Recent Trade Market Center": market_center,
         "Most Recent Trade Conditions": conditions,
         "TickID": tick_id,
         "Bid": bid,
         "Bid Size": "200",
-        "Bid TimeMS": "11:30:00.123455",
+        "Bid Time": "11:30:00.123455",
         "Ask": ask,
         "Ask Size": "300",
-        "Ask TimeMS": "11:30:00.123456",
+        "Ask Time": "11:30:00.123456",
         "Total Volume": "100000",
         "Delay": "0",
         "Message Contents": message_contents,
@@ -458,10 +458,13 @@ def test_reader_ack_then_q_emits_exact_rows() -> None:
 
 
 def test_selected_field_command_is_explicit_and_content_addressed() -> None:
+    # Symbol must NOT be requested: the live feed auto-prepends it and rejects
+    # (silently ignores) any select that names it - verified live 2026-07-16.
     assert bridge.SELECT_UPDATE_FIELDS_COMMAND.startswith(
-        "S,SELECT UPDATE FIELDS,Symbol,Most Recent Trade,"
+        "S,SELECT UPDATE FIELDS,Most Recent Trade,"
     )
+    assert ",Symbol," not in bridge.SELECT_UPDATE_FIELDS_COMMAND
     assert "Most Recent Trade Date" in bridge.SELECT_UPDATE_FIELDS_COMMAND
-    assert "Most Recent Trade TimeMS" in bridge.SELECT_UPDATE_FIELDS_COMMAND
+    assert "Most Recent Trade Time" in bridge.SELECT_UPDATE_FIELDS_COMMAND
     assert "TickID" in bridge.SELECT_UPDATE_FIELDS_COMMAND
     assert len(bridge.SELECTED_UPDATE_FIELDS_SHA256) == 64

@@ -904,7 +904,7 @@ def validate_iqfeed_exact_print_source_provenance(
         "Symbol",
         "Most Recent Trade",
         "Most Recent Trade Size",
-        "Most Recent Trade TimeMS",
+        "Most Recent Trade Time",
         "Most Recent Trade Date",
         "Most Recent Trade Market Center",
         "Most Recent Trade Conditions",

@@ -161,17 +161,22 @@ SELECTED_UPDATE_FIELDS = (
     "Symbol",
     "Most Recent Trade",
     "Most Recent Trade Size",
-    "Most Recent Trade TimeMS",
+    # Live IQConnect 6.2.3.5 rejects the "TimeMS" fieldset names outright
+    # (E,... is not a valid fieldset field). The protocol-6.2 "...Time"
+    # fields already carry microsecond precision (HH:MM:SS.ffffff, verified
+    # live 2026-07-16: 15:56:43.267857), so the exact-print clock loses
+    # nothing by using the names the feed actually acknowledges.
+    "Most Recent Trade Time",
     "Most Recent Trade Date",
     "Most Recent Trade Market Center",
     "Most Recent Trade Conditions",
     "TickID",
     "Bid",
     "Bid Size",
-    "Bid TimeMS",
+    "Bid Time",
     "Ask",
     "Ask Size",
-    "Ask TimeMS",
+    "Ask Time",
     "Total Volume",
     "Delay",
     "Message Contents",
@@ -186,8 +191,11 @@ SELECTED_UPDATE_FIELDS_SHA256 = hashlib.sha256(
         allow_nan=False,
     ).encode("utf-8")
 ).hexdigest()
+# IQFeed always prepends Symbol to Q rows and REJECTS a select that names it
+# (the whole request is then silently ignored and the default layout stays) —
+# request every field AFTER Symbol; the acknowledgement echoes Symbol first.
 SELECT_UPDATE_FIELDS_COMMAND = "S,SELECT UPDATE FIELDS," + ",".join(
-    SELECTED_UPDATE_FIELDS
+    SELECTED_UPDATE_FIELDS[1:]
 )
 _SELECTED_FIELD_INDEX = {
     name: index + 1 for index, name in enumerate(SELECTED_UPDATE_FIELDS)
@@ -1217,7 +1225,7 @@ def _parse_selected_l1(
             p[_SELECTED_FIELD_INDEX["Most Recent Trade Date"]] or ""
         ).strip()
         raw_trade_time = str(
-            p[_SELECTED_FIELD_INDEX["Most Recent Trade TimeMS"]] or ""
+            p[_SELECTED_FIELD_INDEX["Most Recent Trade Time"]] or ""
         ).strip()
         provider_event_at = _exact_trade_datetime_utc(
             raw_trade_date, raw_trade_time
