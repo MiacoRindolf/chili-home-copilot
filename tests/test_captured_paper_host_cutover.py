@@ -970,8 +970,11 @@ def test_tokenized_task_template_resolves_only_verified_manifest_tokens(
         powershell_executable_path=str(powershell),
         activate_paper_projection=projection,
     )
-    assert template.count(cutover.MANIFEST_PATH_TOKEN.encode()) == 1
-    assert template.count(cutover.MANIFEST_SHA256_TOKEN.encode()) == 1
+    # The template is UTF-16 on disk (schtasks rejects UTF-8-declared XML),
+    # so token assertions operate on the decoded text.
+    template_text = template.decode("utf-16")
+    assert template_text.count(cutover.MANIFEST_PATH_TOKEN) == 1
+    assert template_text.count(cutover.MANIFEST_SHA256_TOKEN) == 1
     manifest = tmp_path / ("a" * 64 + ".json")
     manifest.write_text("{}")
     resolved, invocation = cutover._validate_candidate_template(
@@ -980,8 +983,9 @@ def test_tokenized_task_template_resolves_only_verified_manifest_tokens(
         manifest_path=manifest,
         manifest_sha256="a" * 64,
     )
-    assert cutover.MANIFEST_PATH_TOKEN.encode() not in resolved
-    assert cutover.MANIFEST_SHA256_TOKEN.encode() not in resolved
+    resolved_text = resolved.decode("utf-16")
+    assert cutover.MANIFEST_PATH_TOKEN not in resolved_text
+    assert cutover.MANIFEST_SHA256_TOKEN not in resolved_text
     assert str(manifest) in invocation.launcher_arguments
     assert "a" * 64 in invocation.launcher_arguments
 
@@ -1507,17 +1511,19 @@ def test_candidate_token_process_with_wrong_full_argv_is_a_collision(
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        (b"<LogonType>InteractiveToken</LogonType>", b"<LogonType>Password</LogonType>"),
-        (b"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", b"<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>"),
-        (b"<RunLevel>HighestAvailable</RunLevel>", b"<RunLevel>LeastPrivilege</RunLevel>"),
-        (b"<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", b"<ExecutionTimeLimit>PT1H</ExecutionTimeLimit>"),
+        ("<LogonType>InteractiveToken</LogonType>", "<LogonType>Password</LogonType>"),
+        ("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>"),
+        ("<RunLevel>HighestAvailable</RunLevel>", "<RunLevel>LeastPrivilege</RunLevel>"),
+        ("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", "<ExecutionTimeLimit>PT1H</ExecutionTimeLimit>"),
     ],
 )
 def test_candidate_task_semantic_weakening_is_rejected(
-    prepared: cutover.PreparedCutover, old: bytes, new: bytes
+    prepared: cutover.PreparedCutover, old: str, new: str
 ) -> None:
-    assert old in prepared.resolved_task_xml
-    weakened = prepared.resolved_task_xml.replace(old, new)
+    # UTF-16 template: mutate on decoded text, re-encode for validation.
+    resolved_text = prepared.resolved_task_xml.decode("utf-16")
+    assert old in resolved_text
+    weakened = resolved_text.replace(old, new).encode("utf-16")
     with pytest.raises(
         cutover.CapturedPaperHostCutoverError,
         match="TASK_TEMPLATE_SEMANTICS_INVALID",

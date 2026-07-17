@@ -37,6 +37,7 @@ import stat
 import subprocess
 import sys
 import time
+import traceback
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 import uuid
@@ -2072,21 +2073,61 @@ def _assert_launch_contract_roster(
 def _materialize_candidate_xml(
     template: bytes, *, manifest_path: Path, manifest_sha256: str
 ) -> bytes:
-    path_token = MANIFEST_PATH_TOKEN.encode("utf-8")
-    sha_token = MANIFEST_SHA256_TOKEN.encode("ascii")
-    if template.count(path_token) != 1 or template.count(sha_token) != 1:
+    # 2026-07-17: production templates are UTF-16 on disk (schtasks/msxml
+    # reject UTF-8-declared XML with "unable to switch the encoding",
+    # reproduced live), so token replacement happens on decoded text and the
+    # result re-encodes with the same encoding.  UTF-8 remains supported for
+    # existing sealed artifacts and fixtures.  Dispatch is by BOM — decoding
+    # UTF-8 bytes as UTF-16 does not reliably raise, it yields garbage.
+    if template.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = template.decode("utf-16")
+        recode = lambda value: value.encode("utf-16")
+    else:
+        text = template.decode("utf-8")
+        recode = lambda value: value.encode("utf-8")
+    if text.count(MANIFEST_PATH_TOKEN) != 1 or text.count(MANIFEST_SHA256_TOKEN) != 1:
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_TOKEN_MISMATCH",
             "candidate task template must contain each manifest token exactly once",
         )
-    path_raw = str(manifest_path).encode("utf-8")
-    if any(value in path_raw for value in (b'"', b"<", b">", b"&")):
+    path_raw = str(manifest_path)
+    if any(value in path_raw for value in ('"', "<", ">", "&")):
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_PATH_UNSAFE",
             "manifest path is not safe for the sealed task action",
         )
-    return template.replace(path_token, path_raw).replace(
-        sha_token, _sha(manifest_sha256, "manifest_sha256").encode("ascii")
+    return recode(
+        text.replace(MANIFEST_PATH_TOKEN, path_raw).replace(
+            MANIFEST_SHA256_TOKEN, _sha(manifest_sha256, "manifest_sha256")
+        )
+    )
+
+
+def _candidate_task_semantics_match(
+    observed_xml: bytes, resolved_xml: bytes
+) -> bool:
+    """Prove an installed candidate task is the sealed one, semantically.
+
+    Task Scheduler re-serializes registered XML (UTF-16/CRLF, added <URI>,
+    canonicalized principal), so authored bytes never survive a
+    /Create -> /Query round trip and byte/sha compares are impossible by
+    construction (2026-07-17, first live Apply).  Identity is therefore the
+    Exec action — command, arguments, working directory — compared with
+    Windows case-insensitive path semantics against the sealed resolved
+    template, whose own bytes stay hash-bound via the candidate action."""
+
+    try:
+        observed_cmd, observed_args = _task_exec_from_xml(observed_xml)
+        resolved_cmd, resolved_args = _task_exec_from_xml(resolved_xml)
+        observed_projection = _task_exec_projection_from_xml(observed_xml)
+        resolved_projection = _task_exec_projection_from_xml(resolved_xml)
+    except CapturedPaperHostCutoverError:
+        return False
+    return (
+        os.path.normcase(observed_cmd) == os.path.normcase(resolved_cmd)
+        and os.path.normcase(observed_args) == os.path.normcase(resolved_args)
+        and os.path.normcase(str(observed_projection.get("working_directory") or ""))
+        == os.path.normcase(str(resolved_projection.get("working_directory") or ""))
     )
 
 
@@ -3016,9 +3057,15 @@ def prepare_preactivation_rollback_baseline(
         roots=roots,
         field="candidate_task_xml",
     )
+    # Token counts on decoded text — production templates are UTF-16 (see
+    # _materialize_candidate_xml), where a UTF-8 byte-pattern count is
+    # always zero.
+    template_text = template_raw.decode(
+        "utf-16" if template_raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8"
+    )
     if (
-        template_raw.count(MANIFEST_PATH_TOKEN.encode("utf-8")) != 1
-        or template_raw.count(MANIFEST_SHA256_TOKEN.encode("ascii")) != 1
+        template_text.count(MANIFEST_PATH_TOKEN) != 1
+        or template_text.count(MANIFEST_SHA256_TOKEN) != 1
         or _task_enabled_from_xml(template_raw) is not True
     ):
         raise CapturedPaperHostCutoverError(
@@ -3280,7 +3327,12 @@ def _parse_rollback_capsule(
     if (
         os.path.normcase(command)
         != os.path.normcase(invocation.powershell_executable_path)
-        or arguments != _quote_windows_arguments(invocation.launcher_arguments)
+        # Case-insensitive: capsule XML carries normcased template tokens
+        # while the reconstructed invocation may be filesystem proper case
+        # (2026-07-17: this exact compare made every live rollback fail with
+        # ROLLBACK_CAPSULE_INVALID).
+        or os.path.normcase(arguments)
+        != os.path.normcase(_quote_windows_arguments(invocation.launcher_arguments))
     ):
         raise CapturedPaperHostCutoverError(
             "ROLLBACK_CAPSULE_INVALID", "capsule task and invocation are not identical"
@@ -4133,7 +4185,12 @@ def build_candidate_task_xml_template(
 
     escape = lambda value: saxutils.escape(str(value), {'"': "&quot;"})
     xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        # 2026-07-16 -> 2026-07-17: msxml/schtasks REJECT a UTF-8-declared
+        # task XML at /Create ("unable to switch the encoding", reproduced
+        # live and side-effect-free on the target host) — the file must be
+        # real UTF-16 (BOM + matching declaration), the scheduler's own
+        # export format.  ET parsers accept it identically.
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
         f'<Task version="1.4" xmlns="{_TASK_NS}">\n'
         "  <RegistrationInfo>\n"
         "    <Description>One hash-bound captured Alpaca PAPER host; no live-cash authority.</Description>\n"
@@ -4177,7 +4234,7 @@ def build_candidate_task_xml_template(
         "  </Actions>\n"
         "</Task>\n"
     )
-    raw = xml.encode("utf-8")
+    raw = xml.encode("utf-16")
     # Self-review with the same parser used at Apply; manifest values are only
     # placeholders here and are deliberately not resolved.
     _task_enabled_from_xml(raw)
@@ -4466,12 +4523,24 @@ def _task_definition_sha_ignoring_enabled(raw: bytes) -> str:
         raise CapturedPaperHostCutoverError(
             "TASK_XML_INVALID", "task XML is malformed"
         ) from exc
-    enabled = root.find(f".//{{{_TASK_NS}}}Settings/{{{_TASK_NS}}}Enabled")
-    if enabled is None:
+    settings = root.find(f".//{{{_TASK_NS}}}Settings")
+    if settings is None:
         raise CapturedPaperHostCutoverError(
-            "TASK_XML_INVALID", "task XML has no Enabled setting"
+            "TASK_XML_INVALID", "task XML has no Settings element"
         )
-    enabled.text = "@ignored"
+    # Task Scheduler's XSD defines a missing Settings/Enabled as ``true`` and
+    # schtasks OMITS the default from exports (see _task_enabled_from_xml),
+    # while the post-disable readback carries an explicit false at whatever
+    # position the service re-serializes it to.  Removing the element (rather
+    # than rewriting its text) canonicalizes the omitted-default, explicit
+    # and re-positioned forms identically so this sha compares the task
+    # DEFINITION, not the enablement flag.  (2026-07-17: the first live
+    # Apply died here — TASK_XML_INVALID on the first legacy task's
+    # post-disable drift check, reproduced side-effect-free on a throwaway
+    # task.)
+    enabled = settings.find(f"{{{_TASK_NS}}}Enabled")
+    if enabled is not None:
+        settings.remove(enabled)
     return sha256_bytes(ET.tostring(root, encoding="utf-8"))
 
 
@@ -5682,9 +5751,14 @@ class CapturedPaperHostCutoverExecutor:
                 )
                 mutations += 1
                 candidate = self.backend.get_task(CANDIDATE_TASK_NAME)
+                # Semantic identity, not sha — the scheduler re-serializes
+                # registered XML so the readback can never byte-match the
+                # authored template (see _candidate_task_semantics_match).
                 if (
                     candidate is None
-                    or candidate.xml_sha256 != self.prepared.resolved_task_xml_sha256
+                    or not _candidate_task_semantics_match(
+                        candidate.xml, self.prepared.resolved_task_xml
+                    )
                     or candidate.enabled is not True
                 ):
                     raise CapturedPaperHostCutoverError(
@@ -6001,9 +6075,12 @@ class CapturedPaperHostCutoverExecutor:
                 "APPLIED_POSTCONDITION_FAILED", "legacy bridge process remains"
             )
         candidate = self.backend.get_task(CANDIDATE_TASK_NAME)
+        # Semantic identity, not sha (see _candidate_task_semantics_match).
         if (
             candidate is None
-            or candidate.xml_sha256 != self.prepared.resolved_task_xml_sha256
+            or not _candidate_task_semantics_match(
+                candidate.xml, self.prepared.resolved_task_xml
+            )
             or candidate.enabled is not True
         ):
             raise CapturedPaperHostCutoverError(
@@ -6013,8 +6090,9 @@ class CapturedPaperHostCutoverExecutor:
         if (
             len(candidate_tasks) != 1
             or candidate_tasks[0].name != CANDIDATE_TASK_NAME
-            or candidate_tasks[0].xml_sha256
-            != self.prepared.resolved_task_xml_sha256
+            or not _candidate_task_semantics_match(
+                candidate_tasks[0].xml, self.prepared.resolved_task_xml
+            )
         ):
             raise CapturedPaperHostCutoverError(
                 "APPLIED_POSTCONDITION_FAILED",
@@ -6607,7 +6685,10 @@ class CapturedPaperHostCutoverExecutor:
         self._assert_candidate_process_subset(candidate_processes)
         candidate = self.backend.get_task(CANDIDATE_TASK_NAME)
         if candidate is not None:
-            if candidate.xml_sha256 != prepared.resolved_task_xml_sha256:
+            # Semantic identity, not sha (see _candidate_task_semantics_match).
+            if not _candidate_task_semantics_match(
+                candidate.xml, prepared.resolved_task_xml
+            ):
                 # Never mutate a foreign colliding task, but also never let it
                 # strand disabled legacy capture.  Restore legacy first and
                 # then report the unresolved collision fail-closed.
@@ -6648,10 +6729,8 @@ class CapturedPaperHostCutoverExecutor:
                 candidate_before_delete = self.backend.get_task(CANDIDATE_TASK_NAME)
                 if (
                     candidate_before_delete is None
-                    or _task_definition_sha_ignoring_enabled(
-                        candidate_before_delete.xml
-                    ) != _task_definition_sha_ignoring_enabled(
-                        prepared.resolved_task_xml
+                    or not _candidate_task_semantics_match(
+                        candidate_before_delete.xml, prepared.resolved_task_xml
                     )
                 ):
                     foreign_candidate = True
@@ -6979,7 +7058,10 @@ class WindowsHostCutoverBackend:
             if (
                 os.path.normcase(command)
                 == os.path.normcase(invocation.powershell_executable_path)
-                and arguments == expected_arguments
+                # Case-insensitive: the registered Arguments carry the sealed
+                # template's normcased path tokens while the invocation is
+                # filesystem-resolved proper case (2026-07-17 bug class).
+                and os.path.normcase(arguments) == os.path.normcase(expected_arguments)
             ):
                 matches.append(task)
         return tuple(matches)
@@ -7138,9 +7220,14 @@ class WindowsHostCutoverBackend:
 
     @staticmethod
     def _cmdline_matches(identity: ProcessIdentity, arguments: Sequence[str]) -> bool:
-        return len(identity.cmdline) == len(arguments) + 1 and tuple(
-            identity.cmdline[1:]
-        ) == tuple(arguments)
+        # Case-insensitive per element: the task-spawned argv carries the
+        # sealed template's normcased path tokens while the invocation is
+        # filesystem-resolved proper case (2026-07-17 bug class).  The
+        # process chain stays hash-bound upstream; this is identification.
+        return len(identity.cmdline) == len(arguments) + 1 and all(
+            os.path.normcase(actual) == os.path.normcase(str(expected))
+            for actual, expected in zip(identity.cmdline[1:], arguments)
+        )
 
     def _candidate_processes(
         self, invocation: CandidateInvocation
@@ -7160,10 +7247,17 @@ class WindowsHostCutoverBackend:
                     invocation.host_ready_receipt_base,
                 }
                 if info_cmdline:
+                    normcased_cmdline = {
+                        os.path.normcase(item) for item in info_cmdline
+                    }
                     looks_launcher = any(
-                        token in info_cmdline for token in launcher_tokens
+                        os.path.normcase(token) in normcased_cmdline
+                        for token in launcher_tokens
                     )
-                    looks_service = any(token in info_cmdline for token in service_tokens)
+                    looks_service = any(
+                        os.path.normcase(token) in normcased_cmdline
+                        for token in service_tokens
+                    )
                 else:
                     looks_launcher = (
                         os.path.normcase(info_exe)
@@ -7180,11 +7274,16 @@ class WindowsHostCutoverBackend:
                 identity = self._identity_for_pid(pid, role="candidate_probe")
                 if identity is None:
                     continue
+                normcased_identity_cmdline = {
+                    os.path.normcase(item) for item in identity.cmdline
+                }
                 full_launcher_relevant = any(
-                    token in identity.cmdline for token in launcher_tokens
+                    os.path.normcase(token) in normcased_identity_cmdline
+                    for token in launcher_tokens
                 )
                 full_service_relevant = any(
-                    token in identity.cmdline for token in service_tokens
+                    os.path.normcase(token) in normcased_identity_cmdline
+                    for token in service_tokens
                 )
                 if not full_launcher_relevant and not full_service_relevant:
                     # A coarse executable/name prefilter can select an
@@ -7453,11 +7552,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
         ValueError,
     ) as exc:
+        # 2026-07-17 observability: the bare reason_code hid every primary
+        # failure behind whichever error fired last (a COMPENSATING_ROLLBACK
+        # code masked the real Apply defect for a full live cycle).  Bounded
+        # head+tail of the traceback chain names the originating raise.
+        detail = traceback.format_exc()
+        if len(detail) > 2400:
+            detail = detail[:1400] + "\n...[middle truncated]...\n" + detail[-1000:]
         print(
             json.dumps(
                 {
                     "verdict": "REJECTED",
                     "reason_code": getattr(exc, "code", type(exc).__name__),
+                    "error_detail": detail,
                     "live_cash_authorized": False,
                 },
                 sort_keys=True,
