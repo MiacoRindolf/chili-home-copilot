@@ -7081,9 +7081,30 @@ class WindowsHostCutoverBackend:
         self, bindings: Sequence[LegacyProcessBinding]
     ) -> tuple[ProcessIdentity, ...]:
         found: list[ProcessIdentity] = []
+        # 2026-07-17: only a process sharing a sealed binding's executable
+        # name can be a legacy bridge, so prefilter by name before the deep
+        # identity inspection — process.exe() on every PID raises
+        # AccessDenied on protected system processes for ANY caller, which
+        # made this inventory impossible on a real host (first live
+        # ValidateOnly to get past template validation died here).  Same
+        # prefilter pattern as _candidate_processes; an uninspectable NAME
+        # stays fail-closed, as does AccessDenied on a name-matched process.
+        expected_names = {
+            Path(binding.executable_path).name.casefold() for binding in bindings
+        }
         try:
-            for process in self._psutil.process_iter(attrs=["pid"]):
+            for process in self._psutil.process_iter(
+                attrs=["pid", "name"], ad_value=None
+            ):
                 pid = int(process.info["pid"])
+                name = process.info.get("name")
+                if name is None:
+                    raise CapturedPaperHostCutoverError(
+                        "PROCESS_INVENTORY_UNINSPECTABLE",
+                        f"a process name could not be inspected (PID {pid})",
+                    )
+                if str(name).casefold() not in expected_names:
+                    continue
                 for binding in bindings:
                     identity = self._identity_for_pid(
                         pid, role=binding.role, binding=binding
