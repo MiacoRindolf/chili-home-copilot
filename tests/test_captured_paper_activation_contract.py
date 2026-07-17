@@ -800,7 +800,11 @@ def _bundle(tmp_path: Path) -> Bundle:
     preactivation = {
         "schema_version": PREACTIVATION_MANIFEST_SCHEMA_VERSION,
         "generated_at": (NOW - timedelta(seconds=4)).isoformat(),
-        "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        # Mirrors the builder's _MANIFEST_TTL (12 minutes as of 2026-07-17)
+        # so the envelope outlives the 10-minute receipt class — the
+        # slow-smoke test below depends on receipts expiring before the
+        # envelope does.
+        "expires_at": (NOW + timedelta(minutes=12)).isoformat(),
         **shared_manifest,
         "authority_boundary": authority,
         "readiness_receipts": {
@@ -1366,16 +1370,21 @@ def test_slow_no_order_smoke_requires_and_accepts_post_shutdown_refresh(
     output_root = tmp_path / "slow-final-objects"
     output_root.mkdir()
     preactivation = _load_preactivation(bundle)
-    smoke_completed_at = NOW + timedelta(seconds=45)
+    # 2026-07-17: the mid-flow receipt class is uniform (10 minutes), so a
+    # smoke that outlives broker/kill authority also outlives every other
+    # probe receipt — past the class boundary the whole envelope is dead
+    # (fail-closed), and within it a slow smoke still finalizes via the
+    # mandatory post-shutdown refresh.  Exercise both sides.
+    stale_probe_horizon = NOW + timedelta(seconds=615)
+    smoke_completed_at = NOW + timedelta(seconds=320)
 
-    # The original short broker/kill receipts have expired.  They remain
-    # hash/semantic evidence for the pre-smoke boundary but are not current
-    # activation authority.
+    # Past the class boundary: the original receipts (captured NOW-5s,
+    # 600s window) are no longer current activation authority.
     assert all(
         datetime.fromisoformat(
             json.loads(Path(bundle.preactivation["readiness_receipts"][kind]["path"]).read_text())["expires_at"]
         )
-        < smoke_completed_at
+        < stale_probe_horizon
         for kind in ("broker_account", "kill_switch")
     )
     with pytest.raises(CapturedPaperActivationContractError, match="typed readiness"):
@@ -1384,7 +1393,7 @@ def test_slow_no_order_smoke_requires_and_accepts_post_shutdown_refresh(
             expected_manifest_sha256=bundle.preactivation_sha256,
             candidate_root=bundle.candidate,
             allowed_read_roots=(bundle.root,),
-            wall_clock=lambda: smoke_completed_at,
+            wall_clock=lambda: stale_probe_horizon,
         )
 
     refreshed: dict[str, dict[str, Any]] = {}

@@ -45,7 +45,15 @@ _MAX_JSON_BYTES = 4 * 1024 * 1024
 _MAX_SOURCE_BYTES = 64 * 1024 * 1024
 _MAX_DEPENDENCY_CLOSURE_FILES = 8_192
 _MAX_DEPENDENCY_CLOSURE_BYTES = 512 * 1024 * 1024
-_MANIFEST_TTL = timedelta(minutes=5)
+# 2026-07-17: 5 minutes starved the post-smoke tail — the no-order smoke
+# receipt is clamped to this envelope's expiry (min(verified.expires_at, ...)
+# in the service), and the final manifest may not outlive this envelope
+# (contract chronology check), so smoke duration ate most of the receipt
+# window and finalize -> cutover -> ActivatePaper could not fit in what was
+# left.  12 minutes keeps the 10-minute receipt class fully usable through
+# the tail and stays under the contract's 15-minute
+# _MAX_MANIFEST_AGE_SECONDS cap with slack for clock skew.
+_MANIFEST_TTL = timedelta(minutes=12)
 _DEPENDENCY_CLOSURE_SCHEMA_VERSION = "chili.captured-paper-dependency-closure.v1"
 
 _RUNTIME_SECRET_KEYS = frozenset(
@@ -693,7 +701,19 @@ def _captured_paper_external_import_roots(
         name = module_name(path)
         if name:
             pending.append(name)
-    external: set[str] = {"alpaca", "psycopg2", "zstandard"}
+    # 2026-07-17: idinagdag ang ta/pandas/pytz/sqlalchemy — ang AST walker ay
+    # hindi umabot sa module-scope imports ng app/services/trading/scanner.py
+    # (naranasan live: "unsealed import rejected: ta" sa no-order boot).
+    external: set[str] = {
+        "alpaca",
+        "pandas",
+        "psutil",
+        "psycopg2",
+        "pytz",
+        "sqlalchemy",
+        "ta",
+        "zstandard",
+    }
     visited: set[str] = set()
 
     while pending:
@@ -1571,12 +1591,19 @@ def build_captured_paper_preactivation_offline(
         )
         assert receipt is not None
         expires_at = _parse_utc(receipt.get("expires_at"), f"{kind}.expires_at")
-        # Broker identity and kill-switch authority are intentionally refreshed
-        # *after* the no-order service has fully stopped.  Their pre-smoke
-        # receipts must be fresh at this boundary, but cannot cap the envelope
-        # lifetime or a valid 30+ second smoke would become impossible.
-        if kind not in {"broker_account", "kill_switch"}:
-            manifest_expiry = min(manifest_expiry, expires_at)
+        # ENVELOPE POLICY (2026-07-17 bug fix): every readiness receipt is
+        # freshness-gated at its OWN probe boundary; inheriting min(receipt
+        # expiries) here produced envelopes that expired before the producing
+        # flow could even return them (observed live: the 60s
+        # capture_host_smoke receipt left a 41s window that ended 4s BEFORE
+        # the manifest file hit disk — structurally unusable).  A receipt
+        # already expired at build time still rejects the build below; the
+        # envelope itself is governed by _MANIFEST_TTL (contract-capped at
+        # 15 minutes), which bounds the smoke -> finalize handoff.
+        if expires_at <= now:
+            raise CapturedPaperPreactivationBuildError(
+                "EVIDENCE_STALE", f"{kind} receipt is already expired"
+            )
         normalized_receipts[kind] = {"path": str(path), "sha256": digest}
         evidence_hashes[f"readiness_receipts.{kind}"] = digest
     if manifest_expiry <= now:
