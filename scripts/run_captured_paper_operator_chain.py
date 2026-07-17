@@ -45,11 +45,65 @@ with _eng.connect() as _c:
             "GROUP BY symbol ORDER BY n DESC LIMIT 40"
         )
     ).fetchall()
-CERT_SYMBOL = next(
-    (str(s) for s, _n in _cands if _re.fullmatch(r"[A-Z]{1,6}", str(s))),
-    "SPY",
-)
-print("CERT_SYMBOL (live-derived):", CERT_SYMBOL, flush=True)
+def _live_delay_is_zero(symbol: str, timeout_s: float = 4.0) -> bool:
+    """Ask IQConnect directly whether this symbol's L1 feed is real-time.
+
+    2026-07-17: the tape has NO delay/entitlement column, and a failed smoke
+    writes its own DELAYED prints back to the tape, so a delayed symbol (SPY
+    Delay=15 on this NASDAQ-realtime DTN entitlement) self-poisons the
+    top-by-count pick.  A 15-minute-delayed quote can never satisfy the 2s
+    authoritative freshness bound, so only Delay=0 symbols may certify
+    capture.  NOTE: never include Symbol in SELECT UPDATE FIELDS
+    (auto-prepended; including it silently voids the select).
+    """
+    import socket as _sk
+    import time as _tm
+
+    try:
+        sock = _sk.create_connection(("127.0.0.1", 5009), timeout=timeout_s)
+    except OSError:
+        return False
+    try:
+        sock.settimeout(timeout_s)
+        sock.sendall(b"S,SET PROTOCOL,6.2\r\n")
+        sock.sendall(b"S,SELECT UPDATE FIELDS,Most Recent Trade,Delay\r\n")
+        sock.sendall(f"w{symbol}\r\n".encode("ascii"))
+        deadline = _tm.monotonic() + timeout_s
+        buffer = b""
+        while _tm.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buffer += chunk
+            for line in buffer.decode("ascii", errors="replace").splitlines():
+                parts = line.split(",")
+                if len(parts) >= 4 and parts[0] in ("P", "Q") and parts[1] == symbol:
+                    return (parts[3] or "").strip() in ("0", "")
+        return False
+    finally:
+        try:
+            sock.sendall(f"r{symbol}\r\n".encode("ascii"))
+        except OSError:
+            pass
+        sock.close()
+
+
+CERT_SYMBOL = None
+for _s, _n in _cands:
+    _sym = str(_s)
+    if not _re.fullmatch(r"[A-Z]{1,6}", _sym):
+        continue
+    if _live_delay_is_zero(_sym):
+        CERT_SYMBOL = _sym
+        break
+    print(f"cert-candidate {_sym}: DELAYED/unprobeable - skipped", flush=True)
+if CERT_SYMBOL is None:
+    print("FATAL: no real-time (Delay=0) cert symbol on the live tape", flush=True)
+    raise SystemExit(3)
+print("CERT_SYMBOL (live-derived, Delay=0 verified):", CERT_SYMBOL, flush=True)
 
 # ---- error tracing (surface inner cutover codes) ----
 from scripts import captured_paper_host_cutover as hc
