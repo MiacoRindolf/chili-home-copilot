@@ -578,18 +578,29 @@ def _default_cutover_probe(
         candidate = backend.get_task(host_cutover.CANDIDATE_TASK_NAME)
         if candidate is None:
             raise RuntimeError("candidate task is absent")
-        host_cutover._validate_candidate_task_semantics(
-            candidate.xml,
-            candidate_root=str(projection.get("candidate_root") or ""),
-        )
+        if candidate.enabled is not True:
+            raise RuntimeError("candidate task is not enabled")
+        # 2026-07-17: do NOT run the authored-template structural validator on
+        # the /Query readback — Task Scheduler re-serializes registered XML
+        # (adds <URI>, canonicalizes the principal), so "sections are not
+        # exact" is guaranteed on a real host (this rejected every boot
+        # attempt of generation a816ac1a via task RestartOnFailure).  The
+        # action-vs-own-argv comparison below IS the attestation: the sealed
+        # template was structurally validated by the cutover before /Create,
+        # and this process's argv descends from the sealed launcher chain.
         command, arguments = host_cutover._task_exec_from_xml(candidate.xml)
         if (
             _canonical_process_path(command, "candidate task executable")
             != _canonical_process_path(
                 parent_executable_path, "launcher parent executable"
             )
-            or arguments
-            != host_cutover._quote_windows_arguments(tuple(expected_parent_tail))
+            # Case-insensitive: the registered XML carries the sealed
+            # template's normcased path tokens while this process's argv is
+            # filesystem-resolved (2026-07-17 bug class).
+            or os.path.normcase(arguments)
+            != os.path.normcase(
+                host_cutover._quote_windows_arguments(tuple(expected_parent_tail))
+            )
         ):
             raise RuntimeError("candidate task action differs from this process")
         legacy = {}
@@ -603,13 +614,25 @@ def _default_cutover_probe(
 
         bridge_processes: list[str] = []
         bridge_names = {"iqfeed_trade_bridge.py", "iqfeed_depth_bridge.py"}
-        for process in psutil.process_iter(("pid",)):
+        # 2026-07-17: prefilter by process name — cmdline() on every PID
+        # raises AccessDenied on protected system processes for any caller
+        # (same impossible-by-construction class fixed in the cutover's
+        # find_legacy_processes).  Only a python.exe process can be a legacy
+        # bridge; an uninspectable python process stays fail-closed.
+        for process in psutil.process_iter(("pid", "name"), ad_value=None):
+            name = process.info.get("name")
+            if name is None:
+                raise RuntimeError(
+                    f"a process name could not be inspected (PID {process.info['pid']})"
+                )
+            if str(name).casefold() != "python.exe":
+                continue
             try:
                 cmdline = process.cmdline()
             except psutil.NoSuchProcess:
                 continue
             except (psutil.AccessDenied, psutil.ZombieProcess) as exc:
-                raise RuntimeError("process inventory is not complete") from exc
+                raise RuntimeError("a python process is not inspectable") from exc
             for token in cmdline:
                 if Path(str(token)).name.lower() in bridge_names:
                     bridge_processes.append(
