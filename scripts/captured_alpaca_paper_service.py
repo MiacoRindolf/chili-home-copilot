@@ -5401,6 +5401,15 @@ def _validate_mode_arguments(args: argparse.Namespace) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
+    # 2026-07-17: two consecutive live PREPARED-phase stalls were invisible
+    # (only the dispatch lock appeared, then silence until the cutover's
+    # timeout killed the run).  Periodic all-thread stack dumps to stderr —
+    # persisted by the launcher's ActivatePaper console redirect — name the
+    # exact blocking frame without attaching a debugger to the sealed
+    # process.
+    import faulthandler
+
+    faulthandler.dump_traceback_later(150.0, repeat=True, file=sys.stderr)
     external_runtime_boundary_entered = False
     provider_start_may_have_been_attempted = False
     active_order_boundary_entered = False
