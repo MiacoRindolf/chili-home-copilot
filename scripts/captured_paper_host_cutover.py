@@ -3612,7 +3612,17 @@ def _validate_candidate_template(
         "-AllowedReadRootsBase64",
         read_root_b64,
     )
-    if arguments != _quote_windows_arguments(launcher_args):
+    # 2026-07-17: compared case-insensitively — the sealed template stores
+    # normcased paths while _sealed_capsule_path resolves the filesystem's
+    # proper case, so a byte-exact compare fails on real Windows hosts even
+    # when every token is path-identical (first observed live as
+    # TASK_TEMPLATE_ACTION_MISMATCH on generation 3020dd01, tokens
+    # -ServiceScriptPath/-Stage0ScriptPath only).  The template bytes are
+    # already hash-bound via the candidate action, so this remains a
+    # semantic re-derivation check, same as the working-directory compare.
+    if os.path.normcase(arguments) != os.path.normcase(
+        _quote_windows_arguments(launcher_args)
+    ):
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_ACTION_MISMATCH",
             "candidate task template differs from the sealed ActivatePaper invocation",
@@ -3628,7 +3638,9 @@ def _validate_candidate_template(
     )
     if (
         os.path.normcase(resolved_command) != os.path.normcase(str(powershell_path))
-        or resolved_arguments != _quote_windows_arguments(resolved_launcher_args)
+        # Case-insensitive for the same reason as the template compare above.
+        or os.path.normcase(resolved_arguments)
+        != os.path.normcase(_quote_windows_arguments(resolved_launcher_args))
     ):
         raise CapturedPaperHostCutoverError(
             "TASK_RESOLUTION_MISMATCH", "resolved candidate task action is not exact"
@@ -3648,7 +3660,11 @@ def _validate_candidate_template(
     )
     if (
         len(service_args) < 20
-        or service_args[:4] != ("-I", "-S", "-B", str(stage0_target))
+        or service_args[:3] != ("-I", "-S", "-B")
+        # Path token compared case-insensitively (projection stores normcased
+        # paths, the resolved target carries filesystem proper case).
+        or os.path.normcase(str(service_args[3]))
+        != os.path.normcase(str(stage0_target))
         or "--" not in service_args
         or service_args[service_args.index("--target-role") + 1]
         != "activation_service"
