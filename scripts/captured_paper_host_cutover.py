@@ -5800,7 +5800,15 @@ class CapturedPaperHostCutoverExecutor:
                     self.prepared.invocation,
                     service,
                     phase="prepared",
-                    timeout_seconds=90.0,
+                    # 2026-07-17: 90s killed the first Apply to reach this
+                    # point — the sealed ActivatePaper boot (env verification,
+                    # capture host + IQFeed bring-up, DB binds) was alive and
+                    # mid-protocol (dispatch lock written ~90s in) but not yet
+                    # PREPARED.  300s covers the observed boot class and still
+                    # fits inside the 10-minute receipt window measured from
+                    # the smoke; a dead service aborts the wait early either
+                    # way, and rollback is proven live (ROLLED_BACK_EXACT).
+                    timeout_seconds=300.0,
                 )
                 prepared_sha, challenge, prepared_valid_until, dispatch_lock_identity = (
                     _validate_prepared_receipt(
