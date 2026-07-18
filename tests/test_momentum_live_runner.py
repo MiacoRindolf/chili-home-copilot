@@ -275,6 +275,167 @@ def test_quote_quality_block_adaptive_override_allows_wide_spread_on_mover() -> 
     assert _quote_quality_block(tick, fresh, max_spread_bps=150.0) is None
 
 
+def test_broken_quote_ceiling_admits_vivs_ignition_flares() -> None:
+    """VIVS 2026-07-15: a fixed bps abs cap has no price-granularity term — a 3-7
+    CENT spread flare on a sub-$2.50 name exceeds 300bps and vetoed a +90%
+    Ross-class winner at ignition (4 wide_bbo_spread blocks). The broken-quote
+    ceiling must admit all 4 exact recorded payloads: events 1-2 via the dollar
+    floor (no real EM in scope), events 3-4 via the EM term (real EM 4545bps)."""
+    from app.services.trading.momentum_neural.risk_policy import broken_quote_ceiling_bps
+
+    # (blocked spread_bps, mid, REAL expected_move_bps) — the recorded VIVS events.
+    events = [
+        (302.4, 2.315, None),
+        (302.1, 1.655, None),
+        (410.7, 0.9495, 4545.0),
+        (301.8, 0.94425, 4545.0),
+    ]
+    for spread_bps, mid, em in events:
+        ceiling = broken_quote_ceiling_bps(
+            300.0, mid=mid, expected_move_bps=em, ratio=0.5, em_scale_k=1.0,
+            min_spread_usd=0.08,
+        )
+        assert spread_bps <= ceiling, (spread_bps, mid, em, ceiling)
+    # Exact ceilings: events 1-2 = the $0.08 floor in bps of the mid; events 3-4 =
+    # the EM term k*ratio*EM = 1.0*0.5*4545 = 2272.5 (dominates the floor).
+    _ceil = lambda mid, em: broken_quote_ceiling_bps(  # noqa: E731
+        300.0, mid=mid, expected_move_bps=em, ratio=0.5, em_scale_k=1.0,
+        min_spread_usd=0.08,
+    )
+    assert _ceil(2.315, None) == pytest.approx(0.08 / 2.315 * 10_000.0)  # ~345.57
+    assert _ceil(1.655, None) == pytest.approx(0.08 / 1.655 * 10_000.0)  # ~483.38
+    assert _ceil(0.9495, 4545.0) == pytest.approx(2272.5)
+    assert _ceil(0.94425, 4545.0) == pytest.approx(2272.5)
+
+
+def test_broken_quote_ceiling_monotonic_never_below_abs_cap() -> None:
+    """max()-only loosening: the ceiling never drops below the abs cap anywhere on
+    the (mid x EM) grid — the fix can never block anything the raw cap admitted."""
+    from app.services.trading.momentum_neural.risk_policy import broken_quote_ceiling_bps
+
+    for mid in (0.5, 1.0, 2.0, 2.67, 3.0, 10.0, 50.0):
+        for em in (None, 100.0, 4545.0):
+            ceiling = broken_quote_ceiling_bps(
+                300.0, mid=mid, expected_move_bps=em, ratio=0.5, em_scale_k=1.0,
+                min_spread_usd=0.08,
+            )
+            assert ceiling >= 300.0, (mid, em, ceiling)
+
+
+def test_broken_quote_ceiling_floor_inert_above_crossover_mid() -> None:
+    """The $0.08 floor is inert above mid = $2.67 at the 300bps cap: at mid=$3.00
+    (floor term ~266.7bps < 300) with no EM the ceiling is EXACTLY the legacy cap."""
+    from app.services.trading.momentum_neural.risk_policy import broken_quote_ceiling_bps
+
+    assert broken_quote_ceiling_bps(
+        300.0, mid=3.0, expected_move_bps=None, ratio=0.5, em_scale_k=1.0,
+        min_spread_usd=0.08,
+    ) == 300.0
+
+
+def test_broken_quote_ceiling_toxic_book_still_blocks() -> None:
+    """A genuinely toxic $0.30 book (WHLR-class) still blocks where the legacy cap
+    blocked it: the dollar floor ($0.08) can never admit a $0.30 spread."""
+    from app.services.trading.momentum_neural.risk_policy import broken_quote_ceiling_bps
+
+    for mid in (1.0, 3.0):
+        spread_bps = 0.30 / mid * 10_000.0  # 3000 / 1000 bps
+        ceiling = broken_quote_ceiling_bps(
+            300.0, mid=mid, expected_move_bps=None, ratio=0.5, em_scale_k=1.0,
+            min_spread_usd=0.08,
+        )
+        assert spread_bps > ceiling, (mid, spread_bps, ceiling)
+    # At mid=$14 a $0.30 spread is ~214bps — BELOW the 300bps cap, so the LEGACY
+    # gate already admitted it; the floor is inert there (0.08/14 ~ 57bps < 300)
+    # and the verdict is byte-identical legacy (ceiling exactly 300).
+    assert broken_quote_ceiling_bps(
+        300.0, mid=14.0, expected_move_bps=None, ratio=0.5, em_scale_k=1.0,
+        min_spread_usd=0.08,
+    ) == 300.0
+
+
+def test_broken_quote_ceiling_zero_floor_disables() -> None:
+    """min_spread_usd=0 disables the dollar floor: with the EM scale off (k=None,
+    the legacy configuration) the ceiling is the raw abs cap over the whole grid;
+    with the EM scale on, the floor contributes nothing beyond the EM formula."""
+    from app.services.trading.momentum_neural.risk_policy import broken_quote_ceiling_bps
+
+    for mid in (0.5, 1.0, 2.0, 2.67, 3.0, 10.0, 50.0):
+        for em in (None, 100.0, 4545.0):
+            assert broken_quote_ceiling_bps(
+                300.0, mid=mid, expected_move_bps=em, ratio=0.5, em_scale_k=None,
+                min_spread_usd=0.0,
+            ) == 300.0
+    # EM scale on + zero floor: pure EM formula (max(cap, k*ratio*EM)), no floor term.
+    assert broken_quote_ceiling_bps(
+        300.0, mid=1.0, expected_move_bps=4545.0, ratio=0.5, em_scale_k=1.0,
+        min_spread_usd=0.0,
+    ) == pytest.approx(2272.5)
+    assert broken_quote_ceiling_bps(
+        300.0, mid=1.0, expected_move_bps=100.0, ratio=0.5, em_scale_k=1.0,
+        min_spread_usd=0.0,
+    ) == 300.0  # 0.5*100 = 50 < 300 -> cap holds
+
+
+def test_vivs_class_cent_flare_proceeds_past_entry_quote_gate(monkeypatch, db: Session) -> None:
+    """End-to-end regression for the VIVS zeroing: a sub-$2.50 name flaring a
+    ~7-cent spread (302.4bps > the raw 300bps cap) at ignition must NOT be vetoed
+    with wide_bbo_spread on the SKIP-FOR-LIMITS entry path — the $0.08 dollar
+    floor raises the broken-quote ceiling to ~345.6bps. The 15m frame is cold
+    (no OHLCV), so any FIX-A fallback EM must NOT be what admits it (REAL EM
+    only feeds the ceiling; the floor does the admitting here)."""
+    import app.services.trading.momentum_neural.live_runner as _lr
+
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True)
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 300.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_spread_min_usd_floor", 0.08)
+    # Cold frame: no candles -> _expected_move_bps is None (the VIVS events 1-2 shape).
+    monkeypatch.setattr(_lr, "_replay_aware_fetch_ohlcv_df", lambda *a, **k: None)
+    vid, _ = _seed_live_eligible_row(db, symbol="VIV-USD")
+    db.commit()
+    uid = _uid(db, "vivsflare")
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+
+    sess = create_trading_automation_session(
+        db,
+        user_id=uid,
+        symbol="VIV-USD",
+        variant_id=vid,
+        mode="live",
+        state=STATE_LIVE_PENDING_ENTRY,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    fresh = _fresh()
+    # VIVS event-1 payload: mid 2.315, 7c flare = 302.4bps (legacy cap 300 blocked it).
+    ad.get_best_bid_ask.return_value = (
+        NormalizedTicker(
+            product_id="VIV-USD",
+            bid=2.28,
+            ask=2.35,
+            mid=2.315,
+            spread_bps=302.4,
+            freshness=fresh,
+        ),
+        fresh,
+    )
+
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit()
+    db.refresh(sess)
+
+    # NOT vetoed on spread — it proceeded past the quote gate to the entry flow.
+    assert out.get("reason") != "wide_bbo_spread"
+    ad.place_market_order.assert_not_called()
+
+
 def test_live_exit_intent_records_packet_context(monkeypatch) -> None:
     import app.services.trading.momentum_neural.live_runner as live_runner_mod
 

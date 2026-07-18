@@ -78,6 +78,19 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` host invocation
         resolve_subscription_target,
     )
 
+try:
+    from scripts.iqfeed_ignition_detector import (
+        IgnitionConfig,
+        IgnitionDetector,
+        IgnitionFire,
+    )
+except ModuleNotFoundError:  # direct ``python scripts/...`` host invocation
+    from iqfeed_ignition_detector import (  # type: ignore[no-redef]
+        IgnitionConfig,
+        IgnitionDetector,
+        IgnitionFire,
+    )
+
 # ``ACTIVE_EXECUTION_SESSION_SQL`` owns the active-query equity exclusion
 # (``symbol NOT LIKE '%-%'``); the eligible/hint queries retain their local
 # copies below. The pure policy test binds all three defenses.
@@ -143,6 +156,18 @@ BRIDGE_RUN_ID = str(uuid.uuid4())
 SUBSCRIBE_ON_ALERT = os.environ.get("CHILI_MOMENTUM_BRIDGE_SUBSCRIBE_ON_ALERT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 SUBSCRIBE_FAST_POLL_S = float(os.environ.get("IQFEED_SUBSCRIBE_FAST_POLL_S", "3") or 3)   # first-alert -> subscribed target
 SUBSCRIBE_FRESH_WINDOW_S = float(os.environ.get("IQFEED_SUBSCRIBE_FRESH_WINDOW_S", "180") or 180)  # honor only recent hints
+# ── IGNITION DETECTOR (tick-based early-mover nomination; 2026-07-17) ────────────────
+# Computes rolling %change / $-volume / print-rate on the Q frames this bridge ALREADY
+# parses and pg_notify's a minimal nomination on its OWN channel. The v3 authority
+# envelope on IQFEED_NOTIFY_CHANNEL is UNTOUCHED (captured_paper_iqfeed_trigger does
+# exact key-set matching on it). Live+ON by default (operator rule: no dark flags);
+# thresholds live in iqfeed_ignition_detector.IgnitionConfig (adaptive, floors).
+IGNITION_ENABLED = os.environ.get("IQFEED_IGNITION_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+IGNITION_CHANNEL = (
+    os.environ.get("IQFEED_IGNITION_CHANNEL", "momentum_iqfeed_ignition").strip()
+    or "momentum_iqfeed_ignition"
+)
+IGNITION_SCHEMA_VERSION = "chili.iqfeed-ignition-nominate.v1"
 # --- Version-agnostic-backtest coverage (STEP 0): watch the ELIGIBLE-MOVER universe (the names ANY momentum
 # version could pick — ranked by explosiveness), not just armed names, so a backtest of a NEW version has
 # prints to fill against. The working cap is SELF-DISCOVERED: start at WATCH_HARD_MAX, HALVE on an IQFeed
@@ -152,7 +177,15 @@ SUBSCRIBE_FRESH_WINDOW_S = float(os.environ.get("IQFEED_SUBSCRIBE_FRESH_WINDOW_S
 RETENTION_DAYS = float(os.environ.get("IQFEED_TRADE_RETENTION_DAYS", "30") or 30)
 WATCH_FLOOR = int(os.environ.get("IQFEED_WATCH_FLOOR", "64") or 64)          # the ONE documented base
 WATCH_HARD_MAX = int(os.environ.get("IQFEED_WATCH_HARD_MAX", "1000") or 1000)  # backstop only
-ELIGIBLE_FRESH_S = float(os.environ.get("IQFEED_ELIGIBLE_FRESH_SECONDS", "1800") or 1800)  # mover-freshness window
+# STANDING-WATCH WIDENING (2026-07-17, PIT-measured): the 1800s freshness window let
+# eligible movers flicker OUT of the roster between snapshot passes, so the ignition
+# detector had no eyes on re-igniters (PLSM re-spiked +17% at 12:25 UTC). One documented
+# base = one full standing day (86400s); the set stays bounded by the resolver capacity
+# + viability-score ranking + the adaptive IQFeed-limit governor. Measured 2026-07-17:
+# 24h-eligible = 363 distinct symbols; roster peak over the prior week = 259/hour;
+# premarket usage 9-61/hour — comfortably inside the ~500 IQFeed L1 watch limit that
+# the rail-governor self-discovers (WATCH_HARD_MAX start, halve-on-limit-signal).
+ELIGIBLE_FRESH_S = float(os.environ.get("IQFEED_ELIGIBLE_FRESH_SECONDS", "86400") or 86400)  # standing-watch window (floor)
 # These default-layout positions remain only for legacy diagnostic fixtures.
 # Production ``reader`` requires an exact, generation-bound selected-field
 # acknowledgement before any Q frame can enter an authority path.
@@ -809,6 +842,88 @@ def _notify_payload(row: dict) -> str:
 _pending: list[dict] = []
 _pending_nbbo: list[dict] = []
 _pending_lock = threading.Lock()
+_ignition_detector = IgnitionDetector(IgnitionConfig())
+_ignition_fires: list[str] = []          # serialized nomination payloads awaiting NOTIFY
+_ignition_lock = threading.Lock()
+NOTIFY_IGNITION = sa.text("SELECT pg_notify(:channel, :payload)")
+
+
+def _ignition_payload(fire: IgnitionFire, *, connection_generation: int) -> str:
+    """Minimal SEPARATE-channel nomination payload (NOT the v3 authority envelope)."""
+    return json.dumps(
+        {
+            "schema": IGNITION_SCHEMA_VERSION,
+            "symbol": fire.symbol,
+            "source": "ignition_tick",
+            "fired_at": fire.fired_at.isoformat(),
+            "last_price": round(fire.last_price, 6),
+            "pct_change_60s": round(fire.pct_change_60s, 6),
+            "dollar_vol_60s": round(fire.dollar_vol_60s, 2),
+            "prints_10s": int(fire.prints_10s),
+            "bridge_run_id": BRIDGE_RUN_ID,
+            "connection_generation": int(connection_generation),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _observe_ignition_print(
+    symbol: str,
+    at: datetime,
+    price: float,
+    size: float,
+    *,
+    connection_generation: int,
+) -> None:
+    """Feed one genuinely-new print to the detector; queue any nomination.
+
+    Runs on the reader thread — must NEVER raise into the authority parse path
+    and must NEVER touch the DB (the writer owns all DB work).
+    """
+    if not IGNITION_ENABLED:
+        return
+    try:
+        fire = _ignition_detector.on_print(symbol, at, price, size)
+        if fire is None:
+            return
+        payload = _ignition_payload(
+            fire, connection_generation=connection_generation
+        )
+        with _ignition_lock:
+            _ignition_fires.append(payload)
+        log.info(
+            "ignition nomination %s pct=%.1f%% $60s=%.0f prints10s=%d",
+            fire.symbol,
+            fire.pct_change_60s * 100.0,
+            fire.dollar_vol_60s,
+            fire.prints_10s,
+        )
+    except Exception:
+        log.exception("ignition detector failed (nomination path only)")
+
+
+def _drain_ignition_payloads() -> list[str]:
+    with _ignition_lock:
+        drained = _ignition_fires[:]
+        _ignition_fires.clear()
+    return drained
+
+
+def _emit_ignition_notifications(connection) -> int:
+    """NOTIFY every queued nomination on the ignition channel; returns the count.
+
+    Failure is contained by the caller: nominations are advisory (the scheduler
+    admission backstop still exists), so a failed emit is logged and dropped —
+    it must never affect the tape/NBBO authority path.
+    """
+    payloads = _drain_ignition_payloads()
+    for payload in payloads:
+        connection.execute(
+            NOTIFY_IGNITION,
+            {"channel": IGNITION_CHANNEL, "payload": payload},
+        )
+    return len(payloads)
 _last_trade: dict[str, str] = {}        # symbol -> last seen Most-Recent-Trade-Time (dedup key)
 watched: set[str] = set()
 _max_watch = WATCH_HARD_MAX             # adaptive watch cap; halved on an IQFeed limit signal, floored at WATCH_FLOOR
@@ -1338,6 +1453,15 @@ def _parse_selected_l1(
                     ),
                 }
             )
+        # Ignition nomination rides the SAME exact-print stream (genuinely-new
+        # trades only — the dedup key above already dropped repeats/replays).
+        _observe_ignition_print(
+            sym,
+            provider_event_at,
+            price,
+            size,
+            connection_generation=generation,
+        )
         return True, quote_captured
     except (TypeError, ValueError, IndexError):
         return False, False
@@ -1962,6 +2086,18 @@ def writer(
                     len(nbbo_rows),
                     e,
                 )
+        # IGNITION: emit queued nominations on their own channel in their own
+        # transaction — contained so a failure can never affect the tape path.
+        with _ignition_lock:
+            has_ignition_fires = bool(_ignition_fires)
+        if IGNITION_ENABLED and has_ignition_fires:
+            try:
+                with engine.begin() as c:
+                    emitted = _emit_ignition_notifications(c)
+                if emitted:
+                    log.info("ignition notify emitted=%d channel=%s", emitted, IGNITION_CHANNEL)
+            except Exception as e:
+                log.warning("ignition notify emit failed (nominations dropped): %s", e)
     _request_connection_stop(connection_generation, stop_event)
 
 

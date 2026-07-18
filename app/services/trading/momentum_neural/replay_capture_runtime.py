@@ -86,14 +86,35 @@ from .replay_capture_contract import (
     verify_active_capture_input_attestation,
     _coverage_source_clock,
 )
-from .replay_errors import ReplayInputContractError
-from .first_dip_tape_policy import (
-    FirstDipTapePolicy,
-    FirstDipTapePolicyError,
-    FirstDipTapeReadQuery,
-    evaluate_first_dip_tape,
-    first_dip_tape_window_from_capture,
-)
+# 2026-07-17: dual-context imports. (1) Sa SEALED service, ang preflight
+# verified-loader ay nag-e-exec nito sa synthetic package na WALANG sibling
+# (relative → "unsealed import rejected") pero rostered ang app.* → absolute
+# ang gumagana. (2) Sa benchmark standalone loader, walang `app` sa path pero
+# may __path__ ang package → relative ang gumagana. Kaya try/except.
+# Ang .replay_capture_contract sa itaas ay SINADYANG relative — bahagi ng
+# verified synthetic linkage.
+try:
+    from .replay_errors import ReplayInputContractError
+except ImportError:  # sealed synthetic-package exec
+    from app.services.trading.momentum_neural.replay_errors import (
+        ReplayInputContractError,
+    )
+try:
+    from .first_dip_tape_policy import (
+        FirstDipTapePolicy,
+        FirstDipTapePolicyError,
+        FirstDipTapeReadQuery,
+        evaluate_first_dip_tape,
+        first_dip_tape_window_from_capture,
+    )
+except ImportError:  # sealed synthetic-package exec
+    from app.services.trading.momentum_neural.first_dip_tape_policy import (
+        FirstDipTapePolicy,
+        FirstDipTapePolicyError,
+        FirstDipTapeReadQuery,
+        evaluate_first_dip_tape,
+        first_dip_tape_window_from_capture,
+    )
 
 
 UTC = timezone.utc

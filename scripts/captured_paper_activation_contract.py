@@ -461,14 +461,25 @@ def python_dependency_root_identity_sha256(
 
 _RECEIPT_MAX_AGE_SECONDS: Mapping[str, int] = MappingProxyType(
     {
-        "runtime_settings": 5 * 60,
-        "broker_account": 30,
-        "database_schema": 5 * 60,
-        "capture_host_smoke": 60,
+        # 2026-07-17: the 30s/60s max-ages on mid-flow receipts were
+        # impossible-by-construction at the consumer boundary (the probe
+        # battery + flow tail run for minutes; six consecutive live
+        # generations died on this).  The receipts are sealed evidence, not
+        # the live gate — the service still live-binds the broker and
+        # re-checks the kill switch at its own boot.  The class must cover
+        # receipt capture (mid-probe-battery) through the LAST consumer
+        # (launcher ValidateOnly / ActivatePaper re-walk the full roster):
+        # measured ~8-10 minutes end-to-end, so 5 minutes still starved the
+        # tail.  10 minutes covers it; unbounded operator waits are meant to
+        # fail closed — receipt staleness IS the fence.
+        "runtime_settings": 10 * 60,
+        "broker_account": 10 * 60,
+        "database_schema": 10 * 60,
+        "capture_host_smoke": 10 * 60,
         "focused_regressions": 60 * 60,
-        "lifecycle_preflight": 5 * 60,
-        "kill_switch": 30,
-        "no_order_smoke": 60,
+        "lifecycle_preflight": 10 * 60,
+        "kill_switch": 10 * 60,
+        "no_order_smoke": 10 * 60,
         "rollback_snapshot": 60 * 60,
     }
 )
@@ -1820,7 +1831,14 @@ def _validate_receipt(
                         kind=refreshed_kind,
                         context=context,
                         now=now,
-                        max_age_seconds=30,
+                        # 2026-07-17: bound to the single authority table so
+                        # the nested refreshed receipts share the post-smoke
+                        # class the service now issues them with (a hardcoded
+                        # 30 rejected any receipt whose expires-captured
+                        # window exceeded 30s).
+                        max_age_seconds=_RECEIPT_MAX_AGE_SECONDS[
+                            refreshed_kind
+                        ],
                     )
                 )
             except readiness_evidence.CapturedPaperReadinessEvidenceError as exc:

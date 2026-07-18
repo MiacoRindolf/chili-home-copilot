@@ -34,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from types import ModuleType
 from typing import Any, Callable, ContextManager, Mapping, Sequence
 import uuid
@@ -53,6 +54,16 @@ _SERVICE_SHUTDOWN_SECONDS = 30.0
 _MAX_STARTUP_RECONCILIATION_ROWS = 10_000
 _RESTART_GATE_SCHEMA_VERSION = "chili.captured-paper-restart-gate.v1"
 _NO_ORDER_SMOKE_SCHEMA_VERSION = "chili.captured-paper-readiness.no_order_smoke.v4"
+# 2026-07-17: the post-smoke receipt window must cover the whole
+# finalize -> cutover ValidateOnly/Apply -> tape gate -> ActivatePaper tail
+# (~2-4 minutes observed live).  The prior 30s window made that tail
+# impossible by construction: the final manifest inherits
+# min(sealed.expires_at, no_order_expires_at), so cutover always saw
+# MANIFEST_STALE (first observed on the first-ever green finalize,
+# generation 35c79d11).  10 minutes matches the contract's
+# _RECEIPT_MAX_AGE_SECONDS mid-flow class and stays under the 15-minute
+# manifest-age cap.
+_POST_SMOKE_RECEIPT_WINDOW_SECONDS = 10 * 60
 _SERVICE_SINGLETON_NAME = "Global\\CHILI-Captured-Alpaca-PAPER-SERVICE-OWNER"
 _LAUNCH_ATTESTATION_SCHEMA_VERSION = (
     "chili.captured-paper-launcher-cutover-attestation.v1"
@@ -310,10 +321,25 @@ class _CapturedPaperLauncherCutoverAttestation:
             }
 
 
+def _plain_json_value(value: Any) -> Any:
+    """I-unwrap ang Mapping subclasses (MappingProxyType!) at tuples sa purong
+    JSON containers. 2026-07-17: ang json.dumps ay HINDI tumatanggap ng
+    mappingproxy, taliwas sa inasahan ng canonical-round-trip comment sa
+    _build_policy_authority (naranasan live: REPORT_NOT_CANONICAL sa unang
+    tunay na NoOrderSmoke boot). Values lang ang ina-unwrap — walang binabago
+    sa nilalaman."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json_value(item) for item in value]
+    return value
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     try:
         return json.dumps(
-            value,
+            _plain_json_value(value),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -552,18 +578,29 @@ def _default_cutover_probe(
         candidate = backend.get_task(host_cutover.CANDIDATE_TASK_NAME)
         if candidate is None:
             raise RuntimeError("candidate task is absent")
-        host_cutover._validate_candidate_task_semantics(
-            candidate.xml,
-            candidate_root=str(projection.get("candidate_root") or ""),
-        )
+        if candidate.enabled is not True:
+            raise RuntimeError("candidate task is not enabled")
+        # 2026-07-17: do NOT run the authored-template structural validator on
+        # the /Query readback — Task Scheduler re-serializes registered XML
+        # (adds <URI>, canonicalizes the principal), so "sections are not
+        # exact" is guaranteed on a real host (this rejected every boot
+        # attempt of generation a816ac1a via task RestartOnFailure).  The
+        # action-vs-own-argv comparison below IS the attestation: the sealed
+        # template was structurally validated by the cutover before /Create,
+        # and this process's argv descends from the sealed launcher chain.
         command, arguments = host_cutover._task_exec_from_xml(candidate.xml)
         if (
             _canonical_process_path(command, "candidate task executable")
             != _canonical_process_path(
                 parent_executable_path, "launcher parent executable"
             )
-            or arguments
-            != host_cutover._quote_windows_arguments(tuple(expected_parent_tail))
+            # Case-insensitive: the registered XML carries the sealed
+            # template's normcased path tokens while this process's argv is
+            # filesystem-resolved (2026-07-17 bug class).
+            or os.path.normcase(arguments)
+            != os.path.normcase(
+                host_cutover._quote_windows_arguments(tuple(expected_parent_tail))
+            )
         ):
             raise RuntimeError("candidate task action differs from this process")
         legacy = {}
@@ -577,13 +614,25 @@ def _default_cutover_probe(
 
         bridge_processes: list[str] = []
         bridge_names = {"iqfeed_trade_bridge.py", "iqfeed_depth_bridge.py"}
-        for process in psutil.process_iter(("pid",)):
+        # 2026-07-17: prefilter by process name — cmdline() on every PID
+        # raises AccessDenied on protected system processes for any caller
+        # (same impossible-by-construction class fixed in the cutover's
+        # find_legacy_processes).  Only a python.exe process can be a legacy
+        # bridge; an uninspectable python process stays fail-closed.
+        for process in psutil.process_iter(("pid", "name"), ad_value=None):
+            name = process.info.get("name")
+            if name is None:
+                raise RuntimeError(
+                    f"a process name could not be inspected (PID {process.info['pid']})"
+                )
+            if str(name).casefold() != "python.exe":
+                continue
             try:
                 cmdline = process.cmdline()
             except psutil.NoSuchProcess:
                 continue
             except (psutil.AccessDenied, psutil.ZombieProcess) as exc:
-                raise RuntimeError("process inventory is not complete") from exc
+                raise RuntimeError("a python process is not inspectable") from exc
             for token in cmdline:
                 if Path(str(token)).name.lower() in bridge_names:
                     bridge_processes.append(
@@ -1892,11 +1941,14 @@ def _issue_post_smoke_refreshed_readiness(
         "observed_at": _iso(kill_observed),
     }
     # Each receipt's fixed maximum lifetime is measured from its own durable
-    # observation, not from the later issuance clock.  Using one shared
-    # ``issued + 30s`` expiry could silently make an older observation valid
-    # for almost forty seconds.
-    broker_expires_at = broker_observed + timedelta(seconds=30)
-    kill_expires_at = kill_observed + timedelta(seconds=30)
+    # observation, not from the later issuance clock, so an older observation
+    # can never silently gain extra validity from a later issuance stamp.
+    broker_expires_at = broker_observed + timedelta(
+        seconds=_POST_SMOKE_RECEIPT_WINDOW_SECONDS
+    )
+    kill_expires_at = kill_observed + timedelta(
+        seconds=_POST_SMOKE_RECEIPT_WINDOW_SECONDS
+    )
     try:
         broker_receipt = readiness_evidence.issue_readiness_receipt_v2(
             kind="broker_account",
@@ -1905,7 +1957,7 @@ def _issue_post_smoke_refreshed_readiness(
             captured_at=broker_observed,
             expires_at=broker_expires_at,
             now=issued,
-            max_age_seconds=30,
+            max_age_seconds=_POST_SMOKE_RECEIPT_WINDOW_SECONDS,
         )
         kill_receipt = readiness_evidence.issue_readiness_receipt_v2(
             kind="kill_switch",
@@ -1914,7 +1966,7 @@ def _issue_post_smoke_refreshed_readiness(
             captured_at=kill_observed,
             expires_at=kill_expires_at,
             now=issued,
-            max_age_seconds=30,
+            max_age_seconds=_POST_SMOKE_RECEIPT_WINDOW_SECONDS,
         )
     except readiness_evidence.CapturedPaperReadinessEvidenceError as exc:
         raise CapturedAlpacaPaperServiceError(
@@ -3986,7 +4038,7 @@ def _no_order_smoke_receipt(
                     kind=kind,
                     context=context,
                     now=captured,
-                    max_age_seconds=30,
+                    max_age_seconds=_POST_SMOKE_RECEIPT_WINDOW_SECONDS,
                 )
             )
         except readiness_evidence.CapturedPaperReadinessEvidenceError as exc:
@@ -4006,7 +4058,7 @@ def _no_order_smoke_receipt(
         refreshed_expiries.append(refreshed_expires)
     expires = min(
         verified.expires_at,
-        captured + timedelta(seconds=30),
+        captured + timedelta(seconds=_POST_SMOKE_RECEIPT_WINDOW_SECONDS),
         *refreshed_expiries,
     )
     if expires <= captured:
@@ -5372,6 +5424,15 @@ def _validate_mode_arguments(args: argparse.Namespace) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
+    # 2026-07-17: two consecutive live PREPARED-phase stalls were invisible
+    # (only the dispatch lock appeared, then silence until the cutover's
+    # timeout killed the run).  Periodic all-thread stack dumps to stderr —
+    # persisted by the launcher's ActivatePaper console redirect — name the
+    # exact blocking frame without attaching a debugger to the sealed
+    # process.
+    import faulthandler
+
+    faulthandler.dump_traceback_later(150.0, repeat=True, file=sys.stderr)
     external_runtime_boundary_entered = False
     provider_start_may_have_been_attempted = False
     active_order_boundary_entered = False
@@ -5459,6 +5520,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "verdict": "CAPTURED_ALPACA_PAPER_STARTUP_REJECTED",
             "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "error_code": str(code),
+            # 2026-07-17 observability fix: ang nilunok na traceback ay
+            # nagpahirap sa bawat live diagnosis (codeless rejections).
+            # Bounded detail para ma-diagnose ang fail-closed startup nang
+            # hindi kailangang i-reproduce sa labas ng sealed path. Head+tail
+            # para kasama ang ROOT CAUSE ng chained tracebacks (nasa unahan).
+            "error_detail": (
+                (lambda _tb: _tb if len(_tb) <= 2400 else _tb[:1400] + "\n...[gitna pinutol]...\n" + _tb[-1000:])(
+                    traceback.format_exc()
+                )
+            ),
             "paper_execution_started": (
                 None if active_order_boundary_entered else False
             ),

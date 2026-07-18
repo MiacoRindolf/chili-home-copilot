@@ -149,6 +149,57 @@ def adaptive_max_spread_bps(
     return adaptive
 
 
+def broken_quote_ceiling_bps(
+    abs_cap_bps: float,
+    *,
+    mid: float,
+    expected_move_bps: float | None,
+    ratio: float,
+    em_scale_k: float | None,
+    min_spread_usd: float,
+) -> float:
+    """Broken-quote ceiling for the SKIP-FOR-LIMITS entry path (max()-only loosening).
+
+    A fixed bps abs cap has no price-granularity term: a 3-7 CENT spread flare on a
+    sub-$2.50 name exceeds 300bps and vetoes entry at ignition (VIVS 2026-07-15 — a
+    +90% winner zeroed by 4 wide_bbo_spread blocks). The ceiling starts at
+    ``abs_cap_bps`` and only ever RISES (monotonic: never blocks anything the raw cap
+    admitted) via two terms:
+
+    - EM term: ``em_scale_k * ratio * expected_move_bps`` — a REAL measured expected
+      move only (a fallback/fabricated EM must never relax the broken-book backstop);
+      requires ``em_scale_k >= 1.0`` (None = disabled).
+    - Dollar floor: ``min_spread_usd / mid * 10_000`` — a spread of at most this many
+      DOLLARS is never a "broken book" regardless of price; 0 disables (legacy).
+    """
+    try:
+        ceiling = float(abs_cap_bps)
+    except (TypeError, ValueError):
+        ceiling = 0.0
+    if not math.isfinite(ceiling):
+        ceiling = 0.0
+    try:
+        em = float(expected_move_bps) if expected_move_bps is not None else None
+    except (TypeError, ValueError):
+        em = None
+    if em is not None and math.isfinite(em) and em > 0:
+        try:
+            r = float(ratio)
+            k = float(em_scale_k) if em_scale_k is not None else None
+        except (TypeError, ValueError):
+            r, k = 0.0, None
+        if math.isfinite(r) and r > 0 and k is not None and math.isfinite(k) and k >= 1.0:
+            ceiling = max(ceiling, k * r * em)
+    try:
+        m = float(mid)
+        floor_usd = float(min_spread_usd)
+    except (TypeError, ValueError):
+        m, floor_usd = 0.0, 0.0
+    if math.isfinite(m) and m > 0 and math.isfinite(floor_usd) and floor_usd > 0:
+        ceiling = max(ceiling, floor_usd / m * 10_000.0)
+    return ceiling
+
+
 # Short-TTL cache for the agentic cash-account buying power: a Monday burst of
 # candidate sizings must NOT fire a fresh adapter + tools/list + get_accounts +
 # get_portfolio per name (rate-limit / latency → missed fast Ross breaks). Serve a

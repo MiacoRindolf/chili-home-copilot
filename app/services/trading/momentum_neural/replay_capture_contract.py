@@ -8772,12 +8772,21 @@ def verify_first_dip_receipt_inventory(
     # Deliberately lazy: first_dip_tape_policy imports this contract module.
     # Calling after module initialization avoids a circular import while still
     # using the one canonical typed query/policy parser.
-    from .first_dip_tape_policy import (  # noqa: PLC0415
-        FirstDipTapePolicy,
-        FirstDipTapeReadQuery,
-        evaluate_first_dip_tape,
-        first_dip_tape_window_from_capture,
-    )
+    # 2026-07-17: dual-context (tingnan ang replay_capture_runtime header).
+    try:
+        from .first_dip_tape_policy import (  # noqa: PLC0415
+            FirstDipTapePolicy,
+            FirstDipTapeReadQuery,
+            evaluate_first_dip_tape,
+            first_dip_tape_window_from_capture,
+        )
+    except ImportError:  # sealed synthetic-package exec
+        from app.services.trading.momentum_neural.first_dip_tape_policy import (  # noqa: PLC0415
+            FirstDipTapePolicy,
+            FirstDipTapeReadQuery,
+            evaluate_first_dip_tape,
+            first_dip_tape_window_from_capture,
+        )
 
     try:
         query = FirstDipTapeReadQuery.from_dict(receipt.query)

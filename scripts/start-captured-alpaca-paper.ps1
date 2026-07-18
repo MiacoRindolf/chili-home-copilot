@@ -991,9 +991,26 @@ try {
         $env:PYTHONNOUSERSITE = '1'
         Push-Location -LiteralPath $candidate
         $candidateLocationPushed = $true
-        & $python @arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Captured Alpaca PAPER service rejected with exit code $LASTEXITCODE"
+        if ($Mode -eq 'ActivatePaper') {
+            # 2026-07-17: the task-owned console is invisible, which hid two
+            # consecutive live PREPARED-phase stalls (only the dispatch lock
+            # ever appeared).  Persist the service console next to the
+            # handshake artifacts; every argument is a validated no-space
+            # sealed path or base64, so array argument passing is exact.
+            $serviceProcess = Start-Process -FilePath $python `
+                -ArgumentList $arguments -NoNewWindow -Wait -PassThru `
+                -WorkingDirectory $candidate `
+                -RedirectStandardOutput ($hostReadyReceipt + '.service-stdout.log') `
+                -RedirectStandardError ($hostReadyReceipt + '.service-stderr.log')
+            if ($serviceProcess.ExitCode -ne 0) {
+                throw "Captured Alpaca PAPER service rejected with exit code $($serviceProcess.ExitCode)"
+            }
+        }
+        else {
+            & $python @arguments
+            if ($LASTEXITCODE -ne 0) {
+                throw "Captured Alpaca PAPER service rejected with exit code $LASTEXITCODE"
+            }
         }
     }
     finally {

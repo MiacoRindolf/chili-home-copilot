@@ -5389,6 +5389,38 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICRO_FALLBACK_1M_FROM_TICKS_ENABLED"),
         description="WAVE-4 ITEM-7 F2: on a micro-bar build error, retry ONCE on a fresh short-lived SessionLocal (the tape is in-DB) before falling back — never silently degrade the micro frame on a transient session error. OFF ⇒ legacy single-attempt (byte-identical).",
     )
+    # COLD-START TICK-STREAM VOLUME CONFIRMATION (2026-07-18, VIVS 2026-07-15): the
+    # momentum_volume fallback trigger demands >= 25 bars of 15m OHLCV, so a freshly
+    # IGNITED cold symbol (bridge-subscribed seconds ago; zero bar history by
+    # construction) was unenterable for hours — VIVS ran +90% in a minute at
+    # $1.1M+/min ON TAPE and collected 4,257 insufficient_bars trigger-waits with
+    # ZERO entries. Below 25 bars the same confirmation intent is computed from the
+    # tick tape (iqfeed_trade_ticks): trailing-60s $-volume + trailing-10s prints vs
+    # adaptive floors (max(base, surge_mult x the symbol's OWN (t-300s,t-60s]
+    # baseline)) + last price above the 60s tick-VWAP and 60s low. ADMIT-only —
+    # >= 25-bar frames never reach it and a decline falls through to the legacy
+    # insufficient_bars unchanged. Floors mirror the ignition detector's
+    # PLSM/ERNA/VIVS-derived tape floors (scripts/iqfeed_ignition_detector.py).
+    chili_momentum_tick_vol_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_VOL_FALLBACK_ENABLED"),
+        description="Cold-start tick-stream volume confirmation for the momentum_volume entry trigger when a frame has < 25 OHLCV bars (a freshly-ignited cold symbol). ADMIT-only: it can never veto or re-reason a bar-path decision (>= 25-bar frames never reach it; declines fall through to the legacy insufficient_bars). KILL-SWITCH: False ⇒ byte-identical to the bar-only gate.",
+    )
+    chili_momentum_tick_vol_fallback_dollar_vol_base: float = Field(
+        default=150_000.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_VOL_FALLBACK_DOLLAR_VOL_BASE"),
+        description="THE documented base FLOOR for trailing-60s $-volume the tick-stream cold-start confirmation demands (adaptive above it: max(base, surge_mult x the symbol's own trailing baseline)). Derived from the PLSM/ERNA/VIVS ignition tape — the quietest true ignition minute ran ~$211k/min while flat small-cap tape runs <$50k/min (same floor as the ignition detector's dollar_vol_base).",
+    )
+    chili_momentum_tick_vol_fallback_prints_base: int = Field(
+        default=20, ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_VOL_FALLBACK_PRINTS_BASE"),
+        description="THE documented base FLOOR for prints in the trailing 10s the tick-stream cold-start confirmation demands (adaptive above it via surge_mult x the symbol's own baseline print-rate). True ignitions run thousands of prints/min; a thin cold tape stays below this floor and keeps WAITING (same floor as the ignition detector's prints_base).",
+    )
+    chili_momentum_tick_vol_fallback_surge_mult: float = Field(
+        default=4.0, ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_VOL_FALLBACK_SURGE_MULT"),
+        description="Adaptive multiplier over the symbol's OWN trailing (t-300s,t-60s] baseline that raises the tick-stream fallback's $-vol/print floors once the tape spans >= 120s — a name that always trades $2M/60s needs a genuine 4x surge; a cold name falls back to the documented base floors (mirror of the ignition detector's surge_mult).",
+    )
     # Pending-entry lifecycle is EVENT-DRIVEN (cancel on setup invalidation /
     # limit left behind), not clock-driven — this is only the BACKSTOP: a
     # submitted entry limit must not outlive the bar evidence that produced it,
@@ -7467,6 +7499,20 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_ABS_CAP"),
     )
+    # BROKEN-QUOTE dollar floor (VIVS 2026-07-15): a fixed bps abs cap has no
+    # price-granularity term — a 3-7 CENT spread flare on a sub-$2.50 name exceeds
+    # 300bps and vetoes entry at ignition (VIVS +90% zeroed by 4 wide_bbo_spread
+    # blocks). The ONE documented base: a BBO spread <= this many DOLLARS is never a
+    # "broken book" regardless of price — a FLOOR on the broken-quote ceiling
+    # (max()-only: never blocks anything the raw cap admitted). Inert above
+    # mid=$2.67 at the 300bps cap; 0 disables (byte-identical legacy). Base from the
+    # VIVS 07-15 tape: median spreads $0.0025-$0.03, blocked flares 3-7c; a toxic
+    # 30c book still blocks at every price.
+    chili_momentum_risk_spread_min_usd_floor: float = Field(
+        default=0.08,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SPREAD_MIN_USD_FLOOR"),
+    )
     # STEP-E #15: the FIXED 300bps abs cap clamped a legitimately-wide low-float's adaptive
     # EM-based ceiling (DSY adaptive 721bps -> clamped to 300 -> 1,358 wide_bbo blocks). When
     # ON, the effective cap SCALES with the name's OWN adaptive EM ceiling:
@@ -8214,6 +8260,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_NOTIFY_CHANNEL",
             "IQFEED_NOTIFY_CHANNEL",
+        ),
+    )
+    # IGNITION nominations (2026-07-17): the host bridge's tick-based early-mover
+    # detector pg_notify's on this SEPARATE channel (minimal payload; the v3
+    # authority envelope on the channel above is untouched — captured-paper does
+    # exact key-set matching on it). The ordinary live loop LISTENs here and runs
+    # the guarded admit_ross_event path with source tag "ignition_tick"; the
+    # captured-paper loop never listens to this channel. PIT-measured 2026-07-17:
+    # detector fires +36s (ERNA) / +13s (VIVS) from ignition when watched vs
+    # 4-8 min actual subscribe lag via the Massive snapshot funnel.
+    chili_momentum_live_runner_loop_iqfeed_ignition_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_IGNITION_ENABLED"
+        ),
+    )
+    chili_momentum_live_runner_loop_iqfeed_ignition_channel: str = Field(
+        default="momentum_iqfeed_ignition",
+        min_length=1,
+        max_length=63,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_IGNITION_CHANNEL",
+            "IQFEED_IGNITION_CHANNEL",
         ),
     )
     # Exact content-addressed host bridge build allowed to provide authoritative

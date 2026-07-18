@@ -20,6 +20,10 @@ _KNOWN_NON_STRUCTURAL_ENTRY_ALIASES = frozenset(
         "momentum_ok_rel_vol",
         "momentum_ok_abs_vol",
         "momentum_fallback_bar_only",
+        # Cold-start tick-stream volume confirmation (2026-07-18, VIVS 07-15):
+        # like its bar-path siblings above, a non-structural volume-fallback
+        # entry (no pullback levels by construction).
+        "momentum_ok_tick_stream",
     }
 )
 _POSSIBLE_TRUNCATED_WINDOW_ISSUES = frozenset(
