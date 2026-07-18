@@ -1,0 +1,834 @@
+[
+ {
+  "flag": "chili_alpaca_enabled",
+  "category": "posture_deploy",
+  "what_it_does": "Master switch ng Alpaca VenueAdapter (venue/alpaca_spot.py:764): pag OFF, disabled lahat ng Alpaca reads/mutations. Activation = flag + keys + exact account-UUID pin (chili_alpaca_expected_account_id, fail-closed on mismatch).",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "Config comment mismo: 'Off until keys are set... a real dependency, not a dark gate' (config.py:9821-9826, 8eadacb 06-09; dc63af2 07-07 equity lane\u2192Alpaca PAPER). LIVE binding verified: CHILI_ALPACA_ENABLED=1 sa PAREHONG running containers (momentum-exec + scheduler). Code default OFF ang tama; env ang effective at ON na.",
+  "risk_if_on": "Kung i-default-ON sa code nang walang keys/pin, fail-closed pa rin (walang broker access) \u2014 pero mawawala ang malinaw na env-driven activation posture ng lane cutover na in-flight ngayon (alpaca-paper ActivatePaper tasks)."
+ },
+ {
+  "flag": "chili_auto_execute_stops",
+  "category": "exit",
+  "what_it_does": "Gate ng _try_auto_execute_stop sa stop_engine.py:1920 \u2014 auto-sell kapag nag-fire ang stop alert. PERO patay na ito: ang tanging call site ay TINANGGAL noong R30 cleanup 2026-04-30 (stop_engine.py:2101 comment); walang caller ang function.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok d7f1424 (04-13). R30 cleanup comment: iniwan itong dead code dahil 'would have raced the autotrader execution path if anyone ever flipped the flag' \u2014 single source of truth ng exits ngayon = run_crypto_exit_pass (30s monitor) + submit_robinhood_trade_exit. Grep-verified: zero callers sa buong app/. Wala sa anumang live env.",
+  "risk_if_on": "No-op ngayon (walang caller), pero kung may magre-wire ng call, magre-race ito sa autotrader exit path \u2192 double-sell. Dapat i-DELETE ang flag+function, hindi i-flip."
+ },
+ {
+  "flag": "chili_autopilot_price_bus_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "In-process real-time price bus: WS ticks \u2192 event-driven runner loops, ignition loop, tape WS recorder, lane-health checks (main.py:965, live_runner_loop.py:1830/1869, ignition_loop.py:460, tape_ws_recorder.py:313). Pag OFF, walang event-driven arming/tick flow.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "4f31607 (04-13, streaming architecture). LOAD-BEARING: ang 07-06 live-arm outage (ZERO arm events) ay compose ':-false' dark-flag + _bus_on bug, FIXED #852; memory warning na huwag i-flip to false. Compose hard-codes =1 sa app/scheduler/autotrader services; LIVE binding: =true sa momentum-exec, =1 sa scheduler.",
+  "risk_if_on": "ON na ito sa lahat ng live services \u2014 walang risk sa pag-ON; ang totoong panganib ay ang pag-OFF (naulit nang minsang pumatay ng arming). Ang code default=False + compose=1 pattern ang kasalukuyang landmine class."
+ },
+ {
+  "flag": "chili_autotrader_broker_equity_cache_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "TTL cache sa broker-equity lookups ng AutoTrader sizing (auto_trader_rules.py:330/757): fresh window 5min, serve-stale hanggang 15min pag broker outage (tagged cache:fresh/cache:stale) para hindi mag-per-tick retry storm ang flapping broker.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "Phase B tech-debt 26a9fd3 (04-21), 'flip to true after a paper-mode soak' (config.py:12749-12757). LIVE binding verified: =true na sa PAREHONG running containers (momentum-exec at scheduler) \u2014 matagal nang naka-ON ang effective value nang walang naitalang insidente.",
+  "risk_if_on": "Sizing gagamit ng hanggang 5min-stale equity (15min sa outage) \u2014 by design na graceful degradation, mas mabuti kaysa collapse-to-env-default. Bantayan lang na hindi ito magtago ng tunay na broker-auth outage (may hiwalay na disconnect alarm)."
+ },
+ {
+  "flag": "chili_autotrader_synergy_enabled",
+  "category": "sizing",
+  "what_it_does": "Pinapayagan ang AutoTrader na mag-scale-in sa open trade kapag may confirming pattern (auto_trader.py:6326/6386, auto_trader_synergy.py:254), bounded ng small-dollar max-notional cap + max-scale-ins-per-trade.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "feaa9b5 (04-17, AutoTrader v1). Compose autotrader-worker: CHILI_AUTOTRADER_SYNERGY_ENABLED=${...:-true} na may komento 'Measured Pilot: allow bounded confirming-pattern scale-ins' (docker-compose.yml:847) \u2014 effective ON kapag tumatakbo ang worker. Sa ngayon HINDI tumatakbo ang autotrader-worker container, kaya moot; inert din kung OFF ang autotrader lane mismo.",
+  "risk_if_on": "Dagdag na scale-in notional per trade, pero naka-cap (max_notional_usd + max_scale_ins). Tama ang code default OFF bilang kill-switch; compose ang nagde-decide."
+ },
+ {
+  "flag": "chili_bracket_watchdog_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Alert-only background scan (bracket_reconciliation_service.py:2923): nagpa-page kapag may reconciler observation na stale (>=stale_after_sec, bounded 30s-1h) para sa trade na mukhang walang stop o may orphaned broker stop. Hindi ito naglalagay/nagkakansela ng orders.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Default OFF lang 'during Phase G so the reconciler can accumulate observation data' (config.py:7919-7924; 0d17b12/72f4b24 04-19/20 \u2014 Abril pa iyon, buwan-buwan nang may data). Ang 07-10 port-exhaustion incident (GMM orphan \u2212$18k, buhay-pero-bulag na worker, missing stops) ang EKSAKTONG failure class na pina-page nito; #900 dead-man stops = remediation, ito ang detection layer. Additive telemetry na may sariling anti-storm bounds \u2014 per operator standing rule, walang counter-evidence, author caution lang ang dahilan ng OFF. Wala sa anumang live env ngayon (tunay na OFF).",
+  "risk_if_on": "Alert noise/paging storm kung maingay ang healthy-state distribution ng reconciler; bounded ng 30s floor at stale-age threshold. Zero order-path risk (alerts lang)."
+ },
+ {
+  "flag": "chili_code_frontier_enabled",
+  "category": "other",
+  "what_it_does": "Nagru-route ng code-generation gateway purposes (plan/edit/create/diagnose/review) sa frontier model kapag may provider key (llm_gateway.py:360, orchestrator.py:5813); any failure \u2192 fallback sa local cascade. NON-TRADING.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "3be4afa (06-04, #304 opt-in frontier tier). Config comment: 'Inert by default: with no key or the flag off, behavior is byte-identical' (config.py:359-367). LIVE binding SPLIT na sadyang env-driven: =1 sa momentum-exec, =0 sa scheduler \u2014 spend/keys decision ito ng operator, hindi safety gate.",
+  "risk_if_on": "Walang trading risk; frontier API spend lang kapag may key. Graceful fallback kaya hindi kailanman lalala ang code path."
+ },
+ {
+  "flag": "chili_coinbase_ws_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Binubuhay ang Coinbase WebSocket L2/ticker feed adapter (coinbase_spot.py:1809) na nagpapakain sa price bus, crypto L2 book, at freshness stamps. May hiwalay na watchdog (default ON) para sa silent socket-drop.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "7697279 (04-08). LOAD-BEARING sa crypto lane: ang 07-09 crypto-paper outage ay 3-layer flag chain kung saan coinbase_ws OFF \u2192 frozen freshness since Hul-3; .env=true na ang fix. Compose hard-codes =1 sa 3 services; LIVE binding: =true/1 sa parehong running workers.",
+  "risk_if_on": "ON na sa lahat ng live services. Ang panganib ay pag-OFF (frozen freshness \u2192 patay na lane) \u2014 dokumentadong insidente. Env ang effective; huwag galawin ang code default."
+ },
+ {
+  "flag": "chili_mesh_plasticity_dry_run",
+  "category": "other",
+  "what_it_does": "BALIKTAD ang polarity: pag ON, ang Hebbian edge-weight plasticity ay magsusulat lang ng audit rows NANG HINDI minu-mutate ang mesh edge weights (plasticity.py:236). Ang OFF ngayon = LIVE edge mutations na may guards (per-edge cooldown 5, daily |\u0394w| budget 0.5, drift cap 1.0, weight clamp 0.05-3.0, operator_output never learns).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "0fb2999 (04-19, Phase 2C). STALE ang docstrings: plasticity.py:9 at config comment (3679-3682) ay nagsasabing 'dry_run ON ang default' pero ang Field ay default=False at chili_mesh_plasticity_enabled default=True \u2014 matagal nang live-mutating ang mesh learning sa ilalim ng circuit breakers. Ang pag-ON ay magpapatahimik ng learning (shadow-only) = devolution vs 'Evolve, not devolve'.",
+  "risk_if_on": "Titigil nang tahimik ang mesh outcome-learning (audit rows lang, walang weight updates) habang mukhang 'conservative' \u2014 dark regression. Kung kailangan ng shadow mode, sadyaang i-set sa env, huwag baguhin ang default."
+ },
+ {
+  "flag": "chili_micro_log_equity_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Sana ay buksan ang EQUITY branch ng LOG-ONLY L2 microstructure logger (trading_microstructure_log) \u2014 pero WALANG consumer code: ang flag ay hindi kino-consult kahit saan (grep: config.py:9389 def + docstring mention lang sa microstructure_log.py:13).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "6b0d792 (06-13, L2 Phase 0 #697). Docstring mismo: 'Crypto-only for now; the equity branch is gated off until iqfeed coverage is aligned' \u2014 hindi pa naisusulat ang equity branch. Ang pag-flip ay purong no-op dark flag; kailangan munang IBUO ang equity drain (iqfeed-sourced) bago may saysay ang flag.",
+  "risk_if_on": "Walang epekto (unwired) \u2014 pero magbibigay ng maling akala na nag-iipon na ng equity microstructure labels para sa meta-labeling/calibration gayong hindi. Build muna, saka i-ON."
+ },
+ {
+  "flag": "chili_momentum_a_setup_quality_floor_enabled",
+  "category": "selection",
+  "what_it_does": "RESTRICT-only na LIVE-eligibility floor (viability.py:556): live-tradeable lang ang name kung low-float (<=20M ceiling) + real RVOL + meaningful change + FLOAT-CONFIRMED (fail-closed pag missing float). Paper untouched; kaya lang nitong mag-set ng live_eligible=False.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "00e2023 (06-26) mula sa 'puro talo' day (AREC 107M-float armed+lost, CODI float=None queued). Operator-blessed na na-ON ito 06-27 (off-items enablement report, PR #822) at ON pa rin sa scheduler container (=1) \u2014 PERO NALAGLAG sa 07-06 _mexec_armfix.env re-baseline: ABSENT sa momentum-exec container \u2192 OFF sa mismong worker na nag-a-arm/nag-e-enter. Env-drift ito, hindi desisyon \u2014 walang rollback/counter-evidence sa docs. Ang 'OFF' ay aksidente; ang tamang aksyon ay ibalik sa exec-worker env.",
+  "risk_if_on": "Fail-closed float ay maaaring mag-reject ng tunay na mover na walang float data (recent IPO class); bawat rejection ay naka-log with reason kaya obserbable ang over-tightening. Selection ay hindi naman ang kasalukuyang bottleneck (CONVERSION ang bottleneck per 07-09 synthesis), kaya mababa ang capture cost."
+ },
+ {
+  "flag": "chili_momentum_absorption_snap_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "GAP 3 additive LONG entry trigger (entry_gates.py:5403): ask-wall absorption (malaking resting seller na kinakain habang humahawak ang presyo sa buy-side OFI) tapos SNAP entry pag na-clear ang wall. Buong chase-guard set (tape REQUIRED fail-closed, extension veto, not-backside, structural stop) + same downstream veto chain.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "b349aed (06-26, Warrior re-audit Cluster 2/4, chase-guarded). Na-ON 06-27 kasama ang gap-fill clusters (PR #822) at =1 pa rin sa scheduler container \u2014 pero ABSENT sa 07-06 momentum-exec env \u2192 effectively OFF kung saan tumatakbo ang entry evaluation. Parehong env-drift story; walang counter-evidence sa docs/replay na napinsala nito. Additive entry na may sariling guards = TURN_ON_SAFE per standing rule.",
+  "risk_if_on": "Bagong entry class na L2-dependent \u2014 kung stale/thin ang equity L2 (dokumentadong isyu sa exit-ladder reads), fail-closed ito at halos inert; kapag may L2, dagdag entries na bounded ng buong veto chain."
+ },
+ {
+  "flag": "chili_momentum_adaptive_spread_cost_veto_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Adaptive spread-cost derate/veto sa entry sizing (live_runner.py:28265, spread_cost_veto.py): hinuhusgahan ang live spread vs sariling rolling distribution ng name + vs expected-R; graceful size-down sa moderate, hard veto SA EXTREME lang. Walang flat-bps magic number.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "5de6d31 (06-27, Punch-list P1 + 17 tests). Direktang tumutugon sa napatunayang loss mode (momentum 0-fills root cause: MARKET orders na tumawid sa ~4.6% low-float spreads). Na-ON 06-27 at =1 pa rin sa scheduler container \u2014 pero ABSENT sa 07-06 momentum-exec env \u2192 OFF sa entry worker. Env-drift ulit; adaptive+guarded veto na walang counter-evidence = TURN_ON_SAFE per standing rule.",
+  "risk_if_on": "Maaaring mag-derate/mag-veto ng entries sa wide-spread low-floats na mismong target ng lane \u2192 posibleng dagdag sa conversion misses; mitigated dahil name-relative (hindi absolute bps) at hard veto ay extreme-only. Bantayan ang veto/derate logs sa unang sessions."
+ },
+ {
+  "flag": "chili_momentum_add_into_halt_enabled",
+  "category": "sizing",
+  "what_it_does": "GAP 6: pinapayagan ang MALIIT na pyramid ADD habang naka-halt LIMIT-UP ang name, fail-closed sa 7 guards: +1R in profit, limit-up direction lang, small add sa ilalim ng existing pyramid caps, intact original structural stop, RTH-only, extension guard vs swing-high, same pyramid_add_decision + risk_evaluator admission (entry_gates.py:749, live_runner.py:19721/20045/33928).",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "b349aed (06-26) + R2 hardening 19c7a32 (06-27: 7 guards fail-closed-under-master, 24 tests green). Kahit sabi ng config description 'RISKIEST \u2014 KEEP OFF UNTIL SOAKED', ito ay sadyang IN-ON ng 06-27 operator directive at LIVE binding verified: =true sa momentum-exec container NGAYON (nakaligtas sa lahat ng env re-baselines, kasama ang 07-06 armfix). Effective ON na ito; ang config default OFF ay kill-switch pattern lang.",
+  "risk_if_on": "Ang add habang halted ay hindi ma-e-exit hanggang resume \u2014 halt-resume pwedeng mag-gap-down laban sa buong position; naka-bound sa maliit na add size + +1R cushion + intact stop. ON na ito live \u2014 kung gusto ng soak evidence, i-audit ang fire history sa events/outcomes (hindi magawa ngayon: bawal ang DB habang may replays)."
+ },
+ {
+  "flag": "chili_momentum_anticipation_starter_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "Probe-then-add order path (live_runner.py:28433): hinahati ang live entry sa maliit na PROBE leg (default 25%) sa pivot break, tapos ADD ang remainder pagkatapos ma-confirm ang fill \u2014 gamit ang existing pyramid/scale-in machinery (dedupe-safe client_order_id, broker_order_id recorded, orphan-reconciled sa parent).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "dfce6a8 (06-26) + R1 hardening 7edb559 (06-27: stranded-leg bugfix, 33 adversarial dedupe/orphan tests, in-ON per PR #822; =1 pa rin sa scheduler container). PERO: (a) ABSENT sa 07-06 momentum-exec env \u2192 OFF sa entry worker mula noon (env-drift); (b) ang order-path class na ito ang may pinakamaraming totoong insidente (duplicate-fill, BJDX/LUCY orphan, CRVO orphan, GMM \u2212$18k orphan 07-10); (c) NGAYONG GABI ang alpaca-paper broker cutover + may kilalang orphan-reconciler landmine bago activation \u2014 ang probe+add ay dumaragdag ng legs na kailangang i-reconcile ng BAGONG adapter path.",
+  "risk_if_on": "Dalawang leg per entry sa panahong pinapalitan ang execution adapter: kung hindi pa napapatunayan ang alpaca-paper orphan/reconcile handling sa multi-leg entries, posibleng stranded/naked leg o double-count. I-restore lamang pagkatapos ng cutover soak o pagkatapos patakbuhin ang R1 dedupe/orphan test suite laban sa alpaca-paper path."
+ },
+ {
+  "flag": "chili_momentum_ask_thins_dip_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "LOCATE #2 dip-bottom long: pagkatapos ng ATR-scaled retrace na hawak ang higher-low, papasok kapag na-exhaust ang ASK (read_ladder_distribution.ask_build <= -0.25) na may buy-side OFI at tumitik pabalik ang presyo. Entry=pullback_high, stop=dip low; dala LAHAT ng chase-guards (tape_confirms_hold fail-closed, _hod_extension_ok, backside/front_side, _l2_entry_veto) at dumadaan sa parehong LIVE_PENDING_ENTRY veto chain (entry_gates.py:6031).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa b0d5739 (2026-06-26, re-audit-#2 Cluster B, 10 triggers, sinadyang ship-dark). Miyembro ng dip-entry family na may A/B replay NGAYONG GABI (kasama ang tight_false_break_reclaim/sub_vwap_trap/pulling_away_roc/premarket_pivot_macd) \u2014 in-flight na ang ebidensya, hintayin ang resulta sa halip na bulag na i-flip. Positibong supporting evidence sa 07-09 visual audit batch4: ang CLRO L2 footage (seller wall 10.96) ay eksaktong ask_thins feature class.",
+  "risk_if_on": "Knife-catch sa dip na hindi pa tapos \u2014 kung maling basa ang ask-depletion (hal. hidden/refreshing seller), bibili sa gitna ng flush; pero bounded ng structural stop sa dip low + max-loss circuit. Ang totoong panganib ng pag-flip bago ang A/B ay ma-contaminate ang parehong replay na tumatakbo ngayon."
+ },
+ {
+  "flag": "chili_momentum_auto_arm_equity_only",
+  "category": "posture_deploy",
+  "what_it_does": "Kapag ON, ang auto-arm ay nag-e-exclude ng lahat ng crypto ('-USD') pairs \u2014 equities lang ang ina-arm (Ross small-cap lane). Mutually exclusive sa auto_arm_crypto_only (crypto_only ang nananaig kapag parehong ON); ginagamit din ng lane_health at ng captured-paper preflight (auto_arm.py:100,1852,2312).",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "Ipinasok sa 5b4eff7 (2026-06-08, equity-focus #541) bilang operator-controlled posture ('set via env now; revisit crypto later' \u2014 mismong comment sa config.py:9504). Ang effective binding ay env/manifest-driven: itinatakda itong TRUE ng scripts/captured_paper_runtime_env.py:367,442 at scripts/build_captured_paper_preactivation.py:1372 para sa kasalukuyang alpaca-paper activation. Tama ang code default na False; ang deployment manifest ang nagpapasya.",
+  "risk_if_on": "Kung i-hardcode ON sa code default, mawawalan ng bisa ang crypto lane sa lahat ng deployment kahit ang 07-09 crypto-paper unblock ay sadyang binuhay ang crypto sa .env \u2014 posture conflict. Iwan sa env."
+ },
+ {
+  "flag": "chili_momentum_backside_veto_enabled",
+  "category": "veto_gate",
+  "what_it_does": "E1: vine-veto ang isang valid pullback-break entry kapag ang session-anchored front_side_state ay AFFIRMATIVELY backside (below VWAP / faded past retrace / extended top). Fail-open sa unknown/thin data (entry_gates.py:7894).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "KILALANG EBIDENSYA: shipped OFF sa fbd6ba5 (2026-06-24), tapos PINATAY ng replay 2026-06-25 \u2014 net-negative, over-vetoed ang below-VWAP RECLAIM winners (\u2212$78/7d, nakadokumento mismo sa Field description config.py:4770: 'KILLED 2026-06-25, proven net-negative'). Ang code default ay sinadyang ibinaba True\u2192False para hindi muling mabuhay sa env-less deploy. May continuous successor na LIVE: chili_momentum_frontside_adaptive_enabled (default True, size-tilt hindi hard veto) + per-setup front_side_state sa loob ng bawat entry gate.",
+  "risk_if_on": "Direktang regression sa napatunayang net-negative: muling mave-veto ang reclaim winners (ang eksaktong dip-rip/VWAP-reclaim na gusto ng lane), habang doble pa sa adaptive successor \u2014 over-vetoing sa isang lane na CONVERSION na ang bottleneck."
+ },
+ {
+  "flag": "chili_momentum_bail_on_no_confirmation_enabled",
+  "category": "exit",
+  "what_it_does": "GAP1 affirmative breakout-or-bailout: sa loob ng [min_hold=8s, window=20s] pagkatapos ng fill, kapag WALANG bagong high sa itaas ng +10bps buffer AT ang bid ay nasa/mas mababa sa entry, mag-BAIL agad bago pa ang stop (live_runner.py:31998). Ang winner na naka-pop na ay immune.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Direktang salungat sa 07-07 winner-capping root-cause fix: ang fast-bail family ay pumutol sa 6 sa 10 pinakamalaking bailout-WINNERS habang green, at ang FCUV +21% ay nawala sa 4.5s bail \u2014 kaya nga itinayo ang lock-in na 10s/20s (config.py:7184-7202, nakadokumento sa explosive_recalibration master block). Sa code, HINDI kinokonsulta ng bail na ito ang breakout_bailout_lock_in_* (sariling min_hold/window lang) \u2014 papasok ito nang eksakto sa 8-20s dip-test window na pinoprotektahan ng lock-in ('a violent squeeze dip-tests the broken level, then resumes' \u2014 Ross-verified). Dagdag pa ang 07-09 Ross exit-discipline research: retest-wick \u2260 failure. Ipinasok sa e26ecdf (2026-06-26) at hindi kailanman pinagana.",
+  "risk_if_on": "Muling ipapasok ang napatunayang winner-killer mechanism (premature early-cut) sa pamamagitan ng pintong hindi sakop ng lock-in; puputulin nito ang mga JEM/FCUV-class na dip-test-then-resume runs. Kung babalikan man, kailangan muna ng replay A/B + integrasyon sa lock-in."
+ },
+ {
+  "flag": "chili_momentum_bid_prop_explosive_exempt",
+  "category": "veto_gate",
+  "what_it_does": "GATE 1 ng explosive-mover recalibration: nilalaktawan ang bid-prop/spread-tightening RECONFIRM layer (isang pangalawang confirm pagkatapos ng trigger) para sa explosive names (ATR% >= 0.045 O RVOL >= 3.0), dahil ang tunay na squeeze ay lehitimong nagbababa ng bid at nagpapalapad ng spread habang tumatakbo (live_runner.py:24890-24906). Doubly-gated: kailangan ding ON ang master (explosive_recalibration \u2014 ON na simula 07-07).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "May documented false-block evidence PABOR sa pag-ON, nasa mismong code comment: 'ILLR/WEN/BB blocked, then ran' \u2014 ang confirmer ay re-veto layer lang (fail-open pa nga sa thin L1), habang buo pa rin ang structural trigger + volume + LAHAT ng primary vetoes + max-loss circuit. Ang master ay sinadyang binuksan 07-07 (10f2d1e lineage) at ang sub-flag lang ang naiwan OFF dahil sa one-change-at-a-time scoping, hindi dahil sa counter-evidence. Tumutugma sa operator standing rule (author-caution-only + may sariling guards) at sa dokumentadong CONVERSION bottleneck (SILO/CLRO/VRAX zero-fills habang nasa tape).",
+  "risk_if_on": "Sa explosive name na TALAGANG bumabagsak, hindi na makakapag-re-veto ang bid-deterioration read \u2014 posibleng dumami nang bahagya ang mga fill sa fading squeezes; bounded ng structural stop + #769 circuit. I-monitor ang live_entry_bid_prop_explosive_exempt events pagka-flip."
+ },
+ {
+  "flag": "chili_momentum_big_buyer_bid_starter_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "GAP 5 bid-side mirror ng _l2_entry_veto: kapag may malaking nakapatong na BUYER sa bid (depth-imbalance pctile >= 0.85, may spread caveat na 80bps), kino-confirm ang isang flush-dip starter. SA KASALUKUYANG WIRING, annotation lang ito: naisusulat lang sa _pb_debug['big_buyer_bid'] ng isang NAKA-FIRE NA flush-dip (live_runner.py:23808-23821) \u2014 hindi ito nakaka-admit o nakaka-block ng kahit anong entry; fail-closed sa loob (walang L2/malapad na spread \u21d2 None).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa b349aed (2026-06-26, Warrior re-audit Cluster 2) at naiwan OFF bilang bahagi ng ship-dark batch \u2014 puro author caution. Sa code-verified na wiring, puro conviction telemetry ang epekto (enabler overlay na 'NEVER a veto: it cannot block any existing entry' per config.py:9212), kaya zero trading-behavior risk habang nagsisimulang mag-ipon ng L2-accumulation evidence na magagamit ng meta-label features (OFI/micro-price/leadership ang top features). Pasok sa operator standing rule para sa additive telemetry.",
+  "risk_if_on": "Halos wala sa kasalukuyang wiring (annotation lang, may sariling try/except). Tandaan lang: kung sa hinaharap ay i-graduate ito sa tunay na entry-permit, saka na kailangan ng replay validation."
+ },
+ {
+  "flag": "chili_momentum_bottom_reversal_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "SS101 #019 BOTTOM REVERSAL: N sunud-sunod na RED candles sa mataas na volume, tapos ang UNANG green close (na may RVOL >= 1.5x) ang counter-trend confirmation; entry = green-candle close/break ng high nito, stop = ang red-series low. Ginagamit muli ang backside + L2 anti-chase vetoes + tick-break contract (entry_gates.py:9954).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa b0526fb (2026-06-25, named-patterns batch); ang description mismo ay nagsasabing 'ship dark \u2014 new + never-run' \u2014 puro author caution, WALANG counter-evidence sa git/docs. Ang kapatid nitong counter-trend na flush_dip_buy ay default-ON at live na matagal; ang kapwa-batch na cup-and-handle ay hinarden at in-ON na noong 06-27 (R4, 90c9cd6). May sariling guards (min_red=2, volume-spike confirm, structural stop) at dumadaan sa buong veto chain \u2014 eksaktong klase na sinasabi ng operator standing rule na TURN_ON_SAFE.",
+  "risk_if_on": "Counter-trend knife-catch class: sa tunay na distribution day, ang unang green candle ay maaaring dead-cat lang \u2014 bounded ng structural stop sa series low + RVOL confirm + anti-chase vetoes. Madaling i-segment per-trigger sa events kaya reversible at nasusukat."
+ },
+ {
+  "flag": "chili_momentum_break_candle_adaptive_close_pos_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Nire-relax ang weak_break_candle gate: sa EXPLOSIVE break (trigger-bar RVOL >= E3 explosive floor), ang fixed 0.50 close-pos requirement ay bumababa nang RVOL-derived papunta sa 0.30 floor; ordinaryong tape ay nananatiling 0.50, at ang tunay na doji ay bina-block pa rin (entry_gates.py:8321).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa 332ed6b (2026-06-29, 'pre-open conversion + hardening bundle (kill-switched, A/B-ready)') \u2014 ang mismong Field comment (config.py:5815) ay nag-uutos: 'must be A/B'd on the recorded-fills replay before going live' dahil confounded ng full stack ang ebidensya. May malakas na supporting data PABOR (53% ng weak_break_candle blocks ay tumakbo +3%; SKYQ/FRTT/WEN/HELP/BOLD tumakbo pero hindi na-fill), kaya mataas ang prior na papasa ito \u2014 pero skip-tick entry gate ito na eksaktong sinusukat ng replay harness na mainit na ngayon; idaan sa parehong A/B wave ng dip family.",
+  "risk_if_on": "Papayag sa mas mahihinang break candles sa high-RVOL names \u2014 kung mali ang RVOL read (hal. burst noise), dadami ang fills sa wick-out breaks; bounded ng natitirang guards pero ito mismo ang uri ng gate-relaxation na dapat may before/after proof (evolve-not-devolve)."
+ },
+ {
+  "flag": "chili_momentum_broker_truth_label_enabled",
+  "category": "other",
+  "what_it_does": "Ang READ switch ng broker-truth 2-phase design: kapag ON, ang learning consumers (feedback_query) ay babasa ng broker-true label sa pamamagitan ng authoritative_label_for_outcome (ang unreconciled rows ay EXCLUDED, hindi kailanman fabricated $0). BABALA sa mismong config (3086-3090): binabago rin nito ang daily-loss-cap/profit-giveback GATE inputs dahil ang risk_evaluator ay bumabasa sa parehong field \u2014 trading-behavior change, hindi purong data relabel.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "KILALANG EBIDENSYA: 2-phase soak design #821/a677aef (2026-06-24, mig309, dalawang CC_REPORTS 06-24) \u2014 ang WRITE pass ang dapat mag-ipon MUNA, tapos iinspeksyunin ng operator ang divergence distribution + day-net cross-check bago buksan ang READ. Ang memory note ay tugma: 'soak once WRITE populates'. Hindi pa nangyayari ang soak (OFF pa ang WRITE), kaya walang divergence data na magpapatunay na ligtas ang READ flip; at dahil gate-input change ito, 'deploy-when-flat' ang tamang paraan.",
+  "risk_if_on": "Kung buksan nang walang soak: (a) ang mga unreconciled row ay biglang mawawala sa trainer (posibleng malaking data drop kung mababa ang reconcile match-rate), at (b) magbabago ang daily-loss/giveback gate readings mid-session \u2014 posibleng mag-trip o mag-untrip ang caps sa maling batayan."
+ },
+ {
+  "flag": "chili_momentum_broker_truth_reconciliation_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Ang WRITE pass ng parehong design: kapag ON, ang reconcile_momentum_outcomes_to_broker_truth ay nagtutugma ng CLOSED momentum sessions sa broker fills at nagse-stamp ng additive broker_* label columns + divergence audit sa momentum_automation_outcomes (mig309). PURONG ADDITIVE \u2014 hindi kailanman ginagalaw ang legacy realized_pnl_usd/return_bps; OFF = no-op, zero SQL (outcome_reconcile.py).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "KILALANG EBIDENSYA: kalahati ng #821 2-phase soak design (a677aef 06-24) \u2014 ito mismo ang phase-1 na 'WRITE muna mag-i-ipon bago buksan ang READ'. Ang pag-ON dito ANG SIMULA ng validation (additive lang at walang trading impact habang OFF ang READ), pero i-treat bilang deliberadong soak-start na may follow-through: i-inspeksyon ang divergence distribution at match-rate pagkatapos ng ilang sesyon, hindi basta i-flip-and-forget \u2014 ang label READ flip ang naghihintay sa resultang iyon.",
+  "risk_if_on": "Mababa: dagdag na broker-API reads + matching writes kada reconcile pass; kung buggy ang matching, maling broker_* labels ang maiipon (pero walang epekto sa trading habang OFF ang READ \u2014 nase-cleanup bago ang READ flip). Panatilihing OFF ang READ hanggang ma-inspeksyon ang soak."
+ },
+ {
+  "flag": "chili_momentum_bull_flag_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "Ross BULL FLAG (SS101 #012) all-day entry: 1-3 green-candle impulse, tapos 2-3 candle na MAS MALALIM na pullback (50-70% retrace, sakay sa 9-EMA band) na humahawak, tapos FIRE sa unang candle na bumabasag sa prior pullback swing high. Ginagamit muli ang anti-chase guards + volume-profile vetoes; dumadaan sa parehong veto chain (entry_gates.py:2909).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa b0526fb (2026-06-25); ang description ay tahasang 'Ship DARK (default FALSE \u2014 NEW + never-run; operator ramps)' \u2014 puro author caution, walang counter-evidence sa git/docs/CC_REPORTS. Trend-CONTINUATION family ito na kapatid ng live-nang first_pullback (shallow) at deep_reclaim; ang kapwa-batch na cup-and-handle ay in-ON na noong 06-27 pagkatapos ng hardening. Bull flag ang pinaka-core na Ross setup (SS101 #012) at CONVERSION/capture ang kasalukuyang bottleneck \u2014 ang standing rule ng operator (no dark flags; default-ON + live-test + reversibility) ang tamang gabay dito.",
+  "risk_if_on": "Ang 50-70% retrace ay mas malalim kaysa shallow first_pullback \u2014 sa fade day, ang 'deeper pullback na humahawak' ay maaaring backside na; pero may frontside/backside guard + structural stop sa pullback low, at per-trigger segmentable sa events para sa instant rollback."
+ },
+ {
+  "flag": "chili_momentum_candle_quality_multitf_veto_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Master ng DALAWANG dagdag na entry-quality veto sa pullback_break_confirmation: (1) DOJI veto \u2014 tanggihan ang trigger candle na mahina ang body kumpara sa range (adaptive: base 0.25 + atr_pct), at (2) HTF-against \u2014 tanggihan LANG kapag ang 5m ay MALINAW na pababa (EMA-9 sustained rolldown 3 samples / MACD peaked); neutral/lagging HTF ay pumapasa pa rin. Fail-open sa thin data (entry_gates.py:7940).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa 20b89e5 (2026-06-27, Punch-list P6, +23 tests) at hindi kailanman pinagana. May class-level counter-evidence ang mga bagong entry VETO sa lane na ito: ang E1 backside veto ay pinatay dahil over-vetoed winners, at ang katabing break-candle gate ay dokumentadong over-rejects (53% ng blocks tumakbo +3% \u2014 config.py:5806) \u2014 samantalang CONVERSION/missed-fills na ang bottleneck (SILO/CLRO/VRAX). Kahit maingat ang disenyo (neutral-HTF passes, fail-open), ang pag-ON nito ay BAWAS-entries kaya kailangan ng replay A/B na nagpapakitang net-positive ang mga na-veto sana.",
+  "risk_if_on": "Mave-veto ang mga 1m-fast breaks na may lagging 5m o maiksing-body ignition bar \u2014 eksaktong klase ng winners na na-over-veto ng E1 at ng fixed close-pos gate; direktang pagpapalala ng capture bottleneck kung mali ang calibration."
+ },
+ {
+  "flag": "chili_momentum_catalyst_conviction_enabled",
+  "category": "sizing",
+  "what_it_does": "Bounded UPWARD size multiplier sa per-trade risk basis kapag may STRONG credible catalyst ang name (parehong strong/weak/fake news grade na ginagamit na ng lane \u2014 walang bagong feed): mult = clamp(1 + 0.15*rank, 1.0, 1.5), STRONG=>~1.45x, weak/fake/wala=>1.0. Hindi kailanman veto; naka-compose sa loob ng hard 3x combined-multiplier min() clamp (live_runner.py:27685, risk_policy.py:2839).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Itinayo bilang ang 'the #1 profitability lever' sa a0b1102 (2026-06-27, B2, 28 tests na nakahuli pa ng falsy-zero bug) at ang CC_REPORT 2026-06-27_off-items-enablement ay nagmamarka nitong '\u2014 ON' (pinagana sa live env noong deploy; ang code default na False ay dark-flag mismatch vs live posture \u2014 hindi ko ma-compute ang in-container binding sa read-only audit na ito, kaya i-verify ang effective env binding sa exec worker bago/pagkatapos i-flip). Sinusuportahan pa ng 07-05 conviction bundle (#849/#850, +87% week: 'size by name\u00d7ENTRY-quality'). Ang 3x hard ceiling ay verified na hindi nabu-butas (Part B false-alarm refutation: min() clamp sa live_runner).",
+  "risk_if_on": "Sizing-up bago ganap na napatunayan ang expectancy (labag-labag sa $1k/day Stage-0 gate kung mag-isa ito) \u2014 pero bounded sa 1.5x, nasa loob ng 3x hard clamp + notional ceiling, at hindi kailanman nagpapaliit/nagba-block; ang catalyst-grade misread (fake news na na-grade STRONG) ay magpapalaki ng size sa maling name."
+ },
+ {
+  "flag": "chili_momentum_challenge_metrics_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Read-only operator-journaling surface: accuracy% (rule-adherence), profit-loss ratio, at consecutive-green-day streak sa nakaraang 50 closed sessions (metrics_surface.py, ineexpose sa routers/trading_sub/momentum_api.py). Walang anumang trading impact \u2014 hindi kailanman naggegate, nagsa-size, o nagve-veto; OFF = empty dicts.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa dfce6a8 (2026-06-26, re-audit-#2 Cluster C 'SURFACE gaps') at naiwan OFF bilang bahagi lang ng ship-dark batch convention \u2014 puro author caution, walang anumang counter-evidence. Purong read-only reporting sa already-computed data; ang mismong description ay 'A reporting function only \u2014 NO trading impact'. Pinakamalinaw na TURN_ON_SAFE sa buong chunk per operator standing rule.",
+  "risk_if_on": "Halos zero: maliit na dagdag na DB read kada tawag sa metrics endpoint. Walang trading path na nadadaanan."
+ },
+ {
+  "flag": "chili_momentum_crypto_live_arm_enabled",
+  "category": "posture_deploy",
+  "what_it_does": "Ganggate sa LIVE crypto auto-arming (auto_arm.py:4901) AT sa AREA-D viability/freshness path para sa crypto (persistence.py:40,54). Kapag OFF, hindi ina-arm ang live crypto at frozen ang crypto viability freshness; paper/alpaca crypto ay hiwalay na flags.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "Ipinasok sa 32b4a14 (2026-06-12, 'crypto-live-off' #675) na may matibay na data noon: live crypto 0/17 winners ever, \u2212$171/wk, na kumakain pa ng daily-loss budget ng profitable equity window (A4 comment, config.py:8741-8744). PERO posture toggle ito na env ang nagpapasya: per 07-09 crypto-paper unblock, ang .env ay TRUE na (kasama ng coinbase_ws) para buhayin ang lane \u2014 ang code default na False ay tamang konserbatibong fallback para sa env-less deploy, at ang compose .env ang effective value. Nasa POSTURE list din ito ng kilalang ebidensya.",
+  "risk_if_on": "Kung i-flip ang CODE default sa True, ang anumang env-less/na-corrupt na compose deploy (tulad ng 07-09 rename-quarantine incident) ay tahimik na magbubukas ng live crypto arming sa lane na dating 0/17 \u2014 iwan ang default sa False at panatilihin ang kontrol sa .env, verified in-container pagkatapos ng bawat deploy."
+ },
+ {
+  "flag": "chili_momentum_daily_200ema_room_enabled",
+  "category": "selection",
+  "what_it_does": "Ginagamit ang dead-computed na daily_levels.dist_to_sma_200_atr bilang MEASURED selection tilt na naka-fold sa daily_structure_pct (pipeline.py:1486): ni-re-reward ang mga name na may malinis na room sa itaas ng daily 200MA, dine-de-rate ang naka-pin/nasa ilalim ng 200MA. Soft tilt lang \u2014 hindi kailanman nakaka-block ng fill.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa cea5791 2026-06-26 (\"fill SELECTION gaps Cluster 1/4 \u2014 2 bugs + 2 tilts, Warrior re-audit\") na OFF-by-default bilang pag-iingat lang ng author (\"OFF => byte-identical\"). Walang counter-evidence sa docs/git. Ang 3 kapatid nitong daily tilts (gap_geometry, red_rejection_derate, blue_sky_ipo) ay default TRUE na; ang master daily_context_enabled ay TRUE. May sariling ONE-knob adaptive setting (clear_room_atr=1.0, ATR-relative \u2014 pasado sa no-magic rule). Ross doctrine mismo: room above resistance. Sakto sa operator standing rule vs dark flags: additive tilt na may guards, author caution lang ang dahilan ng OFF.",
+  "risk_if_on": "Maaaring ma-down-rank ang isang name na naka-pin sa 200MA pero tatakbo pa rin (catalyst blow-through) \u2014 pero tilt lang ito sa ranking, hindi veto, at bounded sa loob ng daily_structure_pct pillar weight."
+ },
+ {
+  "flag": "chili_momentum_dip_buy_rth_only_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Kapag ON, ang flush-dip / deep-reclaim DIP-BUY triggers ay fi-fire LAMANG sa loob ng RTH window [9:30,16:00) ET (entry_gates.py:654,1241). Rationale ng author: walang stops na nag-fi-fire premarket kaya ang stop-run-snapback thesis ng dip ay wala, at ang dip-buy na bumagsak premarket ay hindi ma-e-exit sa stop; nagsasara rin ito ng premarket leak sa _evaluate_deep_reclaim (bar_ts=None). Equity-only, crypto exempt.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa b349aed 2026-06-26 (\"fill ENTRY gaps Cluster 2/4\") bilang 'bug fix', pero may KONTRA-EBIDENSYA na sariwa: ang 07-16 5-day scorecard (docs/STRATEGY/CC_REPORTS/2026-07-16_ross-5day-replay-scorecard.md) ay nagpakita na ang #1 gap ay ENTRY SHAPE \u2014 si Ross ay DIP-buyer at ang kanyang mga dip ay madalas PREMARKET (ERNA dip 9.37-9.60 sa window na nagsimula 11:03Z=7:03 ET; VRAX 11:36Z). Ang pag-ON nito ay haharang sa eksaktong entry class na sinusubukang buksan ng dip-family A/B replay NGAYONG GABI. I-validate muna sa parehong A/B: paghambingin ang dip fills na may/walang RTH gate bago i-flip.",
+  "risk_if_on": "Haharangin nito ang lahat ng premarket flush-dip/deep-reclaim entries \u2014 ang premarket ang napatunayang gap/edge window (CELZ premarket win; Ross premarket dips sa 07-16 scorecard) \u2014 kaya baka isara nito ang mismong pintuan na binubuksan ng dip-entry initiative."
+ },
+ {
+  "flag": "chili_momentum_dip_velocity_conviction_enabled",
+  "category": "sizing",
+  "what_it_does": "LOCATE #3: conviction SIZE modifier sa dip-family fire (flush_dip/ask-thins/vwap_reclaim/wick_reclaim) \u2014 mas matarik/mabilis na flush = mas malakas na snapback (Ross flush read), kaya scale ang entry size sa dip ROC. Multiplier bounded sa [1.0, 1.25] (max_boost=0.25), hindi kailanman nagpapaliit ng size, at naka-compose sa ILALIM ng existing 3x clamp + max_notional (entry_gates.py:5984).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa b0d5739 2026-06-26 (new-Cluster B re-audit). Walang counter-evidence; ang dahilan ng OFF ay author caution lang. May malakas na precedent: ang conviction-sizing-by-entry-quality bundle (#849/#850) ay LIVE at +87% wk \u2014 ito ang parehong doktrina (size by entry quality). Bounded, additive, hindi maaaring lumampas sa per-trade risk caps (nasa loob ng hard min() 3x clamp na na-verify sa 06-27 audit, live_runner.py:6664). Pasok sa operator standing rule: additive sizing na may sariling guards. Bonus: itinutulak nito ang capital papunta sa TAMANG entry shape (dips) na siyang #1 gap sa 07-16 scorecard.",
+  "risk_if_on": "Kung ang isang dip trigger ay may negatibong expectancy, papalakihin nito ang losses ng hanggang +25% sa mga fire na iyon; ang max-loss circuit (K=2x realized risk) at 3x clamp ang backstop. Ang dip-family A/B ngayong gabi ay magbibigay pa ng confirmation data."
+ },
+ {
+  "flag": "chili_momentum_entry_extension_rvol_boost_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Kapag ON (at master explosive_recalibration ON \u2014 TRUE na since 07-07), NILULUWAGAN ang anti-chase extension cap para sa high-RVOL explosive names: cap += min(0.15, 0.05*(rvol-3.0)) (entry_gates.py:2441-2453). Ibig sabihin: papayagan ang entry na mas malayo sa itaas ng breakout level sa mga outlier squeeze.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa 10f2d1e 2026-06-25 (\"makasakay\" fixes). May DIREKTANG kontra-ebidensya na sariwa: ang 07-16 scorecard ay nag-diagnose na ang #1 loss shape ay ang pagbili ng EXTENSION tops (VEEE @13.57, ERNA @10.56, UBXG @11.05, VRAX late @8.07) \u2014 ang pagluwag ng extension veto ay direktang nagpaparami ng ganoong fills. Ang napiling fix direction ng scorecard ay pullback-entry mode + leader-ignition bypass widening, HINDI pagluwag ng extension cap. Pero two-sided ito: bahagi ng 200+ re-entry blocks sa VRAX (chase-guard 109) habang tumakbo 8\u219213 ay sana napapasok nito. Kailangan ng A/B replay sa 5-day windows (murang eksperimento, nariyan na ang instrument) bago i-flip.",
+  "risk_if_on": "Mas maraming extension-top chases (ang napatunayang #1 loss shape ngayon) sa mga high-RVOL name \u2014 hard-capped nga sa +15% extra room, pero ang mga eksaktong loss sa 07-16 ay nasa ganoong sona."
+ },
+ {
+  "flag": "chili_momentum_entry_flow_veto_explosive_exempt",
+  "category": "veto_gate",
+  "what_it_does": "Kapag ON (at master ON \u2014 TRUE na), ang strong-tape OR-leg ng entry flow veto para sa EXPLOSIVE names ay lumalalim mula -0.5 papuntang -0.85: ang manipis na tape na may isang-dalawang aggressive sellers ay hindi na vi-veto; MAXIMUM selling (<=-0.85) ay vi-veto pa rin, at ang both-bearish AND-leg (OFI<=-0.6 AND tf<=-0.25) ay HINDI binago (entry_gates.py:2352-2380).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa 10f2d1e 2026-06-25. Walang counter-evidence; ang canonical bad case na nagpaluwal ng flow veto (PLSM flush: OFI=-1.0/tf=-0.51) ay VETOED PA RIN sa pamamagitan ng hindi-ginalaw na AND-leg \u2014 na-verify ko sa code na ang exemption ay sa OR-leg lang. Tumutugon ito sa winner-killer #2 ng 07-16 scorecard (re-entry lockout: 212 blocks sa VRAX habang 8\u219213, 601 sa VEEE) \u2014 ang mga thin-tape one-seller false veto ay bahagi ng lockout class. May master kill-switch (explosive_recalibration) at sariling documented threshold knob. Pasok sa standing rule: guarded relaxation na ang tanging dahilan ng OFF ay author caution.",
+  "risk_if_on": "Sa explosive names, papayag ang entry kahit may malakas (pero hindi maximum) na selling sa manipis na tape \u2192 posibleng dagdag na wick-outs; bounded ng max-loss circuit at ng buhay pa ring AND-leg + extension/backside/tape guards."
+ },
+ {
+  "flag": "chili_momentum_entry_l2_veto_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Gate 3 (dip-buy quality): L2 big-seller ask-wall / hidden-seller absorption veto sa entry, gamit ang existing read_ladder_distribution + OFI/micro readers (entry_gates.py:1667). FAIL-OPEN sa missing/stale/empty L2; may SSR carve-out. Naka-wire din bilang chase-guard sa loob ng bagong dip-family triggers (kasama sa tight_false_break_reclaim).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa 6857baf 2026-06-15 (\"Ross quality discriminators \u2014 all flag-OFF\") at hindi na-promote kailanman. Dalawang dahilan para mag-validate muna: (1) ang equity L2 ay data-starved (~88/684 names lang may iqfeed_depth_snapshots per code comment sa live_runner.py:33156, at ang exit-ladder post-mortem ay nagpakita ng 1054/1054 stale_or_thin reads) kaya halos INERT ito sa equity (fail-open) \u2014 pag-flip na walang telemetry check ay ilusyon ng coverage; (2) kung saan sariwa ang L2, ito ay DAGDAG na entry veto sa panahong ang 07-16 scorecard ay nagsasabing ang sobra-sobrang vetoes/lockouts ang winner-killer. Sakop din ito ng dip-family A/B ngayong gabi dahil chase-guard ito ng mga bagong trigger.",
+  "risk_if_on": "Kung saan may sariwang L2, maaaring i-veto nito ang mga reclaim winner (ang E1 lesson: ang over-veto ay net-negative); kung saan wala, nagdadagdag lang ito ng isang branch na walang epekto pero iniuulat na 'protektado'."
+ },
+ {
+  "flag": "chili_momentum_entry_tight_false_break_reclaim_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "GAP-B: BAGONG entry trigger family \u2014 tight-momentum compression regime (adaptive p30 ng sariling compression distribution) + REQUIRED fail-closed flow_ok + vol_ok, tapos false-breakout-reversal reclaim (B.2) O VWAP-reclaim (B.3) geometry, na may lahat ng 4 chase-guards (backside, parabolic, L2, tape) bago mag-fire (entry_gates.py:5656-5724).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa ce1975a 2026-06-29 (\"4-lever Ross chain \u2014 kill-switched\"). Ito mismo ang dip-entry family na may A/B replay NGAYONG GABI (kilalang ebidensya; in-flight) \u2014 at ang worktree branch na ito ay literal na pinangalanang fix/tight-false-break-wire para sa wiring nito. Ito rin ang eksaktong direksyon ng 07-16 scorecard fix item (a): 'pullback-entry mode sa may-catalyst leaders'. TAMANG kandidato ito para i-ON, pero ang ebidensya ay in-flight ngayong gabi \u2014 hintayin ang A/B resulta (oras na lang ang layo) sa halip na mag-flip nang bulag; bagong entry path ito, hindi additive telemetry.",
+  "risk_if_on": "Bagong entry class na walang replay proof pa \u2014 kung maling na-calibrate ang geometry/flow thresholds, magdadagdag ito ng bagong loss shape; ang A/B na tumatakbo na ang eksaktong pagsusulit."
+ },
+ {
+  "flag": "chili_momentum_event_based_abandonment_enabled",
+  "category": "selection",
+  "what_it_does": "Pinapanatili ng reaper ang isang still-high-conviction, still-front-side pre-entry watcher LAMPAS sa fixed base/extend clock (si Ross ay nananatili sa malakas na stock buong araw); ang fumade/cooled ay rine-reap agad gaya ng dati, at may hard adaptive ceiling = 3x ng extend window para walang slot squatter (auto_arm.py:342-361). Bulk conviction read bago ang loop (walang per-session DB read).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa 1e2eb09 2026-06-26 na may sariling motivating evidence sa code: na-drop ang IVF (+66%, 14 malinis na 2-red-pullback setups) dahil na-reap bago nag-develop ang setups \u2014 parehong pattern ng CLRO lesson (armed EARLY lang, na-starve ang hapon). Sinusuportahan din ng 07-16 scorecard finding #5 (session/watch lifecycle na pumuputol ng oportunidad mid-window). Walang counter-evidence sa git/docs. May sariling guards: strict opt-in keep set, instant reap on fade, hard ceiling, fail-through sa normal clock. Klasikong dark flag na ang tanging dahilan ng OFF ay author caution \u2192 standing rule ang umiiral.",
+  "risk_if_on": "Mas matagal na watch-slot occupancy ng mga malakas na name \u2192 posibleng slot pressure sa mga bagong mover sa sobrang aktibong araw; bounded ng hard ceiling at ng instant fade-reap."
+ },
+ {
+  "flag": "chili_momentum_exit_candle_confirm_live",
+  "category": "exit",
+  "what_it_does": "Ginagawang LIVE gate ang 1m candle exhaustion confirmer (topping-tail OR MACD-hist rollover) sa FLOW confluence ng OFI exhaustion lock: kapag ON, ang lock ay hindi mag-fi-fire nang walang candle confirmation (AND-gated = mas mahigpit na fire criterion, hindi mas maluwag; INVARIANT A intact). Kapag OFF, ang candle_would_suppress counterfactual lang ang nala-log (live_runner.py:33058-33111).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa 4614e72 2026-06-16 (#765) na may EXPLICIT staged-promotion design: 'Flip ON once the A/B shows the would-suppress fires were early-sells (price recovered), not real tops.' Ang counterfactual (candle_would_suppress sa live_ofi_exhaustion_lock events) ay naka-log na mula 06-16 \u2014 isang buwan ng data ang naghihintay lang basahin; hindi ko ma-query ngayon (bawal ang DB habang may replays). Nota: potensyal itong PABOR sa winner-killer fix (trail-tighter-than-noise, 07-09 scorecard) dahil sinusupil nito ang mga premature lock fire \u2014 kaya mataas ang prayoridad na basahin ang A/B at i-promote kung green.",
+  "risk_if_on": "Kung ang mga would-suppress ay TUNAY na tops pala (hindi early-sells), ang pag-ON ay magpapaluwag ng profit protection sa mga winner \u2014 ibabalik ang giveback na nilulutas ng lock; kaya kailangan muna ang isang beses na pagbasa ng naka-log na counterfactual."
+ },
+ {
+  "flag": "chili_momentum_exit_event_driven_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Kapag ON, ang WS-tick OFI rollover (ofi < -0.25 thr) ay gigising sa exit runner NGAYON NA sa halip na maghintay ng hanggang 15s poll \u2014 DISPATCH HINT LANG, hindi kailanman nagbebenta; ang buong INVARIANT-A-safe exit confluence pa rin ang nagdedesisyon (live_runner_loop.py:965-1003). Kapag OFF, ang observe mode (default TRUE) ay nala-log ang would-dispatch counterfactual.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa e289a7f 2026-06-16 (#760, \"emit-first\"). Ang mekanismo ay purong latency accelerant sa isang NA-DEPLOY nang decision path \u2014 zero bagong exit math, walang bagong veto, fail-open, ring-only read (walang DB sa WS thread). Ang observe counterfactual ay nagla-log na ng isang buwan. Walang counter-evidence sa git/docs. Kaayon ito ng buong event-driven direction ng system (subscribe-on-alert G3, pg_notify arming). Eksaktong klase ng dark flag na tinutukoy ng operator standing rule: infra/telemetry na may sariling guards, author caution lang ang OFF.",
+  "risk_if_on": "Dagdag na runner wakeups sa maiingay na crypto tape (compute lang, hindi trading risk); ang pinakamasama ay mas MAAGANG ebalwasyon ng parehong exit logic \u2014 na siyang mismong layunin."
+ },
+ {
+  "flag": "chili_momentum_exit_ladder_live",
+  "category": "exit",
+  "what_it_does": "Ang size-moving gate ng v2 sell-into-strength ladder: kapag ON, ang fired distribution read ay nagpo-post ng maliit na resting sell limit LIVE (live_runner.py:33416-33439). Kapag OFF, ang ladder read + INVARIANT-A stop ratchet + counterfactual telemetry ay tumatakbo pa rin (exit_ladder_ENABLED master ang may hawak doon).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "KILALANG EBIDENSYA: fliniplip 07-06 tapos ROLLED BACK (#855) \u2014 201/219 scale-out limits na-cancel, L2 reads 1054/1054 stale_or_thin; ang mismong Field description sa config.py:6780 ay nagdodokumento ng premature default-ON na na-revert (ang BJDX/LUCY give-backs ay ang dup-Reference 409 orphan bug pala, hindi missing harvest). NAPALITAN na ito ng MFE-partial (#881) na LIVE na bilang ang partial-into-strength mechanism. Ang pag-ON ulit nang walang bagong A/B sa sariwang L2 ay uulit lang sa 07-06 failure mode at magbabanggaan pa sa MFE-partial.",
+  "risk_if_on": "Uulit ang 07-06 pattern: mga cancelled/stale resting limits sa stale_or_thin L2, banggaan sa live MFE-partial scale-outs (dobleng size-mover sa iisang posisyon), at execution churn na walang napatunayang benepisyo."
+ },
+ {
+  "flag": "chili_momentum_exit_ofi_hidden_seller_enabled",
+  "category": "exit",
+  "what_it_does": "Accelerant sa OFI exhaustion lock (CRYPTO-ONLY, naka-gate sa -USD + Coinbase book ring): ang hidden-seller absorption sa highs ay nag-a-arm ng lock sa profit-arm + micro-rollover LANG (mas kaunting gates), dahil ang distribution ang nag-iisang LEADING signal (live_runner.py:33040-33055; docs/DESIGN/ADAPTIVE_OFI_EXIT.md:46-48).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa 187dd3a 2026-06-14 (#703) na may sariling staged design: 'OFF at ship \u2014 promote only after OFI+micro proves net-positive (log-only-first)'. Dalawang bagay ang nagsasabing hindi pa tapos ang proof: (1) ang crypto lane ay PATAY mula ~07-03 hanggang sa 07-09 unblock (3-layer flag chain) kaya manipis ang soak data ng OFI+micro sa crypto; (2) ang 07-09 replay scorecard ay nag-root-cause na ang winner-killer ay trail-TIGHTER-than-noise \u2014 ang accelerant na ito ay eksaktong nagpapaAGA ng lock arming, kaya kailangan munang patunayan sa counterfactual na hindi nito pinuputol nang maaga ang mga runner (winners run 7-17R per MFE data).",
+  "risk_if_on": "Mas maagang lock fires sa crypto winners \u2192 posibleng ibalik ang trail-tighter-than-noise winner-killer sa crypto lane; ratchet-only nga (hindi lumuluwag) pero ang 'masyadong maagang tighten' ang napatunayang nakamamatay sa capture."
+ },
+ {
+  "flag": "chili_momentum_exit_ofi_lock_partial_enabled",
+  "category": "exit",
+  "what_it_does": "Action B ng exhaustion lock: kapag nag-fire ang lock (o measured-move/double-top read) na may partial_arm, ina-arm ang EARLY PARTIAL (scale-out \u2192 breakeven) sa pamamagitan ng parehong audited SCALING_OUT path; hindi kailanman full cut (live_runner.py:33010,33148,35883; docs/DESIGN/ADAPTIVE_OFI_EXIT.md:72).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa 187dd3a 2026-06-14 (#703) na may sariling promotion gate sa Field description: 'Default OFF = log-would-fire-first; promote after the counterfactual proves net-positive' \u2014 ang counterfactual ay hindi pa nababasa/na-report kahit saan sa CC_REPORTS. Mas mabigat pa: ang MFE-percentile partial (#881) ay LIVE NA bilang ang napiling partial-into-strength mechanism (pumalit sa exit-ladder). Ang pag-ON ng pangalawang partial-armer nang hindi muna sinusuri ang interaction ay maaaring mag-double-scale sa iisang winner (dalawang independent na scale-out arm sa parehong posisyon). Kailangan: basahin ang would-fire counterfactual + i-map ang overlap sa MFE-partial bago mag-promote.",
+  "risk_if_on": "Dobleng partial-taking kasabay ng live MFE-partial \u2192 sobra-sobrang size na naibebenta nang maaga sa mga runner (winners run 7-17R), na kabaligtaran ng capture goal; hindi pa rin napatunayan ng counterfactual."
+ },
+ {
+  "flag": "chili_momentum_explosive_floor_enabled",
+  "category": "veto_gate",
+  "what_it_does": "E3: hard entry gate (equity-only, crypto exempt, fail-open sa missing data) \u2014 kailangang lampasan ng name ang ABSOLUTE floors ni Ross (RVOL>=5x AND day-change>=+10%) bukod pa sa within-batch percentile rank, para hindi ma-arm ang best-of-a-dull-batch sa tahimik na tape (entry_gates.py:8056-8099). May F1 micro-frame fix na (sub-minute frames ay nilalaktawan ang day-change leg).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok sa fbd6ba5 2026-06-24 na 'SHIPPED OFF (frame fix pending)' \u2014 ang F1 fix ay NASA CODE NA (entry_gates.py:8083-8090), kaya wala nang teknikal na blocker at handa na itong i-validate. Pero ang kapatid nitong E1 backside-veto mula sa PAREHONG batch ay PINATAY ng replay 06-25 (net-negative, over-vetoed reclaim winners) \u2014 patunay na ang hard entry vetoes sa family na ito ay kailangang replay-proven bago i-ON, hindi presumed-good. Dagdag pa: sabi ng 07-16 scorecard, hindi na selection ang problema at ang sobrang vetoes ang winner-killer. Murang eksperimento: patakbuhin ang E3 sa 5-day replay windows (lahat ng 7 Ross names ay malamang pumasa sa floor, kaya ang tanong ay kung ano ang na-BLOCK sana sa mga dull na araw).",
+  "risk_if_on": "E1-style failure: ang hard floor ay maaaring mag-block ng mga name na mababa ang nabasang trigger-bar vol_ratio sa maagang premarket pero siyang mover ng araw; isang hindi-replay-proven na hard gate sa entry path na kasalukuyang sobra na ang lockouts."
+ },
+ {
+  "flag": "chili_momentum_false_halt_avoid_enabled",
+  "category": "veto_gate",
+  "what_it_does": "GAP 3: ang limit-UP halt na nag-resume nang MAHINA (unang post-resume bar bumukas SA ILALIM ng halt_level) ay FALSE halt \u2192 huwag i-long ang halt-resume-dip (no-fire bago pa ang lahat ng dip/reclaim structure checks; entry_gates.py:10489-10507). Nagpapagana rin ito ng halt_level capture sa halt onset (live_runner.py:19717). Purong risk-reduction \u2014 hindi kailanman nag-e-enable ng entry.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa 3b3fd19 2026-06-26 (fill re-audit-#2 HALT gaps). Walang counter-evidence sa git/docs; OFF dahil author caution lang. Buhay ang substrate nito: ang halt inference sa print-recency path ay default TRUE (config.py:3459) at ang 07-14 UBXG replay ay nakakita ng 9 suspected-halts. Direktang suporta pa ang 07-16 scorecard: ang UBXG loss (\u2212$64.66, pinakamalaki sa set) ay pagbili ng post-squeeze chop-top sa halt-riddled tape, at ang fix item (d) ay halt-resume dip entry \u2014 ang flag na ito ang QUALITY gate ng eksaktong entry na iyon (weak resume = huwag). Additive no-fire na may sariling guards; pasok sa standing rule.",
+  "risk_if_on": "Mapapalampas ang bihirang kaso ng weak-resume na biglang nag-reclaim at tumakbo \u2014 maliit na opportunity cost kumpara sa pag-iwas sa failed-halt longs; walang ibang epekto (hindi ito gumagalaw sa breakout/dip triggers labas ng halt-resume path)."
+ },
+ {
+  "flag": "chili_momentum_family_regime_prefilter_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Kapag ON, bina-block ang entry kapag ang historical bucket (family \u00d7 volatility_regime \u00d7 session_label, 120-day rollup ng momentum outcomes) ay 'clearly toxic': n>=5, win_rate<0.4, mean_return_bps<-10 (family_regime_stats.py:66-88, config.py:2196). Nagda-DB aggregate query sa entry-eval path.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok pa noong 2026-04-14 (122e91b, Phase 6a) bago ang dalawang findings na sumisira sa basehan nito: (a) meta-label data-gate root cause 07-06 (#857) \u2014 entry_regime_snapshot_json EMPTY sa 940/942 outcomes, kaya halos lahat ng bucket ay 'unknown'/contaminated; (b) code-drift finding \u2014 walang sha column ang outcomes, kaya ang pooled 90-120-day history ay INVALID na batayan para i-block ang current-code entries (araw-araw ang fixes). Ang blocker ay tatakbo sa basura o kulang na data.",
+  "risk_if_on": "Mga entry na babagsak/papasa base sa unknown-bucket o stale-code aggregates \u2014 arbitrary vetoes sa isang lane na CONVERSION ang #1 bottleneck; dagdag pa ang synchronous DB rollup query kada entry eval."
+ },
+ {
+  "flag": "chili_momentum_fatigue_derate_enabled",
+  "category": "sizing",
+  "what_it_does": "PSY101 GAP 2: pinapaliit ang per-trade risk budget habang tumatagal ang session (minutes since 09:30 ET) at dumadami ang entered-trade count; multiplier bounded [0.5, 1.0], down-only, entry-sizing lang (live_runner.py:27630, config.py:9265).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok 06-26 (b822df0, fill RISK gaps Cluster 4/4) at hindi pa nava-validate. Direktang kontra-ebidensya: ang 07-07 CLRO lesson \u2014 ang exp_mult 0.5 down-only afternoon derate ay naging death-spiral na nag-re-starve ng afternoon #1 (26sh vs 1,026sh sizing inversion, CLRO\u219216.50 na-miss); pareho ang hugis ng mekanismo (down-only derate na 0.5 floor habang tumatagal ang araw). Dagdag pa ang 07-09 Ross deep-research: catalyst names win ANY hour \u2014 ang time-decay sizing ay sistematikong magpapaliit sa hapon na winners.",
+  "risk_if_on": "Muling afternoon starvation ng #1 name \u2014 ang dokumentadong pinakamahal na failure mode ng lane (CLRO class); nag-i-stack pa ito sa ibang down-only multipliers sa ilalim ng 3x clamp."
+ },
+ {
+  "flag": "chili_momentum_first_dip_reclaim_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "DEPRECATED provenance-only input: ayon mismo sa Field description (config.py:2638-2641) at sa _first_dip_policy_mode (entry_gates.py:3963-3985), hindi na nito kayang baguhin ang effective lifecycle mode o i-activate ang candidate/promoted behavior \u2014 dating OR-ed ito at nakaka-bypass ng candidate/OOS workflow, kaya sinadyang ginawang inert.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Sinadyang neutralisado sa captured-paper activation hardening (8aa4df1, 07-16, Codex 019f5d01 / PR #920 line): ang pag-ON nito ay walang epekto kundi mag-stamp ng provenance \u2014 ang tunay na activation authority ay ang chili_momentum_first_dip_reclaim_policy_mode na may typed receipt gates. Walang saysay i-flip; nakakalito lang.",
+  "risk_if_on": "Walang functional na epekto (no-op), pero nagpapalabo ng provenance at nag-aanyaya ng maling akala na naka-activate ang first-dip policy gayong hindi."
+ },
+ {
+  "flag": "chili_momentum_first_dip_reclaim_policy_mode",
+  "category": "entry_trigger",
+  "what_it_does": "Explicit lifecycle ng first-dip-reclaim policy: 'baseline' = comparator/walang pagbabago; 'candidate' = pinapatakbo ang identical sealed replay/paper policy para MAG-IPON ng ebidensya; 'promoted' = fails CLOSED hangga't walang hiwalay na hash-bound OOS promotion receipt (config.py:2643-2649). Naka-pin din ito sa captured-paper route token \u2014 mismatch = runtime unavailable (captured_paper_dispatcher.py:862-881).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Bahagi ng in-flight captured-paper Alpaca activation path (8aa4df1, 07-16, Codex session 019f5d01 / PR #920 handoff) \u2014 ang dip-entry family ay may A/B replay NGAYONG GABI, in-flight pa ang ebidensya. Ang 'candidate' mode mismo ang evidence-collection vehicle; ang 'promoted' ay by-design nakasara hangga't walang OOS receipt. Tama ang 'baseline' default hangga't hindi tapos ang tonight run + activation approvals.",
+  "risk_if_on": "Ang pag-set ng 'promoted' nang walang receipt = fail-closed (classified decisions blocked); ang 'candidate' habang tumatakbo ang replays ay maaaring mag-mismatch sa route token ng aktibong paper lane at mag-contaminate sa evidence run."
+ },
+ {
+  "flag": "chili_momentum_float_overrotation_fix_enabled",
+  "category": "selection",
+  "what_it_does": "Ross SS101 exhaustion fix sa selection scorer: ang float_rotation sub-score ay positive hanggang ~3.0 projected EOD float turns, tapos PENALTY pataas doon, na lumalakas habang tumatagal ang morning session (full sa ~120min). Measured RE-RANK lang, hindi veto, equity-only (config.py:2273-2287, pipeline.py:1564-1574, ross_momentum.py).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok 06-26 (cea5791, fill SELECTION gaps Cluster 1/4 mula Warrior re-audit) at hindi pa napapatakbo. Hindi ito puro author-caution case: ang lane ay pumipili ng EXPLOSIVE low-floats na madalas umiikot ng float nang maraming beses (CELZ/VRAX/CLRO class) \u2014 ang 3.0-turn threshold ay maaaring mag-de-rank mismo ng mga leader midday, at ang selection-leads-trading-window lesson ay nagsasabing ang selection drift ang pinakamahal na uri ng pagkakamali. May scorer/FSM replay instrument na \u2014 patakbuhin sa 07-09..07-15 scorecard days at i-verify na hindi nawawala sa top-3 ang mga dokumentadong winner bago i-ON.",
+  "risk_if_on": "Ma-de-rank ang tunay na day-one leader na mabilis umiikot ang float (ang exact na klase ng winners ni Ross), na nagre-resulta sa maling top-3 at missed arming \u2014 mas mahal kaysa sa exhaustion fades na iniiwasan nito."
+ },
+ {
+  "flag": "chili_momentum_float_persistence_enabled",
+  "category": "selection",
+  "what_it_does": "Anti-flicker backfill: kapag hindi ma-resolve ang float_shares ngayong cycle, kukunin ang last-known STATIC float mula sa persisted momentum_symbol_viability row sa halip na bumagsak sa market_cap/price estimate o None (pipeline.py:1429-1453, config.py:3345-3348). Fills-missing-only; hindi ino-overwrite ang fresh real float; hindi nag-iimbento para sa never-seen symbol.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok 06-26 (bc3c418 'float-persistence anti-flicker'). Ang share float ay static \u2014 ang known value ay constant, kaya ang backfill ay data-integrity fix, hindi bagong signal. Pinoprotektahan nito ang fail-closed A-setup quality floor sa flicker-to-None (isang known class ng maling fail-closed rejections). Walang counter-evidence saanman sa docs/replays; ang tanging dahilan ng OFF ay author caution \u2014 tugma sa operator standing rule (no dark flags, additive na may sariling guards).",
+  "risk_if_on": "Maliit: pagkatapos ng offering/split ang cached float ay luma hanggang sa susunod na fresh resolve \u2014 pero ang kapalit sa OFF ay mas malala (None o market-cap-estimate na mas mali)."
+ },
+ {
+  "flag": "chili_momentum_halt_chain_risk_gate_enabled",
+  "category": "veto_gate",
+  "what_it_does": "GAP 1: per-symbol consecutive halt-UP counter; sa >=3 (chili_momentum_halt_chain_block_count) BINA-BLOCK ang halt-resume-dip long, at nagde-de-weight linearly (floor 0.5x) mula sa 2nd halt pataas (entry_gates.py:900-935, live_runner.py:20044, config.py:3407-3415). Risk-reducing only, fail-open sa error.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok 06-26 (3b3fd19, fill re-audit-#2 HALT gaps), hindi pa nare-replay. May Ross basis (~3 halts up = too extended para habulin ang resumption), PERO may kontra-hugis na ebidensya sa sariling history: ang FSM replay finding na verticals >> grinds at ang fill-on-verticals lesson (isang halt-GATED budget ang dating pumatay sa vertical winners; inayos sa 4ca4379) \u2014 ang mga halt-ladder verticals ang exact tail kung saan tayo 'behind' vs Ross. Kailangang i-replay sa mga halt-chain days para patunayang hindi nito pinuputol ang tail winners bago i-ON.",
+  "risk_if_on": "Pagba-block/derate ng ika-3+ halt-up resume entries \u2014 potensyal na kaputol mismo ng vertical tail (ang pinakamalaking R sa replay data), kapalit ng proteksyon vs late-chase unwinds."
+ },
+ {
+  "flag": "chili_momentum_halt_down_cascade_liquidate_enabled",
+  "category": "exit",
+  "what_it_does": "GAP 4 (SS101-062 ZJYL/HKD halt-ladder trap): kapag ang HAWAK na name ay nag-print ng >=2 consecutive down-halts (bawat resume ay LOWER vs pre-halt bid = cascading limit-down), LILIKIDAHIN via ang existing bailout exit machinery (live_runner.py:31455-31499, config.py:9301-9310). Exit-only; hindi kailanman nagbubukas/nagsa-size/nagho-hold.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok 06-26 (b822df0, 'risk-reducing discipline controls'). Puro disaster-protection sa dokumentadong tail-risk class ng lane (profitability-levers memory: ang \u2212$697 tail ng stop-blow-throughs ang kumain sa edge; ang GMM orphan \u2212$18k ay nagpakita kung gaano kamahal ang hindi-nabantayang held position). Dalawang magkasunod na down-HALT ay malayo sa retest-wick noise (Ross research: retest-wick\u2260failure \u2014 hindi ito ganoon); reuses existing bailout path na may sariling guards. Tanging author caution ang dahilan ng OFF \u2192 standing rule: i-ON live na may reversibility.",
+  "risk_if_on": "Sapilitang exit sa isang cascade na sana bumalik pagkatapos ng 2nd halt \u2014 pero ang hold-through-cascade downside (limit-down ladder, walang likidong labasan mamaya) ay dokumentadong mas malala."
+ },
+ {
+  "flag": "chili_momentum_halt_resumption_direction_enabled",
+  "category": "sizing",
+  "what_it_does": "GAP 2: kine-capture ang halt_level at kino-compare ang resumption open \u2014 resume HIGHER = maliit na size boost (+15% default), resume LOWER = size penalty (\u221215%); bounded [0,0.5] fraction, annotation-only na ina-apply ng live runner sa ilalim ng parehong 3x clamp + max_notional ceiling; hindi kailanman nag-e-enable ng entry o nagluluwag ng gate (entry_gates.py:10471-10514, live_runner.py:19716/20072, config.py:3426-3434).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok 06-26 (3b3fd19, HALT gaps re-audit) na may malinaw na Ross basis (gap-up resume = conviction). Puro bounded sizing tilt sa halt-resume-dip entries lamang; composes sa ilalim ng lahat ng existing ceilings kaya hindi makakalampas sa notional cap; fail-open sa error. Walang counter-evidence sa docs/replays; author caution lang ang OFF \u2192 tugma sa operator standing rule at sa conviction-sizing direction ng #849/#850 bundle (size by entry-quality) na napatunayang +87% wk.",
+  "risk_if_on": "\u00b115% size swing sa isang manipis na entry class \u2014 ang boost sa gap-up resumes ay bahagyang nagtataas ng exposure sa extended names, pero bounded at nasa ilalim ng lahat ng caps."
+ },
+ {
+  "flag": "chili_momentum_hard_no_trade_midday_enabled",
+  "category": "veto_gate",
+  "what_it_does": "HARD no-NEW-ENTRY window sa parehong 10:30-14:30 ET in_midday_lull band ng soft de-weight; equity-only, entries lang (exits/management hindi ginagalaw), at aktibo lang kapag naka-ON din ang hard_no_trade_regime master flag (live_runner.py:17499-17532, config.py:6393-6396).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok 06-25 (1e84efd, Ross Batch E). Kontra-ebidensya: (a) ang 07-09 Ross exit-discipline deep-research (19 claims verified) \u2014 lunch ay structural PERO catalyst names win ANY hour, at puro catalyst names ang universe ng lane; (b) LIVE na ang adaptive na bersyon ng parehong insight \u2014 midday soft de-weight + _midday_viability_bump (nakabatay sa 6% midday vs 29% morning win-rate data) \u2014 kaya ang natitirang epekto ng HARD block ay ang pag-veto sa mga catalyst winner na papasa sana sa mas mataas na midday bar; (c) E1 lesson: ang blunt over-veto ay replay-proven net-negative sa lane na ito.",
+  "risk_if_on": "Zero new entries sa 4 na oras kada araw \u2014 kabilang ang mga afternoon catalyst runners (CLRO\u219216.50 class ang na-miss na noon dahil sa ibang wedge; ito ay magva-veto sa kanila by design)."
+ },
+ {
+  "flag": "chili_momentum_hard_no_trade_regime_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Master kill-switch ng hard no-trade regimes (E3, entries-only): (a) event standdown \u00b130min sa paligid ng mga oras sa chili_momentum_hard_no_trade_event_times_utc (FOMC/CPI list, DEFAULT EMPTY), (b) ginagawang aktibo ang hard-midday sub-flag. Hindi kailanman kino-consult sa exit/stop/trail/bailout; fail-open (live_runner.py:17492-17535, auto_arm.py:4499, config.py:6377-6380).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok 06-25 (1e84efd, Ross Batch E). Sa kasalukuyang defaults (empty event list + midday sub-flag OFF) ang pag-ON ay literal na no-op \u2014 walang na-a-activate na block \u2014 kaya zero-risk i-flip, at inaalis nito ang dark-flag layer para ang FOMC/CPI standdown ay ma-arm na lang sa pamamagitan ng paglalagay ng event times (isang dokumentadong risk discipline, entries-only, hindi hinahawakan ang open positions). Author caution lang ang OFF \u2192 standing rule.",
+  "risk_if_on": "Wala habang walang laman ang event list; kapag nilagyan na, ang maling timezone/format sa event times ay magba-block ng entries sa maling \u00b130min windows \u2014 i-verify ang parsing sa unang paglalagay."
+ },
+ {
+  "flag": "chili_momentum_instant_bid_above_fill_confirm_enabled",
+  "category": "exit",
+  "what_it_does": "LOCATE #7: sa dulo ng 6s confirm window pagkatapos ng fill, kapag ang bid ay HINDI naka-hold sa fill\u221225bps at ang high-water mark ay hindi kailanman lumampas sa fill+25bps, ipapadala sa existing bailout ang posisyon (walang confirmation = cut) (live_runner.py:31912-31948, 18644-18686; config.py:9151-9160).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok 06-26 (b0d5739, Cluster B). Ang 25bps fixed margin ay objectively mas makitid kaysa noise ng lane: dokumentado ang ~4.6% (460bps) spreads sa low-floats (momentum 0-fills root cause) \u2014 ang bid ay natural na nakaupo nang spread-lapad sa ILALIM ng near-ask fill, kaya sa flat na unang 6-12s (ang evaluation band ay [win, 2\u00d7win], at ~10s pa ang broker ack latency per replay-v3) halos sistematikong magbe-bail ang wide-spread entries na walang nagawang mali. Ito mismo ang replay-CONFIRMED winner-killer shape ng 07-09 scorecard (trail/exit tighter than noise ang pumatay kay JEM), at labag din sa adaptive-no-magic rule ang fixed 25bps. Kailangan munang gawing spread/ATR-adaptive ang margin + replay bago ito muling isaalang-alang.",
+  "risk_if_on": "Near-systematic 6-12s bailout ng mga normal na wide-spread fill \u2014 instant churn ng fees/slippage at pagpatay sa mga winner bago sila gumalaw."
+ },
+ {
+  "flag": "chili_momentum_instant_bid_below_fill_cut_enabled",
+  "category": "exit",
+  "what_it_does": "GAP2: sa loob ng unang 6s pagkatapos ng fill, kapag ang live bid ay bumagsak sa ibaba ng fill\u00d7(1\u221225bps), agad na cut via bailout \u2014 ENTERED-only, fresh-quote gated, hindi nagpapalapad ng stop (live_runner.py:31875-31910, 18612-18641; config.py:7289-7305).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok 06-26 (e26ecdf, fill EXIT gaps Cluster 3/4). Pareho ang fatal flaw ng kapatid nitong confirm flag: ang 25bps 'noise discriminator' ay hindi tumutugma sa dokumentadong ~460bps spreads ng lane's low-floats \u2014 ang bid ay laging spread-lapad sa ilalim ng near-ask fill sa t=0, kaya ang cut ay magpa-fire sa ordinaryong spread, hindi sa tunay na bid-collapse. Direktang analog ng replay-confirmed 07-09 winner-killer (exits tighter than noise; ang noise-floor CLAMP ang solusyon doon, hindi mas makitid na trigger), at magic-number violation vs feedback_adaptive_no_magic. Gawing spread/ATR-adaptive muna ang margin, saka i-replay.",
+  "risk_if_on": "Instant bailout ng halos lahat ng wide-spread entry sa loob ng 6s \u2014 mass churn at pag-abort ng mga lehitimong entry sa exact na name class (low-float explosive) na pinagkakakitaan ng lane."
+ },
+ {
+  "flag": "chili_momentum_l2_confirm_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Phase-1 L2 entry CONFIRMER (DEFER-only): pagkatapos pumasa ng chart trigger + dalawang existing veto, kailangang kumpirmahin ng executed tape ang thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor) bago i-submit ang buy; nagde-DEFER LANG sa malinaw na no-tape (accel<=0 AND OFI<0); fail-OPEN sa missing/stale/thin data; entry-only (entry_gates.py:2043-2099, config.py:8939-8942; docs/DESIGN/L2_PRIMARY_SIGNAL.md).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok 06-26 (b8436bc, 'L2-as-primary Phase 1') na may maingat na disenyo (naka-encode na ang E1 over-veto lesson: conservative-active, defer lang sa clear no-confirmation). Pero dalawang bagay ang dapat munang patunayan: (a) sa #855 exit-ladder rollback, 1054/1054 ng L2 reads sa exec worker ay stale_or_thin \u2014 sa ganoong feed ang confirmer ay laging fail-open (inert), kaya walang mapapala; (b) kapag fresh naman ang feed, ito ay dagdag na entry deferrer sa lane na ang dokumentadong #1 bottleneck ay CONVERSION (SILO/CLRO/VRAX zero-fills sa tape). I-verify muna ang fresh L2 binding sa EXEC worker (report-binding lesson) tapos A/B replay bago i-ON.",
+  "risk_if_on": "Kung stale ang feed: walang epekto (dead flag). Kung fresh: mga na-defer na entries sa mabilis na reclaims \u2014 ang exact na miss class na pinapatay na ng conversion bottleneck."
+ },
+ {
+  "flag": "chili_momentum_ma_vwap_pullback_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "SS101 #014: cooler-market grinder dip-buy \u2014 pagkatapos ng 3+ green impulse at 2+ bar na sideways consolidation sa 9/20-EMA cascade (mas malalim kaysa shallow first-pullback), nag-fire sa 9-EMA (o 20-EMA) reclaim; entry = reclaimed EMA level, stop = retracement low; dala ang LAHAT ng chase-guards (extension, collapse cap, backside, L2 veto, overhead veto via select_best_setup) (entry_gates.py:9619-9679, config.py:5042-5058).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok 06-25 (b0526fb, Ross named-patterns batch) na tahasang 'NEW + never-run \u2192 ship DARK; the operator ramps it' (config comment 5043) \u2014 dark-flag by author caution, na kontra sa operator standing rule. PERO hindi ito walang counter-evidence: ang FSM-replay finding ay 'verticals >> grinds' (ang grind-class ang exact target ng setup na ito) at ang CLRO starvation lesson ay nagpakita na ang dagdag na mahinang entries ay kumakain ng shared budget/slots ng #1 name. May FSM replay instrument na \u2014 patakbuhin ito doon (recorded tape, current code) para makita kung positibo ang expectancy ng grind dip-buys bago i-ON.",
+  "risk_if_on": "Dagdag na entries sa chop/grind class na sa replay data ay mababa ang payoff \u2014 budget/slot starvation ng vertical winners + dagdag na midday churn, kahit guarded bawat entry."
+ },
+ {
+  "flag": "chili_momentum_measured_move_exit_enabled",
+  "category": "exit",
+  "what_it_does": "Winner-management: measured-move scale-out target (sell ~33% into strength sa leg-height target) + double-top exhaustion stop-tighten, ratchet-only (stops only tighten), fires lang after partial_taken. Adaptive (leg height + ATR-relative band), consumed sa live_runner.py:32924 via paper_execution.py:2396-2401.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Introduced 0ac61ac 06-27 (Punch-list P2, 19 tests) at IN-ENABLE noong 06-27 wave (CC_REPORTS/2026-06-27_off-items-enablement...md) \u2014 pero ang enablement ay nasa scheduler env lang (=1, rnd_only container); ang momentum-exec (ang tunay na trading container, verified via docker inspect) ay HINDI nag-bind \u2192 effectively OFF live. Kaya VALIDATE hindi TURN_ON: post-dates ito ng 07-09 exit-stack retune (MFE-partial #881 + noise-floor-clamp PAIR \u2014 proven na 'clamp alone WORSE'), at ang exit_ladder_live precedent (#855 rollback) ay nagpapakita ng exit-path changes na pumapalpak live. Kailangan ng replay A/B vs the CURRENT 07-09 exit stack bago i-restore sa exec.",
+  "risk_if_on": "Ang double-top 'exhaustion tighten' ay isang tighten-mechanism \u2014 ang winner-killer ng 07-09 scorecard ay trail-tighter-than-noise; kung hindi ito dumadaan sa noise-floor clamp, pwede nitong ma-re-kill ang JEM-class runners (7-17R winners). Interaction sa MFE-partial din ay hindi pa napa-parity."
+ },
+ {
+  "flag": "chili_momentum_move_exhaustion_abandon_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Pre-arm veto: pagkatapos mag-fire ng trigger, TANGGIHAN ang arm kapag exhausted na ang move sa AGREEING signals \u2014 faded-from-HOD AND (cold-tape OR viability-regressed). Ang still-front-side strong mover ay umaarm pa rin. Consumed sa auto_arm.py:483.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "bbcd224 06-27 'the PLSM-chase fix' (PLSM 19\u219210 chase noong 06-24), 20 tests green, at DELIBERATELY ENABLED noong 06-27 (B1 sa CC_REPORTS/2026-06-27 report, checked [x] ON). Scheduler env =1 pa rin; ang exec container lang ang nawalan ng binding sa 07-03 split \u2014 ACCIDENTAL DRIFT ito, hindi desisyon. Additive risk-reducing veto na may sariling guards (requires agreeing signals, hindi single-signal tulad ng pinatay na E1). Standing rule: restore ang napatunayang enablement sa exec env.",
+  "risk_if_on": "E1-style over-veto ng late-day reclaim winners kung masyadong sensitive ang faded-from-HOD threshold \u2014 pero dual-condition ito (kailangang cold-tape/viability-regressed PA); i-monitor ang refused-arm count sa unang linggo."
+ },
+ {
+  "flag": "chili_momentum_news_catalyst_weight_enabled",
+  "category": "selection",
+  "what_it_does": "Ang 4th Ross pillar (ang \ud83d\udd25 sa scanner): mina-map ang real Polygon/Benzinga catalyst grade (strong/weak/fake \u2014 computed na ng pipeline, walang bagong fetch) sa 0.10-weight selection pillar; strong news BOOSTS, weak/fake DE-RATES; walang news = NEUTRAL (never penalized). Consumed sa pipeline.py:1787,1875.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "098a6aa 06-26; ships OFF lang para i-confirm muna ng operator ang feed amplitude \u2014 na-confirm na: scheduler env =1 mula 06-26 era, at ang catalyst-conviction SIZING (a0b1102, built sa parehong feed) ay bound ON sa exec env (CHILI_MOMENTUM_CATALYST_CONVICTION_ENABLED present sa _mexec_armfix.env). Absurd na ang sizing ay naka-ON pero ang selection pillar ng parehong feed ay OFF sa live path. News-catalyst = top-3 profit lever sa profit-max roadmap memory. Additive re-rank tilt na may graceful fallback; float/RVOL/change nananatiling primary.",
+  "risk_if_on": "Fake/hacked-PR names na mali ang grade ay makaka-boost \u2014 pero may fake-set de-rate na ang feed, at re-rank tilt lang ito (0.10 weight), hindi gate; buyout-arb no-arm class (memory) ay hiwalay na issue."
+ },
+ {
+  "flag": "chili_momentum_news_pr_cadence_enabled",
+  "category": "selection",
+  "what_it_does": "Ross PR-clock: maliit na selection lean-in para sa CATALYST names sa loob ng premarket PR windows (top/bottom of hour, 4:00-9:35 ET windows); neutral sa labas ng windows. Nakapatong sa news-catalyst pillar (kailangan itong nag-i-stamp). Consumed sa pipeline.py:1809.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "cea5791 06-26 (Warrior re-audit Cluster 1 tilts); scheduler env =1 mula noon, exec walang binding (drift). Additive, time-boxed, maliit na boost na naka-guard sa news pillar \u2014 kung OFF ang news pillar, effectively inert ito. I-restore KASABAY ng news_catalyst_weight (magkapares sila). Walang counter-evidence sa docs/git; puro author-caution ang OFF.",
+  "risk_if_on": "Pag-lean sa PR-window pumps na mahina ang katalyst \u2014 bounded dahil catalyst-graded names lang ang nabo-boost at maliit ang lean; premarket-only."
+ },
+ {
+  "flag": "chili_momentum_no_asetup_sit_cash_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Session sit-cash gate, NEW-INITIATION ONLY: sinusupress ang FRESH arm kapag ang best ross_score ng board ay CLEARLY below ng adaptive A+ bar (by margin) AND poor ang regime (cold tape AND walang fresh catalyst). Hindi kailanman humaharang sa exit/position-management. Consumed sa auto_arm.py:747.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "1ebc5eb 06-27 (Punch-list P3, 29 tests green), deliberately enabled sa 06-27 wave; scheduler =1, exec walang binding (drift, hindi desisyon). Ross discipline ito (A+ setups only sa dead regime) na triple-guarded (margin + cold tape + no catalyst \u2014 genuine nothing-day lang). Standing rule: tested + additive + sariling guards \u2192 i-restore sa exec.",
+  "risk_if_on": "Opportunity cost kapag ang dead morning ay nabubuhay pag-afternoon \u2014 pero fresh-initiation lang ang saklaw at adaptive ang bar; bantayan na hindi ito maka-compound ng afternoon-starvation class (CLRO-0707 lesson ay sizing inversion, hindi itong gate, pero parehong starvation failure-mode)."
+ },
+ {
+  "flag": "chili_momentum_no_signal_derank_enabled",
+  "category": "selection",
+  "what_it_does": "FIX 2 sa fail-open bug: kapag may scored names ang batch pero ang symbol na ito ay WALANG ross_score (empty signal \u2014 GALT/PYXS/ANGI umupo sa base ~0.6 at si GALT ay NA-ENTER kumbaga sa totoong movers), lagyan ng viability de-rank penalty para laging manalo ang scored real mover sa slots. De-rank lang, hindi exclude \u2014 tumatrade pa rin kung walang mas maganda. Consumed sa viability.py:678.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "e39c1e0 06-26; ang env ay EXPLICITLY =0 mula sa sarili nitong deploy hanggang ngayon \u2014 shipped dark, never flipped, pero WALANG kill-evidence sa git/docs (walang replay na pumatay dito, unlike E1). Ang binabayaran nitong bug ay TOTOONG nangyari (GALT entered over real movers, dokumentado sa Field description). Ang FIX 1 kapatid nito (explosive-prequal floor, viability.py:918) ay shipped at proven (memory: selection-scoring-fix) \u2014 itong FIX 2 ay complementary hygiene na may hard guard (scored names NEVER touched). Puro author one-change-at-a-time caution ang OFF.",
+  "risk_if_on": "Sa empty-board days, ang no-signal fallback name ay madi-deprioritize \u2014 pero by design tumatrade pa rin ito kung walang scored alternative; ang penalty magnitude ay derived sa existing tilt (walang bagong magic number)."
+ },
+ {
+  "flag": "chili_momentum_order_burst_candle_guard_enabled",
+  "category": "veto_gate",
+  "what_it_does": "LOCATE #9: sa loob ng ~3 min pagkatapos ng top-of-hour boundary (lalo 08:00 ET), i-DEFER ang fresh entry trigger (stay WATCHING) dahil ang burst candle ay order-imbalance noise raw. Equity-only, defer-only (never loosens). Consumed sa live_runner.py:24567.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "b0d5739 06-26 (re-audit-#2 Cluster B); scheduler =1, exec OFF (drift). PERO may mechanism-level tension: ang #1 bottleneck ngayon ay CONVERSION LATENCY (SILO 46s-move na-miss dahil 95s late; CLRO/VRAX sa tape na ZERO fills \u2014 ross_visual_evidence_audit), at ang totoong PR ignitions ay bumabagsak MISMO sa top-of-hour (kaya nga may news_pr_cadence lean-IN sa parehong windows \u2014 direktang magkasalungat ang dalawang flag). Ang 3-min defer sa 8:00 ET ay pwedeng pumatay ng gap-and-go ignition entries. Kailangan ng replay A/B sa top-of-hour entries: mas malaki ba ang nase-save kaysa nawawala?",
+  "risk_if_on": "Na-miss na ignition fills sa pinaka-produktibong premarket windows (7:00/8:00 ET PR drops) \u2014 direktang pagpapalala ng conversion bottleneck na siyang kasalukuyang #1 na problema."
+ },
+ {
+  "flag": "chili_momentum_order_chunking_enabled",
+  "category": "other",
+  "what_it_does": "Venue-adapter wrapper na naghahati ng parent limit order sa N equal blocks (fresh client_order_id bawat isa, blocks knob default 1) para sa queue priority. Nagpaparami ng broker_order_ids. Consumed sa venue/chunking_adapter.py:234.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "dfce6a8 06-26; ang sariling Field description ay nag-uutos: 'do NOT enable until dedupe/reconcile safety is proven on the agentic rail (marginal benefit for a small cash account)'. Oo, hardened + 33 adversarial tests + enabled (blocks=2) noong 06-27 (7edb559, CC_REPORTS report) \u2014 pero POST-DATES iyon ng 07-10 port-exhaustion incident: GMM orphan \u2212$18k habang bulag ang worker (#900), at ang KASALUKUYANG handoff (captured-paper 07-16) ay may naka-flag na orphan-reconciler LANDMINE bago pa ang activation. Ang pagpaparami ng order legs ay nagpapalaki ng orphan surface mismo kung saan may sariwang sugat ang system, para sa marginal benefit.",
+  "risk_if_on": "Bawat block ay hiwalay na orphan candidate: partial-filled legs habang patay/bulag ang managing session = multiplied GMM-class give-backs; ang 06-27 unit tests ay hindi kasing-lakas ng live-rail soak sa ilalim ng #900-class infra failure. Balikan pagkatapos lumapag ang orphan-reconciler hardening."
+ },
+ {
+  "flag": "chili_momentum_overhead_supply_tilt_enabled",
+  "category": "selection",
+  "what_it_does": "5th selection pillar (0.10 weight): dine-de-weight ang name na papalapit sa prior huge-volume doji/round-trip overhead level from below (trapped supply). Percentile-ranked sa batch; re-rank tilt LANG \u2014 hindi makaka-block ng fill o makaka-alis ng name sa pool. Distinct sa overhead_veto (entry veto). Consumed sa pipeline.py:2005.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "dfce6a8 06-26 (re-audit-#2 Cluster C; dokumentado rin sa CC_REPORTS/2026-06-26_six-item-momentum-bundle.md item 5); scheduler =1 mula 06-26 era, exec walang binding (drift). Ross-taught concept (daily resistance size-down ay kapatid na half-shipped na \u2014 memory ross_self_ref_daily_resistance). Purong additive re-rank na may explicit never-block guarantee; walang counter-evidence kahit saan.",
+  "risk_if_on": "Made-de-weight ang name na malapit nang bumutas sa overhead sa huge volume \u2014 mitigated dahil minority pillar lang (0.10, self-renormalized) at pwede pa ring i-manual-arm ng operator."
+ },
+ {
+  "flag": "chili_momentum_overnight_dark_flatten_enabled",
+  "category": "exit",
+  "what_it_does": "FIX A safety: i-flatten ang OVERNIGHT-held position kapag nag-dark ang price bus \u2014 proactively sa first stale onset at sa next fresh tick, via ang operator-flatten chokepoint. Ito ang dark-bus-safe prerequisite para sa overnight trading. Consumed sa live_runner.py:19818,20116.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "36824ca 06-25; scheduler =1, exec walang binding. Purong protective/risk-reducing: habang OFF ang overnight_trading sa exec, halos inert ito (walang overnight position by design) \u2014 PERO ang GMM orphan \u2212$18k (07-10 #900) ay eksaktong failure class nito: position na hawak habang dark ang bus. Kung sakaling may position na ma-stuck papunta sa overnight (orphan/stuck exit), ito ang gustong nakabukas. Zero downside kapag walang overnight position; description mismo: 'false = legacy... naked overnight risk'.",
+  "risk_if_on": "Spurious flatten kung mag-false-positive ang stale detection sa isang legit na position \u2014 bounded ng onset_ticks knob at ng operator-flatten chokepoint (audited path); walang epekto sa intraday flow."
+ },
+ {
+  "flag": "chili_momentum_overnight_tape_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Tier-2 telemetry: i-sample ang NBBO tape overnight para LANG sa 24h-eligible whitelist (bounded DB growth). Kapag OFF, ang overnight arming ay babagsak sa last extended-hours tape row + live quote probe. Consumed sa market_profile.py:377, nbbo_tape.py:65.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "aafb6c6 06-25 ('24h/overnight infra (INERT, default OFF)'); HINDI naka-set sa KAHIT ANONG env (unset kahit sa scheduler) \u2014 never enabled. Telemetry-only habang OFF ang overnight_trading master gate; ito mismo ang data-first pattern (WRITE-before-READ soak, selection-leads-window principle): kailangan ng naipong overnight tape data BAGO man lang ma-validate ang overnight trading balang araw. Additive, whitelist-bounded, walang trading side-effect.",
+  "risk_if_on": "DB growth \u2014 bounded by design sa whitelist, pero bantayan ang table retention (may kasaysayan: trading_exit_parity_log naging 67% ng DB bago ang mig301); walang trading-behavior risk."
+ },
+ {
+  "flag": "chili_momentum_overnight_trading_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "Tier-2 MASTER gate: pinapayagan ang overnight/24h arming+entry para sa 24h-eligible, 24h-liquid names (RH all_day_hours routing). Description mismo: 'DEFAULT FALSE (higher risk: no broker stop overnight, thin books)'. Consumed sa auto_arm.py:4672, live_runner.py:19770/27373/27483/28643, market_profile.py:373.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "aafb6c6 06-25 (INERT infra commit). Ang ebidensya laban sa pag-ON ngayon ay structural at sariwa: (a) WALANG broker stop overnight per sarili nitong description; (b) ang 07-10 #900 incident ay pinatunayan na kayang mabulag ang worker ng ORAS-oras (port exhaustion \u2192 GMM orphan \u2212$18k) at ang feed-liveness gate ay 'DI PA nabubuo' (memory incident_0710) \u2014 ang overnight ay nagpapahaba ng exposure window sa eksaktong failure class na iyon; (c) thin overnight books + A5 dead-band experience (21:00-05:00 UTC patay). BABALA PA: ang scheduler env ay may STALE =1 mula pa 06-25 era (inert dahil rnd_only ang role, pero landmine ito sa market_profile session-shape computations ng RND container at sa susunod na env copy-paste) \u2014 dapat i-scrub sa 0.",
+  "risk_if_on": "Naked overnight positions na walang broker stop, sa thin books, habang ang infra ay may proven blind-window failure mode at walang feed-liveness gate \u2014 GMM-class multi-thousand give-back na walang intraday na saklolo. I-validate muna ang dark_flatten + overnight_tape data + feed-liveness gate bago man lang pag-usapan."
+ },
+ {
+  "flag": "chili_momentum_per_symbol_fatigue_enabled",
+  "category": "veto_gate",
+  "what_it_does": "P2 per-symbol attempt fatigue, entries-only: bumibilang ng attempts bawat symbol; YELLOW = down-size, RED = veto ng susunod na attempt. Consumed sa auto_arm.py:3169/3198/3237, live_runner.py:27588, replay_v2.py:285.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "5c5b99b 06-25 (P1-P3 bundle). Env history (na-trace ko sa D:/CHILI-Docker _sched_env_*): =1 sa 06-25..06-26 (hanggang c141514), tapos DELIBERATE na fliniplip sa =0 sa d880c36 deploy (06-26) at pinanatiling =0 sa LAHAT ng ~40 sunod na env files hanggang ngayon \u2014 isang conscious next-day disable na hindi na binalikan. Ang 07-09 replay scorecard ay nagbigay ng mechanism-level confirmation: ang winner-killer ay 'ignition re-entry lockout' \u2014 ang JEM ay na-capture (\u2212$5\u2192+$125) pagkatapos TANGGALIN ang re-entry lockout, at si Ross mismo ay paulit-ulit umaatake sa parehong leader (CLRO/VRAX na kinailangan ng maraming attempts). Ang attempt-cap ay direktang lumalaban sa napatunayang pangangailangang re-attempt ng leaders.",
+  "risk_if_on": "RED veto sa 4th attempt ng day's leader = na-miss ang ignition re-entry na siyang napatunayang pinagmumulan ng captured winners; YELLOW down-size ay nag-i-invert ng sizing sa pinakamagandang name (CLRO sizing-inversion class)."
+ },
+ {
+  "flag": "chili_momentum_premarket_pivot_macd_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "LOCATE #6: premarket gap-and-go entry \u2014 break ng premarket pivot (swing high) WITH fresh MACD re-cross at cold-RVOL avoid floor (1.5); entry sa pivot, stop sa pivot low. May KUMPLETONG chase-guards (tape required+fail-closed, extension, backside/front_side, L2 veto) + LIVE_PENDING_ENTRY vetoes; equity-only. Consumed sa entry_gates.py:6526.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "b0d5739 06-26 (re-audit-#2 Cluster B, 10 triggers); scheduler =1, exec walang binding \u2192 OFF sa live entry path. Bahagi ito ng dip-entry family na may A/B REPLAY NA TUMATAKBO NGAYONG GABI (in-flight ang ebidensya, kasama ang first_dip policy) \u2014 ang tamang aksyon ay hintayin ang replay verdict at i-flip base doon, hindi mag-ON nang bulag o mag-KEEP_OFF nang walang datos.",
+  "risk_if_on": "Bago pa ang replay verdict: premarket pivot breaks sa thin pre-7am books ay may fake-out class (kaya nga may cold-RVOL floor); kung ma-confirm ng tonight's A/B na net-positive, restore agad sa exec env kasama ang buong dip-family bundle."
+ },
+ {
+  "flag": "chili_momentum_price_sweetspot_tilt_enabled",
+  "category": "selection",
+  "what_it_does": "Ross $3-10 sweet-spot preference bilang MEASURED selection tilt: bino-boost ang $3-10 names, mildly dine-de-rate ang nasa labas pero pasok pa rin sa broad $1-20 band (ang hard band gate ay HINDI ginagalaw). Composable price_band pillar, self-renormalized. Consumed sa pipeline.py:1957.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "cea5791 06-26 (Warrior re-audit Cluster 1); scheduler =1 mula 06-26 era, exec walang binding (drift, hindi desisyon). Direktang Ross-doctrine (ang $3-10 band ang high-conviction zone niya sa lahat ng courses \u2014 memory warrior_courses), purong additive re-rank na hindi gumagalaw sa hard gate, walang counter-evidence sa git/docs/replay. Klasikong author-caution-lang na dark flag.",
+  "risk_if_on": "Mild de-rate ng $12-20 real leader vs $5 na mediocre name \u2014 bounded dahil minority pillar (self-renormalized weight) at ang RVOL/change/float pillars ay nananatiling dominant."
+ },
+ {
+  "flag": "chili_momentum_process_score_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Rolling PROCESS-OVER-PROFITS (rule-adherence) score sa closed sessions \u2014 entered-on-trigger / honored-stop / no-chase mula sa deterministic outcome classes, hiwalay sa PnL. Journaling surface lang: metrics_surface.py:102 nagre-return ng None kapag OFF; NEVER gates/sizes/vetoes (nakasaad mismo sa config.py:2589 description).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok sa dfce6a8 (2026-06-26, re-audit-#2 Cluster C) at dokumentado sa docs/STRATEGY/CC_REPORTS/2026-06-26_six-item-momentum-bundle.md item 4 bilang LOGGED-ONLY. Puro read-only telemetry ang code path \u2014 walang trading effect na posible. Ang tanging dahilan ng OFF ay author caution sa batch shipping; walang counter-evidence. Sakto sa operator standing rule (no dark flags, telemetry = ON).",
+  "risk_if_on": "Halos zero \u2014 extra DB reads sa closed outcomes + isang extra log/metric field. Walang epekto sa entries, sizing, o exits."
+ },
+ {
+  "flag": "chili_momentum_pullback_raw_break_when_explosive",
+  "category": "entry_trigger",
+  "what_it_does": "Kapag require_retest=True at naka-strand ang name sa waiting_for_retest (bumreak na tapos tumakbo nang walang retest), pinapayagan ang GUARDED raw-break fire kung talagang EXPLOSIVE: RVOL >= adaptive explosive floor x mult AND tape-confirmed accelerating buys (fail-CLOSED kapag walang tape). Pagkatapos ng escape, tumatakbo pa rin ang parehong 4 chase-guards (entry_gates.py:7706-7736).",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok 02e9cf9 (06-28) at kasama sa 332ed6b conversion bundle (06-29, 'kill-switched, A/B-ready') \u2014 ang bundle na tumugon sa refuted 'supply-limited' finding (armed 11/11, missed 9 sa WATCH\u2192FILL). Ang kapatid nitong FIX C(1) chili_momentum_explosive_raw_break_enabled (config.py:6910) ay DEFAULT TRUE at LIVE na gamit ang PAREHONG _explosive_raw_break_escape gate para sa mas-agresibong waiting_for_break strand \u2014 kaya live-proven na ang gate mismo. Conversion pa rin ang dokumentadong #1 bottleneck (SILO 95s late, CLRO/VRAX zero fills sa visual-evidence audit); itong flag ang natitirang strand ng parehong fix. Tanging author caution ang dahilan ng OFF.",
+  "risk_if_on": "Extra raw-break entries sa explosive names na walang retest \u2014 pero tape-required fail-closed + parehong extension/backside/VWAP/structural-stop guards downstream, kaya bounded; kung mag-underperform, byte-identical rollback sa flag."
+ },
+ {
+  "flag": "chili_momentum_pulling_away_roc_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "LOCATE #5: bagong ROC-inflection breakout trigger \u2014 multi-tap (>=2) resistance na pinull-away ng ATR-scaled ROC spike; entry = resistance level, stop = swing low sa ilalim ng base. May kumpletong chase-guards at dumadaan sa parehong setup-selector + LIVE_PENDING_ENTRY vetoes (entry_gates.py:6365); OFF = returns disabled bago mag-compute.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok b0d5739 (2026-06-26, re-audit-#2 SCALP/DIP Cluster B, 10 triggers lahat default OFF = author-caution batch). PERO kasama ito sa dip-entry family A/B replay na tumatakbo NGAYONG GABI (kasama ang entry_tight_false_break_reclaim, ask_thins_dip, sub_vwap_trap, premarket_pivot_macd) \u2014 in-flight na ang ebidensya, hintayin ang resulta bago i-flip para hindi ma-confound at para data-driven ang ON/OFF.",
+  "risk_if_on": "Bagong entry class na walang replay validation pa \u2014 pwedeng mag-admit ng tested-ceiling breaks na fade (multi-tap resistance ay pwedeng distribution, hindi accumulation); guarded pero unproven ang hit rate. Ang A/B mamayang gabi ang sasagot."
+ },
+ {
+  "flag": "chili_momentum_pyramid_discrete_add_enabled",
+  "category": "veto_gate",
+  "what_it_does": "GAP 3: nire-require ang FRESH discrete sub-pattern (bagong higher-low bounce off rising 9-EMA/VWAP) bago pumasa ang pyramid ADD, dagdag sa continuous cushion + new-HOD + OFI guards (live_runner.py:33832-33862, pinapasa sa pyramid_add_decision). Explicit False = BLOCKS ang add; fail-OPEN sa read errors. Tighten-only.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok b822df0 (2026-06-26, RISK gaps Cluster 4/4). Risk-reducing nga, PERO may counter-evidence ang pag-ON nang walang replay: (a) ang buong 'makasakay' recalibration (10f2d1e, 06-25) at ang kapatid na skip_viability_recheck ay ginawa dahil STARVED ang adds sa held runners (3x live risk_admission_refused sa held RUN, nakadokumento sa live_runner.py:34031-34041 comment); (b) verticals >> grinds (FSM replay finding) at ang mga vertical ignition ay bihirang mag-print ng discrete higher-low mid-move \u2014 ibig sabihin ang gate na ito ay puputol sa adds mismo sa mga winner na sinusukat nating i-capture; (c) winner-killer history (trail-tighter-than-noise, re-entry lockout) ay parehong 'tighten sa winner' class. Kailangan ng replay A/B sa add-capture bago i-flip.",
+  "risk_if_on": "Mas kaunting pyramid adds sa vertical runners = mas maliit ang winners (direktang banggaan sa Ross scale-into-winners mechanic at sa add-starvation lesson ng CLRO). Ang downside protection ay sakop na ng cushion gate + max-loss circuit."
+ },
+ {
+  "flag": "chili_momentum_pyramid_skip_viability_recheck",
+  "category": "veto_gate",
+  "what_it_does": "Kapag ON (at ON din ang master explosive_recalibration_enabled \u2014 default TRUE mula 07-07), ang add sa ALREADY-HELD winner sa STATE_LIVE_TRAILING ay HINDI na tinatanggihan dahil lang sa live_eligible/viability_freshness FLICKER \u2014 pero LANG kung iyon ang tanging failing checks (live_runner.py:34042-34053). Kill-switch/drawdown/daily-loss/position-cap ay NEVER na-o-override; cushion gate + #769 max-loss circuit binabound pa rin ang add.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok 10f2d1e (2026-06-25, 'gates+pyramid recalibration LIVE \u2014 the makasakay fixes'). May OBSERVED live problem itong tinutugunan: 3x live risk_admission_refused sa held RUN dahil sa stale-snapshot flicker (nakadokumento sa code comment mismo), kapareho ng CLRO-starvation lesson (A1-A10) at ng UPC recency-grace TOCTOU class. Napaka-narrow ang override (held position lang, flicker-only failures lang, hard blocks intact), at ang exposure ay existing na (held na ang position \u2014 ang management tuloy-tuloy pa rin). Tanging author caution ang OFF; sakto sa operator na 'makasakay' direction.",
+  "risk_if_on": "Kung ang freshness flicker ay TOTOONG staleness (feed-blind class, cf. 07-10 port-exhaustion; wala pang feed-liveness gate), makaka-add nang bulag sa isang held name \u2014 pero bounded ng cushion gate + max-loss circuit, at ang parehong staleness ay hindi rin pumipigil sa existing position management ngayon."
+ },
+ {
+  "flag": "chili_momentum_red_candle_entry_block_enabled",
+  "category": "veto_gate",
+  "what_it_does": "LOCATE #10: DEFER (stay WATCHING) ang LAHAT ng fresh entry fires habang RED (close<open) ang pinakahuling bar sa entry frame (chili_momentum_pullback_entry_interval, live_runner.py:24596-24618); fail-OPEN sa missing data. 'Ross never buys into a red candle' \u2014 defer-only, hindi lockout.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok b0d5739 (2026-06-26, Cluster B, batch author-caution). May konkretong conflict na dapat masukat muna: (a) ang dip-family entries (flush_dip/ask_thins/sub_vwap_trap \u2014 A/B NGAYONG GABI) ay madalas mag-fire habang RED pa ang kasalukuyang bar (ang bounce ay intra-bar mula sa flush) \u2014 itong block ay pwedeng mag-defer mismo sa mga iyon at i-confound ang tumatakbong A/B; (b) CONVERSION ang dokumentadong bottleneck (visual-evidence audit: SILO 95s late, zero fills sa CLRO/VRAX) kaya bawat karagdagang defer sa fire path ay may totoong capture cost. Idagdag sa dip-family replay matrix bago i-flip.",
+  "risk_if_on": "Na-defer na dip-buy bounces at unang green-transition breaks = lalong lumalala ang conversion latency na siyang #1 problema; at sabay na maru-ruin ang interpretability ng dip-entry A/B na in-flight."
+ },
+ {
+  "flag": "chili_momentum_replay_capture_features",
+  "category": "infra_telemetry",
+  "what_it_does": "Sa loob ng replay_v2 lang (replay_v2.py:2077): kapag ON, kina-capture ang entry features (_capture_entry_features \u2014 spread/ATR/liquidity/L2/fill context) sa bawat simulated fill para sa meta-label dataset. Walang live code path.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok 0eecb8a (2026-06-23, '#804 entry-feature capture (replay+LIVE) \u2192 meta-label dataset foundation'). Replay-only telemetry; ang meta-labeling discriminator ang #1 lever at ang data-gate blocker nito ay na-root-cause na (empty snapshots) \u2014 mas maraming captured features = direktang pakinabang sa flywheel. Read per-fill via getattr kaya ang pag-flip ay sa susunod na run lang epektibo (hindi maaapektuhan ang tumatakbong replays ngayong gabi).",
+  "risk_if_on": "Bahagyang mas mabagal na replay runs + mas malaking replay-sink rows. Zero live-trading effect."
+ },
+ {
+  "flag": "chili_momentum_replay_full_pipeline_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Replay-mode selector: armed_source='full_pipeline' \u2014 nire-re-run ang TOTOONG as-of selection pipeline (build_equity_universe re-screen \u2192 re-score \u2192 re-arm) mula sa raw tape sa halip na gamitin ang recorded arms. Module-level constant sa replay_v2.py:126-128; walang live path.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "Ipinasok c82da40 (2026-06-15, tick-faithful entry + full-pipeline backtest). Hindi ito dark flag kundi per-run TOOL MODE ng replay harness \u2014 pinipili ng operator/script kung anong fidelity ang kailangan ng partikular na study (mahal ang full pipeline; iba ang tanong na sinasagot vs recorded-arms replay). Tama ang code default na OFF; ang env ng bawat replay invocation ang effective binding. Binabasa sa module import kaya per-process ang pagpili.",
+  "risk_if_on": "Kung naka-ON bilang global default, lahat ng replay ay magiging mabagal at iba ang semantics sa parity baseline (v3 ang parity-grade instrument) \u2014 maling comparison basis, hindi trading risk."
+ },
+ {
+  "flag": "chili_momentum_replay_tick_entry_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Replay-resolution selector: nire-replay ang bawat densified sub-minute tick sa entry window (kung saan may WS ticks) sa halip na 1-min snapshots (replay_v2.py:121-123, module-level). Walang live path.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "Ipinasok c82da40 (2026-06-15, kasama ng full_pipeline). Kapareho ng full_pipeline: per-run replay harness mode, hindi live flag. Tama ang OFF default (byte-identical/SUPERSET semantics; pinipili per study kung tick-faithful ang kailangan); ang replay run env ang effective. Tandaan din na replay v3 (#835) na ang parity-grade instrument \u2014 v2 flags ay legacy-study scoped.",
+  "risk_if_on": "Wala sa live trading; sa replay, mas mabagal na runs at pwedeng magdivergence ang resulta vs mga lumang v2 baseline kung hindi pare-pareho ang mode sa A/B arms."
+ },
+ {
+  "flag": "chili_momentum_risk_require_strict_coinbase_freshness",
+  "category": "veto_gate",
+  "what_it_does": "Risk-policy strictness dial (risk_policy.py:3674-3676, field require_strict_coinbase_freshness sa MomentumAutomationRiskPolicy): kapag ON, nire-require ang STRICT coinbase data freshness bago pumasa ang crypto risk admission \u2014 mas maraming freshness-based refusals.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Default OFF mula pa sa original momentum neural stack (7697279, 2026-04-08). Direktang counter-evidence ang 07-09 crypto-paper unblock incident: ang crypto lane ay NAMATAY dahil sa freshness na FROZEN mula Hul-3 (3-layer flag chain; frozen freshness_ts ang diagnostic) \u2014 ang pag-require ng STRICT freshness sa signal na napatunayang nagfi-freeze ay eksaktong lane-killer class (kapareho ng AREA-D viability gate na pumatay sa lane). docs/FEATURE_FLAG_AUDIT.md:603 din: 'not in Q1.T8 diagnostic flip set \u2014 enable per feature rollout doc.' May sapat nang freshness protection ang non-strict path (require_fresh_viability=True, stale_market_data_max_age_sec=30s, viability_max_age=600s).",
+  "risk_if_on": "Muling pagka-frozen ng crypto lane sa unang freshness-pipeline hiccup (proven failure mode 07-09) \u2014 silent zero-arm state na mukhang 'no setup' pero flag-chain ang totoong dahilan."
+ },
+ {
+  "flag": "chili_momentum_round_number_entry_timing_enabled",
+  "category": "veto_gate",
+  "what_it_does": "GAP 2 context modifier (entry_gates.py:2485): DEFER lang (hindi veto) kapag ang marketable entry ay nasa makitid na ATR-scaled band JUST BELOW ng whole/half-dollar round number na HINDI pa cleared+held ng breakout level \u2014 iwas pagbili diretso sa overhead supply; nagre-re-enter kapag nag-hold over the level. Byte-identical kapag walang round number sa banda o cleared na.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok b349aed (2026-06-26, Warrior re-audit Cluster 2/4, 6 chase-guarded triggers/modifiers \u2014 batch na default-OFF dahil sa author caution lang). Ross-course-verified ang mekanismo (sellers stack sa round numbers; ang scale_grid code ay ginagamit na ang parehong round_numbers_above concept para sa exits). Napaka-narrow ang defer window (\u00bc ng extension cap, entry_gates.py:2500), pure/never-raises, at re-enters on hold \u2014 parehong pattern ng napatunayang extension veto. Walang counter-evidence sa git/docs/replay history; operator standing rule \u2192 ON + live-test + flag rollback.",
+  "risk_if_on": "Kaunting added latency sa entries na bumabangga sa round number bago ito ma-clear \u2014 sa isang fast vertical through ang level, ilang tick na defer; bounded ito ng makitid na band at ng re-entry sa hold, at reversible sa isang env flip."
+ },
+ {
+  "flag": "chili_momentum_rulebreak_nextday_lockout_enabled",
+  "category": "veto_gate",
+  "what_it_does": "GAP 1: kapag may discipline rule break ngayon (daily-loss breach \u2014 governance.py:1134 na lang ang natitirang arming caller), bina-block ang LIVE ARMING para sa BUONG susunod na ET session, persisted sa trading_risk_state regime='rulebreak_nextday_lockout' (governance.py:445-519, auto-clears pagka-roll ng araw; checked sa auto_arm.py:4091).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok b822df0 (2026-06-26, RISK gaps Cluster 4/4). DIREKTANG live counter-evidence: ang 06-30 zero-premarket-entries outage ay sanhi ng EKSAKTONG mekanismong ito \u2014 isang lone max-loss-circuit fire ang nag-arm ng next-day lockout na nagpatay sa buong sesyon; ang lockout-arming landmine ay TINANGGAL sa A1 (07-03) at ang max-loss-circuit arming path ay wala na sa code (daily_loss_breach na lang ang tumatawag). Higit pa: ang verified live-bindings snapshot sa docs/DESIGN/ROSS_CAPTURE_PARITY.md:126 (in-container 2026-07-06) ay tahasang naglilista ng rulebreak_nextday_lockout_enabled=False bilang bahagi ng pinatunayang tamang posture. Redundant din ito \u2014 per-broker daily-loss caps (#727), kill switch, at drawdown breaker ang tamang same-day na guards; ang full-next-day blanket ay opportunity-cost bomb laban sa $1k/day goal.",
+  "risk_if_on": "Isang daily-loss breach ay magze-zero ng BUONG kinabukasan (kasama ang premarket window na siyang pinaka-profitable prep) \u2014 ang eksaktong incident class na na-root-cause at inalis na noong 07-03."
+ },
+ {
+  "flag": "chili_momentum_scale_grid_enabled",
+  "category": "exit",
+  "what_it_does": "Ross Batch E multi-level scale-out grid: nagbe-build ng frozen ladder ng (target_px, fraction) sa R-multiples (defaults 1R:50%, 2R:25%; pinupull-in sa round numbers) kapalit ng single first-scale then trail (paper_execution.py:573-624, live_runner.py:15340-15369; cumulative <0.9 para laging may runner).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Ipinasok 1e84efd (2026-06-25, Batch E). Dalawang layer ng counter-evidence sa parehong exit family: (a) ang exit_ladder_live flip noong 07-06 ay ROLLED BACK (#855) \u2014 201/219 scale-out limits cancelled, L2 reads 1054/1054 stale_or_thin \u2014 at pinalitan na ng MFE-percentile partial (#881, LIVE na ngayon); (b) ang no-magic exit calibration data (#848) ay nagpakitang winners run 7-17R habang chop <2R \u2014 ang fixed 1R/2R grid na nagbebenta ng 75% ng position by 2R ay eksaktong 'winner-killer' class na pinatay na natin dati (trail-tighter-than-noise lesson, JEM fix). Superseded na ng data-derived per-family MFE targets; ang pag-ON nito ay regression sa magic-number exits.",
+  "risk_if_on": "Puputulin ang 7-17R winners sa 1-2R (ang buong edge ng lane ay nasa tail capture) at magdadagdag ng multi-rung order traffic sa mga manipis na L2 na napatunayang hindi kaya ng resting-limit scale-outs."
+ },
+ {
+  "flag": "chili_momentum_second_day_context_enabled",
+  "category": "selection",
+  "what_it_does": "P1 selection tilt sa daily_levels (daily_levels.py:607-612): kapag ON, ang day-2 continuation (holding above prior_day_high/close) ay BINO-BOOST at ang day-3+ ay DINE-DERATE sa daily_structure_pct \u2014 bounded re-rank tilt, hindi gate; ang run/level fields ay naka-surface pa rin for audit kahit OFF.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Ipinasok 5c5b99b (2026-06-25, Ross P1-P3). Ross-verified ang day-2 continuation concept, PERO ito ay perturbation sa napatunayang-gumagana nang selection scorer \u2014 ang ROSS_CAPTURE_PARITY.md guardrail #4 ay 'Do NOT rewrite the 3-layer selection scorer (9b52d30)' at ang WHY-missed synthesis ay nagsabing selection ay \u2705 na (JEM=selection\u2705); ang bottleneck ay conversion, hindi selection. Ang day-3+ DERATE ay pwedeng mag-drop ng multi-day runner sa top-3 (ang mga pinakamalaking Ross winners ay minsan day-3 continuations). Mura itong i-validate offline: before/after re-rank sa recorded selection days (walang DB writes, walang live risk) \u2014 gawin iyon bago i-flip, per evolve-not-devolve.",
+  "risk_if_on": "Rank shuffle sa top-3 explosive selection na proven na \u2014 ang isang na-derate na day-3 runner na sana ay ang winner ng araw ay hindi na masusubaybayan; regression risk sa working layer nang walang before/after proof."
+ },
+ {
+  "flag": "chili_momentum_second_leg_preference_enabled",
+  "category": "selection",
+  "what_it_does": "LOCATE #8: kapag DALAWA o higit pang breakout candidates ang sabay na nag-fire sa setup-selector, ang candidate na may BASED second leg (structural base na ATR-scaled margin ABOVE ng set's lowest low) ay nakakakuha ng bounded +15% effective R:R tilt sa arbitration (entry_gates.py:9147-9179). Preference lang sa already-passing fires \u2014 never nag-a-admit ng bagong entry, never lumuluwag ang guard; single fire = walang tilt.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Ipinasok b0d5739 (2026-06-26, Cluster B) \u2014 batch author-caution lang ang OFF. Pinaka-makitid na scope sa buong chunk: tie-breaker lang ito kapag multiple simultaneous fires sa IISANG symbol session, bounded sa [0,1] clamp, at Ross-verified ang second-leg-over-extended-first-leg preference (ang DXF/CLRO losses ay 'buying LOCAL TOPS into fades' \u2014 first-leg extended entries \u2014 per conviction entry-quality bundle). Walang counter-evidence; hindi ito entry admission kaya walang bagong risk class. Operator standing rule \u2192 ON.",
+  "risk_if_on": "Sa bihirang multi-fire tie, pipiliin ang based leg kaysa marginally-better-R:R extended leg \u2014 bounded sa 15% tilt kaya hindi kayang talunin ang malinaw na mas magandang setup; reversible sa env flip."
+ },
+ {
+  "flag": "chili_momentum_short_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "Master gate for the Alpaca SHORT lane (config.py:9852; entry_gates.py:10778): when ON, the parabolic-exhaustion short detector (Trigger A) can fire sell-to-open entries. OFF = the long-only lane is byte-identical (no detector fires, no side threading).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Introduced e8d863c 2026-07-12 'short lane P1a'. Config comment states default FALSE is 'operator-approved in the design doc' (docs/DESIGN/SHORT_SIDE_LANE.md): the lane stays dark until the P1 paper soak proves the full sell-to-open\u2192cover lifecycle. CC_REPORT 2026-07-12_weekend-hermetic-shortlane.md: 'P1 nearly complete (PRs #915/#916/#918), gated OFF until P2'. This is a documented staged rollout the operator himself approved, not author caution.",
+  "risk_if_on": "Turns on a lane whose cover lifecycle is unproven (P1 not finished); shorts carry asymmetric squeeze risk \u2014 a low-float squeeze into a halt-UP can gap against a short catastrophically (the documented kill scenario). Finish P1 and run the paper soak (P2) first."
+ },
+ {
+  "flag": "chili_momentum_smart_hold_enabled",
+  "category": "exit",
+  "what_it_does": "GAP-A smart post-entry hold (live_runner.py:31719): replaces the fixed 0.001 fast-bail wick buffer with a vol-adaptive band (k*rv_live*sqrt(N)) plus flow/volume/time-floor CUT gating on the first post-entry window. INVARIANT-A: only tightens/suppresses the early level-retest fast-bail; structural stop + #769 max-loss circuit run ungated above it.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Introduced ce1975a 2026-06-29 ('4-lever Ross chain \u2014 kill-switched') and never enabled. Since then the SAME fast-bail zone got live overlapping changes: the GATE-2 explosive lock-in floor (FCUV +21% after a 4.5s bail) and the 07-09 noise-floor clamp + leader-ignition-bypass pair, where replay proved the clamp ALONE was WORSE (pair required) \u2014 direct evidence this exact exit zone is interaction-sensitive. The 07-12 hermetic replay instrument (cent-exact) exists precisely to A/B it.",
+  "risk_if_on": "Unmeasured interaction with the now-live lock-in/noise-floor stack in the winner-killer zone (premature early bails were THE loss driver); could double-suppress or fight the deployed clamp. One hermetic A/B run settles it \u2014 flip only on a green run-R."
+ },
+ {
+  "flag": "chili_momentum_stopout_cooldown_timer_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "INVERTED kill-switch (live_runner.py:36170): OFF (default) = the fixed wall-clock stop-out re-entry timer is REMOVED \u2014 the session recycles to WATCHING immediately and re-entry quality is enforced by reentry_escalation_decision (structure+HWM reclaim+tape buyers) plus the stopout-cycle cap. ON restores the LEGACY fixed timer.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "dfc0f1e 2026-07-04 'REMOVE the fixed stop-out cooldown timer (default OFF; kill-switch)'. In-code evidence (live_runner.py:36162-36169): the timer was a band-aid over an old substring-classifier bug (IPW -$78.62 3s re-arm, since fixed sign-authoritative in risk_policy) and it BLOCKED the fast Ross re-buy of a strong leader \u2014 accurate-FSM CELZ 06-30 replay: 300s timer \u2192 -$108 vs 5s \u2192 +$229. OFF is the improved, replay-proven state; the flag exists only as a rollback lever.",
+  "risk_if_on": "Restores the legacy clock: re-blocks fast leader re-buys on shallow pullbacks (CELZ delta \u2248 $337/session on one name), regressing the 07-04 fix while adding no protection the escalation gates + stopout-cycle cap don't already provide."
+ },
+ {
+  "flag": "chili_momentum_sub5min_scalp_bailout_enabled",
+  "category": "exit",
+  "what_it_does": "LOCATE #1 scalp time-stop (live_runner.py:31961-31986): an ENTERED, not-green position whose deployed cadence read (le['cadence_cls']) is SLOW_CHOPPER and held >= 5 min is bailed via the existing bailout machinery; FAST runners are never time-stopped. Protective-only \u2014 can only exit sooner, never widens a stop.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Introduced b0d5739 2026-06-26 (LOCATE cluster B); it was NOT in the 06-27 harden\u2192test\u2192ON enablement batch (CC_REPORT 2026-06-27_off-items-enablement) and no replay verdict exists. Counter-signal: the cadence classifier in this exact area has a known bug history \u2014 G4 grind-hold was INERT from a cadence mismatch (activation ==FAST vs maintenance NOT SLOW_CHOPPER), and G4 exists because slow grinds are worth HOLDING; exit-family flips have burned the lane before (exit_ladder_live rolled back #855).",
+  "risk_if_on": "A grind misclassified as SLOW_CHOPPER gets time-stopped minutes before its leg (grind\u2192vertical class, the 7-17R tail the Ross exit research says pays for everything). Cheap to settle: one hermetic replay A/B + a spot-check that cadence_cls labels grinds correctly; guards (not-green only, UNCERTAIN\u2192no-op) make it likely safe after that."
+ },
+ {
+  "flag": "chili_momentum_sub_vwap_trap_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "LOCATE #4 new dip-family LONG trigger (entry_gates.py:6215): a sharp undercut BELOW VWAP that fails to make a new low then reclaims = bear-trap/short-cover long; entry = reclaim bar high, stop = trap low. Carries all chase-guards (tape REQUIRED fail-closed, extension, backside/front-side, L2 veto) + downstream vetoes; OFF = returns disabled before any compute.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Introduced b0d5739 2026-06-26 (LOCATE cluster). It is part of the dip-entry family (tight_false_break_reclaim, ask_thins_dip, sub_vwap_trap, pulling_away_roc, premarket_pivot_macd + first_dip policy) whose A/B replay is running TONIGHT on this very branch (fix/tight-false-break-wire) \u2014 the evidence is in flight; decide on the A/B result, hours away.",
+  "risk_if_on": "Flipping mid-A/B contaminates the baseline the replay is measuring. Substantively, a false trap-reclaim on a genuinely backside name is a knife-catch (mitigated by the guard set but exactly what the A/B quantifies)."
+ },
+ {
+  "flag": "chili_momentum_timeofday_schedule_enabled",
+  "category": "sizing",
+  "what_it_does": "NEW-INITIATION-ONLY time-of-day schedule: a bounded-upward prime-window (04:00-10:30 ET) size multiplier composed under the hard 3x clamp (live_runner.py:27704) plus a fade-driven late-day (>=14:30 ET AND regime-poor) fresh-arm suppression in auto_arm (Guard 7, auto_arm.py:4593). Never touches exits.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Introduced aa603e4 2026-06-27 (Punch-list P5), never enabled \u2014 and since superseded on both halves: (1) the ADAPTIVE per-ET-hour expectancy risk curve chili_momentum_time_of_day_risk_enabled is default ON ('2026-07-10, greenlit #1... no dark flags', config.py:9862) and covers the size lever data-driven instead of a fixed magic window; (2) the suppression half reuses the SAME _regime_is_poor signal as the live pre-arm move-exhaustion abandon (B1, ON since 06-27). Fixed-window boost = the magic-number version of a lever already ON adaptively.",
+  "risk_if_on": "Double-counts time-of-day into size (adaptive hourly curve \u00d7 fixed prime boost, still clamped but distorting) and stacks a SECOND regime-fade arm suppressor on the same signal \u2192 late-day lane starvation risk (the CLRO-0707 wedged-lane class) with zero incremental information."
+ },
+ {
+  "flag": "chili_momentum_wedge_break_entry_enabled",
+  "category": "entry_trigger",
+  "what_it_does": "GAP-1 additive entry trigger (entry_gates.py:5217): converging-wedge apex break \u2014 3+ taps on a descending upper AND ascending lower trendline, fire on the body/wick breaking out at the apex with tape; stop = back into the wedge; rising wedges are skipped. Carries the full chase-guard set (tape REQUIRED fail-closed via tape_confirms_hold, _hod_extension_ok, backside/front-side, _l2_entry_veto) and joins the same setup-selector + LIVE_PENDING_ENTRY vetoes; OFF = disabled before any compute.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Introduced b349aed 2026-06-26 (Warrior re-audit Cluster 2/4). The 06-26 cup-and-handle hardening report treats wedge_break as the guard-complete REFERENCE implementation ('mirroring wedge exactly'; wedge 'already requests' the ema/macd arrays others silently missed), and its sibling from the same audit (cup_and_handle) was hardened, 22-tests-greened, and flipped ON on 06-27 (R4). No replay or live counter-evidence exists anywhere in docs \u2014 the only reason OFF is the batch's default-OFF authoring convention, which is exactly the operator's dark-flag anti-pattern. Additive entry + own guards + instant kill-switch \u2192 standing rule applies.",
+  "risk_if_on": "More entry surface on coiling low-floats: a failed apex break stops out back inside the wedge (bounded by the structural stop + #769 circuit). Reversible instantly via the kill-switch; watch the first sessions' wedge-tagged fills."
+ },
+ {
+  "flag": "chili_momentum_wick_reclaim_slow_recovery_gate_enabled",
+  "category": "veto_gate",
+  "what_it_does": "HVM101 #008 quality filter (entry_gates.py:4808-4826) on the ALREADY-LIVE wick-reclaim entry (chili_momentum_wick_reclaim_entry_enabled default True, config.py:2881): rejects reclaim recoveries that took too many bars \u2014 1-3 bars fire, the 4th only with drying-up proof (flush_recedes), 5-6+ rejected as a slow trickle. REJECTS only; never loosens the existing guards.",
+  "verdict": "TURN_ON_SAFE",
+  "why": "Introduced dd82cfb 2026-06-27 'wick-reclaim slow-recovery gate (Pass-4 faithfulness fix) + 9 tests'. The Part-B 3rd-pass audit punch-list explicitly flagged wick_reclaim as 'lighter-guarded than primary triggers' \u2014 this gate IS the tightening, a direct Ross-course faithfulness rule with adaptive boundary relaxation and unit tests. No counter-evidence; pure author-caution OFF on an additive veto with its own guards \u2192 standing rule.",
+  "risk_if_on": "Theoretical E1-class over-veto (rejecting a slow reclaim that would have won), but scoped only to >=4-bar trickles the course itself calls invalid ('confirms the rejection, NOT a reclaim'), on one trigger, with byte-identical rollback."
+ },
+ {
+  "flag": "chili_momentum_win_cycle_fatigue_enabled",
+  "category": "sizing",
+  "what_it_does": "E2 win-cycle fatigue (auto_arm.py:3054/4476, live_runner.py:27567), entries-only: today's clean-win count >= 4 (YELLOW) down-sizes NEW entries to the 0.5 fraction; >= 7 (RED) halts fresh arms entirely. Never touches an open position or exit.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Introduced 1e84efd 2026-06-25 'Ross Batch E'; sibling E1 backside-veto from the adjacent batch was KILLED by replay on 06-25 as net-negative over-vetoing, and E2 never got a replay verdict. Its direction contradicts the measured evidence base: the day-cushion risk ladder (#664) deliberately sizes UP with cushion (Ross's actual practice), and the lane's documented catastrophes were sizing-INVERSION/starvation on hot names \u2014 CLRO 07-02 budget starvation of the #1, and the 07-07 exp_mult-0.5 death-spiral (26sh vs 1,026sh). The give-back problem that motivates fatigue rules was root-caused elsewhere (BJDX/LUCY orphaned-fill sessions, fixed #854).",
+  "risk_if_on": "Caps the right tail: halves size after the 4th win and halts after the 7th on precisely the hot streak days that must carry the $1k/day goal \u2014 re-creating the death-spiral inversion (small on the best days) that already cost the lane once."
+ },
+ {
+  "flag": "chili_pattern_dd_breaker_enabled",
+  "category": "veto_gate",
+  "what_it_does": "Pattern-tier drawdown breaker (portfolio_risk.py:1943, check_drawdown_breaker): computes a Gaussian lower bound on 30-day realized PnL from the trailing 180d of CHILI-attributed history and trips when actual 30d PnL falls below it; a trip blocks pattern-attributed trades until manual reset (absorbing state).",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Config comment (config.py:12622) is explicit: 'Default OFF until walk-forward shows it would have tripped on/around 2026-04-22 (the cumulative-PnL trough date from the 2026-05-15 audit)'. Renamed/separated d6ddbe8 2026-05-16 (CC_REPORT 2026-05-16_f-portfolio-vs-pattern-breaker-separation.md), and a purpose-built validation script ships with it (walkforward_monthly_dd_breaker.py). The documented acceptance test (the walk-forward) has no recorded green result.",
+  "risk_if_on": "Uncalibrated K/lookback either false-trips \u2014 freezing pattern trading in an absorbing state needing manual reset \u2014 or never trips (false comfort). Run the shipped walk-forward against the 2026-04-22 trough first; that is the flag's own documented turn-on condition. (No DB queries tonight \u2014 replays are running \u2014 so this cannot be validated in this session.)"
+ },
+ {
+  "flag": "chili_pattern_evidence_auto_demote",
+  "category": "selection",
+  "what_it_does": "Makes the promotion-evidence audit ENFORCING (promotion_evidence_audit.py:539): promoted patterns lacking evidence get demoted to 'challenged' on the next run instead of just being reported. A separate chili_pattern_evidence_auto_demote_dry_run flag exists for a no-mutation rehearsal.",
+  "verdict": "VALIDATE_FIRST",
+  "why": "Introduced 643bb33 2026-04-27 (trading-brain stabilization). Config comment (config.py:10954-10958) carries the counter-evidence: Codex's 2026-04-27 audit found 'near-total absence of evidence on the legacy promoted-status set, so naive auto-demote would stop a lot of live trading at once'; the 2026-04-28 incident (32/34 entries on 'challenged' patterns) shows lifecycle demotion directly gates the AutoTrader entry path. The documented workflow is report-first.",
+  "risk_if_on": "One flip mass-demotes the legacy promoted set on the next audit run \u2192 most pattern-driven live trading halts simultaneously. Run the dry-run flag + read the report, backfill/accept evidence for the keepers, then enable deliberately."
+ },
+ {
+  "flag": "chili_per_broker_count_manual_as_rh",
+  "category": "sizing",
+  "what_it_does": "Accounting semantics toggle (governance.py:1215): when True, manual (broker_source='manual') Trade rows count against the Robinhood per-broker daily budget/loss cap; default False excludes operator-originated trades (reconcile_import is always excluded either way).",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Introduced 2d32338 2026-06-15 with the per-broker daily-loss caps fix (#727, the frozen-lane incident where a Coinbase-sized global cap froze Robinhood). The default encodes deliberate, documented semantics (Field description + governance.py:1191): manual trades are operator-originated, not lane-generated, so they should not consume the automated lane's budget. This is a policy choice shipped as the correct default, not a dark feature awaiting activation.",
+  "risk_if_on": "The operator's own manual RH trades would eat the automated lane's daily budget and loss cap \u2192 lane starvation/freeze on days he trades alongside the bot \u2014 the exact frozen-lane failure class #727 was built to eliminate."
+ },
+ {
+  "flag": "chili_scheduler_runs_externally",
+  "category": "posture_deploy",
+  "what_it_does": "Deployment descriptor (config.py:2139): tells this process the cron scheduler runs in a separate worker \u2014 main.py:606 then skips starting the in-process APScheduler, and operator_readiness.py treats scheduler-liveness checks as externally owned.",
+  "verdict": "POSTURE_ENV_DRIVEN",
+  "why": "Introduced 99d16cb 2026-04-13 (fix for false stale-pipeline/scheduler-not-running warnings). The effective value is compose-driven: docker-compose.yml:144 sets CHILI_SCHEDULER_RUNS_EXTERNALLY=1 on the app container (paired with CHILI_SCHEDULER_ROLE=none), while dedicated workers carry their own roles. The code default False is correct for bare local dev with no scheduler-worker. Matches the known-evidence posture list.",
+  "risk_if_on": "It must mirror the real topology, never be 'flipped': set True with no external scheduler-worker running and every cron job (mining, broker sync, reconcilers) silently stops; left False inside the Docker topology and jobs double-run. Verify the in-container binding on the exec worker, not the config default."
+ },
+ {
+  "flag": "chili_tenbeat_candle_equity_enabled",
+  "category": "infra_telemetry",
+  "what_it_does": "Intended to extend the log-only 10s-candle (tenbeat) measurement layer to EQUITIES. Today it is a no-op: grep confirms zero consumers outside config.py \u2014 the drain job (fast_path/tenbeat_candle_log.py:243) checks only chili_tenbeat_candle_enabled, sources symbols from eligible_crypto_symbols, and hardcodes asset_class='crypto'.",
+  "verdict": "KEEP_OFF_EVIDENCE",
+  "why": "Introduced 78c85f8 2026-06-14 ('LOG-ONLY 10-second candle pattern layer (Ross's 10s chart) \u2014 measurement, zero decision path', #715). Field description is the evidence: 'DATA-gated OFF (the 60s equity NBBO tape cannot form a 10s candle; the min_ticks guard fails closed). Un-gate only when a 2-3s equity mid source lands.' The blocker is a missing data source, not caution \u2014 and the equity branch was never even wired.",
+  "risk_if_on": "Functionally none today (nothing reads it), which is itself the problem: flipping it would only misrepresent posture. The real unlock is a 2-3s equity mid source (IQFeed-class tick bridge) plus wiring an equity branch into the drain job; until then ON produces zero equity candles by design."
+ }
+]
