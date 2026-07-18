@@ -78,12 +78,18 @@ def test_ross_row_premarket_uses_live_tick_not_prevday() -> None:
 
 # ── pure: RTH gating ─────────────────────────────────────────────────────────
 def test_sampling_window_covers_data_session() -> None:
-    # #595: the sampler covers the full US DATA session (04:00-20:00 ET), not RTH —
-    # premarket movers (Ross gap-and-go) must already be on tape by the 7:00 entries.
+    # The sampler covers the full US DATA session up to 20:00 ET, opening at the
+    # DERIVED data-session open (market_profile._data_session_open_min): entry start −
+    # selection_prep_lead, capped at the 04:00 ET extended open. With the deployed
+    # default (premarket entry 04:00 ET, 60-min lead) that open is 03:00 ET, so the
+    # watchlist/tape are WARM before the first allowed entry — selection leads the
+    # trading window (operator 2026-06-11, twice). The window pulled earlier when the
+    # entry default moved 07:00 → 04:00; 03:00 ET is now INSIDE the data session.
     assert _in_sampling_window(datetime(2026, 6, 9, 14, 0, tzinfo=timezone.utc)) is True   # Tue 10:00 ET
     assert _in_sampling_window(datetime(2026, 6, 9, 9, 0, tzinfo=timezone.utc)) is True    # 05:00 ET premarket
     assert _in_sampling_window(datetime(2026, 6, 9, 22, 0, tzinfo=timezone.utc)) is True   # 18:00 ET afterhours
-    assert _in_sampling_window(datetime(2026, 6, 9, 7, 0, tzinfo=timezone.utc)) is False   # 03:00 ET overnight
+    assert _in_sampling_window(datetime(2026, 6, 9, 7, 0, tzinfo=timezone.utc)) is True    # 03:00 ET = derived data-session open
+    assert _in_sampling_window(datetime(2026, 6, 9, 6, 0, tzinfo=timezone.utc)) is False   # 02:00 ET overnight (before the open)
     assert _in_sampling_window(datetime(2026, 6, 13, 14, 0, tzinfo=timezone.utc)) is False  # Saturday
 
 
