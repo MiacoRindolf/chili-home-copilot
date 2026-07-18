@@ -1675,7 +1675,12 @@ def test_iqfeed_listener_registration_cannot_spoof_lane_health(monkeypatch):
 
     loop._iqfeed_notify_loop()
 
-    assert listened == ["LISTEN momentum_iqfeed_l1;"]
+    # The ordinary loop registers the authority channel AND the ignition
+    # nomination channel (live by default) on the same connection.
+    assert listened == [
+        "LISTEN momentum_iqfeed_l1;",
+        "LISTEN momentum_iqfeed_ignition;",
+    ]
     # LISTEN registration alone proves neither tracker refresh nor price-bus exit
     # ownership, so it cannot keep the owner-health signal green.
     assert heartbeats == []
@@ -2191,3 +2196,208 @@ def test_scheduler_shutdown_stops_out_of_band_live_loop(monkeypatch):
 
     assert stopped == ["loop"]
     assert signaled == ["scheduler"]
+
+
+# ── IGNITION nomination channel (tick-based early-mover; 2026-07-17) ──────────
+
+
+def _ignition_payload(now: datetime, **overrides) -> str:
+    payload = {
+        "schema": "chili.iqfeed-ignition-nominate.v1",
+        "symbol": "PLSM",
+        "source": "ignition_tick",
+        "fired_at": (now - timedelta(seconds=1)).isoformat(),
+        "last_price": 4.98,
+        "pct_change_60s": 0.084,
+        "dollar_vol_60s": 516361.0,
+        "prints_10s": 103,
+        "bridge_run_id": _IQFEED_RUN_ID,
+        "connection_generation": 2,
+    }
+    payload.update(overrides)
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def _ignition_loop(monkeypatch, sessions=()):
+    loop = LiveRunnerLoop()
+    loop._running = True
+    loop._generation = 1
+    loop._tracker.get_sessions_for_symbol = lambda sym: list(sessions)  # type: ignore
+    admissions = []
+
+    def _admit(symbol, payload, *, expected_generation):
+        admissions.append((symbol, payload.get("source"), expected_generation))
+        return {"ok": True, "admitted": True, "symbol": symbol}
+
+    monkeypatch.setattr(loop, "_admit_iqfeed_symbol", _admit)
+    dispatches = []
+    monkeypatch.setattr(
+        loop,
+        "_dispatch",
+        lambda sid, expected_generation=None: dispatches.append(sid) or True,
+    )
+    return loop, admissions, dispatches
+
+
+def test_ignition_payload_admits_with_ignition_tick_source(monkeypatch):
+    loop, admissions, _dispatches = _ignition_loop(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now), generation=1
+    ) is True
+    assert admissions == [("PLSM", "ignition_tick", 1)]
+
+
+def test_ignition_dispatches_existing_sessions_without_admission(monkeypatch):
+    loop, admissions, dispatches = _ignition_loop(
+        monkeypatch,
+        sessions=[{"session_id": 42, "symbol": "PLSM"}],
+    )
+    now = datetime.now(timezone.utc)
+
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now), generation=1
+    ) is True
+    assert admissions == []
+    assert dispatches == [42]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"schema": "chili.iqfeed-ignition-nominate.v0"},
+        {"source": "iqfeed_l1"},
+        {"symbol": "plsm"},
+        {"symbol": "PLSM."},
+        {"symbol": None},
+        {"fired_at": "not-a-time"},
+        {"last_price": 0},
+        {"last_price": -1.5},
+        {"last_price": True},
+    ],
+)
+def test_ignition_rejects_malformed_payloads(monkeypatch, overrides):
+    loop, admissions, _dispatches = _ignition_loop(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now, **overrides), generation=1
+    ) is False
+    assert admissions == []
+
+
+def test_ignition_rejects_stale_and_future_fired_at(monkeypatch):
+    loop, admissions, _dispatches = _ignition_loop(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    stale = _ignition_payload(
+        now, fired_at=(now - timedelta(seconds=45)).isoformat()
+    )
+    future = _ignition_payload(
+        now, fired_at=(now + timedelta(seconds=5)).isoformat()
+    )
+    assert loop._handle_iqfeed_ignition_payload(stale, generation=1) is False
+    assert loop._handle_iqfeed_ignition_payload(future, generation=1) is False
+    assert admissions == []
+
+
+def test_ignition_per_symbol_dedup_ttl_blocks_repeat(monkeypatch):
+    loop, admissions, _dispatches = _ignition_loop(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now), generation=1
+    ) is True
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now), generation=1
+    ) is False
+    assert len(admissions) == 1
+
+
+def test_ignition_admits_per_minute_hard_cap(monkeypatch):
+    loop, admissions, _dispatches = _ignition_loop(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    for idx in range(loop_mod._IGNITION_ADMITS_PER_MINUTE + 3):
+        loop._handle_iqfeed_ignition_payload(
+            _ignition_payload(now, symbol=f"CAP{idx}"), generation=1
+        )
+    assert len(admissions) == loop_mod._IGNITION_ADMITS_PER_MINUTE
+
+
+def test_ignition_refused_for_captured_paper_scope(monkeypatch):
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+    )
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_symbol_admitter=lambda **_kwargs: {"ok": True},
+    )
+    loop._running = True
+    loop._generation = 1
+    admissions = []
+    monkeypatch.setattr(
+        loop,
+        "_admit_iqfeed_symbol",
+        lambda *a, **k: admissions.append(a) or {"admitted": True},
+    )
+    now = datetime.now(timezone.utc)
+
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now), generation=1
+    ) is False
+    assert admissions == []
+    # The captured-paper loop never LISTENs to the ignition channel either.
+    assert loop._ignition_listen_channel("momentum_iqfeed_l1") is None
+
+
+def test_ignition_listen_channel_validation(monkeypatch):
+    loop = LiveRunnerLoop()
+    assert (
+        loop._ignition_listen_channel("momentum_iqfeed_l1")
+        == "momentum_iqfeed_ignition"
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_ignition_channel",
+        "momentum_iqfeed_l1",
+        raising=False,
+    )
+    # Colliding with the authority channel is refused.
+    assert loop._ignition_listen_channel("momentum_iqfeed_l1") is None
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_ignition_channel",
+        "bad;channel",
+        raising=False,
+    )
+    assert loop._ignition_listen_channel("momentum_iqfeed_l1") is None
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_ignition_channel",
+        "momentum_iqfeed_ignition",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        loop_mod.settings,
+        "chili_momentum_live_runner_loop_iqfeed_ignition_enabled",
+        False,
+        raising=False,
+    )
+    assert loop._ignition_listen_channel("momentum_iqfeed_l1") is None
+
+
+def test_ignition_inactive_generation_is_refused(monkeypatch):
+    loop, admissions, _dispatches = _ignition_loop(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now), generation=7
+    ) is False
+    loop._running = False
+    assert loop._handle_iqfeed_ignition_payload(
+        _ignition_payload(now), generation=1
+    ) is False
+    assert admissions == []

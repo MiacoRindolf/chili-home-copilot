@@ -91,6 +91,19 @@ _IQFEED_BUILD_RE = re.compile(
 )
 _IQFEED_NOTIFY_CHANNEL_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _IQFEED_DEFAULT_NOTIFY_CHANNEL = "momentum_iqfeed_l1"
+# IGNITION nominations (2026-07-17): SEPARATE pg_notify channel fed by the host
+# bridge's tick-based early-mover detector. Minimal payload, NOT the v3 authority
+# envelope (captured_paper_iqfeed_trigger does exact key-set matching on that one).
+# The consumer only NOMINATES into the same guarded admit_ross_event path
+# (pg_advisory_xact_lock dedup + every admission gate stay authoritative); hard
+# caps here are defense-in-depth against a chatty/compromised producer.
+_IGNITION_DEFAULT_CHANNEL = "momentum_iqfeed_ignition"
+_IGNITION_SCHEMA_VERSION = "chili.iqfeed-ignition-nominate.v1"
+_IGNITION_SOURCE_TAG = "ignition_tick"
+_IGNITION_MAX_AGE_S = 30.0
+_IGNITION_FUTURE_TOLERANCE_S = 1.0
+_IGNITION_DEDUP_TTL_S = 300.0            # one admission attempt per symbol per TTL
+_IGNITION_ADMITS_PER_MINUTE = 6          # hard cap on ignition admission attempts
 _IQFEED_EQUITY_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 _LIVE_LOOP_OWNER_INSTANCE_ID = str(uuid.uuid4())
 # Cluster-wide, database-scoped PostgreSQL advisory fence.  Positive int32 values
@@ -376,6 +389,10 @@ class LiveRunnerLoop:
         self._iqfeed_generation_watermarks: dict[str, int] = {}
         self._iqfeed_admission_lock = threading.Lock()
         self._iqfeed_admission_inflight: dict[object, tuple[int, str]] = {}
+        # IGNITION nomination governors (monotonic clocks; consumer-side caps).
+        self._ignition_lock = threading.Lock()
+        self._ignition_dedup: dict[str, float] = {}
+        self._ignition_admit_monotonic: list[float] = []
         # This monotonic state only throttles this owner's durable DB writes. It is
         # never consumed as health truth by the cockpit/API process.
         self._lane_health_heartbeat_lock = threading.Lock()
@@ -1331,11 +1348,18 @@ class LiveRunnerLoop:
                     conn.set_session(autocommit=True)
                     cur = conn.cursor()
                     cur.execute(f"LISTEN {channel};")
+                    ignition_channel = self._ignition_listen_channel(channel)
+                    if ignition_channel is not None:
+                        cur.execute(f"LISTEN {ignition_channel};")
                     if not self._generation_active(generation, stop_event):
                         break
                     startup_ready = True
                     self._mark_iqfeed_notify_listener_ready(generation)
-                    _log.info("[live_loop] listening for IQFeed events channel=%s", channel)
+                    _log.info(
+                        "[live_loop] listening for IQFeed events channel=%s ignition=%s",
+                        channel,
+                        ignition_channel or "-",
+                    )
                     while self._generation_active(generation, stop_event):
                         ready, _, _ = select.select([conn], [], [], 1.0)
                         if not self._generation_active(generation, stop_event):
@@ -1347,6 +1371,16 @@ class LiveRunnerLoop:
                             notify = conn.notifies.pop(0)
                             if not self._generation_active(generation, stop_event):
                                 break
+                            if (
+                                ignition_channel is not None
+                                and getattr(notify, "channel", None)
+                                == ignition_channel
+                            ):
+                                self._handle_iqfeed_ignition_payload(
+                                    notify.payload,
+                                    generation=generation,
+                                )
+                                continue
                             self._handle_iqfeed_notify_payload(
                                 notify.payload,
                                 generation=generation,
@@ -1371,6 +1405,166 @@ class LiveRunnerLoop:
         finally:
             if self._notify_thread_generation == generation:
                 self._mark_iqfeed_notify_listener_failed(generation)
+
+    # ── IGNITION nominations (tick-based early-mover; 2026-07-17) ────────────
+    # The host bridge's detector NOMINATES a symbol the moment its own tape shows
+    # rolling %change + $-volume + print-rate ignition (PIT-measured: PLSM/ERNA/
+    # VIVS fired +1-36s from data visibility vs the 3-8 min Massive-snapshot
+    # funnel). Admission remains fully guarded: this handler only feeds the same
+    # admit_ross_event path used by the certified L1 flow, tagged ignition_tick.
+
+    def _ignition_listen_channel(self, main_channel: str) -> str | None:
+        """The validated ignition channel, or None when ignition is disabled.
+
+        Captured-paper loops NEVER listen to ignition: that lane's admission
+        contract is sealed to the exact v3 envelope and must stay blind to
+        nomination traffic.
+        """
+        if self._captured_paper_scope is not None:
+            return None
+        if not bool(
+            getattr(
+                settings,
+                "chili_momentum_live_runner_loop_iqfeed_ignition_enabled",
+                True,
+            )
+        ):
+            return None
+        channel = str(
+            getattr(
+                settings,
+                "chili_momentum_live_runner_loop_iqfeed_ignition_channel",
+                _IGNITION_DEFAULT_CHANNEL,
+            )
+            or ""
+        ).strip()
+        if (
+            _IQFEED_NOTIFY_CHANNEL_RE.fullmatch(channel) is None
+            or channel == str(main_channel or "").strip()
+        ):
+            _log.warning(
+                "[live_loop] refusing IQFeed ignition LISTEN with channel=%r",
+                channel,
+            )
+            return None
+        return channel
+
+    def _validated_ignition_notify(self, payload: str) -> dict | None:
+        """Strict shape/freshness validation for the minimal nomination payload."""
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("schema") != _IGNITION_SCHEMA_VERSION:
+            return None
+        if data.get("source") != _IGNITION_SOURCE_TAG:
+            return None
+        symbol = _strict_equity_symbol(data.get("symbol"))
+        if symbol is None:
+            return None
+        fired_at = _parse_aware_utc(data.get("fired_at"))
+        if fired_at is None:
+            return None
+        age = (_utcnow() - fired_at).total_seconds()
+        if age < -_IGNITION_FUTURE_TOLERANCE_S or age > _IGNITION_MAX_AGE_S:
+            return None
+        last_price = data.get("last_price")
+        if (
+            isinstance(last_price, bool)
+            or not isinstance(last_price, (int, float))
+            or not math.isfinite(float(last_price))
+            or float(last_price) <= 0
+        ):
+            return None
+        return {
+            "symbol": symbol,
+            "source": _IGNITION_SOURCE_TAG,
+            "schema": _IGNITION_SCHEMA_VERSION,
+            "fired_at": fired_at.isoformat(),
+            "last_price": float(last_price),
+            "pct_change_60s": data.get("pct_change_60s"),
+            "dollar_vol_60s": data.get("dollar_vol_60s"),
+            "prints_10s": data.get("prints_10s"),
+            "bridge_run_id": data.get("bridge_run_id"),
+            "connection_generation": data.get("connection_generation"),
+        }
+
+    def _ignition_admission_permitted(self, symbol: str) -> bool:
+        """Consumer-side dedup TTL + admits/minute hard cap (monotonic clocks)."""
+        now_mono = time.monotonic()
+        with self._ignition_lock:
+            last = self._ignition_dedup.get(symbol)
+            if last is not None and now_mono - last < _IGNITION_DEDUP_TTL_S:
+                return False
+            self._ignition_admit_monotonic = [
+                at
+                for at in self._ignition_admit_monotonic
+                if now_mono - at < 60.0
+            ]
+            if len(self._ignition_admit_monotonic) >= _IGNITION_ADMITS_PER_MINUTE:
+                return False
+            # Bounded memory: drop expired dedup entries opportunistically.
+            if len(self._ignition_dedup) > 2048:
+                self._ignition_dedup = {
+                    sym: at
+                    for sym, at in self._ignition_dedup.items()
+                    if now_mono - at < _IGNITION_DEDUP_TTL_S
+                }
+            self._ignition_dedup[symbol] = now_mono
+            self._ignition_admit_monotonic.append(now_mono)
+            return True
+
+    def _handle_iqfeed_ignition_payload(
+        self,
+        payload: str,
+        *,
+        generation: int | None = None,
+    ) -> bool:
+        owner_generation = (
+            self._generation if generation is None else int(generation)
+        )
+        if self._captured_paper_scope is not None:
+            return False
+        if not self._generation_active(owner_generation):
+            return False
+        data = self._validated_ignition_notify(payload)
+        if data is None:
+            return False
+        sym = data["symbol"]
+        handled = False
+        try:
+            sessions = self._tracker.get_sessions_for_symbol(sym)
+            if not sessions:
+                if not self._ignition_admission_permitted(sym):
+                    return False
+                _log.info(
+                    "[live_loop] ignition nomination symbol=%s px=%s pct60=%s",
+                    sym,
+                    data.get("last_price"),
+                    data.get("pct_change_60s"),
+                )
+                admission = self._admit_iqfeed_symbol(
+                    sym,
+                    data,
+                    expected_generation=owner_generation,
+                )
+                handled = bool(admission and admission.get("admitted"))
+                sessions = self._tracker.get_sessions_for_symbol(sym)
+            for sess in sessions:
+                handled = self._dispatch(
+                    int(sess["session_id"]),
+                    expected_generation=owner_generation,
+                ) or handled
+        except Exception:
+            _log.debug(
+                "[live_loop] ignition notify handling failed symbol=%s",
+                sym,
+                exc_info=True,
+            )
+            handled = False
+        return handled
 
     def _validated_iqfeed_notify(self, payload: str) -> tuple[dict, tuple] | None:
         """Validate the complete v3 authority tuple before any admission work."""

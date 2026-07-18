@@ -8230,6 +8230,30 @@ class Settings(BaseSettings):
             "IQFEED_NOTIFY_CHANNEL",
         ),
     )
+    # IGNITION nominations (2026-07-17): the host bridge's tick-based early-mover
+    # detector pg_notify's on this SEPARATE channel (minimal payload; the v3
+    # authority envelope on the channel above is untouched — captured-paper does
+    # exact key-set matching on it). The ordinary live loop LISTENs here and runs
+    # the guarded admit_ross_event path with source tag "ignition_tick"; the
+    # captured-paper loop never listens to this channel. PIT-measured 2026-07-17:
+    # detector fires +36s (ERNA) / +13s (VIVS) from ignition when watched vs
+    # 4-8 min actual subscribe lag via the Massive snapshot funnel.
+    chili_momentum_live_runner_loop_iqfeed_ignition_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_IGNITION_ENABLED"
+        ),
+    )
+    chili_momentum_live_runner_loop_iqfeed_ignition_channel: str = Field(
+        default="momentum_iqfeed_ignition",
+        min_length=1,
+        max_length=63,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_LIVE_RUNNER_LOOP_IQFEED_IGNITION_CHANNEL",
+            "IQFEED_IGNITION_CHANNEL",
+        ),
+    )
     # Exact content-addressed host bridge build allowed to provide authoritative
     # IQFeed L1 BBOs. Empty by default: notifications fail closed and the Alpaca
     # adapter uses a direct broker quote until an operator pins the reviewed v2 build.
