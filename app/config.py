@@ -7467,6 +7467,20 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_ABS_CAP"),
     )
+    # BROKEN-QUOTE dollar floor (VIVS 2026-07-15): a fixed bps abs cap has no
+    # price-granularity term — a 3-7 CENT spread flare on a sub-$2.50 name exceeds
+    # 300bps and vetoes entry at ignition (VIVS +90% zeroed by 4 wide_bbo_spread
+    # blocks). The ONE documented base: a BBO spread <= this many DOLLARS is never a
+    # "broken book" regardless of price — a FLOOR on the broken-quote ceiling
+    # (max()-only: never blocks anything the raw cap admitted). Inert above
+    # mid=$2.67 at the 300bps cap; 0 disables (byte-identical legacy). Base from the
+    # VIVS 07-15 tape: median spreads $0.0025-$0.03, blocked flares 3-7c; a toxic
+    # 30c book still blocks at every price.
+    chili_momentum_risk_spread_min_usd_floor: float = Field(
+        default=0.08,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SPREAD_MIN_USD_FLOOR"),
+    )
     # STEP-E #15: the FIXED 300bps abs cap clamped a legitimately-wide low-float's adaptive
     # EM-based ceiling (DSY adaptive 721bps -> clamped to 300 -> 1,358 wide_bbo blocks). When
     # ON, the effective cap SCALES with the name's OWN adaptive EM ceiling:

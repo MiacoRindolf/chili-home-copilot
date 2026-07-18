@@ -145,6 +145,7 @@ from .replay_errors import (
 )
 from .risk_policy import (
     RISK_SNAPSHOT_KEY,
+    broken_quote_ceiling_bps,
     compute_risk_first_quantity,
     equity_relative_notional_cap,
     liquidity_capped_notional,
@@ -23310,11 +23311,49 @@ def tick_live_session(
     # rejects) — stale_bbo + invalid_bbo reliability checks inside _quote_quality_block ALWAYS
     # apply regardless. Spread becomes a sized COST (L2.2) + the bounded limit, not a veto.
     _skip_spread_gate = bool(getattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True))
-    _entry_spread_ceiling = (
-        float(getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 1500.0) or 1500.0)
-        if _skip_spread_gate
-        else _adaptive_max_spread
-    )
+    if _skip_spread_gate:
+        # BROKEN-QUOTE ceiling (VIVS 2026-07-15): the raw fixed abs_cap has no
+        # price-granularity term — a 3-7 CENT flare on a sub-$2.50 name exceeds
+        # 300bps and vetoed a +90% winner at ignition. max()-only loosening on top
+        # of the abs_cap: the EM-scaled term (REAL measured EM only — NEVER the
+        # FIX-A fallback EM, mirroring _adaptive_live_max_spread_bps's exclusion;
+        # a fabricated EM must not relax the broken-book backstop) + the documented
+        # dollar floor on the ceiling. Never blocks anything the raw cap admitted.
+        try:
+            _bq_raw_cap = getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 300.0)
+            _bq_abs_cap = 300.0 if _bq_raw_cap is None else float(_bq_raw_cap)
+        except (TypeError, ValueError):
+            _bq_abs_cap = 300.0
+        try:
+            _bq_raw_ratio = getattr(settings, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5)
+            _bq_ratio = 0.5 if _bq_raw_ratio is None else float(_bq_raw_ratio)
+        except (TypeError, ValueError):
+            _bq_ratio = 0.5
+        _bq_em_scale_k: float | None = None
+        if bool(getattr(settings, "chili_momentum_risk_spread_abs_cap_em_scale_enabled", True)):
+            try:
+                _bq_em_scale_k = float(getattr(settings, "chili_momentum_risk_spread_abs_cap_em_scale_k", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                _bq_em_scale_k = 1.0
+        try:
+            _bq_raw_floor = getattr(settings, "chili_momentum_risk_spread_min_usd_floor", 0.08)
+            _bq_min_spread_usd = 0.08 if _bq_raw_floor is None else float(_bq_raw_floor)
+        except (TypeError, ValueError):
+            _bq_min_spread_usd = 0.08
+        try:
+            _bq_mid = float(getattr(tick, "mid", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            _bq_mid = 0.0
+        _entry_spread_ceiling = broken_quote_ceiling_bps(
+            _bq_abs_cap,
+            mid=_bq_mid,
+            expected_move_bps=_expected_move_bps,
+            ratio=_bq_ratio,
+            em_scale_k=_bq_em_scale_k,
+            min_spread_usd=_bq_min_spread_usd,
+        )
+    else:
+        _entry_spread_ceiling = _adaptive_max_spread
     quote_block = _quote_quality_block(
         tick, _fr, max_spread_bps=_entry_spread_ceiling, symbol=sess.symbol, db=db
     )
