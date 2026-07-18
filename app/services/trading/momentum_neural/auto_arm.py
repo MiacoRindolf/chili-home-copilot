@@ -361,13 +361,64 @@ def _event_based_max_extend_seconds() -> int:
     return max(_watch_extend_seconds(), int(_watch_extend_seconds() * mult))
 
 
-def _session_still_high_conviction(row: Any) -> bool:
+def _daily_breaking_from_recorded_levels(symbol: str, current_price: Any) -> bool:
+    """RECOVERY leg for the reap keep-check (VRAX 2026-07-09 winner-kill): derive
+    "breaking a major daily level" from the RECORDED daily OHLCV levels + the session's
+    CURRENT price when the row's persisted scanner signal lost (or never received) the
+    pipeline's ``daily_breaking_major`` stamp.
+
+    WHY: the stamp rides ``execution_readiness_json.extra.ross_signals[sym]`` and that
+    ``extra`` blob is wholesale-REPLACED on every viability upsert with the writing
+    tick's own batch meta — one refresh whose daily fetch failed (or that came from a
+    writer without the daily-context enrichment) silently drops the key, and the reaper
+    then reads a decayed composite with its strongest keep-leg missing. VRAX 07-09
+    13:52:36Z: ross 0.62-0.66 < 0.7 floor, scanner vol_ratio ~1.61x, stamp absent —
+    session reaped while the symbol was +230% over prior close, hours past breaking its
+    prior daily high, and it ran 10 -> 13.19 with no watcher on it.
+
+    Mirrors ``daily_levels.compute_daily_context``'s own definition (px > prior_day_high
+    OR px > n-day swing high) but against the CURRENT price, using the live runner's
+    per-(symbol, day) cached DailyContext — the daily bars are fetched at most once per
+    symbol per day process-wide (the levels are day-constant), never per tick.
+
+    MONOTONIC KEEP-ONLY: this leg can only turn a missing/False daily-breaking read into
+    True (keep MORE); it never falsifies a persisted True. Fail-CLOSED (False) on any
+    missing datum / error so absence of evidence just falls back to today's behaviour.
+    A kept watcher still has to clear the FULL live_runner entry-gate stack to enter, so
+    keeping more watchers cannot admit an entry the gates would veto."""
+    try:
+        _px = float(current_price)
+        if not (_px > 0):
+            return False
+        _symu = str(symbol or "").upper()
+        if not _symu or "-USD" in _symu:
+            return False  # equities only — crypto has no daily-S&R regime here
+        from .live_runner import _daily_ctx_cached
+
+        _ctx = _daily_ctx_cached(_symu, price=_px)
+        if _ctx is None:
+            return False
+        _pdh = getattr(_ctx, "prior_day_high", None)
+        _sh = getattr(_ctx, "swing_high_nd", None)
+        return bool(
+            (_pdh is not None and _px > float(_pdh))
+            or (_sh is not None and _px > float(_sh))
+        )
+    except Exception:
+        return False
+
+
+def _session_still_high_conviction(row: Any, *, current_price: Any = None) -> bool:
     """True iff ``row`` (a MomentumSymbolViability for this watcher's symbol) still clears the
     arm-queue's HIGH-CONVICTION bar — the IDENTICAL test ``_continuation_active_trigger`` uses:
     ross_score >= chili_momentum_continuation_ross_floor, OR rvol >= the coiling-exempt extreme
     floor (explosive_rvol_floor * coiling_exempt_rvol_mult, ~9x), OR daily_breaking_major.
-    Reads ONLY the row's OWN persisted scanner signal (no new fetch). ``row`` None / no
-    evidence => False (NOT high-conviction => falls through to the normal fixed-clock reap)."""
+    Reads the row's OWN persisted scanner signal first (no new fetch); when the persisted
+    daily-breaking stamp is missing/False AND the reap loop supplied the session's cached
+    ``current_price`` (last_mid), the daily-breaking leg is RE-DERIVED from recorded daily
+    OHLCV levels via ``_daily_breaking_from_recorded_levels`` (VRAX 2026-07-09: a dropped
+    stamp reaped the day's biggest runner mid-run). ``row`` None / no evidence => False
+    (NOT high-conviction => falls through to the normal fixed-clock reap)."""
     if row is None:
         return False
     _ross_score: float | None = None
@@ -383,6 +434,12 @@ def _session_still_high_conviction(row: Any) -> bool:
     _sig = _row_ross_signal(row)
     if isinstance(_sig, dict):
         _daily_breaking = bool(_sig.get("daily_breaking_major"))
+    if not _daily_breaking and current_price is not None:
+        # Persisted stamp missing/False but the reap loop knows the session's current
+        # price: re-derive against the recorded day-constant daily levels (keep-only).
+        _daily_breaking = _daily_breaking_from_recorded_levels(
+            str(getattr(row, "symbol", "") or ""), current_price
+        )
     _rvol_now = _row_rvol(row)
     _ross_floor = float(getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
     _rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
@@ -1727,8 +1784,12 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                     and s.started_at is not None
                     and s.started_at < _event_ceiling_cutoff
                 )
+                # The session's OWN cached last_mid (already loaded above — zero new
+                # fetch) lets the conviction check re-derive a dropped daily-breaking
+                # stamp against recorded daily levels (VRAX 2026-07-09 winner-kill).
+                _cur_px = _le.get("last_mid") if isinstance(_le, dict) else None
                 if not _past_ceiling and _session_still_high_conviction(
-                    _conviction_idx.get(_su)
+                    _conviction_idx.get(_su), current_price=_cur_px
                 ) and _session_still_front_side(_le):
                     logger.info(
                         "[auto_arm] event-based KEEP pre-entry session=%s %s state=%s "
