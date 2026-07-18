@@ -132,9 +132,236 @@ def evaluate_pattern_conditions_for_variant(
     return True, "pattern_ok"
 
 
-def momentum_volume_confirmation(df: pd.DataFrame) -> tuple[bool, str]:
-    """Price above EMA-9 and volume above 1.5x recent average (last bar)."""
+# ── Cold-start tick-stream volume confirmation (2026-07-18, VIVS 2026-07-15) ──
+# The momentum_volume fallback trigger below demands >= 25 OHLCV bars (a 20-bar
+# trailing volume average + EMA-9 seed) on the 15m frame the live runner feeds it
+# — so a freshly-IGNITED cold symbol (bridge-subscribed seconds ago, ZERO bar
+# history by construction) was unenterable for hours: VIVS 2026-07-15 ran +90%
+# in a minute at $1.1M+/min ON OUR TAPE and collected 4,257 insufficient_bars
+# trigger-waits with zero entries (sink chili_weekend_test, session 2). Same
+# defect class as the 07-07 rvol-pillar fix: a null INPUT starved the gate, so
+# mechanize the signal from the data that DOES exist instead of surrendering it.
+# The tick tape (iqfeed_trade_ticks) has everything from subscribe onward, and
+# the ignition detector proves $-vol / print-rate / %change are computable from
+# ticks within seconds (scripts/iqfeed_ignition_detector.py, PIT-measured
+# 2026-07-17). Window geometry mirrors the detector's IgnitionConfig; the
+# adaptive floors are max(base, surge_mult x the symbol's OWN trailing baseline
+# over (as_of-300s, as_of-60s]) — the surge window is EXCLUDED so a burst can
+# never raise its own bar, and a cold name falls back to the documented floors.
+_TICK_VOL_SURGE_WINDOW_S = 60.0      # $-volume surge window (mirror: vol_window_s)
+_TICK_VOL_PRINTS_WINDOW_S = 10.0     # print-rate window (mirror: prints_window_s)
+_TICK_VOL_BASELINE_WINDOW_S = 300.0  # trailing self-baseline (mirror: baseline_window_s)
+_TICK_VOL_BASELINE_MIN_SPAN_S = 120.0  # baseline may only raise a bar past this span
+
+
+def _tick_stream_volume_decision(
+    stats: dict[str, Any],
+    *,
+    dollar_vol_base: float,
+    prints_base: float,
+    surge_mult: float,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Pure decision for the cold-start tick-stream volume confirmation.
+
+    ``stats`` carries the tape aggregates over the trailing windows anchored at
+    the (replay-aware) as-of instant: ``last_price``, ``vwap_60`` (60s tick
+    VWAP), ``min_60`` (60s low print), ``dollar_60`` (60s $-volume),
+    ``prints_10`` (prints in the trailing 10s), ``base_dollar``/``base_prints``
+    (the pre-surge baseline over (as_of-300s, as_of-60s]) and ``span_s`` (tape
+    history actually covered). ALL of the following must hold to ADMIT:
+
+    1. ``dollar_60``  >= max(dollar_vol_base, surge_mult x baseline $-rate x 60)
+    2. ``prints_10``  >= max(prints_base,   surge_mult x baseline print-rate x 10)
+    3. ``last_price`` >  ``vwap_60``  — buyers in control (the tick-equivalent of
+       the bar path's price-above-EMA-9 trend check)
+    4. ``last_price`` >  ``min_60``   — an actual up-move inside the window (a
+       monotonic flush prints last == min and is rejected; the bar path's
+       uptick check)
+
+    Pure; no I/O. Fail-CLOSED on any missing/invalid input — this helper can
+    only ever ADMIT what the bar gate starves, never manufacture a confirm on
+    a thin or unreadable tape.
+    """
+    def _f(key: str) -> float | None:
+        v = stats.get(key)
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return None
+        return fv if math.isfinite(fv) else None
+
+    last_price = _f("last_price")
+    vwap_60 = _f("vwap_60")
+    min_60 = _f("min_60")
+    dollar_60 = _f("dollar_60") or 0.0
+    prints_10 = _f("prints_10") or 0.0
+    base_dollar = _f("base_dollar") or 0.0
+    base_prints = _f("base_prints") or 0.0
+    span_s = _f("span_s") or 0.0
+    try:
+        vol_thr = max(0.0, float(dollar_vol_base))
+        prints_thr = max(0.0, float(prints_base))
+        _mult = max(1.0, float(surge_mult))
+    except (TypeError, ValueError):
+        return False, "tick_fallback_config_invalid", {}
+    # Adaptive raise: only once the tape actually spans the baseline minimum —
+    # a 30s-old cold tape keeps the documented floors (floors, not ceilings).
+    if span_s >= _TICK_VOL_BASELINE_MIN_SPAN_S:
+        pre_span = max(span_s - _TICK_VOL_SURGE_WINDOW_S, 1.0)
+        vol_thr = max(vol_thr, _mult * base_dollar / pre_span * _TICK_VOL_SURGE_WINDOW_S)
+        prints_thr = max(prints_thr, _mult * base_prints / pre_span * _TICK_VOL_PRINTS_WINDOW_S)
+    dbg: dict[str, Any] = {
+        "last_price": last_price,
+        "vwap_60": round(vwap_60, 6) if vwap_60 is not None else None,
+        "min_60": min_60,
+        "dollar_60": round(dollar_60, 2),
+        "prints_10": int(prints_10),
+        "dollar_vol_threshold": round(vol_thr, 2),
+        "prints_threshold": round(prints_thr, 2),
+        "baseline_span_s": round(span_s, 1),
+    }
+    if last_price is None or last_price <= 0 or vwap_60 is None or vwap_60 <= 0:
+        return False, "tick_fallback_no_tape", dbg
+    if dollar_60 < vol_thr:
+        return False, "tick_fallback_dollar_vol_below_floor", dbg
+    if prints_10 < prints_thr:
+        return False, "tick_fallback_prints_below_floor", dbg
+    if last_price <= vwap_60:
+        return False, "tick_fallback_below_vwap", dbg
+    if min_60 is not None and min_60 > 0 and last_price <= min_60:
+        return False, "tick_fallback_no_uptick", dbg
+    return True, "momentum_ok_tick_stream", dbg
+
+
+def tick_stream_volume_confirmation(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    as_of: Any = None,
+    settings_obj: Any = settings,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Cold-start volume confirmation from the recorded tick tape.
+
+    Live wrapper around :func:`_tick_stream_volume_decision`: one aggregate
+    read of ``iqfeed_trade_ticks`` over the trailing baseline window, bounded
+    as-of through the replay-aware clock chokepoint (live: ``_utcnow()`` is
+    wall UTC; FSM replay: the sim clock — same seam as
+    :func:`signed_tape_accel_features`, lookahead-free by construction).
+
+    Fail-CLOSED to ``(False, ...)`` on: no symbol / no db / crypto (no equity
+    tick tape) / kill-switch off / read error / empty tape. Equity-only —
+    crypto rides its existing OFI/flow path.
+    """
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return False, "tick_fallback_unavailable", {}
+    if not bool(getattr(settings_obj, "chili_momentum_tick_vol_fallback_enabled", True)):
+        return False, "tick_fallback_disabled", {}
+    try:
+        base_dv = float(
+            getattr(settings_obj, "chili_momentum_tick_vol_fallback_dollar_vol_base", 150_000.0)
+        )
+        base_pr = float(getattr(settings_obj, "chili_momentum_tick_vol_fallback_prints_base", 20))
+        smult = float(getattr(settings_obj, "chili_momentum_tick_vol_fallback_surge_mult", 4.0))
+    except (TypeError, ValueError):
+        return False, "tick_fallback_config_invalid", {}
+    try:
+        from sqlalchemy import text as _sql
+
+        _ao = _tape_asof_default(as_of)
+        _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
+        q = (
+            "WITH w AS ("
+            " SELECT price, size, observed_at FROM iqfeed_trade_ticks"
+            " WHERE symbol = :s"
+            " AND observed_at > :as_of - make_interval(secs => :bw)"
+            " AND observed_at <= :as_of"
+            ") SELECT"
+            " (SELECT price FROM w ORDER BY observed_at DESC LIMIT 1) AS last_price,"
+            " sum(price * size) FILTER (WHERE observed_at > :as_of - make_interval(secs => :sw)) AS dollar_60,"
+            " sum(size) FILTER (WHERE observed_at > :as_of - make_interval(secs => :sw)) AS shares_60,"
+            " min(price) FILTER (WHERE observed_at > :as_of - make_interval(secs => :sw)) AS min_60,"
+            " count(*) FILTER (WHERE observed_at > :as_of - make_interval(secs => :pw)) AS prints_10,"
+            " sum(price * size) FILTER (WHERE observed_at <= :as_of - make_interval(secs => :sw)) AS base_dollar,"
+            " count(*) FILTER (WHERE observed_at <= :as_of - make_interval(secs => :sw)) AS base_prints,"
+            " EXTRACT(EPOCH FROM (CAST(:as_of AS timestamp) - min(observed_at))) AS span_s"
+            " FROM w"
+        )
+        from .optional_db_read import optional_fetchone
+
+        row = optional_fetchone(db, _sql(q), {
+            "s": s,
+            "as_of": _ao,
+            "bw": _TICK_VOL_BASELINE_WINDOW_S,
+            "sw": _TICK_VOL_SURGE_WINDOW_S,
+            "pw": _TICK_VOL_PRINTS_WINDOW_S,
+        })
+    except Exception:
+        return False, "tick_fallback_read_error", {}
+    if row is None:
+        return False, "tick_fallback_no_tape", {}
+    try:
+        (last_price, dollar_60, shares_60, min_60, prints_10,
+         base_dollar, base_prints, span_s) = row
+    except (TypeError, ValueError):
+        return False, "tick_fallback_no_tape", {}
+    vwap_60 = None
+    try:
+        if shares_60 is not None and float(shares_60) > 0 and dollar_60 is not None:
+            vwap_60 = float(dollar_60) / float(shares_60)
+    except (TypeError, ValueError, ZeroDivisionError):
+        vwap_60 = None
+    return _tick_stream_volume_decision(
+        {
+            "last_price": last_price,
+            "vwap_60": vwap_60,
+            "min_60": min_60,
+            "dollar_60": dollar_60,
+            "prints_10": prints_10,
+            "base_dollar": base_dollar,
+            "base_prints": base_prints,
+            "span_s": span_s,
+        },
+        dollar_vol_base=base_dv,
+        prints_base=base_pr,
+        surge_mult=smult,
+    )
+
+
+def momentum_volume_confirmation(
+    df: pd.DataFrame,
+    *,
+    symbol: str | None = None,
+    db: Any = None,
+    as_of: Any = None,
+) -> tuple[bool, str]:
+    """Price above EMA-9 and volume above 1.5x recent average (last bar).
+
+    COLD-START TICK FALLBACK (2026-07-18, VIVS 2026-07-15): when the frame has
+    fewer than the 25 bars the EMA-9/volume-average math below needs, the SAME
+    confirmation intent (price above trend + volume genuinely surging) is
+    computed from the tick tape via :func:`tick_stream_volume_confirmation`.
+    ADDITIVE-only: callers that omit ``symbol``/``db`` and every frame with
+    >= 25 bars take the exact legacy path byte-identically; the fallback can
+    only ADMIT what the bar gate starves, and any decline falls through to the
+    legacy ``(False, "insufficient_bars")`` unchanged.
+    """
     if df is None or len(df) < 25:
+        try:
+            _tk_ok, _tk_reason, _tk_dbg = tick_stream_volume_confirmation(
+                symbol, db=db, as_of=as_of
+            )
+        except Exception:
+            _tk_ok, _tk_reason, _tk_dbg = False, "tick_fallback_error", {}
+        if _tk_ok:
+            _log.info(
+                "[entry_gates] cold-start tick-stream volume confirmation ADMIT sym=%s "
+                "bars=%s dbg=%s",
+                symbol, 0 if df is None else len(df), _tk_dbg,
+            )
+            return True, _tk_reason
         return False, "insufficient_bars"
     close = df["Close"].astype(float)
     vol = df["Volume"].astype(float)

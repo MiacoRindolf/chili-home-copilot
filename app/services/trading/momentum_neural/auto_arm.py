@@ -3602,6 +3602,28 @@ def _entry_trigger_fires(symbol: str, row: Any = None) -> tuple[bool, str]:
             df = fetch_ohlcv_df(symbol, interval="15m", period="5d")
             if df is None or getattr(df, "empty", True):
                 return False, "no_data"
+            if len(df) < 25:
+                # COLD-START TICK FALLBACK parity (2026-07-18, VIVS 07-15): the probe
+                # must make the IDENTICAL cold-frame decision as the live runner, so a
+                # freshly-ignited zero-bar-history name can ARM on its tick tape. The
+                # #561 short-lived-reader pattern: open a read session JUST for the
+                # tape aggregate and always close it. A session/read error ⇒ db=None
+                # inside ⇒ the legacy (False, "insufficient_bars") — never a free arm.
+                from ....db import SessionLocal
+
+                _vdb = None
+                try:
+                    _vdb = SessionLocal()
+                except Exception:
+                    _vdb = None
+                try:
+                    return momentum_volume_confirmation(df, symbol=symbol, db=_vdb)
+                finally:
+                    if _vdb is not None:
+                        try:
+                            _vdb.close()
+                        except Exception:
+                            pass
             return momentum_volume_confirmation(df)
     except Exception:
         return False, "trigger_error"

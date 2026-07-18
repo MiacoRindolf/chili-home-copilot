@@ -24383,8 +24383,27 @@ def tick_live_session(
                         _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
                     if _df is None or getattr(_df, "empty", True):
                         _trigger_ok, _trigger_reason = False, "no_data_wait"
+                        # COLD-START TICK FALLBACK, zero-bar frame (2026-07-18, VIVS 07-15):
+                        # a just-ignited symbol with NO OHLCV frame at all (or a transient
+                        # bar-fetch outage) can still confirm from its tick tape. ADMIT-only
+                        # override: any decline keeps the legacy "no_data_wait" byte-identical.
+                        try:
+                            _tk_ok, _tk_reason = momentum_volume_confirmation(
+                                None, symbol=sess.symbol, db=db,
+                            )
+                            if _tk_ok:
+                                _trigger_ok, _trigger_reason = _tk_ok, _tk_reason
+                        except Exception:
+                            pass
                     else:
-                        _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
+                        # COLD-START TICK FALLBACK (2026-07-18, VIVS 07-15): thread symbol+db
+                        # so a < 25-bar frame (freshly-ignited cold symbol, zero bar history
+                        # by construction) can confirm from the tick tape instead of waiting
+                        # insufficient_bars forever. as_of resolves through the replay-aware
+                        # clock chokepoint inside; >= 25-bar frames are byte-identical.
+                        _trigger_ok, _trigger_reason = momentum_volume_confirmation(
+                            _df, symbol=sess.symbol, db=db,
+                        )
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
         # BATCH B (FIX 1): STICKY BACK-SIDE BENCH. The per-tick front_side_state /
