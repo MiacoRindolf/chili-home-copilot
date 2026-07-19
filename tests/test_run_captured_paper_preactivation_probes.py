@@ -348,6 +348,8 @@ def test_focused_regression_roster_owns_complete_captured_paper_critical_path() 
         "scripts/captured_paper_operator_flow.py",
         "scripts/captured_paper_runtime_env.py",
         "scripts/captured_paper_activation_contract.py",
+        "scripts/captured_paper_activation_runner.py",
+        "scripts/build_captured_paper_activation_authority.py",
         "scripts/run_captured_paper_operator_chain.py",
         "app/services/trading/momentum_neural/captured_paper_initial_candidate_reader.py",
         "app/services/trading/momentum_neural/captured_paper_selection_producer.py",
@@ -358,9 +360,6 @@ def test_focused_regression_roster_owns_complete_captured_paper_critical_path() 
         "app/services/trading/momentum_neural/captured_paper_variant_binding.py",
     }
     assert required_compile_paths <= set(probes.FOCUSED_COMPILE_RELATIVE_PATHS)
-    assert "scripts/captured_paper_activation_runner.py" not in (
-        probes.FOCUSED_COMPILE_RELATIVE_PATHS
-    )
 
     required_test_nodes = {
         "tests/test_captured_paper_selection_source.py::test_source_captures_full_four_stream_envelope_and_scores_without_fallback",
@@ -393,12 +392,21 @@ def test_focused_regression_roster_owns_complete_captured_paper_critical_path() 
         "tests/test_captured_paper_runtime_env.py::test_installs_equity_only_candidate_and_excludes_every_live_credential",
         "tests/test_captured_paper_host_cutover.py::test_validate_only_is_default_and_performs_no_mutation",
         "tests/test_build_captured_paper_preactivation.py::test_code_inventory_exactly_matches_activation_contract_and_local_dependency_closure",
+        "tests/test_captured_paper_activation_runner.py::test_production_isolation_gate_requires_i_s_b_and_no_site_modules",
+        "tests/test_captured_paper_activation_runner.py::test_git_authority_runs_before_secret_install_with_minimal_sanitized_env",
+        "tests/test_captured_paper_activation_runner.py::test_validate_only_reaches_real_validate_boundary_but_never_apply",
+        "tests/test_captured_paper_activation_runner.py::test_staged_no_order_service_drift_is_rehashed_at_immediate_prelaunch",
+        "tests/test_captured_paper_activation_runner.py::test_every_post_apply_failure_runs_exactly_one_exact_rollback",
+        "tests/test_captured_paper_activation_runner.py::test_success_result_fsync_failure_remains_inside_compensated_apply_boundary",
+        "tests/test_captured_paper_activation_runner.py::test_subprocess_timeout_kills_exact_owned_child_and_grandchild_tree",
+        "tests/test_captured_paper_admission.py::test_missing_first_dip_receipt_keeps_daily_opportunity_reusable",
+        "tests/test_build_captured_paper_activation_authority.py::test_import_is_inert_stdlib_only_and_performs_no_authority_probe",
+        "tests/test_build_captured_paper_activation_authority.py::test_real_temp_git_builds_exact_canonical_loader_roundtrip_and_no_secret_receipt",
+        "tests/test_build_captured_paper_activation_authority.py::test_valid_looking_ignored_python_cache_cannot_execute_during_build",
+        "tests/test_build_captured_paper_activation_authority.py::test_private_publication_failure_leaves_no_final_or_pending_and_never_overwrites",
+        "tests/test_build_captured_paper_activation_authority.py::test_malformed_identity_database_and_secret_configuration_reject",
     }
     assert required_test_nodes <= set(probes.FOCUSED_PYTEST_NODE_IDS)
-    assert not any(
-        node.startswith("tests/test_captured_paper_activation_runner.py::")
-        for node in probes.FOCUSED_PYTEST_NODE_IDS
-    )
 
 
 def lifecycle_authority(*, omit_event: bool = False) -> StaticAuthority:
