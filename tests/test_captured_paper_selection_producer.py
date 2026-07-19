@@ -511,14 +511,18 @@ def test_ensure_and_apply_use_frontier_then_variant_lock_order(db) -> None:
         deadline = time.monotonic() + 5.0
         waiting_on_lock = False
         while time.monotonic() < deadline:
-            with db.get_bind().connect() as observer:
-                wait_type = observer.execute(
-                    text(
-                        "SELECT wait_event_type FROM pg_stat_activity "
-                        "WHERE pid=:pid"
-                    ),
-                    {"pid": waiter_pid[0]},
-                ).scalar_one_or_none()
+            # Reuse the lock-owning transaction as the observer.  The guarded
+            # test engine intentionally permits only two concurrent pooled
+            # connections: one for this owner and one for the waiter.  A third
+            # observer checkout would test pool exhaustion instead of lock
+            # ordering.
+            wait_type = applying.execute(
+                text(
+                    "SELECT wait_event_type FROM pg_stat_activity "
+                    "WHERE pid=:pid"
+                ),
+                {"pid": waiter_pid[0]},
+            ).scalar_one_or_none()
             if wait_type == "Lock":
                 waiting_on_lock = True
                 break

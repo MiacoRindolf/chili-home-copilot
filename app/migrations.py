@@ -28964,6 +28964,15 @@ def _migration_353_captured_paper_selection_route_state(conn) -> None:
         raise RuntimeError(
             "captured PAPER selection route-state schema incomplete"
         )
+    # ``Base.create_all`` owns the ORM table shape in fresh test databases but
+    # the model-level ``default`` is client-side, so PostgreSQL can legitimately
+    # have the full table with no durable version default.  Repair that one
+    # migration-owned allocator before verifying the physical contract.  This
+    # is idempotent and does not rewrite retained rows.
+    conn.execute(text("""
+        ALTER TABLE captured_paper_selection_route_states
+        ALTER COLUMN version SET DEFAULT 1
+    """))
     # ``Base.create_all`` or an interrupted earlier draft can leave a table
     # with every column but only a subset of the safety constraints.  Rebuild
     # every named contract on each migration invocation; invalid retained rows
