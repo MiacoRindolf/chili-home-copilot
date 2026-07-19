@@ -72,7 +72,6 @@ from .risk_policy import (
     replay_account_equity,
 )
 from .replay_provenance import (
-    IQFEED_AVAILABILITY_QUARANTINE_MIGRATION_ID,
     IQFEED_NBBO_TIMESTAMP_BASIS,
     IQFEED_TRADE_TIMESTAMP_BASIS,
     certify_iqfeed_tape_row,
@@ -552,55 +551,6 @@ def _database_table_has_column(db: Session, table_name: str, column_name: str) -
         return False
 
 
-def _database_migration_applied(db: Session, version_id: str) -> bool:
-    """Fail-closed migration probe; lightweight row fakes model current schema."""
-
-    if not hasattr(db, "get_bind"):
-        return True
-    try:
-        return bool(
-            db.execute(
-                text(
-                    "SELECT EXISTS ("
-                    "SELECT 1 FROM schema_version WHERE version_id = :version_id"
-                    ")"
-                ),
-                {"version_id": version_id},
-            ).scalar()
-        )
-    except Exception:
-        return False
-
-
-def _availability_quarantine_sql(
-    *,
-    stream_name: str,
-    table_name: str,
-    observed_at_expression: str,
-) -> str:
-    """Correlated immutable-ledger/incident-manifest quarantine predicate."""
-
-    equality_expression = f"{table_name}.available_at = {observed_at_expression}"
-    return (
-        "(EXISTS ("
-        "SELECT 1 FROM iqfeed_availability_quarantines quarantine "
-        f"WHERE quarantine.stream_name = '{stream_name}' "
-        f"AND quarantine.stream_row_id = {table_name}.id"
-        ") OR EXISTS ("
-        "SELECT 1 FROM iqfeed_availability_quarantine_manifests manifest "
-        f"WHERE manifest.stream_name = '{stream_name}' "
-        "AND (manifest.bridge_run_id IS NULL "
-        f"OR manifest.bridge_run_id = {table_name}.bridge_run_id) "
-        f"AND {observed_at_expression} >= manifest.observed_at_from "
-        f"AND {observed_at_expression} <= manifest.observed_at_through "
-        "AND (NOT manifest.require_available_equals_observed "
-        f"OR {equality_expression}) "
-        "AND (manifest.affected_update_xid IS NULL "
-        f"OR manifest.affected_update_xid = {table_name}.xmin::text)"
-        "))"
-    )
-
-
 def load_nbbo_tape(
     db: Session,
     symbol: str,
@@ -624,13 +574,7 @@ def load_nbbo_tape(
         "momentum_nbbo_spread_tape",
         "available_at",
     )
-    quarantine_ready = _database_migration_applied(
-        db,
-        IQFEED_AVAILABILITY_QUARANTINE_MIGRATION_ID,
-    )
-    if require_causal_provenance and (
-        not has_available_at or not quarantine_ready
-    ):
+    if require_causal_provenance and not has_available_at:
         return []
     available_select = (
         "available_at" if has_available_at else "NULL::timestamptz AS available_at"
@@ -646,20 +590,6 @@ def load_nbbo_tape(
         "expected_build": expected_build,
     }
     clock_column = "available_at" if require_causal_provenance else "observed_at"
-    quarantine_predicate = _availability_quarantine_sql(
-        stream_name="momentum_nbbo_spread_tape",
-        table_name="momentum_nbbo_spread_tape",
-        observed_at_expression="momentum_nbbo_spread_tape.observed_at",
-    )
-    quarantine_select = (
-        f"{quarantine_predicate} AS availability_quarantined, "
-        "TRUE AS availability_quarantine_checked"
-        if quarantine_ready
-        else (
-            "FALSE AS availability_quarantined, "
-            "FALSE AS availability_quarantine_checked"
-        )
-    )
     strict_predicate = (
         " AND source = 'iqfeed_l1'"
         " AND provider_event_at IS NULL"
@@ -671,7 +601,6 @@ def load_nbbo_tape(
         " AND message_type = 'Q'"
         " AND bridge_run_id IS NOT NULL"
         " AND connection_generation > 0"
-        f" AND NOT {quarantine_predicate}"
         if require_causal_provenance
         else ""
     )
@@ -688,15 +617,14 @@ def load_nbbo_tape(
             "       x.provider_event_at, x.received_at, x.available_at, "
             "       x.timestamp_basis, x.bridge_version, "
             "       x.provider_trade_reference_at, x.message_type, x.bridge_run_id, "
-            "       x.connection_generation, x.availability_quarantined, "
-            "       x.availability_quarantine_checked "
+            "       x.connection_generation "
             "FROM buckets b "
             "JOIN LATERAL ("
             "  SELECT id, observed_at, bid, ask, mid, spread_bps, source, "
             f"         provider_event_at, received_at, {available_select}, "
             "         timestamp_basis, bridge_version, "
             "         provider_trade_reference_at, message_type, bridge_run_id, "
-            f"         connection_generation, {quarantine_select} "
+            "         connection_generation "
             "  FROM momentum_nbbo_spread_tape "
             "  WHERE symbol = :symbol "
             f"    AND {clock_column} >= b.bucket "
@@ -715,7 +643,7 @@ def load_nbbo_tape(
             f"       provider_event_at, received_at, {available_select}, "
             "       timestamp_basis, bridge_version, "
             "       provider_trade_reference_at, message_type, bridge_run_id, "
-            f"       connection_generation, {quarantine_select} "
+            "       connection_generation "
             "FROM momentum_nbbo_spread_tape "
             f"WHERE symbol = :symbol AND {clock_column} >= :since AND {clock_column} < :until "
             "  AND bid > 0 AND ask > 0 AND ask >= bid "
@@ -785,13 +713,7 @@ def load_trade_tape(
         "iqfeed_trade_ticks",
         "available_at",
     )
-    quarantine_ready = _database_migration_applied(
-        db,
-        IQFEED_AVAILABILITY_QUARANTINE_MIGRATION_ID,
-    )
-    if require_causal_provenance and (
-        not has_available_at or not quarantine_ready
-    ):
+    if require_causal_provenance and not has_available_at:
         return []
     available_select = (
         "available_at" if has_available_at else "NULL::timestamptz AS available_at"
@@ -815,22 +737,6 @@ def load_trade_tape(
         "expected_build": expected_build,
     }
     clock_column = "available_at" if require_causal_provenance else "observed_at"
-    quarantine_predicate = _availability_quarantine_sql(
-        stream_name="iqfeed_trade_ticks",
-        table_name="iqfeed_trade_ticks",
-        observed_at_expression=(
-            "iqfeed_trade_ticks.observed_at AT TIME ZONE 'UTC'"
-        ),
-    )
-    quarantine_select = (
-        f"{quarantine_predicate} AS availability_quarantined, "
-        "TRUE AS availability_quarantine_checked"
-        if quarantine_ready
-        else (
-            "FALSE AS availability_quarantined, "
-            "FALSE AS availability_quarantine_checked"
-        )
-    )
     strict_predicate = (
         " AND source = 'iqfeed_l1'"
         " AND provider_event_at IS NULL"
@@ -842,7 +748,6 @@ def load_trade_tape(
         " AND message_type = 'Q'"
         " AND bridge_run_id IS NOT NULL"
         " AND connection_generation > 0"
-        f" AND NOT {quarantine_predicate}"
         if require_causal_provenance
         else ""
     )
@@ -859,15 +764,14 @@ def load_trade_tape(
             "       x.provider_event_at, x.received_at, x.available_at, "
             "       x.timestamp_basis, x.bridge_version, "
             "       x.provider_trade_reference_at, x.message_type, x.bridge_run_id, "
-            "       x.connection_generation, x.availability_quarantined, "
-            "       x.availability_quarantine_checked "
+            "       x.connection_generation "
             "FROM buckets b "
             "JOIN LATERAL ("
             "  SELECT id, observed_at, price, size, bid, ask, source, "
             f"         provider_event_at, received_at, {available_select}, "
             "         timestamp_basis, bridge_version, "
             "         provider_trade_reference_at, message_type, bridge_run_id, "
-            f"         connection_generation, {quarantine_select} "
+            "         connection_generation "
             "  FROM iqfeed_trade_ticks "
             "  WHERE symbol = :symbol "
             f"    AND {clock_column} >= b.bucket "
@@ -886,7 +790,7 @@ def load_trade_tape(
             f"       provider_event_at, received_at, {available_select}, "
             "       timestamp_basis, bridge_version, "
             "       provider_trade_reference_at, message_type, bridge_run_id, "
-            f"       connection_generation, {quarantine_select} "
+            "       connection_generation "
             "FROM iqfeed_trade_ticks "
             f"WHERE symbol = :symbol AND {clock_column} >= :since AND {clock_column} < :until "
             "  AND price > 0 "

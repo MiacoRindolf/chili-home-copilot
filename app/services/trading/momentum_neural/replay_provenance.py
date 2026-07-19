@@ -23,9 +23,6 @@ IQFEED_SOURCE = "iqfeed_l1"
 IQFEED_MESSAGE_TYPE = "Q"
 IQFEED_NBBO_TIMESTAMP_BASIS = "iqfeed_q_receive_trade_reference_fenced"
 IQFEED_TRADE_TIMESTAMP_BASIS = "iqfeed_trade_reference_date_inferred"
-IQFEED_AVAILABILITY_QUARANTINE_MIGRATION_ID = (
-    "349_iqfeed_availability_incident_quarantine"
-)
 IQFEED_MAX_REFERENCE_AGE_SECONDS = 2.0
 IQFEED_FUTURE_TOLERANCE_SECONDS = 1.0
 IQFEED_BRIDGE_BUILD_RE = re.compile(
@@ -119,8 +116,6 @@ def certify_iqfeed_tape_row(
     reference_at = _aware_utc_datetime(row.get("provider_trade_reference_at"))
     observed_at = _stored_observed_utc(row.get("observed_at"))
     provider_event_raw = row.get("provider_event_at")
-    availability_quarantined = row.get("availability_quarantined")
-    availability_quarantine_checked = row.get("availability_quarantine_checked")
     pinned_build = str(
         expected_bridge_build
         if expected_bridge_build is not None
@@ -152,10 +147,6 @@ def certify_iqfeed_tape_row(
         reasons.append("received_at_missing_or_naive")
     if available_at is None:
         reasons.append("available_at_missing_or_naive")
-    if availability_quarantine_checked is not True:
-        reasons.append("availability_quarantine_not_checked")
-    elif availability_quarantined is not False:
-        reasons.append("availability_quarantined")
     if reference_at is None:
         reasons.append("provider_trade_reference_missing_or_naive")
     # The bridge deliberately leaves this NULL: IQFeed's Most-Recent-Trade-Time
