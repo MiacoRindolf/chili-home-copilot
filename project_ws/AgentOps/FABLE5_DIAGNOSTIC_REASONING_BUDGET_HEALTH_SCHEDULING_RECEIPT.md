@@ -23,12 +23,15 @@ synthesis. **No Fable 5 parity or sealed-final solve is claimed.** Current evide
 
 - `542d9535` — feat: schedule repair planning within the local model budget
 - `0f9e8d67` — feat: fall back to the warm editor model when the reasoner times out
+- `04dcfc9a` — perf: compact diagnosis-to-fix case prompt and align generation budget
 
-Files (both commits):
+Files:
 - `scripts/autopilot_diagnosis_to_fix_benchmark.py`
 - `tests/test_diagnosis_to_fix_benchmark.py`
+- `app/services/project_autonomy/diagnostic_reasoning.py` (compact case-prompt flag, off by default)
+- `tests/test_project_autonomy_diagnostic_reasoning.py`
 
-Pushed to `origin/codex/fable5-diagnostic-reasoning` (`9eed3fd0..0f9e8d67`).
+Pushed to `origin/codex/fable5-diagnostic-reasoning`.
 
 No other file was touched. No runtime service, database, broker, Docker container, live
 trading state, deployment, or credential was touched. All edits are confined to the
@@ -104,18 +107,39 @@ Interpretation:
 - **Sealed-final remains 0/1** in every run. No novel-reasoning repair survived fresh sealed
   final adjudication.
 
+## 5b. Diagnosis-prompt compression attempt (commit `04dcfc9a`)
+
+The diagnosis stages were the largest budget consumer (investigator prompt ~20 K chars,
+judge ~27 K), so a compact case prompt was added: a reduced observation key set that keeps
+statements, causal classification, and ownership/source hints while dropping per-observation
+scaffolding, plus a generation cap aligned to the compact output rule (850 tokens). It is
+opt-in and off by default, so production autonomy and every other benchmark are byte-identical.
+
+Measured effect (scope-lane contract-disabled replay, 8 GB GPU): the investigator prompt
+dropped **20,098 → 15,729 chars (~22%)** and stayed above the 12,000-char qwen3 thinking
+threshold. **Honest limit: this did not overcome the qwen3:8b investigator timeout.** The
+investigator was still clamped at 135 s in two measured runs (with and without the 850-token
+cap). Per-call latency here is dominated not by prompt eval but by generation on a
+VRAM-offloaded model: `qwen3:8b` (6.2 GB) plus the prompt KV cache exceeds the 8 GB GPU, so
+generation runs partly on CPU and the call is killed at the clamp regardless of a 22% smaller
+prompt. No score or latency gain was demonstrated on this host; the change is correct and
+expected to help only where the reasoner plus its KV cache fit in VRAM. It was retained (not
+reverted) because it is off-by-default, non-regressing, and forward-looking, but it is
+explicitly **not** claimed as a proven improvement on the measurement hardware.
+
 ## 6. Tests run and exact pass counts
 
 - Focused suite (`tests/test_project_autonomy_diagnostic_reasoning.py`,
   `tests/test_diagnosis_to_fix_benchmark.py`, `tests/test_fable5_diagnostic_headtohead.py`,
   `tests/test_frontier_model_identity_attestation.py`,
-  `tests/test_realworld_diagnostic_benchmark.py`): **388 passed, 1 warning** post-change
-  (375 baseline + 13 new unit tests). The one warning is the pre-existing SAWarning about
+  `tests/test_realworld_diagnostic_benchmark.py`): **389 passed, 1 warning** post-change
+  (375 baseline + 14 new unit tests). The one warning is the pre-existing SAWarning about
   mutually dependent trading FK cycles.
-- 13 new unit tests cover `_observed_model_latency_sec`, `_model_timed_out`,
+- 14 new unit tests cover `_observed_model_latency_sec`, `_model_timed_out`,
   `_effective_reasoning_model`, `_budget_aware_repair_plan_schedule` (reasoner / editor-fallback
-  / budget-stop / reasoner-timed-out routes), and the `_generate_patch` and `_repair_after_failure`
-  routing/stop paths.
+  / budget-stop / reasoner-timed-out routes), the `_generate_patch` and `_repair_after_failure`
+  routing/stop paths, and the compact case prompt (statements preserved, scaffolding dropped,
+  default path byte-identical).
 
 ## 7. Premium calls made
 
@@ -127,9 +151,12 @@ authenticated Fable 5 collector was **not** run (it remains pending explicit use
 1. **Local 7B editor synthesis quality/variance** is the dominant residual bottleneck.
    Contract-disabled sealed-final success is still 0/1; the score swings 25–55 run to run.
 2. **Latency/hardware.** On 8 GB VRAM the dual-model configuration thrashes (18 s cold-loads +
-   ~30 tok/s reasoner). The reliable path on this host is swap-free single-model, but that
-   trades away the reasoner's depth. Prompt compression for the diagnosis stage (to fit the
-   investigator within the per-call timeout) is an unaddressed lever.
+   VRAM-offloaded generation). The reliable path on this host is swap-free single-model, but
+   that trades away the reasoner's depth. Diagnosis-prompt compression (commit `04dcfc9a`) was
+   tried and cut the prompt ~22% but did **not** fit the qwen3 investigator inside the per-call
+   timeout — the wall is VRAM (model + KV cache > 8 GB → CPU offload), not prompt size. A host
+   with enough VRAM to hold the reasoner plus its KV cache, or a smaller/faster reasoner, is the
+   real requirement.
 3. **No authenticated same-task Fable 5 head-to-head** exists (collector unapproved).
 4. Parity still requires ≥30 independently authored blinded cases, broad language/repository
    coverage, ≥95% sealed-final success, and blind human adjudication — none met.
