@@ -180,6 +180,31 @@ def test_normalized_case_and_prompts_preserve_deep_diagnostic_lenses():
     assert "explicit identity, scope, ordering, and recovery facts" in judge
 
 
+def test_compact_case_prompt_keeps_statements_and_drops_scaffolding():
+    case = reasoning.build_case_from_prompt(
+        "Diagnose why an AutoTrader candidate selector forces the explicit-user path "
+        "through the broad system backlog instead of its narrow index."
+    )
+    full = reasoning.investigator_prompt(case)
+    compact = reasoning.investigator_prompt(case, compact_case=True)
+    # Compaction only removes per-observation scaffolding, so it is strictly smaller.
+    assert len(compact) < len(full)
+    # Every observation statement survives compaction (statements are the diagnostic signal).
+    assert full.count('"statement":') >= 1
+    assert compact.count('"statement":') == full.count('"statement":')
+    # The fixed instruction shell is unchanged.
+    assert "earliest causal break" in compact
+    # Low-signal scaffolding keys are dropped from the compact prompt only.
+    assert "independence_key" in full and "independence_key" not in compact
+    # The flag defaults off, so the shared builder is byte-identical by default.
+    assert reasoning.investigator_prompt(case) == full
+    # Judge and skeptic honor the same flag.
+    packet = reasoning.heuristic_packet(case)
+    assert len(reasoning.judge_prompt(case, packet, {}, compact_case=True)) < len(
+        reasoning.judge_prompt(case, packet, {})
+    )
+
+
 def test_reconstructs_earliest_break_from_shuffled_cross_service_events():
     case = {
         "case_id": "causal-timeline",

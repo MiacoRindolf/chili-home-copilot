@@ -3080,7 +3080,10 @@ def _diagnostic_json_call(
         stage=f"diagnosis_{stage}",
         calls=calls,
         timeout=primary_timeout,
-        num_predict=1000,
+        # The compact output rules cap the packet at 850 tokens; matching the generation
+        # budget to that cap keeps a VRAM-offloaded local reasoner from spending ~150 extra
+        # tokens (tens of seconds at the offloaded generation rate) past its own budget.
+        num_predict=850,
         json_mode=True,
     )
     valid = diagnostic_reasoning.parse_json_object(response) is not None
@@ -3216,6 +3219,7 @@ def _diagnose(
         judge,
         stages_to_run=("investigator", "judge"),
         stop_after_unusable_investigator_with_boundary_fallback=True,
+        compact_case_prompt=True,
     )
     report = initial["report"]
     probes = diagnostic_probes.probes_from_packet(initial["packet"], max_probes=3)
@@ -3253,6 +3257,7 @@ def _diagnose(
         judge,
         stages_to_run=("judge",),
         previous_report=report,
+        compact_case_prompt=True,
     )
     revision = diagnostic_reasoning.evidence_gated_report_revision(
         report,

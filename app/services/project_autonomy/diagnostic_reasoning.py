@@ -12894,8 +12894,40 @@ def _has_prompt_value(value: object) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-def _case_prompt(case: Mapping[str, Any]) -> str:
-    observation_keys = (
+# High-signal observation fields retained when a caller opts into a compact case
+# prompt. Keeps the statement, causal classification, ownership/source hints, and
+# state/transition facts; drops per-observation scaffolding (provenance,
+# independence/correlation keys, lifecycle, fingerprints, revisions, timestamps,
+# service/producer/consumer ids) that a prose-derived diagnosis-to-fix case does not
+# need to identify the causal family and owner. The full (non-compact) case remains
+# available to the deterministic evaluator, so only prompt size changes.
+_COMPACT_OBSERVATION_KEYS = (
+    "evidence_id",
+    "statement",
+    "structured_context",
+    "dimension",
+    "observed_dimension",
+    "causal_dimension",
+    "dimension_origin",
+    "kind",
+    "discriminating",
+    "causal_role",
+    "attribution_gap",
+    "changed_dimensions",
+    "held_constant_dimensions",
+    "source_path",
+    "source_symbol",
+    "expected_state",
+    "actual_state",
+    "transition_from",
+    "transition_to",
+    "edge_from",
+    "edge_to",
+)
+
+
+def _case_prompt(case: Mapping[str, Any], *, compact: bool = False) -> str:
+    observation_keys = _COMPACT_OBSERVATION_KEYS if compact else (
         "evidence_id",
         "statement",
         "structured_context",
@@ -13152,7 +13184,7 @@ def _schema_correction_prompt(
     )
 
 
-def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
+def investigator_prompt(raw_case: Mapping[str, Any], *, compact_case: bool = False) -> str:
     case = normalize_case(raw_case)
     return (
         "You are CHILI's investigator. Return JSON only. "
@@ -13168,11 +13200,11 @@ def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
         "one targeted test selector under tests/. "
         f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
-        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}"
+        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case, compact=compact_case)}"
     )
 
 
-def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report: Mapping[str, Any]) -> str:
+def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report: Mapping[str, Any], *, compact_case: bool = False) -> str:
     case = normalize_case(raw_case)
     return (
         "You are the skeptic in a local-only diagnostic team. Return one full revised diagnostic packet as JSON only. "
@@ -13185,13 +13217,13 @@ def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], repor
         "Retract a conclusion rather than defending it when the evidence changed. Never request automatic runtime or live mutation. "
         f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
-        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
+        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case, compact=compact_case)}\n\n"
         f"Investigator packet:\n{_packet_prompt(packet)}\n\n"
         f"Deterministic evaluation:\n{_report_prompt(report)}"
     )
 
 
-def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report: Mapping[str, Any]) -> str:
+def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report: Mapping[str, Any], *, compact_case: bool = False) -> str:
     case = normalize_case(raw_case)
     return (
         "You are the judge in a local-only diagnostic team. Return one final full diagnostic packet as JSON only. "
@@ -13213,7 +13245,7 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
         "db_schema/db_profile. Database probes never accept SQL or raw-row selection. Raw commands are forbidden. "
         f"Causal ownership rubric:\n{_prompt_json(CAUSAL_DIMENSION_RUBRIC)}\n\n"
         f"{_compact_output_rules(case)}\n\n"
-        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
+        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case, compact=compact_case)}\n\n"
         f"Challenged packet:\n{_packet_prompt(packet)}\n\n"
         f"Deterministic evaluation:\n{_report_prompt(report)}"
     )
@@ -13602,6 +13634,7 @@ def run_local_diagnostic_debate(
     stages_to_run: Sequence[str] = ("investigator", "skeptic", "judge"),
     previous_report: Mapping[str, Any] | None = None,
     stop_after_unusable_investigator_with_boundary_fallback: bool = False,
+    compact_case_prompt: bool = False,
 ) -> dict[str, Any]:
     case = normalize_case(raw_case)
     packet = heuristic_packet(case)
@@ -13624,11 +13657,11 @@ def run_local_diagnostic_debate(
 
     for stage in requested_stages:
         if stage == "investigator":
-            prompt = investigator_prompt(case)
+            prompt = investigator_prompt(case, compact_case=compact_case_prompt)
         elif stage == "skeptic":
-            prompt = skeptic_prompt(case, packet, report)
+            prompt = skeptic_prompt(case, packet, report, compact_case=compact_case_prompt)
         else:
-            prompt = judge_prompt(case, packet, report)
+            prompt = judge_prompt(case, packet, report, compact_case=compact_case_prompt)
         response = model_call(stage, prompt) if model_call is not None else ""
         initial_parsed = parse_json_object(response)
         initial_json_parsed = initial_parsed is not None
