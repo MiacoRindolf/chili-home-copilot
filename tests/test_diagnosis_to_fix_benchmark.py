@@ -3165,6 +3165,104 @@ def test_repair_stops_deterministically_when_budget_cannot_fund_plan_and_edit(
     assert result["repair_plan_budget_stop"]["route"] == "budget_stop"
 
 
+def test_model_timed_out_detects_timeout_and_ignores_slow_success():
+    ledger = [
+        {"model": "qwen3:8b", "ok": False, "error_kind": "call_timeout"},
+        {"model": "qwen2.5-coder:7b", "ok": True, "wall_ms": 47000},
+    ]
+    assert benchmark._model_timed_out(ledger, "qwen3:8b") is True
+    assert benchmark._model_timed_out(ledger, "qwen2.5-coder:7b") is False
+    assert benchmark._model_timed_out(
+        [{"model": "m", "ok": False, "error": "http://x: TimeoutError: timed out"}], "m"
+    ) is True
+    # A slow-but-successful call does not disqualify the reasoner.
+    assert benchmark._model_timed_out([{"model": "m", "ok": True, "wall_ms": 170000}], "m") is False
+
+
+def test_effective_reasoning_model_keeps_healthy_affordable_reasoner():
+    calls = benchmark._ModelCallLedger(model_time_budget=690.0)
+    model, reason = benchmark._effective_reasoning_model(
+        calls, 180.0, reasoning_model="qwen3:8b", editor_model="qwen2.5-coder:7b"
+    )
+    assert model == "qwen3:8b"
+    assert reason == "reasoner"
+
+
+def test_effective_reasoning_model_falls_back_after_reasoner_timeout():
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 180.0
+    calls.append({"model": "qwen3:8b", "ok": False, "error_kind": "call_timeout"})
+    model, reason = benchmark._effective_reasoning_model(
+        calls, 180.0, reasoning_model="qwen3:8b", editor_model="qwen2.5-coder:7b"
+    )
+    assert model == "qwen2.5-coder:7b"
+    assert reason == "reasoner_timed_out"
+
+
+def test_effective_reasoning_model_falls_back_under_budget_pressure():
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 322.0  # remaining ~158s
+    calls.append({"model": "qwen3:8b", "ok": True, "wall_ms": 132000})
+    calls.append({"model": "qwen2.5-coder:7b", "ok": True, "wall_ms": 47000})
+    model, reason = benchmark._effective_reasoning_model(
+        calls, 180.0, reasoning_model="qwen3:8b", editor_model="qwen2.5-coder:7b"
+    )
+    assert model == "qwen2.5-coder:7b"
+    assert reason == "reasoner_budget"
+
+
+def test_effective_reasoning_model_is_noop_for_single_model():
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 470.0
+    model, reason = benchmark._effective_reasoning_model(
+        calls, 180.0, reasoning_model="qwen2.5-coder:7b", editor_model="qwen2.5-coder:7b"
+    )
+    assert model == "qwen2.5-coder:7b"
+    assert reason == "single_model"
+
+
+def test_budget_aware_repair_plan_falls_back_when_reasoner_timed_out():
+    calls = benchmark._ModelCallLedger(model_time_budget=690.0)  # ample budget
+    calls.append({"model": "qwen3:8b", "ok": False, "error_kind": "call_timeout"})
+    calls.append({"model": "qwen2.5-coder:7b", "ok": True, "wall_ms": 47000})
+    schedule = benchmark._budget_aware_repair_plan_schedule(
+        calls, 180.0, reasoning_model="qwen3:8b", editor_model="qwen2.5-coder:7b"
+    )
+    assert schedule["model"] == "qwen2.5-coder:7b"
+    assert schedule["stop"] is False
+    assert schedule["detail"]["route"] == "reasoner_timed_out"
+    assert schedule["detail"]["reasoner_timed_out"] is True
+
+
+def test_generate_patch_routes_plan_to_editor_after_reasoner_timeout(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    used: list[dict[str, object]] = []
+
+    def fake_call(model, _messages, *, stage, calls, timeout, num_predict, json_mode):
+        used.append({"model": model, "stage": stage})
+        return ""  # empty plan short-circuits _generate_patch right after the plan call
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 180.0
+    calls.append({"model": "qwen3:8b", "ok": False, "error_kind": "call_timeout"})
+
+    result = benchmark._generate_patch(
+        repo,
+        {"prompt": "Repair the owner.", "candidate_paths": ["owner.py"], "max_files": 1},
+        {"report": {"conclusion": {"dimension": "code"}}},
+        "qwen2.5-coder:7b",
+        calls,
+        180.0,
+        planning_model="qwen3:8b",
+    )
+    assert used and used[0]["stage"] == "plan"
+    assert used[0]["model"] == "qwen2.5-coder:7b"  # fell back off the timed-out reasoner
+    assert result["patch_applied"] is False
+
+
 def test_contract_owner_plan_edits_mapped_owner_instead_of_distractor(
     tmp_path,
     monkeypatch,

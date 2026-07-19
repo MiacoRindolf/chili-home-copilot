@@ -2952,6 +2952,57 @@ def _observed_model_latency_sec(
     return max(observed) if observed else None
 
 
+def _model_timed_out(calls: Sequence[Mapping[str, Any]], model: str) -> bool:
+    """True if ``model`` has a recorded timeout or budget-exhaustion failure.
+
+    On a host whose VRAM cannot hold the reasoning and editor models at once, a reasoner
+    that has already timed out will keep costing a cold model swap plus another doomed
+    call, so plan scheduling prefers the warm editor model once this is true. Only genuine
+    timeouts count -- a slow-but-successful call does not disqualify the reasoner.
+    """
+    target = str(model)
+    for entry in calls:
+        if not isinstance(entry, Mapping) or str(entry.get("model") or "") != target:
+            continue
+        if entry.get("ok"):
+            continue
+        kind = str(entry.get("error_kind") or "")
+        error = str(entry.get("error") or "").casefold()
+        if kind in {"call_timeout", "case_budget_exhausted"} or "timed out" in error or "timeout" in error:
+            return True
+    return False
+
+
+def _effective_reasoning_model(
+    calls: Sequence[Mapping[str, Any]],
+    timeout: float,
+    *,
+    reasoning_model: str,
+    editor_model: str,
+) -> tuple[str, str]:
+    """Choose the model for a structured reasoning (plan) call, preferring reliability.
+
+    Keeps a distinct reasoning model while it is healthy and still affordable; otherwise
+    falls back to the warm editor model. This converges a VRAM-thrashing dual-model run to
+    the reliable single-model path once the reasoner has proven too slow, without changing
+    the common case where the reasoner is fast enough. Returns ``(model, reason)``.
+    """
+    reasoner = reasoning_model or editor_model
+    if reasoner == editor_model:
+        return editor_model, "single_model"
+    if _model_timed_out(calls, reasoner):
+        return editor_model, "reasoner_timed_out"
+    remaining = _remaining_local_model_budget_sec(calls)
+    if remaining is not None:
+        editor_reserve = min(max(0.0, float(timeout)), REPAIR_EDITOR_RESERVE_SEC)
+        reasoner_latency = _observed_model_latency_sec(calls, reasoner)
+        if reasoner_latency is not None and remaining < reasoner_latency + editor_reserve:
+            editor_latency = _observed_model_latency_sec(calls, editor_model) or 0.0
+            if remaining >= editor_latency + editor_reserve:
+                return editor_model, "reasoner_budget"
+    return reasoner, "reasoner"
+
+
 def _budget_aware_repair_plan_schedule(
     calls: Sequence[Mapping[str, Any]],
     timeout: float,
@@ -2962,36 +3013,44 @@ def _budget_aware_repair_plan_schedule(
     """Pick a repair-plan model that still leaves room for the edit under budget pressure.
 
     The re-plan and the edit are two separate local calls that share one per-case model
-    budget. When an earlier slow diagnosis has drained most of that budget, issuing the
-    plan against the slower reasoning model clamps its timeout and the call dies without
-    ever reaching the editor, wasting the remainder. This scheduler is adaptive: it reads
-    the *observed* latency of each model from the call ledger (no fixed magic latency) and
-    prefers, in order, the reasoning model, the faster editor model, then a deterministic
-    stop. It is a no-op with ample budget or before any model has been observed.
+    budget. When an earlier slow diagnosis has drained most of that budget -- or the
+    distinct reasoning model has already timed out -- issuing the plan against the reasoner
+    clamps its timeout and the call dies without ever reaching the editor, wasting the
+    remainder. This scheduler is adaptive: it reads the *observed* latency and health of
+    each model from the call ledger (no fixed magic latency) and prefers, in order, the
+    reasoning model, the faster/warm editor model, then a deterministic stop. It is a no-op
+    with ample budget, a healthy reasoner, and no prior observation.
 
     Returns ``{"model", "num_predict", "stop", "detail"}``.
     """
     editor_reserve = min(max(0.0, float(timeout)), REPAIR_EDITOR_RESERVE_SEC)
     remaining = _remaining_local_model_budget_sec(calls)
     reasoner = reasoning_model or editor_model
+    reasoner_timed_out = reasoner != editor_model and _model_timed_out(calls, reasoner)
     detail: dict[str, Any] = {
         "remaining_sec": None if remaining is None else round(remaining, 3),
         "editor_reserve_sec": round(editor_reserve, 3),
+        "reasoner_timed_out": reasoner_timed_out,
     }
     if remaining is None:
-        return {"model": reasoner, "num_predict": 700, "stop": False,
-                "detail": {**detail, "route": "reasoner_unbounded_budget"}}
+        model = editor_model if reasoner_timed_out else reasoner
+        return {"model": model, "num_predict": 500 if reasoner_timed_out else 700, "stop": False,
+                "detail": {**detail, "route": "reasoner_timed_out" if reasoner_timed_out else "reasoner_unbounded_budget"}}
     reasoner_latency = _observed_model_latency_sec(calls, reasoner)
     editor_latency = _observed_model_latency_sec(calls, editor_model)
     detail["reasoner_latency_sec"] = reasoner_latency
     detail["editor_latency_sec"] = editor_latency
-    if reasoner_latency is None or remaining >= reasoner_latency + editor_reserve:
+    reasoner_fits = (
+        not reasoner_timed_out
+        and (reasoner_latency is None or remaining >= reasoner_latency + editor_reserve)
+    )
+    if reasoner_fits:
         return {"model": reasoner, "num_predict": 700, "stop": False,
                 "detail": {**detail, "route": "reasoner"}}
-    fast_estimate = editor_latency if editor_latency is not None else reasoner_latency
+    fast_estimate = editor_latency if editor_latency is not None else (reasoner_latency or 0.0)
     if remaining >= fast_estimate + editor_reserve:
         return {"model": editor_model, "num_predict": 500, "stop": False,
-                "detail": {**detail, "route": "editor_fallback"}}
+                "detail": {**detail, "route": "reasoner_timed_out" if reasoner_timed_out else "editor_fallback"}}
     return {"model": editor_model, "num_predict": 500, "stop": True,
             "detail": {**detail, "route": "budget_stop"}}
 
@@ -4633,8 +4692,14 @@ def _generate_patch(
         context += f"\n\n### Strongest causal evidence\n{evidence_context}"
     report = diagnosis.get("report") if isinstance(diagnosis.get("report"), Mapping) else {}
     max_files = _case_max_files(case)
+    plan_model, plan_model_reason = _effective_reasoning_model(
+        calls,
+        timeout,
+        reasoning_model=planning_model or model,
+        editor_model=model,
+    )
     plan_text = _local_call(
-        planning_model or model,
+        plan_model,
         [
             {"role": "system", "content": "You are a senior coding architect. Return compact JSON only."},
             {
@@ -4656,6 +4721,8 @@ def _generate_patch(
         num_predict=700,
         json_mode=True,
     )
+    if calls and plan_model != (planning_model or model):
+        calls[-1]["reasoning_model_fallback"] = plan_model_reason
     plan = code_agent._parse_plan_json(plan_text) or {}
     if not plan:
         return {
