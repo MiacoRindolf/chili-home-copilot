@@ -111,6 +111,11 @@ REQUIRED_DATABASE_TABLES = (
     "captured_paper_completed_fill_watch_events",
     "captured_paper_post_commit_outbox",
     "captured_paper_post_commit_outbox_events",
+    "captured_paper_selection_frontiers",
+    "captured_paper_selection_frontier_events",
+    "captured_paper_selection_route_states",
+    "captured_paper_variant_application_receipts",
+    "captured_paper_variant_application_events",
 )
 
 _COMMON_RECEIPT_KEYS = frozenset(

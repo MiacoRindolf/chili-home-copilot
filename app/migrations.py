@@ -19,11 +19,11 @@ append-only with respect to already-registered IDs:
    code path stays in this file even if the table it touched is later
    dropped. Deleting it breaks the startup import of ``run_migrations``
    in environments where the version_id is still unapplied.
-4. **Retirement, not deletion.** If a migration must be decommissioned
-   (e.g. it references a dropped table and new environments can skip it),
-   add an entry to ``RETIRED_MIGRATIONS`` below with the retirement date,
-   but keep its function defined and keep it in ``MIGRATIONS``. Retired
-   entries are asserted to never collide with live ``MIGRATIONS`` IDs.
+4. **Retirement, not deletion.** If an unshipped migration must be
+   decommissioned, add its ID to ``RETIRED_MIGRATIONS``, keep the function
+   body as historical evidence, and remove only its active ``MIGRATIONS``
+   tuple. Retired IDs are permanently reserved and asserted never to collide
+   with the live roster.
 5. **Idempotent bodies.** Every migration body guards every ALTER / INSERT
    with an existence check so re-running on a mis-tracked environment is
    a no-op, not a crash.
@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from typing import Iterator
@@ -150,7 +151,12 @@ def schema_startup_lock(engine: Engine) -> Iterator[None]:
 #     RETIRED_MIGRATIONS: dict[str, str] = {
 #         "042_trade_attribution_exit_tca": "superseded by 099; retired 2026-06-01",
 #     }
-RETIRED_MIGRATIONS: dict[str, str] = {}
+RETIRED_MIGRATIONS: dict[str, str] = {
+    "349_iqfeed_availability_incident_quarantine": (
+        "unbounded historical tape scan parked before PAPER activation; "
+        "retired 2026-07-18"
+    ),
+}
 
 
 def _assert_migration_ids_unique() -> None:
@@ -28270,6 +28276,1100 @@ def _migration_348_captured_paper_executed_read_inventory(conn) -> None:
     )
 
 
+def _migration_349_iqfeed_availability_incident_quarantine(conn) -> None:
+    """Quarantine the 2026-07-17 reconstructed IQFeed trade clocks.
+
+    An operator UPDATE replaced 176 previously-NULL ``available_at`` values
+    with ``observed_at``.  Migration 318 explicitly forbids that reconstruction:
+    the first strategy-visible instant is not recoverable from a market clock.
+
+    Keep the tape untouched.  Exact PostgreSQL update-version evidence is used
+    when one unique ``xmin`` owns all 176 candidate rows.  If vacuum, retention,
+    or a later update erased that identity, retain a conservative bridge-run /
+    observed-time manifest for every remaining incident-shape candidate.  The
+    replay reader applies both the immutable row ledger and the manifest fail
+    closed.
+    """
+
+    raise RuntimeError(
+        "migration 349 is parked and must never run; any bounded replacement "
+        "requires a new migration ID"
+    )
+
+    if "iqfeed_trade_ticks" not in _tables(conn):  # pragma: no cover - parked evidence
+        raise RuntimeError(
+            "IQFeed trade tape is missing before availability quarantine"
+        )
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS iqfeed_availability_quarantine_manifests (
+            manifest_id TEXT PRIMARY KEY,
+            incident_id TEXT NOT NULL,
+            stream_name TEXT NOT NULL,
+            bridge_run_id VARCHAR(36),
+            observed_at_from TIMESTAMPTZ NOT NULL,
+            observed_at_through TIMESTAMPTZ NOT NULL,
+            affected_update_xid TEXT,
+            identification_mode TEXT NOT NULL,
+            require_available_equals_observed BOOLEAN NOT NULL DEFAULT TRUE,
+            expected_affected_rows BIGINT NOT NULL,
+            selected_row_count BIGINT NOT NULL,
+            incident_statement TEXT NOT NULL,
+            recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+            CONSTRAINT ck_iqfeed_availability_manifest_stream CHECK (
+                stream_name IN (
+                    'iqfeed_trade_ticks', 'momentum_nbbo_spread_tape'
+                )
+            ),
+            CONSTRAINT ck_iqfeed_availability_manifest_window CHECK (
+                observed_at_through >= observed_at_from
+            ),
+            CONSTRAINT ck_iqfeed_availability_manifest_mode CHECK (
+                identification_mode IN (
+                    'postgres_xmin_exact_176',
+                    'conservative_bridge_run_window',
+                    'conservative_incident_window_no_retained_identity'
+                )
+            ),
+            CONSTRAINT ck_iqfeed_availability_manifest_counts CHECK (
+                expected_affected_rows > 0 AND selected_row_count >= 0
+            )
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS iqfeed_availability_quarantines (
+            stream_name TEXT NOT NULL,
+            stream_row_id BIGINT NOT NULL,
+            incident_id TEXT NOT NULL,
+            manifest_id TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            identification_mode TEXT NOT NULL,
+            affected_update_xid TEXT,
+            bridge_run_id VARCHAR(36),
+            connection_generation BIGINT,
+            source_frame_sequence BIGINT,
+            source_frame_sha256 VARCHAR(64),
+            symbol VARCHAR(16) NOT NULL,
+            observed_at TIMESTAMPTZ NOT NULL,
+            received_at TIMESTAMPTZ,
+            untrusted_available_at TIMESTAMPTZ NOT NULL,
+            quarantined_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (stream_name, stream_row_id),
+            CONSTRAINT ck_iqfeed_availability_quarantine_stream CHECK (
+                stream_name IN (
+                    'iqfeed_trade_ticks', 'momentum_nbbo_spread_tape'
+                )
+            ),
+            CONSTRAINT ck_iqfeed_availability_quarantine_mode CHECK (
+                identification_mode IN (
+                    'postgres_xmin_exact_176',
+                    'conservative_bridge_run_window'
+                )
+            )
+        )
+    """))
+
+    # Candidate identity is deliberately materialized only in a temporary
+    # relation.  The 128M-row production tape is never UPDATEd or DELETEd.
+    conn.execute(text("""
+        CREATE TEMP TABLE iqfeed_mig349_candidates ON COMMIT DROP AS
+        SELECT
+            tick.id AS stream_row_id,
+            tick.xmin::text AS update_xid,
+            tick.bridge_run_id,
+            tick.connection_generation,
+            tick.source_frame_sequence,
+            tick.source_frame_sha256,
+            tick.symbol,
+            tick.observed_at AT TIME ZONE 'UTC' AS observed_at,
+            tick.received_at,
+            tick.available_at AS untrusted_available_at,
+            (
+                tick.received_at IS NULL
+                OR tick.available_at < tick.received_at
+            ) AS impossible_release_order
+        FROM iqfeed_trade_ticks AS tick
+        WHERE tick.bridge_run_id IS NOT NULL
+          AND tick.available_at IS NOT NULL
+          AND tick.available_at = tick.observed_at AT TIME ZONE 'UTC'
+          AND tick.observed_at < TIMESTAMP '2026-07-18 07:00:00'
+    """))
+    conn.execute(text("""
+        CREATE TEMP TABLE iqfeed_mig349_exact_xid ON COMMIT DROP AS
+        WITH exact_groups AS (
+            SELECT update_xid
+            FROM iqfeed_mig349_candidates
+            GROUP BY update_xid
+            HAVING count(*) = 176
+               AND bool_or(impossible_release_order)
+        )
+        SELECT min(update_xid) AS update_xid
+        FROM exact_groups
+        HAVING count(*) = 1
+    """))
+    conn.execute(text("""
+        CREATE TEMP TABLE iqfeed_mig349_selected ON COMMIT DROP AS
+        WITH exact AS (
+            SELECT update_xid FROM iqfeed_mig349_exact_xid
+        )
+        SELECT candidate.*,
+               CASE
+                   WHEN EXISTS (SELECT 1 FROM exact)
+                   THEN 'postgres_xmin_exact_176'
+                   ELSE 'conservative_bridge_run_window'
+               END AS identification_mode
+        FROM iqfeed_mig349_candidates AS candidate
+        WHERE (
+            EXISTS (SELECT 1 FROM exact)
+            AND candidate.update_xid = (SELECT update_xid FROM exact)
+        ) OR (
+            NOT EXISTS (SELECT 1 FROM exact)
+        )
+    """))
+    conn.execute(text("""
+        INSERT INTO iqfeed_availability_quarantine_manifests (
+            manifest_id, incident_id, stream_name, bridge_run_id,
+            observed_at_from, observed_at_through, affected_update_xid,
+            identification_mode, require_available_equals_observed,
+            expected_affected_rows, selected_row_count, incident_statement
+        )
+        SELECT
+            'mig349:2026-07-17:' || bridge_run_id,
+            '2026-07-17_claude_available_at_observed_at',
+            'iqfeed_trade_ticks',
+            bridge_run_id,
+            min(observed_at),
+            max(observed_at),
+            CASE
+                WHEN bool_and(
+                    identification_mode = 'postgres_xmin_exact_176'
+                ) THEN min(update_xid)
+                ELSE NULL
+            END,
+            min(identification_mode),
+            TRUE,
+            176,
+            count(*),
+            'UPDATE iqfeed_trade_ticks SET available_at=observed_at '
+            'WHERE available_at IS NULL AND bridge_run_id IS NOT NULL '
+            'AND observed_at < now()-30min'
+        FROM iqfeed_mig349_selected
+        GROUP BY bridge_run_id
+        ON CONFLICT (manifest_id) DO NOTHING
+    """))
+    # If retention/vacuum removed every usable row identity, leave a visible
+    # wildcard incident window rather than silently declaring the evidence safe.
+    conn.execute(text("""
+        INSERT INTO iqfeed_availability_quarantine_manifests (
+            manifest_id, incident_id, stream_name, bridge_run_id,
+            observed_at_from, observed_at_through, affected_update_xid,
+            identification_mode, require_available_equals_observed,
+            expected_affected_rows, selected_row_count, incident_statement
+        )
+        SELECT
+            'mig349:2026-07-17:unrecovered',
+            '2026-07-17_claude_available_at_observed_at',
+            'iqfeed_trade_ticks',
+            NULL,
+            COALESCE(
+                (
+                    SELECT applied_at AT TIME ZONE 'UTC'
+                    FROM schema_version
+                    WHERE version_id = '318_iqfeed_strategy_available_at'
+                ),
+                TIMESTAMPTZ '2026-07-16 00:00:00+00'
+            ),
+            TIMESTAMPTZ '2026-07-18 07:00:00+00',
+            NULL,
+            'conservative_incident_window_no_retained_identity',
+            TRUE,
+            176,
+            0,
+            'UPDATE iqfeed_trade_ticks SET available_at=observed_at '
+            'WHERE available_at IS NULL AND bridge_run_id IS NOT NULL '
+            'AND observed_at < now()-30min'
+        WHERE NOT EXISTS (SELECT 1 FROM iqfeed_mig349_selected)
+        ON CONFLICT (manifest_id) DO NOTHING
+    """))
+    conn.execute(text("""
+        INSERT INTO iqfeed_availability_quarantines (
+            stream_name, stream_row_id, incident_id, manifest_id,
+            reason_code, identification_mode, affected_update_xid,
+            bridge_run_id, connection_generation, source_frame_sequence,
+            source_frame_sha256, symbol, observed_at, received_at,
+            untrusted_available_at
+        )
+        SELECT
+            'iqfeed_trade_ticks',
+            selected.stream_row_id,
+            '2026-07-17_claude_available_at_observed_at',
+            'mig349:2026-07-17:' || selected.bridge_run_id,
+            'available_at_reconstructed_from_observed_at',
+            selected.identification_mode,
+            CASE
+                WHEN selected.identification_mode = 'postgres_xmin_exact_176'
+                THEN selected.update_xid
+                ELSE NULL
+            END,
+            selected.bridge_run_id,
+            selected.connection_generation,
+            selected.source_frame_sequence,
+            selected.source_frame_sha256,
+            selected.symbol,
+            selected.observed_at,
+            selected.received_at,
+            selected.untrusted_available_at
+        FROM iqfeed_mig349_selected AS selected
+        ON CONFLICT (stream_name, stream_row_id) DO NOTHING
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION reject_iqfeed_availability_quarantine_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'IQFeed availability quarantine evidence is append-only'
+                USING ERRCODE = '23514';
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    for table_name in (
+        "iqfeed_availability_quarantine_manifests",
+        "iqfeed_availability_quarantines",
+    ):
+        conn.execute(text(
+            f"DROP TRIGGER IF EXISTS trg_{table_name}_immutable "
+            f"ON {table_name}"
+        ))
+        conn.execute(text(
+            f"CREATE TRIGGER trg_{table_name}_immutable "
+            f"BEFORE UPDATE OR DELETE OR TRUNCATE ON {table_name} "
+            "FOR EACH STATEMENT EXECUTE FUNCTION "
+            "reject_iqfeed_availability_quarantine_mutation()"
+        ))
+    conn.commit()
+    logger.info(
+        "[mig349] quarantined reconstructed IQFeed trade availability via "
+        "immutable xmin evidence or conservative bridge-run/window manifest"
+    )
+
+
+def _migration_350_captured_paper_selection_frontier(conn) -> None:
+    """Install the generation-bound captured PAPER selection CAS frontier."""
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS captured_paper_selection_frontiers (
+            id BIGSERIAL PRIMARY KEY,
+            account_scope VARCHAR(32) NOT NULL,
+            expected_account_id VARCHAR(36) NOT NULL,
+            activation_generation VARCHAR(36) NOT NULL,
+            execution_family VARCHAR(32) NOT NULL,
+            authority_sha256 VARCHAR(64) NOT NULL,
+            policy_sha256 VARCHAR(64) NOT NULL,
+            settings_projection_sha256 VARCHAR(64) NOT NULL,
+            code_build_sha256 VARCHAR(64) NOT NULL,
+            variant_set_sha256 VARCHAR(64) NOT NULL,
+            last_source_sequence BIGINT NOT NULL DEFAULT 0,
+            last_source_event_at TIMESTAMPTZ,
+            last_source_available_at TIMESTAMPTZ,
+            last_batch_sha256 VARCHAR(64),
+            status VARCHAR(16) NOT NULL DEFAULT 'ready',
+            gap_count BIGINT NOT NULL DEFAULT 0,
+            version BIGINT NOT NULL DEFAULT 1,
+            event_sequence BIGINT NOT NULL DEFAULT 0,
+            frontier_sha256 VARCHAR(64) NOT NULL,
+            last_event_sha256 VARCHAR(64),
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            CONSTRAINT uq_captured_paper_selection_frontier_generation UNIQUE (
+                account_scope, expected_account_id, activation_generation
+            ),
+            CONSTRAINT ck_captured_paper_selection_frontier_route CHECK (
+                account_scope = 'alpaca:paper'
+                AND execution_family = 'alpaca_spot'
+            ),
+            CONSTRAINT ck_captured_paper_selection_frontier_status CHECK (
+                status IN ('ready', 'gap')
+            ),
+            CONSTRAINT ck_captured_paper_selection_frontier_counters CHECK (
+                last_source_sequence >= 0 AND gap_count >= 0
+                AND version >= 1 AND event_sequence >= 0
+            )
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS captured_paper_selection_frontier_events (
+            id BIGSERIAL PRIMARY KEY,
+            frontier_id BIGINT NOT NULL REFERENCES
+                captured_paper_selection_frontiers(id) ON DELETE RESTRICT,
+            event_sequence BIGINT NOT NULL,
+            event_type VARCHAR(24) NOT NULL,
+            expected_version BIGINT NOT NULL,
+            next_version BIGINT NOT NULL,
+            expected_frontier_sha256 VARCHAR(64) NOT NULL,
+            next_frontier_sha256 VARCHAR(64) NOT NULL,
+            previous_event_sha256 VARCHAR(64),
+            event_sha256 VARCHAR(64) NOT NULL,
+            batch_sha256 VARCHAR(64),
+            gap_sha256 VARCHAR(64),
+            source_sequence_from BIGINT NOT NULL,
+            source_sequence_through BIGINT NOT NULL,
+            detail_canonical_json TEXT NOT NULL,
+            recorded_at TIMESTAMPTZ NOT NULL,
+            CONSTRAINT uq_captured_paper_selection_frontier_event_sequence
+                UNIQUE (frontier_id, event_sequence),
+            CONSTRAINT uq_captured_paper_selection_frontier_event_sha
+                UNIQUE (event_sha256),
+            CONSTRAINT ck_captured_paper_selection_frontier_event_type CHECK (
+                event_type IN ('batch_applied', 'coverage_gap')
+            ),
+            CONSTRAINT ck_captured_paper_selection_frontier_event_counters CHECK (
+                next_version = expected_version + 1
+                AND event_sequence > 0
+                AND source_sequence_from >= 0
+                AND source_sequence_through >= source_sequence_from
+            ),
+            CONSTRAINT ck_captured_paper_selection_frontier_event_evidence CHECK (
+                (
+                    event_type = 'batch_applied'
+                    AND batch_sha256 IS NOT NULL
+                    AND gap_sha256 IS NULL
+                ) OR (
+                    event_type = 'coverage_gap'
+                    AND batch_sha256 IS NULL
+                    AND gap_sha256 IS NOT NULL
+                )
+            )
+        )
+    """))
+    expected_frontier_columns = {
+        "id", "account_scope", "expected_account_id",
+        "activation_generation", "execution_family", "authority_sha256",
+        "policy_sha256", "settings_projection_sha256", "code_build_sha256",
+        "variant_set_sha256", "last_source_sequence",
+        "last_source_event_at", "last_source_available_at",
+        "last_batch_sha256", "status", "gap_count", "version",
+        "event_sequence", "frontier_sha256", "last_event_sha256",
+        "created_at", "updated_at",
+    }
+    expected_event_columns = {
+        "id", "frontier_id", "event_sequence", "event_type",
+        "expected_version", "next_version", "expected_frontier_sha256",
+        "next_frontier_sha256", "previous_event_sha256", "event_sha256",
+        "batch_sha256", "gap_sha256", "source_sequence_from",
+        "source_sequence_through", "detail_canonical_json", "recorded_at",
+    }
+    if expected_frontier_columns - _columns(
+        conn, "captured_paper_selection_frontiers"
+    ):
+        raise RuntimeError("captured PAPER selection frontier schema incomplete")
+    if expected_event_columns - _columns(
+        conn, "captured_paper_selection_frontier_events"
+    ):
+        raise RuntimeError("captured PAPER selection event schema incomplete")
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS
+            ix_captured_paper_selection_frontier_event_recorded
+        ON captured_paper_selection_frontier_events (recorded_at, id)
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION guard_captured_paper_selection_frontier()
+        RETURNS trigger AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                RAISE EXCEPTION 'captured PAPER selection frontier cannot be deleted'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF ROW(
+                NEW.account_scope, NEW.expected_account_id,
+                NEW.activation_generation, NEW.execution_family,
+                NEW.authority_sha256, NEW.policy_sha256,
+                NEW.settings_projection_sha256, NEW.code_build_sha256,
+                NEW.variant_set_sha256, NEW.created_at
+            ) IS DISTINCT FROM ROW(
+                OLD.account_scope, OLD.expected_account_id,
+                OLD.activation_generation, OLD.execution_family,
+                OLD.authority_sha256, OLD.policy_sha256,
+                OLD.settings_projection_sha256, OLD.code_build_sha256,
+                OLD.variant_set_sha256, OLD.created_at
+            ) THEN
+                RAISE EXCEPTION 'captured PAPER selection authority is immutable'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF NEW.version <> OLD.version + 1
+               OR NEW.event_sequence <> OLD.event_sequence + 1
+               OR NEW.last_source_sequence < OLD.last_source_sequence
+               OR NEW.updated_at < OLD.updated_at
+               OR NEW.last_event_sha256 IS NULL
+               OR NOT EXISTS (
+                    SELECT 1
+                    FROM captured_paper_selection_frontier_events event
+                    WHERE event.frontier_id = OLD.id
+                      AND event.event_sequence = NEW.event_sequence
+                      AND event.expected_version = OLD.version
+                      AND event.next_version = NEW.version
+                      AND event.expected_frontier_sha256 = OLD.frontier_sha256
+                      AND event.next_frontier_sha256 = NEW.frontier_sha256
+                      AND event.previous_event_sha256
+                          IS NOT DISTINCT FROM OLD.last_event_sha256
+                      AND event.event_sha256 = NEW.last_event_sha256
+                      AND (
+                        (
+                            event.event_type = 'batch_applied'
+                            AND NEW.status = 'ready'
+                            AND NEW.gap_count = OLD.gap_count
+                            AND NEW.last_source_sequence
+                                = event.source_sequence_through
+                        ) OR (
+                            event.event_type = 'coverage_gap'
+                            AND NEW.status = 'gap'
+                            AND NEW.gap_count = OLD.gap_count + 1
+                            AND NEW.last_source_sequence
+                                = OLD.last_source_sequence
+                        )
+                      )
+               ) THEN
+                RAISE EXCEPTION 'captured PAPER selection frontier CAS is invalid'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_captured_paper_selection_frontier_guard
+        ON captured_paper_selection_frontiers
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_captured_paper_selection_frontier_guard
+        BEFORE UPDATE OR DELETE ON captured_paper_selection_frontiers
+        FOR EACH ROW EXECUTE FUNCTION guard_captured_paper_selection_frontier()
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION reject_captured_paper_selection_event_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'captured PAPER selection events are append-only'
+                USING ERRCODE = '23514';
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_captured_paper_selection_event_immutable
+        ON captured_paper_selection_frontier_events
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_captured_paper_selection_event_immutable
+        BEFORE UPDATE OR DELETE ON captured_paper_selection_frontier_events
+        FOR EACH ROW EXECUTE FUNCTION
+            reject_captured_paper_selection_event_mutation()
+    """))
+    conn.commit()
+    logger.info("[mig350] installed captured PAPER selection CAS frontier")
+
+
+def _migration_351_captured_paper_variant_application_receipts(conn) -> None:
+    """Persist exact PAPER clone applications and append-only transitions."""
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS captured_paper_variant_application_receipts (
+            id BIGSERIAL PRIMARY KEY,
+            account_scope VARCHAR(32) NOT NULL,
+            execution_family VARCHAR(32) NOT NULL,
+            expected_account_id VARCHAR(36) NOT NULL,
+            activation_generation VARCHAR(36) NOT NULL,
+            activation_manifest_sha256 VARCHAR(64) NOT NULL,
+            authority_sha256 VARCHAR(64) NOT NULL,
+            plan_sha256 VARCHAR(64) NOT NULL,
+            application_sha256 VARCHAR(64) NOT NULL,
+            application_canonical_json TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            CONSTRAINT uq_captured_paper_variant_application_generation UNIQUE (
+                account_scope, expected_account_id, execution_family,
+                activation_generation
+            ),
+            CONSTRAINT uq_captured_paper_variant_application_sha UNIQUE (
+                application_sha256
+            ),
+            CONSTRAINT ck_captured_paper_variant_application_route CHECK (
+                account_scope = 'alpaca:paper'
+                AND execution_family = 'alpaca_spot'
+            )
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS captured_paper_variant_application_events (
+            id BIGSERIAL PRIMARY KEY,
+            application_id BIGINT NOT NULL REFERENCES
+                captured_paper_variant_application_receipts(id) ON DELETE RESTRICT,
+            event_sequence BIGINT NOT NULL,
+            event_type VARCHAR(24) NOT NULL,
+            previous_event_sha256 VARCHAR(64),
+            event_sha256 VARCHAR(64) NOT NULL,
+            detail_canonical_json TEXT NOT NULL,
+            recorded_at TIMESTAMPTZ NOT NULL,
+            CONSTRAINT uq_captured_paper_variant_application_event_sequence
+                UNIQUE (application_id, event_sequence),
+            CONSTRAINT uq_captured_paper_variant_application_event_sha
+                UNIQUE (event_sha256),
+            CONSTRAINT ck_captured_paper_variant_application_event_type CHECK (
+                event_type IN ('applied', 'rolled_back', 'recovered_stale')
+            ),
+            CONSTRAINT ck_captured_paper_variant_application_event_sequence CHECK (
+                event_sequence > 0
+            )
+        )
+    """))
+    expected_columns = {
+        "id", "account_scope", "execution_family", "expected_account_id",
+        "activation_generation", "activation_manifest_sha256",
+        "authority_sha256", "plan_sha256", "application_sha256",
+        "application_canonical_json", "created_at",
+    }
+    if expected_columns - _columns(
+        conn, "captured_paper_variant_application_receipts"
+    ):
+        raise RuntimeError(
+            "captured PAPER variant application receipt schema incomplete"
+        )
+    expected_event_columns = {
+        "id", "application_id", "event_sequence", "event_type",
+        "previous_event_sha256", "event_sha256", "detail_canonical_json",
+        "recorded_at",
+    }
+    if expected_event_columns - _columns(
+        conn, "captured_paper_variant_application_events"
+    ):
+        raise RuntimeError(
+            "captured PAPER variant application event schema incomplete"
+        )
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION reject_captured_paper_variant_application_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'captured PAPER variant application is immutable'
+                USING ERRCODE = '23514';
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_captured_paper_variant_application_guard
+        ON captured_paper_variant_application_receipts
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_captured_paper_variant_application_guard
+        BEFORE UPDATE OR DELETE ON captured_paper_variant_application_receipts
+        FOR EACH ROW EXECUTE FUNCTION
+            reject_captured_paper_variant_application_mutation()
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION guard_captured_paper_variant_application_event()
+        RETURNS trigger AS $$
+        DECLARE
+            prior RECORD;
+        BEGIN
+            IF TG_OP <> 'INSERT' THEN
+                RAISE EXCEPTION 'captured PAPER variant application event is append-only'
+                    USING ERRCODE = '23514';
+            END IF;
+            SELECT event_sequence, event_type, event_sha256 INTO prior
+            FROM captured_paper_variant_application_events
+            WHERE application_id = NEW.application_id
+            ORDER BY event_sequence DESC LIMIT 1
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                IF NOT (
+                    NEW.event_sequence = 1
+                    AND NEW.event_type = 'applied'
+                    AND NEW.previous_event_sha256 IS NULL
+                ) THEN
+                    RAISE EXCEPTION 'captured PAPER application first event is invalid'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSE
+                IF NOT (
+                    prior.event_sequence = 1
+                    AND prior.event_type = 'applied'
+                    AND NEW.event_sequence = 2
+                    AND NEW.event_type IN ('rolled_back', 'recovered_stale')
+                    AND NEW.previous_event_sha256 = prior.event_sha256
+                ) THEN
+                    RAISE EXCEPTION 'captured PAPER application transition is invalid'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_captured_paper_variant_application_event_guard
+        ON captured_paper_variant_application_events
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_captured_paper_variant_application_event_guard
+        BEFORE INSERT OR UPDATE OR DELETE
+        ON captured_paper_variant_application_events
+        FOR EACH ROW EXECUTE FUNCTION
+            guard_captured_paper_variant_application_event()
+    """))
+    conn.commit()
+    logger.info(
+        "[mig351] installed durable captured PAPER variant application receipts"
+    )
+
+
+def _migration_352_captured_paper_variant_application_append_only(conn) -> None:
+    """Reconcile the pre-event receipt draft to the append-only ledger."""
+
+    columns = _columns(conn, "captured_paper_variant_application_receipts")
+    legacy_columns = {
+        "status", "rollback_sha256", "rollback_canonical_json", "version",
+        "updated_at",
+    }
+    required_identity = {"execution_family", "activation_manifest_sha256"}
+    if columns and (legacy_columns & columns or required_identity - columns):
+        count = int(conn.execute(text(
+            "SELECT COUNT(*) FROM captured_paper_variant_application_receipts"
+        )).scalar() or 0)
+        if count:
+            raise RuntimeError(
+                "legacy captured PAPER application rows require explicit sealed migration"
+            )
+        conn.execute(text("""
+            DROP TRIGGER IF EXISTS trg_captured_paper_variant_application_guard
+            ON captured_paper_variant_application_receipts
+        """))
+        conn.execute(text("""
+            ALTER TABLE captured_paper_variant_application_receipts
+            ADD COLUMN IF NOT EXISTS execution_family VARCHAR(32),
+            ADD COLUMN IF NOT EXISTS activation_manifest_sha256 VARCHAR(64)
+        """))
+        conn.execute(text("""
+            ALTER TABLE captured_paper_variant_application_receipts
+            ALTER COLUMN execution_family SET NOT NULL,
+            ALTER COLUMN activation_manifest_sha256 SET NOT NULL,
+            DROP CONSTRAINT IF EXISTS uq_captured_paper_variant_application_generation,
+            DROP CONSTRAINT IF EXISTS ck_captured_paper_variant_application_route,
+            DROP CONSTRAINT IF EXISTS ck_captured_paper_variant_application_status,
+            DROP CONSTRAINT IF EXISTS ck_captured_paper_variant_application_state,
+            DROP COLUMN IF EXISTS status,
+            DROP COLUMN IF EXISTS rollback_sha256,
+            DROP COLUMN IF EXISTS rollback_canonical_json,
+            DROP COLUMN IF EXISTS version,
+            DROP COLUMN IF EXISTS updated_at
+        """))
+        conn.execute(text("""
+            ALTER TABLE captured_paper_variant_application_receipts
+            ADD CONSTRAINT uq_captured_paper_variant_application_generation UNIQUE (
+                account_scope, expected_account_id, execution_family,
+                activation_generation
+            ),
+            ADD CONSTRAINT ck_captured_paper_variant_application_route CHECK (
+                account_scope = 'alpaca:paper'
+                AND execution_family = 'alpaca_spot'
+            )
+        """))
+        conn.commit()
+    _migration_351_captured_paper_variant_application_receipts(conn)
+    logger.info(
+        "[mig352] reconciled captured PAPER application ledger to append-only"
+    )
+
+
+def _verify_migration_353_route_state_physical_contract(conn) -> None:
+    """Reject an all-column table whose physical PostgreSQL contract is weak."""
+
+    rows = conn.execute(text("""
+        SELECT
+            attribute.attname,
+            type.typname,
+            attribute.atttypmod,
+            attribute.attnotnull,
+            pg_get_expr(default_value.adbin, default_value.adrelid)
+        FROM pg_attribute AS attribute
+        JOIN pg_type AS type ON type.oid = attribute.atttypid
+        LEFT JOIN pg_attrdef AS default_value
+          ON default_value.adrelid = attribute.attrelid
+         AND default_value.adnum = attribute.attnum
+        WHERE attribute.attrelid =
+              'captured_paper_selection_route_states'::regclass
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+        ORDER BY attribute.attnum
+    """)).fetchall()
+    actual_columns = {
+        str(row[0]): (
+            str(row[1]),
+            int(row[2]),
+            bool(row[3]),
+            None if row[4] is None else str(row[4]),
+        )
+        for row in rows
+    }
+    expected_types = {
+        "id": ("int8", -1),
+        "account_scope": ("varchar", 36),
+        "expected_account_id": ("varchar", 40),
+        "activation_generation": ("varchar", 40),
+        "execution_family": ("varchar", 36),
+        "authority_sha256": ("varchar", 68),
+        "symbol": ("varchar", 40),
+        "variant_id": ("int4", -1),
+        "latest_source_sequence": ("int8", -1),
+        "state": ("varchar", 28),
+        "evidence_sha256": ("varchar", 68),
+        "batch_sha256": ("varchar", 68),
+        "source_event_at": ("timestamptz", -1),
+        "source_available_at": ("timestamptz", -1),
+        "version": ("int8", -1),
+        "state_sha256": ("varchar", 68),
+        "created_at": ("timestamptz", -1),
+        "updated_at": ("timestamptz", -1),
+    }
+    if set(actual_columns) != set(expected_types):
+        raise RuntimeError(
+            "captured PAPER selection route-state physical columns differ"
+        )
+    for name, (type_name, type_modifier) in expected_types.items():
+        actual_type, actual_modifier, not_null, default = actual_columns[name]
+        if (
+            actual_type != type_name
+            or actual_modifier != type_modifier
+            or not not_null
+        ):
+            raise RuntimeError(
+                "captured PAPER selection route-state physical column differs: "
+                f"{name}"
+            )
+        if name == "id":
+            if not re.fullmatch(
+                r"nextval\('(?:[^']+\.)?"
+                r"captured_paper_selection_route_states_id_seq'::regclass\)",
+                str(default or ""),
+            ):
+                raise RuntimeError(
+                    "captured PAPER selection route-state id allocator differs"
+                )
+        elif name == "version":
+            if str(default or "").replace("'", "").replace("::bigint", "") != "1":
+                raise RuntimeError(
+                    "captured PAPER selection route-state version default differs"
+                )
+        elif default is not None:
+            raise RuntimeError(
+                "captured PAPER selection route-state unexpected default: "
+                f"{name}"
+            )
+
+    key_rows = conn.execute(text("""
+        SELECT
+            constraint_row.contype,
+            ARRAY(
+                SELECT attribute.attname
+                FROM unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, pos)
+                JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = constraint_row.conrelid
+                 AND attribute.attnum = key.attnum
+                ORDER BY key.pos
+            ) AS local_columns,
+            foreign_relation.relname,
+            ARRAY(
+                SELECT attribute.attname
+                FROM unnest(constraint_row.confkey) WITH ORDINALITY AS key(attnum, pos)
+                JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = constraint_row.confrelid
+                 AND attribute.attnum = key.attnum
+                ORDER BY key.pos
+            ) AS foreign_columns,
+            constraint_row.confdeltype,
+            constraint_row.convalidated
+        FROM pg_constraint AS constraint_row
+        LEFT JOIN pg_class AS foreign_relation
+          ON foreign_relation.oid = constraint_row.confrelid
+        WHERE constraint_row.conrelid =
+              'captured_paper_selection_route_states'::regclass
+          AND constraint_row.contype IN ('p', 'f')
+        ORDER BY constraint_row.contype, constraint_row.conname
+    """)).fetchall()
+    normalized_keys = [
+        (
+            str(row[0]),
+            tuple(str(value) for value in (row[1] or ())),
+            None if row[2] is None else str(row[2]),
+            tuple(str(value) for value in (row[3] or ())),
+            str(row[4]),
+            bool(row[5]),
+        )
+        for row in key_rows
+    ]
+    primary_keys = [row for row in normalized_keys if row[0] == "p"]
+    foreign_keys = [row for row in normalized_keys if row[0] == "f"]
+    if not (
+        len(primary_keys) == 1
+        and primary_keys[0][1] == ("id",)
+        and primary_keys[0][5] is True
+        and foreign_keys
+        == [
+            (
+                "f",
+                ("variant_id",),
+                "momentum_strategy_variants",
+                ("id",),
+                "r",
+                True,
+            )
+        ]
+    ):
+        raise RuntimeError(
+            "captured PAPER selection route-state PK/FK contract differs"
+        )
+
+    index_row = conn.execute(text("""
+        SELECT
+            index_state.indisvalid,
+            index_state.indisready,
+            index_state.indisunique,
+            access_method.amname,
+            index_state.indpred IS NULL,
+            index_state.indexprs IS NULL,
+            ARRAY(
+                SELECT pg_get_indexdef(
+                    index_state.indexrelid, ordinal.position, TRUE
+                )
+                FROM generate_series(
+                    1, index_state.indnkeyatts
+                ) AS ordinal(position)
+                ORDER BY ordinal.position
+            )
+        FROM pg_class AS index_relation
+        JOIN pg_namespace AS namespace
+          ON namespace.oid = index_relation.relnamespace
+        JOIN pg_index AS index_state
+          ON index_state.indexrelid = index_relation.oid
+        JOIN pg_class AS table_relation
+          ON table_relation.oid = index_state.indrelid
+        JOIN pg_am AS access_method
+          ON access_method.oid = index_relation.relam
+        WHERE namespace.nspname = current_schema()
+          AND table_relation.relname =
+              'captured_paper_selection_route_states'
+          AND index_relation.relname =
+              'ix_captured_paper_selection_route_state_symbol'
+    """)).fetchall()
+    if len(index_row) != 1 or (
+        bool(index_row[0][0]),
+        bool(index_row[0][1]),
+        bool(index_row[0][2]),
+        str(index_row[0][3]),
+        bool(index_row[0][4]),
+        bool(index_row[0][5]),
+        tuple(str(value) for value in (index_row[0][6] or ())),
+    ) != (
+        True,
+        True,
+        False,
+        "btree",
+        True,
+        True,
+        (
+            "account_scope",
+            "expected_account_id",
+            "activation_generation",
+            "symbol",
+        ),
+    ):
+        raise RuntimeError(
+            "captured PAPER selection route-state index contract differs"
+        )
+
+
+def _migration_353_captured_paper_selection_route_state(conn) -> None:
+    """Install the durable per-route selection eligibility/tombstone CAS."""
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS captured_paper_selection_route_states (
+            id BIGSERIAL PRIMARY KEY,
+            account_scope VARCHAR(32) NOT NULL,
+            expected_account_id VARCHAR(36) NOT NULL,
+            activation_generation VARCHAR(36) NOT NULL,
+            execution_family VARCHAR(32) NOT NULL,
+            authority_sha256 VARCHAR(64) NOT NULL,
+            symbol VARCHAR(36) NOT NULL,
+            variant_id INTEGER NOT NULL REFERENCES
+                momentum_strategy_variants(id) ON DELETE RESTRICT,
+            latest_source_sequence BIGINT NOT NULL,
+            state VARCHAR(24) NOT NULL,
+            evidence_sha256 VARCHAR(64) NOT NULL,
+            batch_sha256 VARCHAR(64) NOT NULL,
+            source_event_at TIMESTAMPTZ NOT NULL,
+            source_available_at TIMESTAMPTZ NOT NULL,
+            version BIGINT NOT NULL DEFAULT 1,
+            state_sha256 VARCHAR(64) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            CONSTRAINT uq_captured_paper_selection_route_state UNIQUE (
+                account_scope, expected_account_id, activation_generation,
+                symbol, variant_id
+            ),
+            CONSTRAINT ck_captured_paper_selection_route_state_route CHECK (
+                account_scope = 'alpaca:paper'
+                AND execution_family = 'alpaca_spot'
+            ),
+            CONSTRAINT ck_captured_paper_selection_route_state_value CHECK (
+                state IN ('eligible', 'coverage_unavailable')
+            ),
+            CONSTRAINT ck_captured_paper_selection_route_state_counters CHECK (
+                latest_source_sequence > 0 AND version > 0
+            ),
+            CONSTRAINT ck_captured_paper_selection_route_state_clocks CHECK (
+                source_available_at >= source_event_at
+                AND updated_at >= created_at
+            ),
+            CONSTRAINT ck_captured_paper_selection_route_state_hashes CHECK (
+                authority_sha256 ~ '^[0-9a-f]{64}$'
+                AND evidence_sha256 ~ '^[0-9a-f]{64}$'
+                AND batch_sha256 ~ '^[0-9a-f]{64}$'
+                AND state_sha256 ~ '^[0-9a-f]{64}$'
+            )
+        )
+    """))
+    expected_columns = {
+        "id", "account_scope", "expected_account_id",
+        "activation_generation", "execution_family", "authority_sha256",
+        "symbol", "variant_id", "latest_source_sequence", "state",
+        "evidence_sha256", "batch_sha256", "source_event_at",
+        "source_available_at", "version", "state_sha256", "created_at",
+        "updated_at",
+    }
+    if expected_columns - _columns(conn, "captured_paper_selection_route_states"):
+        raise RuntimeError(
+            "captured PAPER selection route-state schema incomplete"
+        )
+    # ``Base.create_all`` or an interrupted earlier draft can leave a table
+    # with every column but only a subset of the safety constraints.  Rebuild
+    # every named contract on each migration invocation; invalid retained rows
+    # make the migration fail closed instead of silently preserving a weaker
+    # table.
+    for constraint_name in (
+        "uq_captured_paper_selection_route_state",
+        "ck_captured_paper_selection_route_state_route",
+        "ck_captured_paper_selection_route_state_value",
+        "ck_captured_paper_selection_route_state_counters",
+        "ck_captured_paper_selection_route_state_clocks",
+        "ck_captured_paper_selection_route_state_hashes",
+    ):
+        conn.execute(text(
+            "ALTER TABLE captured_paper_selection_route_states "
+            f'DROP CONSTRAINT IF EXISTS "{constraint_name}"'
+        ))
+    conn.execute(text("""
+        ALTER TABLE captured_paper_selection_route_states
+        ADD CONSTRAINT uq_captured_paper_selection_route_state UNIQUE (
+            account_scope, expected_account_id, activation_generation,
+            symbol, variant_id
+        ),
+        ADD CONSTRAINT ck_captured_paper_selection_route_state_route CHECK (
+            account_scope = 'alpaca:paper'
+            AND execution_family = 'alpaca_spot'
+        ),
+        ADD CONSTRAINT ck_captured_paper_selection_route_state_value CHECK (
+            state IN ('eligible', 'coverage_unavailable')
+        ),
+        ADD CONSTRAINT ck_captured_paper_selection_route_state_counters CHECK (
+            latest_source_sequence > 0 AND version > 0
+        ),
+        ADD CONSTRAINT ck_captured_paper_selection_route_state_clocks CHECK (
+            source_available_at >= source_event_at
+            AND updated_at >= created_at
+        ),
+        ADD CONSTRAINT ck_captured_paper_selection_route_state_hashes CHECK (
+            authority_sha256 ~ '^[0-9a-f]{64}$'
+            AND evidence_sha256 ~ '^[0-9a-f]{64}$'
+            AND batch_sha256 ~ '^[0-9a-f]{64}$'
+            AND state_sha256 ~ '^[0-9a-f]{64}$'
+        )
+    """))
+    installed_constraints = {
+        str(row[0]): str(row[1])
+        for row in conn.execute(text("""
+            SELECT conname, contype
+            FROM pg_constraint
+            WHERE conrelid =
+                'captured_paper_selection_route_states'::regclass
+        """)).fetchall()
+    }
+    expected_constraints = {
+        "uq_captured_paper_selection_route_state": "u",
+        "ck_captured_paper_selection_route_state_route": "c",
+        "ck_captured_paper_selection_route_state_value": "c",
+        "ck_captured_paper_selection_route_state_counters": "c",
+        "ck_captured_paper_selection_route_state_clocks": "c",
+        "ck_captured_paper_selection_route_state_hashes": "c",
+    }
+    if any(
+        installed_constraints.get(name) != kind
+        for name, kind in expected_constraints.items()
+    ):
+        raise RuntimeError(
+            "captured PAPER selection route-state constraints incomplete"
+        )
+    conn.execute(text("""
+        DROP INDEX IF EXISTS ix_captured_paper_selection_route_state_symbol
+    """))
+    conn.execute(text("""
+        CREATE INDEX
+            ix_captured_paper_selection_route_state_symbol
+        ON captured_paper_selection_route_states (
+            account_scope, expected_account_id, activation_generation, symbol
+        )
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION guard_captured_paper_selection_route_state()
+        RETURNS trigger AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                RAISE EXCEPTION 'captured PAPER selection route state cannot be deleted'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF NOT (
+                NEW.account_scope = OLD.account_scope
+                AND NEW.expected_account_id = OLD.expected_account_id
+                AND NEW.activation_generation = OLD.activation_generation
+                AND NEW.execution_family = OLD.execution_family
+                AND NEW.authority_sha256 = OLD.authority_sha256
+                AND NEW.symbol = OLD.symbol
+                AND NEW.variant_id = OLD.variant_id
+                AND NEW.created_at = OLD.created_at
+                AND NEW.version = OLD.version + 1
+                AND NEW.latest_source_sequence > OLD.latest_source_sequence
+                AND NEW.source_event_at >= OLD.source_event_at
+                AND NEW.source_available_at >= OLD.source_available_at
+                AND NEW.updated_at >= OLD.updated_at
+            ) THEN
+                RAISE EXCEPTION 'captured PAPER selection route-state CAS is invalid'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_captured_paper_selection_route_state_guard
+        ON captured_paper_selection_route_states
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_captured_paper_selection_route_state_guard
+        BEFORE UPDATE OR DELETE ON captured_paper_selection_route_states
+        FOR EACH ROW EXECUTE FUNCTION
+            guard_captured_paper_selection_route_state()
+    """))
+    _verify_migration_353_route_state_physical_contract(conn)
+    conn.commit()
+    logger.info(
+        "[mig353] installed captured PAPER per-route selection state CAS"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -28728,6 +29828,14 @@ MIGRATIONS = [
      _migration_347_captured_paper_phase_one_handoff_ledger),
     ("348_captured_paper_executed_read_inventory",
      _migration_348_captured_paper_executed_read_inventory),
+    ("350_captured_paper_selection_frontier",
+     _migration_350_captured_paper_selection_frontier),
+    ("351_captured_paper_variant_application_receipts",
+     _migration_351_captured_paper_variant_application_receipts),
+    ("352_captured_paper_variant_application_append_only",
+     _migration_352_captured_paper_variant_application_append_only),
+    ("353_captured_paper_selection_route_state",
+     _migration_353_captured_paper_selection_route_state),
 ]
 
 

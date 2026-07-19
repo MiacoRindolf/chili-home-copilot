@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
+import sqlalchemy as sa
 
 from app.config import settings
 from app.services.trading.momentum_neural.counterfactual_replay import (
@@ -16,11 +17,13 @@ from app.services.trading.momentum_neural.counterfactual_replay import (
     _trade_dollar_volume_asof,
     _trade_tape_to_microbars,
     load_nbbo_tape,
+    load_trade_tape,
     opportunity_label_summary,
 )
 from app.services.trading.momentum_neural.entry_gates import momentum_pullback_trigger
 from app.services.trading.momentum_neural.replay_provenance import (
     IQFEED_NBBO_TIMESTAMP_BASIS,
+    IQFEED_TRADE_TIMESTAMP_BASIS,
     certify_iqfeed_tape_row,
 )
 from app.services.trading.momentum_neural.replay_v3 import RecordedOhlcvProvider
@@ -49,7 +52,19 @@ def _certified_quote_row(**overrides):
         "message_type": "Q",
         "bridge_run_id": "11111111-1111-1111-1111-111111111111",
         "connection_generation": 3,
+        "availability_quarantined": False,
+        "availability_quarantine_checked": True,
     }
+    row.update(overrides)
+    return row
+
+
+def _certified_trade_row(**overrides):
+    row = _certified_quote_row(
+        price=5.0,
+        size=100.0,
+        timestamp_basis=IQFEED_TRADE_TIMESTAMP_BASIS,
+    )
     row.update(overrides)
     return row
 
@@ -71,6 +86,29 @@ def test_complete_q_tuple_certifies_receive_clock_not_reference_clock():
     assert out.receive_reference_delta_seconds == pytest.approx(0.25)
 
 
+def test_legitimate_exact_equality_is_not_quarantined_by_clock_shape_alone():
+    exact = _certified_quote_row(
+        received_at=REFERENCE,
+        available_at=REFERENCE,
+    )
+
+    trusted = certify_iqfeed_tape_row(
+        exact,
+        expected_timestamp_basis=IQFEED_NBBO_TIMESTAMP_BASIS,
+        expected_bridge_build=TEST_BRIDGE_BUILD,
+    )
+    quarantined = certify_iqfeed_tape_row(
+        {**exact, "availability_quarantined": True},
+        expected_timestamp_basis=IQFEED_NBBO_TIMESTAMP_BASIS,
+        expected_bridge_build=TEST_BRIDGE_BUILD,
+    )
+
+    assert trusted.certified is True
+    assert "availability_quarantined" not in trusted.reasons
+    assert quarantined.certified is False
+    assert "availability_quarantined" in quarantined.reasons
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
@@ -80,6 +118,10 @@ def test_complete_q_tuple_certifies_receive_clock_not_reference_clock():
         ({"connection_generation": 0}, "connection_generation_invalid"),
         ({"connection_generation": True}, "connection_generation_invalid"),
         ({"available_at": None}, "available_at_missing_or_naive"),
+        (
+            {"availability_quarantine_checked": False},
+            "availability_quarantine_not_checked",
+        ),
         (
             {"bridge_version": "iqfeed-l1-exact-print-provenance-v3+sha256:ffffffffffffffff"},
             "bridge_version_not_pinned",
@@ -185,6 +227,99 @@ def test_strict_nbbo_loader_drops_legacy_rows_and_uses_availability_clock(monkey
     assert "available_at >= :since" in strict_sql
     assert "bridge_version = :expected_build" in strict_sql
     assert "source = 'iqfeed_l1'" in strict_sql
+    assert "iqfeed_availability_quarantines" in strict_sql
+    assert "iqfeed_availability_quarantine_manifests" in strict_sql
+    assert "affected_update_xid" in strict_sql
+
+
+def test_strict_loader_rejects_quarantined_row_even_if_db_fake_ignores_sql(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.counterfactual_replay.settings.chili_iqfeed_l1_authoritative_bridge_build",
+        TEST_BRIDGE_BUILD,
+        raising=False,
+    )
+    row = _certified_quote_row(
+        availability_quarantined=True,
+        received_at=REFERENCE,
+        available_at=REFERENCE,
+    )
+
+    strict = load_nbbo_tape(
+        _FakeDb([row]),
+        "TEST",
+        since=REFERENCE - timedelta(seconds=1),
+        until=REFERENCE + timedelta(seconds=1),
+        require_causal_provenance=True,
+    )
+
+    assert strict == []
+
+
+def test_strict_trade_loader_filters_the_incident_quarantine(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.counterfactual_replay.settings.chili_iqfeed_l1_authoritative_bridge_build",
+        TEST_BRIDGE_BUILD,
+        raising=False,
+    )
+    trusted = _certified_trade_row()
+    quarantined = _certified_trade_row(
+        id=2,
+        availability_quarantined=True,
+    )
+    db = _FakeDb([trusted, quarantined])
+
+    strict = load_trade_tape(
+        db,
+        "TEST",
+        since=REFERENCE - timedelta(seconds=1),
+        until=REFERENCE + timedelta(seconds=1),
+        require_causal_provenance=True,
+    )
+
+    assert [tick.sequence for tick in strict] == [1]
+    sql = db.calls[0][0]
+    assert "quarantine.stream_row_id = iqfeed_trade_ticks.id" in sql
+    assert "manifest.bridge_run_id = iqfeed_trade_ticks.bridge_run_id" in sql
+    assert "iqfeed_trade_ticks.xmin::text" in sql
+    assert "available_at = iqfeed_trade_ticks.observed_at AT TIME ZONE 'UTC'" in sql
+
+
+def test_strict_trade_loader_fails_closed_before_query_when_349_is_parked(
+    monkeypatch,
+):
+    from app.services.trading.momentum_neural import counterfactual_replay
+
+    class NoQueryDb:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("strict loader queried after missing authority")
+
+    monkeypatch.setattr(
+        counterfactual_replay,
+        "_database_table_has_column",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        counterfactual_replay,
+        "_database_migration_applied",
+        lambda *_args, **_kwargs: False,
+    )
+
+    assert load_trade_tape(
+        NoQueryDb(),
+        "M349SQL",
+        since=REFERENCE - timedelta(seconds=1),
+        until=REFERENCE + timedelta(seconds=2),
+        require_causal_provenance=True,
+    ) == []
+    assert load_nbbo_tape(
+        NoQueryDb(),
+        "M349SQL",
+        since=REFERENCE - timedelta(seconds=1),
+        until=REFERENCE + timedelta(seconds=2),
+        require_causal_provenance=True,
+    ) == []
 
 
 def test_recorded_ohlcv_provider_excludes_future_and_incomplete_bar():

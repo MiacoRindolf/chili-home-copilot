@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -165,6 +168,501 @@ def test_paper_order_submission_audit_is_monotonic_and_content_addressed(
     assert hashlib.sha256(body.encode()).hexdigest() == after[
         "snapshot_sha256"
     ]
+
+
+def _bound_order_transition_adapter(monkeypatch, orders, *, after_read=None):
+    account_id = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
+    requests = []
+
+    class _Client:
+        def get_orders(self, *, filter):
+            requests.append(filter)
+            if after_read is not None:
+                after_read()
+            return list(orders)
+
+    client = _Client()
+    alpaca_pkg = types.ModuleType("alpaca")
+    alpaca_pkg.__path__ = []
+    common_pkg = types.ModuleType("alpaca.common")
+    common_pkg.__path__ = []
+    common_enums = types.ModuleType("alpaca.common.enums")
+    trading_pkg = types.ModuleType("alpaca.trading")
+    trading_pkg.__path__ = []
+    trading_enums = types.ModuleType("alpaca.trading.enums")
+    trading_requests = types.ModuleType("alpaca.trading.requests")
+
+    class _Sort:
+        ASC = "asc"
+
+    class _QueryOrderStatus:
+        ALL = "all"
+
+    class _GetOrdersRequest:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    common_enums.Sort = _Sort
+    trading_enums.QueryOrderStatus = _QueryOrderStatus
+    trading_requests.GetOrdersRequest = _GetOrdersRequest
+    monkeypatch.setitem(sys.modules, "alpaca", alpaca_pkg)
+    monkeypatch.setitem(sys.modules, "alpaca.common", common_pkg)
+    monkeypatch.setitem(sys.modules, "alpaca.common.enums", common_enums)
+    monkeypatch.setitem(sys.modules, "alpaca.trading", trading_pkg)
+    monkeypatch.setitem(sys.modules, "alpaca.trading.enums", trading_enums)
+    monkeypatch.setitem(sys.modules, "alpaca.trading.requests", trading_requests)
+    monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        account_id,
+        raising=False,
+    )
+    monkeypatch.setattr(alpaca_mod, "_trading_client", lambda: client)
+    monkeypatch.setitem(alpaca_mod._clients, "trading:paper", client)
+    monkeypatch.setitem(
+        alpaca_mod._clients, "trading:observed_account_id", account_id
+    )
+    monkeypatch.setitem(alpaca_mod._clients, "trading:fingerprint", "a" * 64)
+    adapter = AlpacaSpotAdapter()
+    assert adapter.bind_account_id(account_id) is True
+    return adapter, account_id, requests
+
+
+def _real_shaped_order_payload(now, *, index=1, status="canceled"):
+    """Shape mirrors alpaca-py 0.43 Order; notably it has no account_id."""
+
+    submitted_at = now - timedelta(seconds=2)
+    return {
+        "id": f"00000000-0000-4000-8000-{index:012d}",
+        "client_order_id": f"terminal-client-{index}",
+        "created_at": (submitted_at - timedelta(milliseconds=2)).isoformat(),
+        "updated_at": (submitted_at + timedelta(milliseconds=2)).isoformat(),
+        "submitted_at": submitted_at.isoformat(),
+        "filled_at": None,
+        "expired_at": None,
+        "expires_at": None,
+        "canceled_at": (
+            (submitted_at + timedelta(milliseconds=1)).isoformat()
+            if status == "canceled"
+            else None
+        ),
+        "failed_at": None,
+        "replaced_at": None,
+        "replaced_by": None,
+        "replaces": None,
+        "asset_id": f"10000000-0000-4000-8000-{index:012d}",
+        "symbol": "ACTU",
+        "asset_class": "us_equity",
+        "notional": None,
+        "qty": "10",
+        "filled_qty": "0",
+        "filled_avg_price": None,
+        "order_class": "simple",
+        "order_type": "limit",
+        "type": "limit",
+        "side": "buy",
+        "time_in_force": "day",
+        "limit_price": "10.00",
+        "stop_price": None,
+        "status": status,
+        "extended_hours": False,
+        "legs": None,
+        "trail_percent": None,
+        "trail_price": None,
+        "hwm": None,
+        "position_intent": "buy_to_open",
+        "ratio_qty": None,
+    }
+
+
+def _exact_window_read_binding(
+    adapter,
+    account_id,
+    *,
+    after,
+    until,
+    purpose,
+):
+    client = alpaca_mod._clients["trading:paper"]
+    connection_generation = (
+        AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+            adapter,
+            client,
+        )
+    )
+    return {
+        "purpose": purpose,
+        "expected_account_id": account_id,
+        "connection_generation": connection_generation,
+        "after": after.astimezone(timezone.utc).isoformat(),
+        "until": until.astimezone(timezone.utc).isoformat(),
+    }
+
+
+def test_paper_order_transition_census_captures_terminal_order(monkeypatch):
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+
+    class _Order:
+        def model_dump(self, *, mode):
+            assert mode == "json"
+            return _real_shaped_order_payload(now)
+
+    adapter, account_id, requests = _bound_order_transition_adapter(
+        monkeypatch, [_Order()]
+    )
+    monkeypatch.setattr(alpaca_mod, "_now", lambda: now)
+    after = now - timedelta(seconds=5)
+    until = now - timedelta(seconds=1)
+    result = adapter.get_paper_order_transition_census(
+        after=after,
+        until=until,
+        read_binding=_exact_window_read_binding(
+            adapter,
+            account_id,
+            after=after,
+            until=until,
+            purpose="final-paper-start",
+        ),
+    )
+
+    assert result["readable"] is True
+    assert result["pagination_complete"] is True
+    assert result["provider_account_id"] == account_id
+    assert result["orders"][0]["status"] == "canceled"
+    assert "account_id" not in result["orders"][0]
+    assert len(requests) == 1
+    assert getattr(requests[0], "limit") == 500
+    assert getattr(requests[0], "nested") is False
+    receipt = json.loads(result["query_receipt_canonical_json"])
+    assert receipt["schema_version"] == (
+        "chili.alpaca-paper-order-transition-census.v2"
+    )
+    assert (receipt["method"], receipt["path"], receipt["api_version"]) == (
+        "GET",
+        "/orders",
+        "v2",
+    )
+    assert hashlib.sha256(
+        receipt["query_canonical_json"].encode("utf-8")
+    ).hexdigest() == receipt["query_sha256"]
+    assert receipt["terminal_proof"]["scope"] == (
+        "bounded_submitted_at_query_only"
+    )
+    assert receipt["account_binding_basis"].startswith("pinned_paper_client")
+    assert hashlib.sha256(
+        result["inventory_canonical_json"].encode("utf-8")
+    ).hexdigest() == result["inventory_sha256"]
+    assert hashlib.sha256(
+        result["read_binding_canonical_json"].encode("utf-8")
+    ).hexdigest() == result["read_binding_sha256"]
+
+
+@pytest.mark.parametrize("failure", ("full_page", "duplicate_order"))
+def test_paper_order_transition_census_fails_closed_on_unprovable_page(
+    monkeypatch, failure
+):
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    class _Order:
+        def __init__(self, index):
+            self.index = index
+
+        def model_dump(self, *, mode):
+            assert mode == "json"
+            return _real_shaped_order_payload(
+                now,
+                index=1 if failure == "duplicate_order" else self.index + 1,
+                status="filled",
+            )
+
+    count = 500 if failure == "full_page" else 2
+    adapter, account_id, _ = _bound_order_transition_adapter(
+        monkeypatch, [_Order(index) for index in range(count)]
+    )
+    monkeypatch.setattr(alpaca_mod, "_now", lambda: now)
+    after = now - timedelta(seconds=5)
+    until = now - timedelta(seconds=1)
+    result = adapter.get_paper_order_transition_census(
+        after=after,
+        until=until,
+        read_binding=_exact_window_read_binding(
+            adapter,
+            account_id,
+            after=after,
+            until=until,
+            purpose="final-paper-start",
+        ),
+    )
+
+    assert result == {
+        "readable": False,
+        "pagination_complete": False,
+        "reason": "alpaca_paper_order_transition_census_unavailable",
+        "error_type": "RuntimeError",
+    }
+
+
+@pytest.mark.parametrize("drift", ("account", "generation", "binding"))
+def test_paper_order_transition_census_rejects_post_read_authority_drift(
+    monkeypatch, drift
+):
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+
+    class _Order:
+        def model_dump(self, *, mode):
+            assert mode == "json"
+            return _real_shaped_order_payload(now)
+
+    def _drift():
+        if drift == "account":
+            alpaca_mod._clients["trading:observed_account_id"] = (
+                "ce2faeb2-35b1-40aa-901c-4969e2c250b0"
+            )
+        elif drift == "generation":
+            alpaca_mod._clients["trading:fingerprint"] = "b" * 64
+
+    adapter, account_id, _ = _bound_order_transition_adapter(
+        monkeypatch,
+        [_Order()],
+        after_read=_drift,
+    )
+    monkeypatch.setattr(alpaca_mod, "_now", lambda: now)
+    after = now - timedelta(seconds=5)
+    until = now - timedelta(seconds=1)
+    read_binding = _exact_window_read_binding(
+        adapter,
+        account_id,
+        after=after,
+        until=until,
+        purpose="final-paper-start",
+    )
+    if drift == "binding":
+        read_binding["expected_account_id"] = (
+            "ce2faeb2-35b1-40aa-901c-4969e2c250b0"
+        )
+    result = adapter.get_paper_order_transition_census(
+        after=after,
+        until=until,
+        read_binding=read_binding,
+    )
+
+    assert result["readable"] is False
+    assert result["reason"] == (
+        "alpaca_paper_order_transition_census_unavailable"
+    )
+
+
+def _real_shaped_fill_activity(
+    now,
+    *,
+    index,
+    account_id=None,
+    activity_type="FILL",
+):
+    payload = {
+        "id": f"20260718110000000::{index:05d}",
+        "activity_type": activity_type,
+        "transaction_time": (
+            now - timedelta(seconds=10) + timedelta(milliseconds=index)
+        ).isoformat(),
+        "type": "partial_fill" if index < 100 else "fill",
+        "price": "10.01",
+        "qty": "1",
+        "side": "buy",
+        "symbol": "ACTU",
+        "leaves_qty": str(max(0, 100 - index)),
+        "order_id": "20000000-0000-4000-8000-000000000001",
+        "cum_qty": str(index + 1),
+        "order_status": "partially_filled" if index < 100 else "filled",
+    }
+    if account_id is not None:
+        payload["account_id"] = account_id
+    return payload
+
+
+def _bound_account_fill_census_adapter(
+    monkeypatch,
+    *,
+    pages,
+    after_request=None,
+):
+    account_id = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
+    requests = []
+
+    class _Client:
+        def _request(self, method, path, *, data, api_version):
+            request_index = len(requests)
+            requests.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "data": dict(data),
+                    "api_version": api_version,
+                }
+            )
+            if after_request is not None:
+                after_request(request_index)
+            return [dict(row) for row in pages[request_index]]
+
+    client = _Client()
+    monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_alpaca_expected_account_id",
+        account_id,
+        raising=False,
+    )
+    monkeypatch.setattr(alpaca_mod, "_trading_client", lambda: client)
+    monkeypatch.setitem(alpaca_mod._clients, "trading:paper", client)
+    monkeypatch.setitem(
+        alpaca_mod._clients, "trading:observed_account_id", account_id
+    )
+    monkeypatch.setitem(alpaca_mod._clients, "trading:fingerprint", "a" * 64)
+    adapter = AlpacaSpotAdapter()
+    assert adapter.bind_account_id(account_id) is True
+    return adapter, account_id, requests
+
+
+def test_paper_account_fill_activity_census_is_paginated_and_hash_bound(
+    monkeypatch,
+):
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    account_id = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
+    activities = [
+        _real_shaped_fill_activity(
+            now,
+            index=index,
+        )
+        for index in range(101)
+    ]
+    adapter, _, requests = _bound_account_fill_census_adapter(
+        monkeypatch,
+        pages=[activities[:100], activities[100:]],
+    )
+    monkeypatch.setattr(alpaca_mod, "_now", lambda: now)
+    after = now - timedelta(seconds=20)
+    until = now - timedelta(seconds=1)
+    read_binding = _exact_window_read_binding(
+        adapter,
+        account_id,
+        after=after,
+        until=until,
+        purpose="captured-paper-fixed-point-cycle-1",
+    )
+    read_binding["generation"] = "paper-generation-a"
+    result = adapter.get_paper_account_fill_activity_census(
+        after=after,
+        until=until,
+        read_binding=read_binding,
+    )
+
+    assert result["readable"] is True
+    assert result["pagination_complete"] is True
+    assert result["activity_scope"] == "all_account_fill_activities"
+    assert result["provider_account_id"] == account_id
+    assert len(result["activities"]) == 101
+    assert len(requests) == 2
+    assert requests[0] == {
+        "method": "GET",
+        "path": "/account/activities",
+        "data": {
+            "activity_types": "FILL",
+            "after": (now - timedelta(seconds=20)).isoformat(),
+            "until": (now - timedelta(seconds=1)).isoformat(),
+            "direction": "asc",
+            "page_size": 100,
+        },
+        "api_version": "v2",
+    }
+    assert requests[1]["data"]["page_token"] == activities[99]["id"]
+    receipt = json.loads(result["query_receipt_canonical_json"])
+    assert receipt["terminal_proof"] == {
+        "pagination_complete": True,
+        "reason": "pagination_complete_short_page",
+        "page_count": 2,
+        "last_request_page_token": activities[99]["id"],
+        "last_response_sha256": receipt["pages"][-1]["response_sha256"],
+        "last_response_count": 1,
+        "last_page_terminal": True,
+        "scope": "bounded_query_pagination_only",
+    }
+    assert hashlib.sha256(
+        result["inventory_canonical_json"].encode("utf-8")
+    ).hexdigest() == result["inventory_sha256"]
+    canonical_binding = json.dumps(
+        read_binding,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    assert result["read_binding_canonical_json"] == canonical_binding
+    assert result["read_binding_sha256"] == hashlib.sha256(
+        canonical_binding.encode("utf-8")
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("account", "generation", "binding", "duplicate_page"),
+)
+def test_paper_account_fill_activity_census_fails_closed_on_authority_or_page_gap(
+    monkeypatch,
+    failure,
+):
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    account_id = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
+    activities = [
+        _real_shaped_fill_activity(
+            now,
+            index=index,
+            account_id=(
+                "ce2faeb2-35b1-40aa-901c-4969e2c250b0"
+                if failure == "account" and index == 0
+                else None
+            ),
+        )
+        for index in range(100)
+    ]
+
+    def _drift(request_index):
+        if failure == "generation" and request_index == 0:
+            alpaca_mod._clients["trading:fingerprint"] = "b" * 64
+
+    pages = (
+        [activities, [activities[-1]]]
+        if failure == "duplicate_page"
+        else [activities[:1]]
+    )
+    adapter, _, _ = _bound_account_fill_census_adapter(
+        monkeypatch,
+        pages=pages,
+        after_request=_drift,
+    )
+    monkeypatch.setattr(alpaca_mod, "_now", lambda: now)
+    after = now - timedelta(seconds=20)
+    until = now - timedelta(seconds=1)
+    read_binding = _exact_window_read_binding(
+        adapter,
+        account_id,
+        after=after,
+        until=until,
+        purpose="captured-paper-fixed-point",
+    )
+    if failure == "binding":
+        read_binding["connection_generation"] = "alpaca-paper-rest:" + "f" * 64
+    result = adapter.get_paper_account_fill_activity_census(
+        after=after,
+        until=until,
+        read_binding=read_binding,
+    )
+
+    assert result == {
+        "readable": False,
+        "pagination_complete": False,
+        "reason": "alpaca_paper_account_fill_activity_census_unavailable",
+        "error_type": "RuntimeError",
+    }
 
 
 def test_submit_boundary_rejects_non_long_or_non_equity_entry_before_client(monkeypatch):

@@ -36,10 +36,11 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, NoReturn, Protocol, Sequence
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -50,7 +51,30 @@ UTC = timezone.utc
 MODE_VALIDATE_ONLY = "ValidateOnly"
 MODE_APPLY = "Apply"
 MODE_ROLLBACK = "Rollback"
+MODE_RECOVER_ONLY = "RecoverOnly"
 APPLY_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
+_HOST_WIDE_CUTOVER_LOCK_PATH = (
+    Path(tempfile.gettempdir())
+    / "chili-captured-alpaca-paper-host-cutover.v1.lock"
+)
+_HOST_WIDE_CUTOVER_MUTEX_NAME = r"Global\CHILI-Captured-Alpaca-PAPER-Host-Cutover-v1"
+# PAPER-only operational assumption boundary. alpaca-py's legacy
+# ``TradingClient`` has no explicit HTTP timeout, so process termination proves
+# that no local sender remains but cannot mathematically bound when an
+# already-sent request becomes visible at Alpaca. Hold a sealed quiet horizon
+# before issuing the short-lived permit, then require a broker fixed point.
+# This evidence is never live-cash certification.
+LEGACY_PAPER_BROKER_QUIET_HORIZON_SECONDS = 30.0
+LEGACY_PAPER_BROKER_QUIET_HORIZON_POLICY = (
+    "alpaca-paper-assumption-bound-quiet-horizon.v1"
+)
+# One historical pre-Docker-identity transaction reached only immutable local
+# staging before TASK_XML_INVALID.  Its exact append-only bytes were verified
+# on this host.  Generic trust-on-first-use adoption is forbidden: any other
+# legacy journal requires an explicit, separately reviewed recovery path.
+_PRE_IDENTITY_JOURNAL_RECOVERY_ALLOWLIST = frozenset(
+    {"1f4592075ec786b1f274ebbc9156061327fad6f52b8f6bcf2ddd2e7eb2fb3be3"}
+)
 
 REQUIRED_LEGACY_TASKS = (
     "CHILI-IQFeed-Depth-Bridge-Daily",
@@ -61,7 +85,115 @@ REQUIRED_LEGACY_TASKS = (
 REQUIRED_LEGACY_PROCESS_ROLES = frozenset(
     {"iqfeed_trade_bridge", "iqfeed_depth_bridge"}
 )
+EXECUTION_LANE_RECREATOR_TASKS = (
+    "CHILI-Docker-Socket-Guard",
+    "CHILI-captured-paper-premarket-activation",
+    "CHILI-liveness-watchdog",
+    "CHILI-Premarket-Readiness",
+    "CHILI-Premarket-Readiness-Recheck",
+)
 CANDIDATE_TASK_NAME = "CHILI-Captured-Alpaca-PAPER"
+LEGACY_EXECUTION_LANE_NAME = "chili-clean-recovery-momentum-exec"
+LEGACY_EXECUTION_LANE_PRIOR_STATES = frozenset({"running", "stopped"})
+LEGACY_EXECUTION_LANE_SCHEMA = "chili.legacy-execution-lane-observation.v2"
+_DOCKER_DESKTOP_EXECUTABLE = Path(
+    r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"
+)
+_EXECUTION_LANE_RECREATOR_SOURCES = MappingProxyType(
+    {
+        "CHILI-Docker-Socket-Guard": (
+            (
+                r"D:\dev\chili-home-copilot\scripts\run-hidden.vbs",
+                "51d54330a857496ab88d31d6b716f2df0e764b6fc60947ac79f4b8a598e323b9",
+            ),
+            (
+                r"D:\dev\chili-home-copilot\scripts\docker-socket-guard.ps1",
+                "976c48a4a1cd4a11b3060d372c2ea6f3495bd6363d79147c7db5de3de07d631e",
+            ),
+            (
+                r"D:\dev\chili-home-copilot\scripts\start-chili-stack.ps1",
+                "cd5e382aa75d3c8849c50582a3bccefc3c7c4e1dfe5fdd3023dd59ac96fcd92c",
+            ),
+        ),
+        "CHILI-captured-paper-premarket-activation": (
+            (
+                r"D:\CHILI-Docker\captured-paper\premarket-activation\run.ps1",
+                "5061baaf9ddc3a63193fef04401d64b91cfb1c07e9afa9ee9e342f5e87669765",
+            ),
+            (
+                r"D:\CHILI-Docker\captured-paper\premarket-activation\orchestrator.py",
+                "c59008466a421646693a7b89914ea2b5862ec1b56ada53db0258ab81432dbf46",
+            ),
+        ),
+        "CHILI-liveness-watchdog": (
+            (
+                r"D:\CHILI-Docker\captured-paper\premarket-activation\chili_liveness_watchdog.ps1",
+                "e23b9acb9503daf58d83dfc1208f07eac5d9125bd670239e5e18f2292679ed14",
+            ),
+        ),
+        "CHILI-Premarket-Readiness": (
+            (
+                r"D:\CHILI-Docker\premarket-readiness.ps1",
+                "bd1c3a8db84e89ed0c38dab53c7aa4443f32118a62c293d286c52bf12d1defc3",
+            ),
+        ),
+        "CHILI-Premarket-Readiness-Recheck": (
+            (
+                r"D:\CHILI-Docker\premarket-readiness.ps1",
+                "bd1c3a8db84e89ed0c38dab53c7aa4443f32118a62c293d286c52bf12d1defc3",
+            ),
+        ),
+    }
+)
+_EXECUTION_LANE_RECREATOR_DIRECT_SOURCES = MappingProxyType(
+    {
+        "CHILI-Docker-Socket-Guard": (
+            r"D:\dev\chili-home-copilot\scripts\run-hidden.vbs",
+            r"D:\dev\chili-home-copilot\scripts\docker-socket-guard.ps1",
+        ),
+        "CHILI-captured-paper-premarket-activation": (
+            r"D:\CHILI-Docker\captured-paper\premarket-activation\run.ps1",
+        ),
+        "CHILI-liveness-watchdog": (
+            r"D:\CHILI-Docker\captured-paper\premarket-activation\chili_liveness_watchdog.ps1",
+        ),
+        "CHILI-Premarket-Readiness": (
+            r"D:\CHILI-Docker\premarket-readiness.ps1",
+        ),
+        "CHILI-Premarket-Readiness-Recheck": (
+            r"D:\CHILI-Docker\premarket-readiness.ps1",
+        ),
+    }
+)
+_EXECUTION_LANE_COMPOSE_FILE = Path(
+    r"D:\dev\chili-home-copilot\docker-compose.yml"
+)
+_EXECUTION_LANE_COMPOSE_FILE_SHA256 = (
+    "fcb9f9d1c6515603bd4b0c3a7bbf0871c06cc088aa2d15e4c15776be124071a4"
+)
+_EXECUTION_LANE_COMPOSE_DEPENDENT_TASKS = frozenset(
+    {
+        "CHILI-Docker-Socket-Guard",
+        "CHILI-Premarket-Readiness",
+        "CHILI-Premarket-Readiness-Recheck",
+    }
+)
+_EXECUTION_LANE_REQUIRED_SCOPE_FLAGS = MappingProxyType(
+    {
+        "CHILI_ALPACA_ENABLED": True,
+        "CHILI_ALPACA_PAPER": True,
+        "CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER": True,
+        "CHILI_MOMENTUM_PAPER_RUNNER_ENABLED": True,
+        "CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED": True,
+        "CHILI_AUTOTRADER_ENABLED": False,
+        "CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED": False,
+        "CHILI_MOMENTUM_EXEC_AUTO_ARM_LIVE_ENABLED": False,
+        "CHILI_MOMENTUM_EXEC_LIVE_RUNNER_ENABLED": False,
+        "CHILI_MOMENTUM_LIVE_RUNNER_ENABLED": False,
+        "CHILI_COINBASE_AUTOTRADER_LIVE": False,
+        "COINBASE_AUTOTRADER_LIVE": False,
+    }
+)
 SINGLETON_POLICY = "one_unified_candidate_host"
 LEGACY_DIRECT_LAUNCH_KIND = "direct_python_v1"
 LEGACY_WRAPPER_LAUNCH_KIND = "wscript_vbs_powershell_starter_v1"
@@ -80,7 +212,8 @@ JOURNAL_OBJECT_SCHEMA = "chili.captured-paper-host-cutover-journal-object.v1"
 ROLLBACK_CAPSULE_SCHEMA = "chili.captured-paper-host-rollback-capsule.v1"
 STARTUP_PREPARED_SCHEMA = "chili.captured-paper-host-startup-prepared.v1"
 STARTUP_PERMIT_SCHEMA = "chili.captured-paper-host-startup-permit.v1"
-STARTUP_STARTED_SCHEMA = "chili.captured-paper-host-startup-started.v1"
+STARTUP_STARTED_SCHEMA = "chili.captured-paper-host-startup-started.v2"
+ACTIVE_START_AUTHORITY_SCHEMA = "chili.captured-paper-active-start-authority.v2"
 STARTUP_REVOKED_SCHEMA = "chili.captured-paper-host-startup-revoked.v1"
 PREACTIVATION_ROLLBACK_BASELINE_SCHEMA = (
     "chili.captured-paper-host-preactivation-rollback-baseline.v1"
@@ -97,6 +230,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+ACTIVE_START_EVIDENCE_MAX_BYTES = 512 * 1024
 _TASK_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 _LEGACY_TASK_ROLE = MappingProxyType(
     {
@@ -569,6 +703,50 @@ class TaskObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionLaneRecreatorTaskObservation:
+    """Secret-free identity/state of one external lane resurrection task."""
+
+    name: str
+    definition_sha256: str
+    action_sha256: str
+    source_chain_sha256: str
+    enabled: bool
+
+    def identity_key(self) -> tuple[str, str, str, str]:
+        return (
+            self.name,
+            self.definition_sha256,
+            self.action_sha256,
+            self.source_chain_sha256,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyExecutionLaneObservation:
+    """Secret-free immutable identity and current state of the legacy lane."""
+
+    container_name: str
+    container_id: str
+    image_id: str
+    config_sha256: str
+    execution_scope: str
+    scope_sha256: str
+    recreator_tasks: tuple[ExecutionLaneRecreatorTaskObservation, ...]
+    state: str
+
+    def identity_key(self) -> tuple[Any, ...]:
+        return (
+            self.container_name,
+            self.container_id,
+            self.image_id,
+            self.config_sha256,
+            self.execution_scope,
+            self.scope_sha256,
+            tuple(item.identity_key() for item in self.recreator_tasks),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessIdentity:
     pid: int
     create_time_ns: int
@@ -731,6 +909,20 @@ class HostCutoverBackend(Protocol):
         phase: str,
         timeout_seconds: float,
     ) -> Mapping[str, Any]: ...
+
+    def inspect_legacy_execution_lane(self) -> LegacyExecutionLaneObservation: ...
+
+    def await_execution_lane_recreator_processes(
+        self, *, timeout_seconds: float
+    ) -> tuple[str, ...]: ...
+
+    def quiesce_legacy_execution_lane(
+        self, *, expected: LegacyExecutionLaneObservation
+    ) -> int: ...
+
+    def restore_legacy_execution_lane(
+        self, *, expected: LegacyExecutionLaneObservation
+    ) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -946,6 +1138,170 @@ def build_startup_prepared_receipt(
     return MappingProxyType(body)
 
 
+_ACTIVE_START_AUTHORITY_BODY_KEYS = frozenset(
+    {
+        "schema_version",
+        "verdict",
+        "account_scope",
+        "expected_account_id",
+        "runtime_generation",
+        "activation_manifest_sha256",
+        "kill_switch_receipt_sha256",
+        "launcher_attestation_sha256",
+        "launcher_attestation_consumed",
+        "host_activation_permit_sha256",
+        "host_activation_permit_consumed",
+        "host_quiet_horizon_event_sha256",
+        "broker_fixed_point",
+        "broker_fixed_point_sha256",
+        "post_permit_broker_snapshot_sha256",
+        "order_transition_fence_sha256",
+        "fill_activity_fence_sha256",
+        "final_kill_switch_query",
+        "final_kill_switch_query_sha256",
+        "paper_order_submission_authorized",
+        "live_cash_authorized",
+        "real_money_authorized",
+    }
+)
+
+
+def _validate_active_start_authority(
+    value: Mapping[str, Any],
+    *,
+    prepared: PreparedCutover,
+    activation_permit_sha256: str,
+    host_quiet_horizon_event_sha256: str | None = None,
+) -> str:
+    """Independently validate the complete pre-worker PAPER evidence."""
+
+    authority = _mapping(value, "active-start authority")
+    _exact_keys(
+        authority,
+        {*_ACTIVE_START_AUTHORITY_BODY_KEYS, "authority_sha256"},
+        "active-start authority",
+    )
+    claimed = _sha(authority.get("authority_sha256"), "active-start authority")
+    body = dict(authority)
+    body.pop("authority_sha256")
+    broker = _mapping(body.get("broker_fixed_point"), "broker fixed point")
+    final_kill = _mapping(
+        body.get("final_kill_switch_query"), "final kill-switch query"
+    )
+    kill_body = dict(final_kill)
+    kill_self_sha = _sha(
+        kill_body.pop("query_receipt_sha256", None),
+        "final kill-switch query",
+    )
+    digest_fields = (
+        "activation_manifest_sha256",
+        "kill_switch_receipt_sha256",
+        "launcher_attestation_sha256",
+        "host_activation_permit_sha256",
+        "host_quiet_horizon_event_sha256",
+        "broker_fixed_point_sha256",
+        "post_permit_broker_snapshot_sha256",
+        "order_transition_fence_sha256",
+        "fill_activity_fence_sha256",
+        "final_kill_switch_query_sha256",
+    )
+    snapshots = tuple(
+        _mapping(broker.get(field), f"broker fixed-point {field}")
+        for field in ("baseline_snapshot", "first_snapshot", "second_snapshot")
+    )
+    order_fences = tuple(
+        _mapping(broker.get(field), f"broker fixed-point {field}")
+        for field in ("first_order_census", "second_order_census")
+    )
+    fill_fences = tuple(
+        _mapping(broker.get(field), f"broker fixed-point {field}")
+        for field in (
+            "first_fill_activity_census",
+            "second_fill_activity_census",
+        )
+    )
+    quiet_sha = _sha(
+        body.get("host_quiet_horizon_event_sha256"),
+        "host quiet-horizon event",
+    )
+    expected_quiet_sha = (
+        quiet_sha
+        if host_quiet_horizon_event_sha256 is None
+        else _sha(
+            host_quiet_horizon_event_sha256,
+            "expected host quiet-horizon event",
+        )
+    )
+    try:
+        valid = (
+            sha256_json(body) == claimed
+            and all(_SHA256_RE.fullmatch(str(body.get(field) or "")) for field in digest_fields)
+            and body.get("schema_version") == ACTIVE_START_AUTHORITY_SCHEMA
+            and body.get("verdict")
+            == "CAPTURED_ALPACA_PAPER_ACTIVE_START_AUTHORIZED"
+            and body.get("account_scope") == "alpaca:paper"
+            and body.get("expected_account_id") == prepared.expected_account_id
+            and body.get("runtime_generation") == prepared.activation_generation
+            and body.get("activation_manifest_sha256") == prepared.manifest_sha256
+            and body.get("host_activation_permit_sha256")
+            == activation_permit_sha256
+            and quiet_sha == expected_quiet_sha
+            and body.get("launcher_attestation_consumed") is True
+            and body.get("host_activation_permit_consumed") is True
+            and body.get("paper_order_submission_authorized") is True
+            and body.get("live_cash_authorized") is False
+            and body.get("real_money_authorized") is False
+            and sha256_json(dict(broker))
+            == body.get("broker_fixed_point_sha256")
+            and sha256_json(dict(broker["second_snapshot"]))
+            == body.get("post_permit_broker_snapshot_sha256")
+            and sha256_json(dict(broker["second_order_census"]))
+            == body.get("order_transition_fence_sha256")
+            and sha256_json(dict(broker["second_fill_activity_census"]))
+            == body.get("fill_activity_fence_sha256")
+            and broker.get("schema_version")
+            == "chili.captured-paper-broker-fixed-point.v1"
+            and broker.get("verdict") == "PAPER_BROKER_QUIET_FIXED_POINT"
+            and broker.get("account_scope") == "alpaca:paper"
+            and broker.get("expected_account_id") == prepared.expected_account_id
+            and broker.get("activation_generation")
+            == prepared.activation_generation
+            and broker.get("activation_manifest_sha256")
+            == prepared.manifest_sha256
+            and broker.get("assumption_bound") is True
+            and broker.get("live_cash_certification") is False
+            and all(
+                snapshot.get("position_count") == 0
+                and snapshot.get("open_order_count") == 0
+                and snapshot.get("order_submission_call_count") == 0
+                for snapshot in snapshots
+            )
+            and all(fence.get("exact_order_count") == 0 for fence in order_fences)
+            and all(
+                fence.get("exact_activity_count") == 0 for fence in fill_fences
+            )
+            and sha256_json(kill_body) == kill_self_sha
+            and sha256_json(dict(final_kill))
+            == body.get("final_kill_switch_query_sha256")
+            and final_kill.get("schema_version")
+            == "chili.captured-paper-kill-switch-query.v1"
+            and final_kill.get("account_scope") == "alpaca:paper"
+            and final_kill.get("expected_account_id")
+            == prepared.expected_account_id
+            and final_kill.get("activation_generation")
+            == prepared.activation_generation
+            and final_kill.get("active") is False
+        )
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise CapturedPaperHostCutoverError(
+            "ACTIVE_START_AUTHORITY_INVALID",
+            "active-start authority is not exact zero-exposure PAPER evidence",
+        )
+    return claimed
+
+
 def build_startup_started_receipt(
     *,
     prepared: PreparedCutover,
@@ -953,9 +1309,16 @@ def build_startup_started_receipt(
     challenge_sha256: str,
     prepared_receipt_sha256: str,
     activation_permit_sha256: str,
+    active_start_authority: Mapping[str, Any],
+    active_start_evidence_artifact_sha256: str,
     started_at: datetime,
     valid_until: datetime,
 ) -> Mapping[str, Any]:
+    authority_sha256 = _validate_active_start_authority(
+        active_start_authority,
+        prepared=prepared,
+        activation_permit_sha256=activation_permit_sha256,
+    )
     body: dict[str, Any] = {
         "schema_version": STARTUP_STARTED_SCHEMA,
         "state": "STARTED",
@@ -975,6 +1338,12 @@ def build_startup_started_receipt(
         "activation_permit_sha256": _sha(
             activation_permit_sha256, "activation permit hash"
         ),
+        "active_start_authority_sha256": authority_sha256,
+        "active_start_evidence_artifact_sha256": _sha(
+            active_start_evidence_artifact_sha256,
+            "active-start evidence artifact",
+        ),
+        "active_start_authority": dict(active_start_authority),
         "started_at": _iso(started_at),
         "valid_until": _iso(valid_until),
         "workers_started": True,
@@ -1081,6 +1450,7 @@ def _validate_started_receipt(
     value: Mapping[str, Any], *, prepared: PreparedCutover,
     service: ProcessIdentity, now: datetime, challenge_sha256: str,
     prepared_receipt_sha256: str, activation_permit_sha256: str,
+    host_quiet_horizon_event_sha256: str,
     require_fresh: bool = True,
 ) -> str:
     _exact_keys(
@@ -1091,7 +1461,9 @@ def _validate_started_receipt(
             "service_create_time_ns", "service_executable_path",
             "service_executable_sha256", "service_cmdline_sha256",
             "challenge_sha256", "prepared_receipt_sha256",
-            "activation_permit_sha256", "started_at", "valid_until",
+            "activation_permit_sha256", "active_start_authority_sha256",
+            "active_start_evidence_artifact_sha256",
+            "active_start_authority", "started_at", "valid_until",
             "workers_started", "paper_execution_started", "live_cash_authorized",
             "real_money_authorized", "receipt_sha256",
         },
@@ -1101,12 +1473,36 @@ def _validate_started_receipt(
         value, prepared=prepared, service=service, time_field="started_at",
         now=now, require_fresh=require_fresh,
     )
+    authority = _mapping(
+        value.get("active_start_authority"), "STARTED active-start authority"
+    )
+    authority_sha256 = _validate_active_start_authority(
+        authority,
+        prepared=prepared,
+        activation_permit_sha256=activation_permit_sha256,
+        host_quiet_horizon_event_sha256=host_quiet_horizon_event_sha256,
+    )
+    paths = _startup_handshake_paths(
+        prepared.invocation, roots=prepared.allowed_read_roots
+    )
+    _evidence_path, evidence_raw, evidence_artifact_sha256 = _stable_read(
+        paths["active_start_evidence"],
+        roots=prepared.allowed_read_roots,
+        field="active-start evidence artifact",
+        max_bytes=ACTIVE_START_EVIDENCE_MAX_BYTES,
+    )
+    evidence = _strict_json(evidence_raw, "active-start evidence artifact")
     if not (
         value.get("schema_version") == STARTUP_STARTED_SCHEMA
         and value.get("state") == "STARTED"
         and value.get("challenge_sha256") == challenge_sha256
         and value.get("prepared_receipt_sha256") == prepared_receipt_sha256
         and value.get("activation_permit_sha256") == activation_permit_sha256
+        and value.get("active_start_authority_sha256") == authority_sha256
+        and value.get("active_start_evidence_artifact_sha256")
+        == evidence_artifact_sha256
+        and evidence == authority
+        and evidence_raw == _canonical_json_bytes(evidence)
         and value.get("workers_started") is True
         and value.get("paper_execution_started") is True
     ):
@@ -2103,6 +2499,315 @@ def _materialize_candidate_xml(
     )
 
 
+def _normalized_task_account_identity(value: str) -> str:
+    """Normalize a Task Scheduler account to its SID when on Windows."""
+
+    raw = str(value or "").strip()
+    if not raw or any(character in raw for character in "\x00\r\n"):
+        raise CapturedPaperHostCutoverError(
+            "TASK_PRINCIPAL_UNINSPECTABLE", "candidate task principal is empty"
+        )
+    if re.fullmatch(r"S-\d-(?:\d+-)+\d+", raw, flags=re.I):
+        return raw.upper()
+    if os.name != "nt":
+        return raw.casefold()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        lookup = advapi32.LookupAccountNameW
+        lookup.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPVOID,
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        lookup.restype = wintypes.BOOL
+        sid_size = wintypes.DWORD(0)
+        domain_size = wintypes.DWORD(0)
+        sid_use = wintypes.DWORD(0)
+        lookup(
+            None,
+            raw,
+            None,
+            ctypes.byref(sid_size),
+            None,
+            ctypes.byref(domain_size),
+            ctypes.byref(sid_use),
+        )
+        if ctypes.get_last_error() != 122 or sid_size.value <= 0:
+            raise OSError("LookupAccountNameW sizing failed")
+        sid = ctypes.create_string_buffer(sid_size.value)
+        domain = ctypes.create_unicode_buffer(max(1, domain_size.value))
+        if not lookup(
+            None,
+            raw,
+            sid,
+            ctypes.byref(sid_size),
+            domain,
+            ctypes.byref(domain_size),
+            ctypes.byref(sid_use),
+        ):
+            raise OSError("LookupAccountNameW failed")
+        convert = advapi32.ConvertSidToStringSidW
+        convert.argtypes = (wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR))
+        convert.restype = wintypes.BOOL
+        sid_text = wintypes.LPWSTR()
+        if not convert(sid, ctypes.byref(sid_text)):
+            raise OSError("ConvertSidToStringSidW failed")
+        try:
+            return str(sid_text.value).upper()
+        finally:
+            local_free = kernel32.LocalFree
+            local_free.argtypes = (ctypes.c_void_p,)
+            local_free.restype = ctypes.c_void_p
+            local_free(ctypes.cast(sid_text, ctypes.c_void_p))
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Sealed tests and disconnected domain hosts can carry a syntactically
+        # valid account which the local LSA cannot currently resolve.  Raw
+        # case-folded identity remains strict (different principals still do
+        # not compare equal); resolvable production names canonicalize to SID.
+        return raw.casefold()
+
+
+def _candidate_task_scheduler_projection_from_xml(raw: bytes) -> Mapping[str, Any]:
+    """Normalize the candidate principal, triggers, settings and Exec policy."""
+
+    if b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper():
+        raise CapturedPaperHostCutoverError(
+            "TASK_XML_UNSAFE", "task XML cannot contain DTD/entity declarations"
+        )
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise CapturedPaperHostCutoverError(
+            "TASK_XML_INVALID", "candidate task XML is malformed"
+        ) from exc
+    if root.tag != f"{{{_TASK_NS}}}Task" or root.attrib.get("version") != "1.4":
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            "candidate task root/version changed during registration",
+        )
+    root_children = [item.tag.rsplit("}", 1)[-1] for item in list(root)]
+    if (
+        any(
+            not item.tag.startswith(f"{{{_TASK_NS}}}")
+            for item in list(root)
+        )
+        or set(root_children)
+        != {"RegistrationInfo", "Triggers", "Principals", "Settings", "Actions"}
+        or root_children.count("RegistrationInfo") != 1
+    ):
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            "candidate task section roster changed during registration",
+        )
+
+    def one_root(tag: str) -> ET.Element:
+        values = root.findall(f"{{{_TASK_NS}}}{tag}")
+        if len(values) != 1:
+            raise CapturedPaperHostCutoverError(
+                "TASK_SCHEDULER_SEMANTICS_INVALID",
+                f"candidate task must contain exactly one {tag}",
+            )
+        return values[0]
+
+    def child_map(parent: ET.Element, *, field: str) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for item in list(parent):
+            if not item.tag.startswith(f"{{{_TASK_NS}}}"):
+                raise CapturedPaperHostCutoverError(
+                    "TASK_SCHEDULER_SEMANTICS_INVALID",
+                    f"candidate {field} contains a foreign namespace",
+                )
+            name = item.tag.rsplit("}", 1)[-1]
+            if name in values:
+                raise CapturedPaperHostCutoverError(
+                    "TASK_SCHEDULER_SEMANTICS_INVALID",
+                    f"candidate {field} repeats {name}",
+                )
+            if (item.attrib or list(item)) and not (
+                field == "settings" and name == "IdleSettings"
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "TASK_SCHEDULER_SEMANTICS_INVALID",
+                    f"candidate {field} scalar {name} contains nested policy",
+                )
+            values[name] = (item.text or "").strip()
+        return values
+
+    triggers = one_root("Triggers")
+    if triggers.attrib or list(triggers):
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            "candidate task must be on-demand-only with no automatic triggers",
+        )
+
+    principals = one_root("Principals")
+    if principals.attrib or len(list(principals)) != 1:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            "candidate task must contain exactly one principal",
+        )
+    principal = list(principals)[0]
+    if principal.tag != f"{{{_TASK_NS}}}Principal" or set(principal.attrib) != {"id"}:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID", "candidate principal roster changed"
+        )
+    principal_values = child_map(principal, field="principal")
+    if not (
+        {"UserId", "LogonType", "RunLevel"}.issubset(principal_values)
+        and set(principal_values)
+        <= {"UserId", "LogonType", "RunLevel", "ProcessTokenSidType"}
+        and principal_values.get("ProcessTokenSidType", "Default") == "Default"
+    ):
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID", "candidate principal policy changed"
+        )
+    principal_id = str(principal.attrib["id"]).strip()
+    if not principal_id:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID", "candidate principal id is empty"
+        )
+
+    settings = one_root("Settings")
+    if settings.attrib:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID", "candidate settings gained attributes"
+        )
+    settings_values = child_map(settings, field="settings")
+    # Task Scheduler is allowed to omit schema-default values from an XML
+    # readback.  Compare the effective policy, not the serializer's choice to
+    # spell those defaults.  Non-default values remain mandatory because an
+    # omission would change the authored task's behavior.
+    required_scalars = {
+        "MultipleInstancesPolicy": "IgnoreNew",
+        "DisallowStartIfOnBatteries": "false",
+        "StopIfGoingOnBatteries": "false",
+        "StartWhenAvailable": "true",
+        "ExecutionTimeLimit": "PT0S",
+    }
+    scheduler_default_scalars = {
+        "AllowHardTerminate": "true",
+        "RunOnlyIfNetworkAvailable": "false",
+        "AllowStartOnDemand": "true",
+        "Enabled": "true",
+        "Hidden": "false",
+        "RunOnlyIfIdle": "false",
+        "WakeToRun": "false",
+        "Priority": "7",
+        "DisallowStartOnRemoteAppSession": "false",
+        "UseUnifiedSchedulingEngine": "false",
+        "Volatile": "false",
+    }
+    if not (
+        (set(required_scalars) | {"IdleSettings"}) <= set(settings_values)
+        and set(settings_values)
+        <= (
+            set(required_scalars)
+            | set(scheduler_default_scalars)
+            | {"IdleSettings"}
+        )
+    ):
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            "candidate settings roster changed or enables automatic restart",
+        )
+    for key, expected in required_scalars.items():
+        actual = settings_values[key]
+        if expected in {"true", "false"}:
+            actual = actual.casefold()
+        if actual != expected:
+            raise CapturedPaperHostCutoverError(
+                "TASK_SCHEDULER_SEMANTICS_INVALID",
+                f"candidate setting {key} changed during registration",
+            )
+    for key, expected in scheduler_default_scalars.items():
+        actual = settings_values.get(key, expected)
+        if key == "Enabled":
+            if actual.casefold() not in {"true", "false"}:
+                raise CapturedPaperHostCutoverError(
+                    "TASK_SCHEDULER_SEMANTICS_INVALID",
+                    "candidate lifecycle Enabled setting is not boolean",
+                )
+            # Enablement is checked from TaskObservation at each lifecycle
+            # boundary and is intentionally excluded from definition identity.
+            continue
+        if actual.casefold() != expected:
+            raise CapturedPaperHostCutoverError(
+                "TASK_SCHEDULER_SEMANTICS_INVALID",
+                f"candidate scheduler-default setting {key} changed",
+            )
+    idle = next(
+        item for item in list(settings)
+        if item.tag == f"{{{_TASK_NS}}}IdleSettings"
+    )
+    idle_values = child_map(idle, field="IdleSettings")
+    idle_expected = {"StopOnIdleEnd": "false"}
+    idle_defaults = {
+        "RestartOnIdle": "false",
+        "Duration": "PT10M",
+        "WaitTimeout": "PT1H",
+    }
+    if (
+        idle.attrib
+        or not set(idle_expected).issubset(idle_values)
+        or set(idle_values) - set(idle_expected) - set(idle_defaults)
+        or any(
+            idle_values[key].casefold() != value
+            for key, value in idle_expected.items()
+        )
+        or any(
+            idle_values.get(key, value) != value
+            for key, value in idle_defaults.items()
+        )
+    ):
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID", "candidate idle settings changed"
+        )
+
+    actions = one_root("Actions")
+    if actions.attrib != {"Context": principal_id}:
+        raise CapturedPaperHostCutoverError(
+            "TASK_SCHEDULER_SEMANTICS_INVALID",
+            "candidate action context changed principal",
+        )
+    exec_projection = dict(_task_exec_projection_from_xml(raw))
+    return MappingProxyType(
+        {
+            "principal_id": principal_id,
+            "principal_user_id": _normalized_task_account_identity(
+                principal_values["UserId"]
+            ),
+            "logon_type": principal_values["LogonType"].casefold(),
+            "run_level": principal_values["RunLevel"].casefold(),
+            "process_token_sid_type": principal_values.get(
+                "ProcessTokenSidType", "Default"
+            ),
+            "trigger_profile": "on_demand_only",
+            "settings": {
+                **{
+                    key: value for key, value in required_scalars.items()
+                    if key != "Enabled"
+                },
+                **{
+                    key: value for key, value in scheduler_default_scalars.items()
+                    if key != "Enabled"
+                },
+                "IdleSettings": {**idle_expected, **idle_defaults},
+            },
+            "command": exec_projection["command"],
+            "arguments": exec_projection["arguments"],
+            "working_directory": exec_projection["working_directory"],
+        }
+    )
+
+
 def _candidate_task_semantics_match(
     observed_xml: bytes, resolved_xml: bytes
 ) -> bool:
@@ -2111,24 +2816,24 @@ def _candidate_task_semantics_match(
     Task Scheduler re-serializes registered XML (UTF-16/CRLF, added <URI>,
     canonicalized principal), so authored bytes never survive a
     /Create -> /Query round trip and byte/sha compares are impossible by
-    construction (2026-07-17, first live Apply).  Identity is therefore the
+    construction (2026-07-17, first live Apply).  Identity includes the
     Exec action — command, arguments, working directory — compared with
-    Windows case-insensitive path semantics against the sealed resolved
-    template, whose own bytes stay hash-bound via the candidate action."""
+    principal account/logon/run-level, empty trigger roster and exact
+    no-restart settings, all compared against the sealed resolved template."""
 
     try:
-        observed_cmd, observed_args = _task_exec_from_xml(observed_xml)
-        resolved_cmd, resolved_args = _task_exec_from_xml(resolved_xml)
-        observed_projection = _task_exec_projection_from_xml(observed_xml)
-        resolved_projection = _task_exec_projection_from_xml(resolved_xml)
+        observed_projection = dict(
+            _candidate_task_scheduler_projection_from_xml(observed_xml)
+        )
+        resolved_projection = dict(
+            _candidate_task_scheduler_projection_from_xml(resolved_xml)
+        )
     except CapturedPaperHostCutoverError:
         return False
-    return (
-        os.path.normcase(observed_cmd) == os.path.normcase(resolved_cmd)
-        and os.path.normcase(observed_args) == os.path.normcase(resolved_args)
-        and os.path.normcase(str(observed_projection.get("working_directory") or ""))
-        == os.path.normcase(str(resolved_projection.get("working_directory") or ""))
-    )
+    for key in ("command", "arguments", "working_directory"):
+        observed_projection[key] = os.path.normcase(str(observed_projection[key]))
+        resolved_projection[key] = os.path.normcase(str(resolved_projection[key]))
+    return observed_projection == resolved_projection
 
 
 def _decode_b64(value: Any, field: str) -> bytes:
@@ -3402,20 +4107,10 @@ def _validate_candidate_task_semantics(raw: bytes, *, candidate_root: str) -> No
             "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate description is not exact"
         )
     triggers = _one_child(root, "Triggers", "Triggers")
-    logon = _one_child(triggers, "LogonTrigger", "LogonTrigger")
-    if list(triggers) != [logon] or triggers.attrib or logon.attrib:
+    if list(triggers) or triggers.attrib:
         raise CapturedPaperHostCutoverError(
-            "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate trigger roster is not exact"
-        )
-    trigger_enabled = _one_child(logon, "Enabled", "trigger Enabled")
-    trigger_user = _one_child(logon, "UserId", "trigger UserId")
-    if (
-        [item.tag.rsplit("}", 1)[-1] for item in list(logon)] != ["Enabled", "UserId"]
-        or (trigger_enabled.text or "").strip().lower() != "true"
-        or not (trigger_user.text or "").strip()
-    ):
-        raise CapturedPaperHostCutoverError(
-            "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate logon trigger is not exact"
+            "TASK_TEMPLATE_SEMANTICS_INVALID",
+            "candidate task must be on-demand-only with no automatic triggers",
         )
     principals = _one_child(root, "Principals", "Principals")
     principal = _one_child(principals, "Principal", "Principal")
@@ -3427,13 +4122,13 @@ def _validate_candidate_task_semantics(raw: bytes, *, candidate_root: str) -> No
         item.tag.rsplit("}", 1)[-1]: (item.text or "").strip()
         for item in list(principal)
     }
-    if principal_values != {
-        "UserId": (trigger_user.text or "").strip(),
-        "LogonType": "InteractiveToken",
-        "RunLevel": "HighestAvailable",
-    } or [item.tag.rsplit("}", 1)[-1] for item in list(principal)] != [
-        "UserId", "LogonType", "RunLevel"
-    ]:
+    if (
+        [item.tag.rsplit("}", 1)[-1] for item in list(principal)]
+        != ["UserId", "LogonType", "RunLevel"]
+        or not principal_values.get("UserId")
+        or principal_values.get("LogonType") != "InteractiveToken"
+        or principal_values.get("RunLevel") != "HighestAvailable"
+    ):
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate principal policy is not exact"
         )
@@ -3460,25 +4155,21 @@ def _validate_candidate_task_semantics(raw: bytes, *, candidate_root: str) -> No
     actual_scalars = {
         item.tag.rsplit("}", 1)[-1]: (item.text or "").strip()
         for item in list(settings)
-        if item.tag.rsplit("}", 1)[-1] not in {"IdleSettings", "RestartOnFailure"}
+        if item.tag.rsplit("}", 1)[-1] != "IdleSettings"
     }
     if actual_scalars != scalar_settings:
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate task settings are not exact"
         )
     idle = _one_child(settings, "IdleSettings", "IdleSettings")
-    restart = _one_child(settings, "RestartOnFailure", "RestartOnFailure")
     if {
         item.tag.rsplit("}", 1)[-1]: (item.text or "").strip()
         for item in list(idle)
-    } != {"StopOnIdleEnd": "false", "RestartOnIdle": "false"} or {
-        item.tag.rsplit("}", 1)[-1]: (item.text or "").strip()
-        for item in list(restart)
-    } != {"Interval": "PT1M", "Count": "3"}:
+    } != {"StopOnIdleEnd": "false", "RestartOnIdle": "false"}:
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate nested settings are not exact"
         )
-    if len(list(settings)) != len(scalar_settings) + 2:
+    if len(list(settings)) != len(scalar_settings) + 1:
         raise CapturedPaperHostCutoverError(
             "TASK_TEMPLATE_SEMANTICS_INVALID", "candidate settings contain extras"
         )
@@ -4195,12 +4886,7 @@ def build_candidate_task_xml_template(
         "  <RegistrationInfo>\n"
         "    <Description>One hash-bound captured Alpaca PAPER host; no live-cash authority.</Description>\n"
         "  </RegistrationInfo>\n"
-        "  <Triggers>\n"
-        "    <LogonTrigger>\n"
-        "      <Enabled>true</Enabled>\n"
-        f"      <UserId>{escape(user)}</UserId>\n"
-        "    </LogonTrigger>\n"
-        "  </Triggers>\n"
+        "  <Triggers />\n"
         "  <Principals>\n"
         "    <Principal id=\"Author\">\n"
         f"      <UserId>{escape(user)}</UserId>\n"
@@ -4223,7 +4909,6 @@ def build_candidate_task_xml_template(
         "    <WakeToRun>false</WakeToRun>\n"
         "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
         "    <Priority>7</Priority>\n"
-        "    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>\n"
         "  </Settings>\n"
         '  <Actions Context="Author">\n'
         "    <Exec>\n"
@@ -4246,11 +4931,45 @@ def build_candidate_task_xml_template(
 
 
 class _JournalLock:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, mutex_name: str | None = None) -> None:
         self._path = path
+        self._mutex_name = mutex_name
+        self._mutex_handle: Any = None
         self._handle: Any = None
 
     def __enter__(self) -> "_JournalLock":
+        if os.name == "nt" and self._mutex_name is not None:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                create = kernel32.CreateMutexW
+                create.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+                create.restype = wintypes.HANDLE
+                wait = kernel32.WaitForSingleObject
+                wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+                wait.restype = wintypes.DWORD
+                close = kernel32.CloseHandle
+                close.argtypes = (wintypes.HANDLE,)
+                close.restype = wintypes.BOOL
+                release = kernel32.ReleaseMutex
+                release.argtypes = (wintypes.HANDLE,)
+                release.restype = wintypes.BOOL
+                handle = create(None, False, self._mutex_name)
+                if not handle:
+                    raise OSError("CreateMutexW failed")
+                result = int(wait(handle, 0))
+                if result not in {0x00000000, 0x00000080}:
+                    close(handle)
+                    raise OSError("host mutex is already owned or unavailable")
+                self._mutex_handle = (handle, kernel32)
+                return self
+            except (AttributeError, ImportError, OSError, TypeError) as exc:
+                raise CapturedPaperHostCutoverError(
+                    "CUTOVER_ALREADY_RUNNING",
+                    "another host-cutover transaction owns or obscures the host mutex",
+                ) from exc
         self._handle = self._path.open("a+b")
         self._handle.seek(0, os.SEEK_END)
         if self._handle.tell() == 0:
@@ -4271,6 +4990,14 @@ class _JournalLock:
         return self
 
     def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        if self._mutex_handle is not None:
+            handle, kernel32 = self._mutex_handle
+            self._mutex_handle = None
+            try:
+                kernel32.ReleaseMutex(handle)
+            finally:
+                kernel32.CloseHandle(handle)
+            return
         if self._handle is None:
             return
         try:
@@ -4415,7 +5142,13 @@ class CutoverJournal:
             ) from exc
         self._observed_journal_raw = self._valid_journal_prefix
 
-    def append(self, event_type: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    def append(
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        recorded_at: datetime | None = None,
+    ) -> Mapping[str, Any]:
         self._repair_valid_prefix_before_append()
         previous = (
             str(self._events[-1]["event_sha256"])
@@ -4428,7 +5161,7 @@ class CutoverJournal:
             "sequence": len(self._events) + 1,
             "previous_event_sha256": previous,
             "event_type": str(event_type),
-            "recorded_at": _iso(self.clock()),
+            "recorded_at": _iso(self.clock() if recorded_at is None else recorded_at),
             "payload": json.loads(_canonical_json_bytes(payload).decode("utf-8")),
         }
         body["event_sha256"] = sha256_json(body)
@@ -4559,6 +5292,194 @@ def _journal_state(events: Sequence[Mapping[str, Any]]) -> str:
     return state
 
 
+def _legacy_execution_lane_document(
+    value: LegacyExecutionLaneObservation,
+) -> Mapping[str, Any]:
+    document = {
+        "schema_version": LEGACY_EXECUTION_LANE_SCHEMA,
+        "container_name": value.container_name,
+        "container_id": value.container_id,
+        "image_id": value.image_id,
+        "config_sha256": value.config_sha256,
+        "execution_scope": value.execution_scope,
+        "scope_sha256": value.scope_sha256,
+        "recreator_tasks": [
+            {
+                "name": item.name,
+                "definition_sha256": item.definition_sha256,
+                "action_sha256": item.action_sha256,
+                "source_chain_sha256": item.source_chain_sha256,
+                "enabled": item.enabled,
+            }
+            for item in sorted(value.recreator_tasks, key=lambda row: row.name)
+        ],
+        "state": value.state,
+    }
+    return MappingProxyType(document)
+
+
+def _parse_legacy_execution_lane(
+    value: Any, *, field: str
+) -> LegacyExecutionLaneObservation:
+    lane = _mapping(value, field)
+    _exact_keys(
+        lane,
+        {
+            "schema_version",
+            "container_name",
+            "container_id",
+            "image_id",
+            "config_sha256",
+            "execution_scope",
+            "scope_sha256",
+            "recreator_tasks",
+            "state",
+        },
+        field,
+    )
+    container_id = str(lane.get("container_id") or "").lower()
+    image_id = str(lane.get("image_id") or "").lower()
+    state = str(lane.get("state") or "")
+    execution_scope = str(lane.get("execution_scope") or "")
+    raw_recreator_tasks = lane.get("recreator_tasks")
+    if not isinstance(raw_recreator_tasks, list):
+        raise CapturedPaperHostCutoverError(
+            "EXECUTION_LANE_IDENTITY_INVALID",
+            f"{field} has no exact external recreator-task roster",
+        )
+    recreator_tasks: list[ExecutionLaneRecreatorTaskObservation] = []
+    for index, raw_task in enumerate(raw_recreator_tasks):
+        task = _mapping(raw_task, f"{field}.recreator_tasks[{index}]")
+        _exact_keys(
+            task,
+            {
+                "name",
+                "definition_sha256",
+                "action_sha256",
+                "source_chain_sha256",
+                "enabled",
+            },
+            f"{field}.recreator_tasks[{index}]",
+        )
+        name = str(task.get("name") or "")
+        if type(task.get("enabled")) is not bool:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_IDENTITY_INVALID",
+                f"{field} has a malformed recreator-task state",
+            )
+        recreator_tasks.append(
+            ExecutionLaneRecreatorTaskObservation(
+                name=name,
+                definition_sha256=_sha(
+                    task.get("definition_sha256"),
+                    f"{field}.recreator_tasks[{index}].definition_sha256",
+                ),
+                action_sha256=_sha(
+                    task.get("action_sha256"),
+                    f"{field}.recreator_tasks[{index}].action_sha256",
+                ),
+                source_chain_sha256=_sha(
+                    task.get("source_chain_sha256"),
+                    f"{field}.recreator_tasks[{index}].source_chain_sha256",
+                ),
+                enabled=bool(task["enabled"]),
+            )
+        )
+    if (
+        [item.name for item in recreator_tasks]
+        != sorted(EXECUTION_LANE_RECREATOR_TASKS)
+        or len({item.name for item in recreator_tasks}) != len(recreator_tasks)
+    ):
+        raise CapturedPaperHostCutoverError(
+            "EXECUTION_LANE_IDENTITY_INVALID",
+            f"{field} has an incomplete external recreator-task roster",
+        )
+    if not (
+        lane.get("schema_version") == LEGACY_EXECUTION_LANE_SCHEMA
+        and lane.get("container_name") == LEGACY_EXECUTION_LANE_NAME
+        and _SHA256_RE.fullmatch(container_id)
+        and image_id.startswith("sha256:")
+        and _SHA256_RE.fullmatch(image_id.removeprefix("sha256:"))
+        and _sha(lane.get("config_sha256"), f"{field}.config_sha256")
+        and execution_scope == "legacy:mixed-paper-config-live-masters-disabled"
+        and _sha(lane.get("scope_sha256"), f"{field}.scope_sha256")
+        and state in LEGACY_EXECUTION_LANE_PRIOR_STATES
+    ):
+        raise CapturedPaperHostCutoverError(
+            "EXECUTION_LANE_IDENTITY_INVALID",
+            f"{field} is not the exact allowlisted Docker container",
+        )
+    return LegacyExecutionLaneObservation(
+        container_name=LEGACY_EXECUTION_LANE_NAME,
+        container_id=container_id,
+        image_id=image_id,
+        config_sha256=str(lane["config_sha256"]).lower(),
+        execution_scope=execution_scope,
+        scope_sha256=str(lane["scope_sha256"]).lower(),
+        recreator_tasks=tuple(recreator_tasks),
+        state=state,
+    )
+
+
+def _legacy_execution_lane_baseline(
+    events: Sequence[Mapping[str, Any]],
+) -> LegacyExecutionLaneObservation:
+    """Read the durable exact pre-mutation Docker lane identity."""
+
+    started = [event for event in events if event.get("event_type") == "apply_started"]
+    if len(started) != 1:
+        raise CapturedPaperHostCutoverError(
+            "EXECUTION_LANE_ROLLBACK_AUTHORITY_MISSING",
+            "rollback requires one journal-bound execution lane baseline",
+        )
+    payload = _mapping(started[0].get("payload"), "apply_started.payload")
+    if payload.get("legacy_execution_lane") is not None:
+        return _parse_legacy_execution_lane(
+            payload.get("legacy_execution_lane"),
+            field="apply_started.payload.legacy_execution_lane",
+        )
+    adopted = [
+        event
+        for event in events
+        if event.get("event_type") == "legacy_execution_lane_identity_adopted"
+    ]
+    if len(adopted) != 1:
+        raise CapturedPaperHostCutoverError(
+            "EXECUTION_LANE_ROLLBACK_AUTHORITY_MISSING",
+            "legacy journal has no exact Docker identity adoption",
+        )
+    adopted_payload = _mapping(
+        adopted[0].get("payload"),
+        "legacy_execution_lane_identity_adopted.payload",
+    )
+    _exact_keys(
+        adopted_payload,
+        {"legacy_execution_lane", "reason", "host_baseline_verified"},
+        "legacy execution lane adoption",
+    )
+    if not (
+        adopted_payload.get("reason")
+        == "pre_identity_schema_journal_already_at_exact_baseline"
+        and adopted_payload.get("host_baseline_verified") is True
+    ):
+        raise CapturedPaperHostCutoverError(
+            "EXECUTION_LANE_ROLLBACK_AUTHORITY_INVALID",
+            "legacy Docker identity adoption is not an exact baseline proof",
+        )
+    return _parse_legacy_execution_lane(
+        adopted_payload.get("legacy_execution_lane"),
+        field="legacy_execution_lane_identity_adopted.legacy_execution_lane",
+    )
+
+
+def _legacy_execution_lane_quiesced_state(prior_state: str) -> str:
+    if prior_state in LEGACY_EXECUTION_LANE_PRIOR_STATES:
+        return "stopped"
+    raise CapturedPaperHostCutoverError(
+        "EXECUTION_LANE_STATE_INVALID", "legacy execution lane state is unsupported"
+    )
+
+
 def _discover_rollback_capsule(
     *,
     journal_root: str | Path,
@@ -4682,6 +5603,72 @@ def _discover_rollback_capsule(
     )
 
 
+def _discover_single_active_rollback_capsule(
+    *,
+    journal_root: str | Path,
+    caller_roots: Sequence[Path],
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> tuple[PreparedCutover, str] | None:
+    """Find one interrupted/applied local transaction without mutable inputs.
+
+    Baseline journals are intentionally ignored.  Every candidate is still
+    admitted through ``_discover_rollback_capsule`` and its hash-chained,
+    content-addressed rollback capsule.  More than one active transaction is
+    ambiguous and therefore cannot be recovered automatically.
+    """
+
+    raw_root = Path(journal_root)
+    if not raw_root.is_absolute() or str(raw_root).startswith(("\\\\", "//")):
+        raise CapturedPaperHostCutoverError(
+            "JOURNAL_PATH_INVALID", "recovery journal_root must be an absolute local path"
+        )
+    if not os.path.lexists(raw_root):
+        parent = raw_root.parent.resolve(strict=True)
+        _reject_reparse_chain(parent)
+        if not _inside(parent, caller_roots):
+            raise CapturedPaperHostCutoverError(
+                "PATH_OUTSIDE_ROOTS", "recovery journal_root escaped caller roots"
+            )
+        return None
+    _reject_reparse_chain(raw_root)
+    root = _strict_existing_dir(
+        raw_root, roots=caller_roots, field="recovery journal_root"
+    )
+    manifest_hashes: set[str] = set()
+    for generation_root in root.iterdir():
+        _reject_reparse_chain(generation_root)
+        if not generation_root.is_dir():
+            continue
+        try:
+            generation = str(uuid.UUID(generation_root.name))
+        except ValueError:
+            continue
+        if generation != generation_root.name:
+            continue
+        for journal_path in generation_root.glob("*.jsonl"):
+            _reject_reparse_chain(journal_path)
+            if journal_path.is_file() and _SHA256_RE.fullmatch(journal_path.stem):
+                manifest_hashes.add(journal_path.stem)
+
+    active: list[tuple[PreparedCutover, str]] = []
+    for manifest_sha in sorted(manifest_hashes):
+        prepared = _discover_rollback_capsule(
+            journal_root=root,
+            manifest_sha256=manifest_sha,
+            caller_roots=caller_roots,
+        )
+        journal = CutoverJournal(root=root, prepared=prepared, clock=clock)
+        state = _journal_state(journal.events)
+        if state != "baseline":
+            active.append((prepared, state))
+    if len(active) > 1:
+        raise CapturedPaperHostCutoverError(
+            "ACTIVE_ROLLBACK_JOURNAL_AMBIGUOUS",
+            "more than one nonbaseline cutover transaction requires manual review",
+        )
+    return active[0] if active else None
+
+
 def _startup_handshake_paths(
     invocation: CandidateInvocation, *, roots: Sequence[Path]
 ) -> Mapping[str, Path]:
@@ -4694,6 +5681,9 @@ def _startup_handshake_paths(
         "prepared": base,
         "permit": Path(f"{base}.permit.json"),
         "started": Path(f"{base}.started.json"),
+        "active_start_evidence": Path(
+            f"{base}.active-start-evidence.json"
+        ),
         "revocation_requested": Path(f"{base}.revocation-requested.json"),
         "revoked": Path(f"{base}.revoked.json"),
         "dispatch_lock": Path(f"{base}.dispatch.lock"),
@@ -5553,10 +6543,14 @@ class CapturedPaperHostCutoverExecutor:
         backend: HostCutoverBackend,
         journal_root: Path,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        wait: Callable[[float], None] = time.sleep,
     ) -> None:
         self.prepared = prepared
         self.backend = backend
         self.clock = clock
+        self.monotonic_clock = monotonic_clock
+        self.wait = wait
         self.journal_root = _strict_existing_dir(
             journal_root,
             roots=prepared.allowed_read_roots,
@@ -5577,6 +6571,79 @@ class CapturedPaperHostCutoverExecutor:
             mutation_count=0,
         )
 
+    def _await_legacy_paper_broker_quiet_horizon(
+        self,
+        *,
+        journal: CutoverJournal,
+        expected_lane: LegacyExecutionLaneObservation,
+    ) -> None:
+        """Hold the sealed PAPER-only quiet horizon with local authority absent."""
+
+        required = float(LEGACY_PAPER_BROKER_QUIET_HORIZON_SECONDS)
+        if not (required > 0.0 and required <= 300.0):
+            raise CapturedPaperHostCutoverError(
+                "BROKER_QUIET_HORIZON_INVALID",
+                "sealed PAPER quiet horizon is outside the host contract",
+            )
+
+        def probe(field: str) -> tuple[LegacyExecutionLaneObservation, str]:
+            lane = self.backend.inspect_legacy_execution_lane()
+            lane_document = dict(_legacy_execution_lane_document(lane))
+            if (
+                lane.identity_key() != expected_lane.identity_key()
+                or lane.state != "stopped"
+                or any(item.enabled for item in lane.recreator_tasks)
+                or self.backend.find_legacy_processes(
+                    self.prepared.restore_plan.bindings
+                )
+                or self.backend.await_execution_lane_recreator_processes(
+                    timeout_seconds=0.0
+                )
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "BROKER_QUIET_HORIZON_INTERRUPTED",
+                    f"legacy execution authority reappeared during {field}",
+                )
+            return lane, sha256_json(lane_document)
+
+        _first_lane, first_lane_sha = probe("first zero-authority probe")
+        first_zero_at = self.clock()
+        _iso(first_zero_at)
+        first_zero_at = first_zero_at.astimezone(UTC)
+        started = float(self.monotonic_clock())
+        self.wait(required)
+        elapsed = float(self.monotonic_clock()) - started
+        if not elapsed >= required:
+            raise CapturedPaperHostCutoverError(
+                "BROKER_QUIET_HORIZON_INCOMPLETE",
+                "PAPER quiet horizon returned before its sealed duration",
+            )
+        _last_lane, last_lane_sha = probe("last zero-authority probe")
+        last_zero_at = self.clock()
+        _iso(last_zero_at)
+        last_zero_at = last_zero_at.astimezone(UTC)
+        if first_lane_sha != last_lane_sha or last_zero_at < first_zero_at:
+            raise CapturedPaperHostCutoverError(
+                "BROKER_QUIET_HORIZON_DRIFT",
+                "legacy execution identity changed during the PAPER quiet horizon",
+            )
+        journal.append(
+            "legacy_paper_broker_quiet_horizon_completed",
+            {
+                "policy": LEGACY_PAPER_BROKER_QUIET_HORIZON_POLICY,
+                "assumption_bound": True,
+                "live_cash_certification": False,
+                "required_seconds": required,
+                "observed_monotonic_seconds": elapsed,
+                "stabilized_probe_count": 2,
+                "first_zero_at": _iso(first_zero_at),
+                "last_zero_at": _iso(last_zero_at),
+                "legacy_execution_lane_sha256": last_lane_sha,
+                "legacy_process_count": 0,
+                "recreator_process_count": 0,
+            },
+        )
+
     def apply(self) -> CutoverReport:
         journal = CutoverJournal(
             root=self.journal_root, prepared=self.prepared, clock=self.clock
@@ -5586,7 +6653,24 @@ class CapturedPaperHostCutoverExecutor:
             journal._events = journal._read_events()
             state = _journal_state(journal.events)
             if state == "applied":
-                self._assert_applied()
+                prior_lane = _legacy_execution_lane_baseline(journal.events)
+                try:
+                    self._assert_applied(prior_lane)
+                except BaseException as exc:
+                    try:
+                        self._rollback(
+                            journal, reason="recover_applied_postcondition_failure"
+                        )
+                    except BaseException as rollback_exc:
+                        raise CapturedPaperHostCutoverError(
+                            "COMPENSATING_ROLLBACK_FAILED",
+                            "applied service failed and exact rollback also failed: "
+                            f"{type(rollback_exc).__name__}",
+                        ) from rollback_exc
+                    raise CapturedPaperHostCutoverError(
+                        "APPLIED_POSTCONDITION_RECOVERED",
+                        "applied service was not healthy; legacy ownership was restored",
+                    ) from exc
                 return self._report(MODE_APPLY, "ALREADY_APPLIED_EXACT", journal, 0)
             if state in {"applying", "rolling_back"}:
                 self._rollback(journal, reason="recover_incomplete_transaction")
@@ -5595,12 +6679,14 @@ class CapturedPaperHostCutoverExecutor:
                     "an interrupted cutover was rolled back; rerun Apply explicitly",
                 )
             if journal.events:
-                self._assert_rolled_back()
+                self._assert_rolled_back(
+                    _legacy_execution_lane_baseline(journal.events)
+                )
                 raise CapturedPaperHostCutoverError(
                     "FRESH_ROLLBACK_SNAPSHOT_REQUIRED",
                     "a consumed rollback snapshot cannot authorize another Apply",
                 )
-            self._assert_baseline()
+            prior_lane = self._assert_baseline()
             resolved_path = journal.publish_object(
                 self.prepared.resolved_task_xml, kind="candidate_task_xml"
             )
@@ -5633,12 +6719,41 @@ class CapturedPaperHostCutoverExecutor:
                     "rollback_task_xml_paths": {
                         name: str(path) for name, path in rollback_task_paths.items()
                     },
+                    "legacy_execution_lane": dict(
+                        _legacy_execution_lane_document(prior_lane)
+                    ),
                     "account_scope": "alpaca:paper",
                     "live_cash_authorized": False,
                 },
             )
             mutations = 0
             try:
+                mutations += self.backend.quiesce_legacy_execution_lane(
+                    expected=prior_lane
+                )
+                quiesced_lane = self.backend.inspect_legacy_execution_lane()
+                if (
+                    quiesced_lane.identity_key() != prior_lane.identity_key()
+                    or quiesced_lane.state != "stopped"
+                    or any(
+                        item.enabled for item in quiesced_lane.recreator_tasks
+                    )
+                ):
+                    raise CapturedPaperHostCutoverError(
+                        "EXECUTION_LANE_QUIESCE_FAILED",
+                        "legacy Docker execution lane is not exactly quiesced",
+                    )
+                journal.append(
+                    "legacy_execution_lane_quiesced",
+                    {
+                        "legacy_execution_lane": dict(
+                            _legacy_execution_lane_document(quiesced_lane)
+                        ),
+                        "legacy_execution_lane_sha256": sha256_json(
+                            dict(_legacy_execution_lane_document(quiesced_lane))
+                        ),
+                    },
+                )
                 handshake_paths = _startup_handshake_paths(
                     self.prepared.invocation,
                     roots=self.prepared.allowed_read_roots,
@@ -5739,6 +6854,28 @@ class CapturedPaperHostCutoverExecutor:
                         "a provenance-matched legacy bridge remains after shutdown",
                     )
 
+                # The quiet horizon starts only after *every* local legacy
+                # execution authority is gone.  Quiescing the Docker lane alone
+                # is insufficient while the scheduled tasks and bridge
+                # processes below are still able to submit PAPER orders.
+                self._await_legacy_paper_broker_quiet_horizon(
+                    journal=journal,
+                    expected_lane=quiesced_lane,
+                )
+                quiet_horizon_event = journal.events[-1]
+                if (
+                    quiet_horizon_event.get("event_type")
+                    != "legacy_paper_broker_quiet_horizon_completed"
+                ):
+                    raise CapturedPaperHostCutoverError(
+                        "BROKER_QUIET_HORIZON_UNBOUND",
+                        "quiet-horizon journal event was not durably linearized",
+                    )
+                quiet_horizon_event_sha256 = _sha(
+                    quiet_horizon_event.get("event_sha256"),
+                    "quiet-horizon journal event",
+                )
+
                 if self.backend.get_task(CANDIDATE_TASK_NAME) is not None:
                     raise CapturedPaperHostCutoverError(
                         "CANDIDATE_TASK_COLLISION",
@@ -5820,7 +6957,7 @@ class CapturedPaperHostCutoverExecutor:
                 )
                 # Re-evaluate every host postcondition only after PREPARED has
                 # proven workers are still stopped.  No permit exists yet.
-                postcondition_processes = self._assert_applied()
+                postcondition_processes = self._assert_applied(prior_lane)
                 current_service = next(
                     item.identity
                     for item in postcondition_processes
@@ -5853,20 +6990,60 @@ class CapturedPaperHostCutoverExecutor:
                     challenge_sha256=challenge,
                     prepared_receipt_sha256=prepared_sha,
                     activation_permit_sha256=permit_sha,
+                    host_quiet_horizon_event_sha256=(
+                        quiet_horizon_event_sha256
+                    ),
                 )
-                self._assert_applied()
+                self._assert_applied(prior_lane)
+                apply_completed_at = self.clock()
+                if apply_completed_at >= prepared_valid_until:
+                    raise CapturedPaperHostCutoverError(
+                        "HOST_ACTIVATION_PERMIT_EXPIRED",
+                        "host could not commit STARTED before permit expiry",
+                    )
                 journal.append(
                     "apply_completed",
                     {
                         "postcondition": "one_unified_candidate_host",
+                        "activation_generation": (
+                            self.prepared.activation_generation
+                        ),
+                        "manifest_sha256": self.prepared.manifest_sha256,
+                        "account_scope": "alpaca:paper",
+                        "expected_account_id": self.prepared.expected_account_id,
+                        "service_pid": service.pid,
+                        "service_create_time_ns": service.create_time_ns,
+                        "service_executable_sha256": (
+                            service.executable_sha256
+                        ),
+                        "service_executable_path": service.executable_path,
+                        "service_cmdline_sha256": service.cmdline_sha256,
                         "legacy_task_count_disabled": len(REQUIRED_LEGACY_TASKS),
                         "legacy_process_count": 0,
                         "prepared_receipt_sha256": prepared_sha,
                         "activation_permit_sha256": permit_sha,
                         "started_receipt_sha256": started_sha,
+                        "active_start_authority_sha256": started_receipt[
+                            "active_start_authority_sha256"
+                        ],
+                        "active_start_evidence_artifact_sha256": started_receipt[
+                            "active_start_evidence_artifact_sha256"
+                        ],
+                        "host_quiet_horizon_event_sha256": (
+                            quiet_horizon_event_sha256
+                        ),
                         "challenge_sha256": challenge,
+                        "legacy_execution_lane": dict(
+                            _legacy_execution_lane_document(quiesced_lane)
+                        ),
+                        "legacy_execution_lane_sha256": sha256_json(
+                            dict(_legacy_execution_lane_document(quiesced_lane))
+                        ),
+                        "paper_execution_committed": True,
                         "live_cash_authorized": False,
+                        "real_money_authorized": False,
                     },
+                    recorded_at=apply_completed_at,
                 )
                 return self._report(MODE_APPLY, "APPLIED_ALPACA_PAPER_ONLY", journal, mutations)
             except BaseException as exc:
@@ -5905,7 +7082,9 @@ class CapturedPaperHostCutoverExecutor:
             journal._events = journal._read_events()
             if _journal_state(journal.events) == "baseline":
                 if journal.events:
-                    self._assert_rolled_back()
+                    self._assert_rolled_back(
+                        _legacy_execution_lane_baseline(journal.events)
+                    )
                 else:
                     self._assert_baseline()
                 return self._report(
@@ -5913,6 +7092,110 @@ class CapturedPaperHostCutoverExecutor:
                 )
             mutations = self._rollback(journal, reason="explicit_rollback")
             return self._report(MODE_ROLLBACK, "ROLLED_BACK_EXACT", journal, mutations)
+
+    def adopt_pre_identity_journal_at_exact_baseline(
+        self,
+    ) -> CutoverReport | None:
+        """Close an old pre-Docker journal only when the host is already exact.
+
+        Early cutover schema revisions wrote ``apply_started`` before any
+        Docker identity was part of the transaction.  We never invent that
+        missing rollback authority.  Recovery may append one explicit
+        adoption only after the capsule-bound tasks/processes, candidate
+        absence, handshake revocation, and the current immutable Docker
+        identity all prove the host is already at a complete legacy baseline.
+        No host mutation occurs in this path.
+        """
+
+        journal = CutoverJournal(
+            root=self.journal_root, prepared=self.prepared, clock=self.clock
+        )
+        with journal.lock():
+            journal._events = journal._read_events()
+            if _journal_state(journal.events) == "baseline":
+                return None
+            observed_sha256 = sha256_bytes(journal._observed_journal_raw)
+            event_types = [
+                str(event.get("event_type")) for event in journal.events
+            ]
+            if (
+                observed_sha256
+                not in _PRE_IDENTITY_JOURNAL_RECOVERY_ALLOWLIST
+                or event_types
+                != ["apply_started", "immutable_runtime_staged", "apply_failed"]
+            ):
+                return None
+            failure = _mapping(
+                journal.events[-1].get("payload"), "apply_failed.payload"
+            )
+            if (
+                set(failure) != {"error_code", "error_type"}
+                or failure.get("error_code") != "TASK_XML_INVALID"
+                or failure.get("error_type")
+                != "CapturedPaperHostCutoverError"
+            ):
+                return None
+            started = [
+                event
+                for event in journal.events
+                if event.get("event_type") == "apply_started"
+            ]
+            if len(started) != 1:
+                return None
+            payload = _mapping(started[0].get("payload"), "apply_started.payload")
+            if payload.get("legacy_execution_lane") is not None:
+                return None
+            if any(
+                event.get("event_type")
+                == "legacy_execution_lane_identity_adopted"
+                for event in journal.events
+            ):
+                return None
+            prepared = self._rollback_material(journal)
+            lane = _parse_legacy_execution_lane(
+                _legacy_execution_lane_document(
+                    self.backend.inspect_legacy_execution_lane()
+                ),
+                field="legacy recovery current Docker lane",
+            )
+            self._assert_rolled_back_with(
+                prepared, prior_execution_lane=lane
+            )
+            journal.append(
+                "legacy_execution_lane_identity_adopted",
+                {
+                    "legacy_execution_lane": dict(
+                        _legacy_execution_lane_document(lane)
+                    ),
+                    "reason": (
+                        "pre_identity_schema_journal_already_at_exact_baseline"
+                    ),
+                    "host_baseline_verified": True,
+                },
+            )
+            journal.append(
+                "rollback_started",
+                {
+                    "reason": "adopt_pre_identity_journal_exact_baseline",
+                    "candidate_task_name": CANDIDATE_TASK_NAME,
+                    "live_cash_authorized": False,
+                },
+            )
+            journal.append(
+                "rollback_completed",
+                {
+                    "restored_task_count": len(REQUIRED_LEGACY_TASKS),
+                    "restored_process_roles": sorted(
+                        item.role for item in prepared.restore_plan.bindings
+                    ),
+                    "candidate_task_absent": True,
+                    "host_mutation_count": 0,
+                    "legacy_identity_adoption_only": True,
+                },
+            )
+            return self._report(
+                MODE_RECOVER_ONLY, "ROLLED_BACK_EXACT", journal, 0
+            )
 
     def _report(
         self, mode: str, verdict: str, journal: CutoverJournal, mutation_count: int
@@ -5927,7 +7210,7 @@ class CapturedPaperHostCutoverExecutor:
             mutation_count=mutation_count,
         )
 
-    def _assert_baseline(self) -> None:
+    def _assert_baseline(self) -> LegacyExecutionLaneObservation:
         handshake_paths = _startup_handshake_paths(
             self.prepared.invocation, roots=self.prepared.allowed_read_roots
         )
@@ -5994,6 +7277,14 @@ class CapturedPaperHostCutoverExecutor:
                 "CANDIDATE_PROCESS_COLLISION",
                 "a candidate captured PAPER process already exists",
             )
+        lane = self.backend.inspect_legacy_execution_lane()
+        # Round-trip through the strict public document parser so a backend
+        # cannot smuggle an incomplete or noncanonical identity into the
+        # durable rollback authority.
+        return _parse_legacy_execution_lane(
+            _legacy_execution_lane_document(lane),
+            field="legacy execution lane baseline",
+        )
 
     @staticmethod
     def _assert_candidate_process_roster(
@@ -6026,7 +7317,19 @@ class CapturedPaperHostCutoverExecutor:
                 "candidate process inventory is ambiguous",
             )
 
-    def _assert_applied(self) -> tuple[CandidateProcessObservation, ...]:
+    def _assert_applied(
+        self, prior_execution_lane: LegacyExecutionLaneObservation
+    ) -> tuple[CandidateProcessObservation, ...]:
+        lane = self.backend.inspect_legacy_execution_lane()
+        if (
+            lane.identity_key() != prior_execution_lane.identity_key()
+            or lane.state != "stopped"
+            or any(item.enabled for item in lane.recreator_tasks)
+        ):
+            raise CapturedPaperHostCutoverError(
+                "APPLIED_POSTCONDITION_FAILED",
+                "legacy Docker execution lane is no longer exactly quiesced",
+            )
         launcher_path, launcher_sha = _stable_local_file_unrooted(
             self.prepared.invocation.launcher_script_path,
             field="applied candidate launcher",
@@ -6210,10 +7513,20 @@ class CapturedPaperHostCutoverExecutor:
         )
         return MappingProxyType(body), permit_sha
 
-    def _assert_rolled_back(self) -> None:
-        self._assert_rolled_back_with(self.prepared)
+    def _assert_rolled_back(
+        self, prior_execution_lane: LegacyExecutionLaneObservation
+    ) -> None:
+        self._assert_rolled_back_with(
+            self.prepared,
+            prior_execution_lane=prior_execution_lane,
+        )
 
-    def _assert_rolled_back_with(self, prepared: PreparedCutover) -> None:
+    def _assert_rolled_back_with(
+        self,
+        prepared: PreparedCutover,
+        *,
+        prior_execution_lane: LegacyExecutionLaneObservation,
+    ) -> None:
         handshake_paths = _startup_handshake_paths(
             prepared.invocation, roots=prepared.allowed_read_roots
         )
@@ -6263,6 +7576,12 @@ class CapturedPaperHostCutoverExecutor:
         ):
             raise CapturedPaperHostCutoverError(
                 "ROLLBACK_POSTCONDITION_FAILED", "candidate process remains after rollback"
+            )
+        lane = self.backend.inspect_legacy_execution_lane()
+        if lane != prior_execution_lane:
+            raise CapturedPaperHostCutoverError(
+                "ROLLBACK_POSTCONDITION_FAILED",
+                "legacy Docker execution lane prior state was not exactly restored",
             )
 
     @staticmethod
@@ -6505,7 +7824,7 @@ class CapturedPaperHostCutoverExecutor:
             "state": "REVOCATION_REQUESTED",
             "activation_generation": prepared.activation_generation,
             "manifest_sha256": prepared.manifest_sha256,
-            "account_scope": "alpaca:paper",
+            "execution_scope": "legacy:mixed-paper-config-live-masters-disabled",
             "expected_account_id": prepared.expected_account_id,
             "journal_transaction_id": journal.transaction_id,
             "journal_authorization_sequence": authorization["sequence"],
@@ -6651,6 +7970,7 @@ class CapturedPaperHostCutoverExecutor:
 
     def _rollback(self, journal: CutoverJournal, *, reason: str) -> int:
         prepared = self._rollback_material(journal)
+        prior_lane = _legacy_execution_lane_baseline(journal.events)
         journal_failed = False
 
         def record(event_type: str, payload: Mapping[str, Any]) -> None:
@@ -6684,9 +8004,140 @@ class CapturedPaperHostCutoverExecutor:
         self._revalidate_restore_authority(prepared)
         mutations = 0
         foreign_candidate = False
-        # Inventory, then disable/End the restart-capable task before
-        # signaling either process.  Otherwise RestartOnFailure can relaunch
-        # between the stop and task deletion.
+
+        def late_candidate_evidence() -> tuple[
+            TaskObservation | None,
+            tuple[TaskObservation, ...],
+            tuple[CandidateProcessObservation, ...],
+        ]:
+            return (
+                self.backend.get_task(CANDIDATE_TASK_NAME),
+                tuple(self.backend.find_candidate_tasks(prepared.invocation)),
+                tuple(
+                    self.backend.await_candidate_processes(
+                        prepared.invocation, timeout_seconds=0.0
+                    )
+                ),
+            )
+
+        def quarantine_late_candidate(
+            *,
+            named: TaskObservation | None,
+            tasks: Sequence[TaskObservation],
+            processes: Sequence[CandidateProcessObservation],
+        ) -> NoReturn:
+            """Re-quiesce every exact legacy lane after a rollback race.
+
+            A candidate task can be registered by an external generation
+            after the first inventory.  Once that happens, restoring the
+            legacy Docker executor and bridges would create dual authority.
+            Never mutate the foreign task; revoke the exact candidate
+            processes and put only the sealed legacy identities back into a
+            stopped state before reporting the quarantine.
+            """
+
+            nonlocal mutations
+            lane = self.backend.inspect_legacy_execution_lane()
+            if lane.identity_key() != prior_lane.identity_key():
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_IDENTITY_DRIFT",
+                    "cannot safely quarantine a changed legacy Docker identity",
+                )
+            mutations += self.backend.quiesce_legacy_execution_lane(expected=lane)
+
+            for process in processes:
+                current = self.backend.await_candidate_processes(
+                    prepared.invocation, timeout_seconds=0.0
+                )
+                match = next(
+                    (
+                        item
+                        for item in current
+                        if item.kind == process.kind
+                        and item.identity.semantic_key()
+                        == process.identity.semantic_key()
+                    ),
+                    None,
+                )
+                if match is not None:
+                    self.backend.stop_candidate_process(match, prepared.invocation)
+                    mutations += 1
+
+            for process in self.backend.find_legacy_processes(
+                prepared.restore_plan.bindings
+            ):
+                current = self.backend.get_process(process.pid, role=process.role)
+                if (
+                    current is not None
+                    and current.semantic_key() == process.semantic_key()
+                ):
+                    self.backend.stop_process(process)
+                    mutations += 1
+
+            legacy_task_drift = False
+            for name in REQUIRED_LEGACY_TASKS:
+                expected = prepared.task_snapshot.tasks[name]
+                observed = self.backend.get_task(name)
+                if observed is None:
+                    legacy_task_drift = True
+                    continue
+                if _task_definition_sha_ignoring_enabled(
+                    observed.xml
+                ) != _task_definition_sha_ignoring_enabled(expected.xml):
+                    legacy_task_drift = True
+                    continue
+                if observed.enabled:
+                    self.backend.set_task_enabled(name, False)
+                    mutations += 1
+
+            lane_after = self.backend.inspect_legacy_execution_lane()
+            legacy_processes_after = self.backend.find_legacy_processes(
+                prepared.restore_plan.bindings
+            )
+            candidate_processes_after = self.backend.await_candidate_processes(
+                prepared.invocation, timeout_seconds=0.0
+            )
+            legacy_tasks_quiesced = all(
+                (observed := self.backend.get_task(name)) is not None
+                and not observed.enabled
+                for name in REQUIRED_LEGACY_TASKS
+            )
+            quarantine_complete = (
+                lane_after.identity_key() == prior_lane.identity_key()
+                and lane_after.state == "stopped"
+                and not any(
+                    item.enabled for item in lane_after.recreator_tasks
+                )
+                and not legacy_processes_after
+                and not candidate_processes_after
+                and legacy_tasks_quiesced
+                and not legacy_task_drift
+            )
+            record(
+                "rollback_blocked_foreign_candidate",
+                {
+                    "candidate_task_name": CANDIDATE_TASK_NAME,
+                    "foreign_named_collision": named is not None,
+                    "exact_invocation_task_names": sorted(
+                        {item.name for item in tasks}
+                    ),
+                    "candidate_process_count_stopped": len(processes),
+                    "legacy_execution_remains_quiesced": quarantine_complete,
+                    "live_cash_authorized": False,
+                },
+            )
+            if not quarantine_complete:
+                raise CapturedPaperHostCutoverError(
+                    "FOREIGN_CANDIDATE_QUARANTINE_FAILED",
+                    "candidate authority appeared and exact legacy quiescence could not be proven",
+                )
+            raise CapturedPaperHostCutoverError(
+                "FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
+                "candidate authority appeared during rollback; legacy was re-quiesced",
+            )
+
+        # Inventory, then disable/End the on-demand-only task before signaling
+        # either process.  This also prevents a concurrent explicit /Run.
         candidate_processes = self.backend.await_candidate_processes(
             prepared.invocation, timeout_seconds=0.0
         )
@@ -6753,6 +8204,27 @@ class CapturedPaperHostCutoverExecutor:
                         "candidate_removed",
                         {"resolved_task_xml_sha256": prepared.resolved_task_xml_sha256},
                     )
+
+        remaining_candidate_tasks = self.backend.find_candidate_tasks(
+            prepared.invocation
+        )
+        if foreign_candidate or remaining_candidate_tasks:
+            record(
+                "rollback_blocked_foreign_candidate",
+                {
+                    "candidate_task_name": CANDIDATE_TASK_NAME,
+                    "foreign_named_collision": foreign_candidate,
+                    "exact_invocation_task_names": sorted(
+                        item.name for item in remaining_candidate_tasks
+                    ),
+                    "legacy_execution_remains_quiesced": True,
+                    "live_cash_authorized": False,
+                },
+            )
+            raise CapturedPaperHostCutoverError(
+                "FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
+                "foreign candidate authority remains; legacy execution stays quiesced",
+            )
 
         for name in REQUIRED_LEGACY_TASKS:
             expected = prepared.task_snapshot.tasks[name]
@@ -6857,12 +8329,84 @@ class CapturedPaperHostCutoverExecutor:
                 "LEGACY_PROCESS_RESTORE_FAILED",
                 "legacy bridge roles did not restore exactly",
             )
-        if foreign_candidate:
-            raise CapturedPaperHostCutoverError(
-                "FOREIGN_CANDIDATE_TASK",
-                "legacy was restored but a foreign candidate task was not mutated",
+        if self.backend.find_candidate_tasks(prepared.invocation):
+            # A foreign exact-invocation task appeared after the initial
+            # candidate inventory.  Stop the exact legacy bridges we just
+            # restored and disable their tasks before the Docker lane can be
+            # restarted.  Do not mutate the foreign task.
+            for process in restored:
+                current = self.backend.get_process(process.pid, role=process.role)
+                if current is not None and current.semantic_key() == process.semantic_key():
+                    self.backend.stop_process(process)
+                    mutations += 1
+            for name in REQUIRED_LEGACY_TASKS:
+                observed = self.backend.get_task(name)
+                if observed is not None and observed.enabled:
+                    self.backend.set_task_enabled(name, False)
+                    mutations += 1
+            record(
+                "rollback_blocked_foreign_candidate",
+                {
+                    "candidate_task_name": CANDIDATE_TASK_NAME,
+                    "foreign_named_collision": False,
+                    "exact_invocation_task_names": sorted(
+                        item.name
+                        for item in self.backend.find_candidate_tasks(
+                            prepared.invocation
+                        )
+                    ),
+                    "legacy_execution_remains_quiesced": True,
+                    "live_cash_authorized": False,
+                },
             )
-        self._assert_rolled_back_with(prepared)
+            raise CapturedPaperHostCutoverError(
+                "FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
+                "candidate authority appeared during rollback; legacy was re-quiesced",
+            )
+        mutations += self.backend.restore_legacy_execution_lane(
+            expected=prior_lane
+        )
+        restored_lane = self.backend.inspect_legacy_execution_lane()
+        if restored_lane != prior_lane:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RESTORE_FAILED",
+                "legacy Docker execution lane prior state was not exactly restored",
+            )
+        record(
+            "legacy_execution_lane_restored",
+            {
+                "legacy_execution_lane": dict(
+                    _legacy_execution_lane_document(restored_lane)
+                ),
+                "legacy_execution_lane_sha256": sha256_json(
+                    dict(_legacy_execution_lane_document(restored_lane))
+                ),
+            },
+        )
+        named, tasks, processes = late_candidate_evidence()
+        if named is not None or tasks or processes:
+            quarantine_late_candidate(
+                named=named, tasks=tasks, processes=processes
+            )
+        try:
+            self._assert_rolled_back_with(
+                prepared, prior_execution_lane=prior_lane
+            )
+        except CapturedPaperHostCutoverError:
+            # Close the final inventory/assertion race.  Only candidate
+            # evidence triggers compensation here; unrelated rollback drift
+            # retains its original error and is never disguised.
+            named, tasks, processes = late_candidate_evidence()
+            if named is not None or tasks or processes:
+                quarantine_late_candidate(
+                    named=named, tasks=tasks, processes=processes
+                )
+            raise
+        named, tasks, processes = late_candidate_evidence()
+        if named is not None or tasks or processes:
+            quarantine_late_candidate(
+                named=named, tasks=tasks, processes=processes
+            )
         if self.backend.get_task(CANDIDATE_TASK_NAME) is not None:
             raise CapturedPaperHostCutoverError(
                 "ROLLBACK_POSTCONDITION_FAILED", "candidate task remains after rollback"
@@ -6905,6 +8449,7 @@ class WindowsHostCutoverBackend:
             str(_native_system32_directory() / "schtasks.exe"), "schtasks.exe"
         )
         self._bindings = {item.role: item for item in bindings}
+        self._docker: Path | None = None
         try:
             import psutil  # type: ignore
         except ImportError as exc:
@@ -6912,6 +8457,638 @@ class WindowsHostCutoverBackend:
                 "PSUTIL_REQUIRED", "psutil is required for exact process provenance"
             ) from exc
         self._psutil = psutil
+
+    def _docker_command(
+        self, arguments: Sequence[str]
+    ) -> subprocess.CompletedProcess[bytes]:
+        if self._docker is None:
+            self._docker, _ = _resolve_system_executable(
+                str(_DOCKER_DESKTOP_EXECUTABLE), "Docker Desktop CLI"
+            )
+        completed = subprocess.run(
+            [str(self._docker), *[str(item) for item in arguments]],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_COMMAND_FAILED",
+                f"Docker rejected fixed execution-lane operation {arguments[0]}",
+            )
+        return completed
+
+    def _inspect_legacy_execution_lane_by(
+        self, identifier: str
+    ) -> LegacyExecutionLaneObservation:
+        completed = self._docker_command(
+            (
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{json .}}",
+                identifier,
+            )
+        )
+        value = _strict_json(
+            completed.stdout.strip(), "legacy Docker execution lane inspect"
+        )
+        state_value = _mapping(value.get("State"), "legacy Docker state")
+        config = _mapping(value.get("Config"), "legacy Docker config")
+        host_config = _mapping(
+            value.get("HostConfig"), "legacy Docker host config"
+        )
+        restart_policy = _mapping(
+            host_config.get("RestartPolicy"), "legacy Docker restart policy"
+        )
+        container_id = str(value.get("Id") or "").lower()
+        image_id = str(value.get("Image") or "").lower()
+        name = str(value.get("Name") or "").removeprefix("/")
+        created = value.get("Created")
+        executable = value.get("Path")
+        args = value.get("Args")
+        config_image = config.get("Image")
+        entrypoint = config.get("Entrypoint")
+        command = config.get("Cmd")
+        restart_name = restart_policy.get("Name")
+        restart_maximum = restart_policy.get("MaximumRetryCount")
+        auto_remove = host_config.get("AutoRemove")
+        status = state_value.get("Status")
+        running = state_value.get("Running")
+        paused = state_value.get("Paused")
+        restarting = state_value.get("Restarting")
+        dead = state_value.get("Dead")
+        if not (
+            _SHA256_RE.fullmatch(container_id)
+            and image_id.startswith("sha256:")
+            and _SHA256_RE.fullmatch(image_id.removeprefix("sha256:"))
+            and name == LEGACY_EXECUTION_LANE_NAME
+            and isinstance(created, str)
+            and bool(created)
+            and isinstance(executable, str)
+            and bool(executable)
+            and isinstance(args, list)
+            and all(isinstance(item, str) for item in args)
+            and isinstance(config_image, str)
+            and bool(config_image)
+            and (
+                entrypoint is None
+                or isinstance(entrypoint, str)
+                or (
+                    isinstance(entrypoint, list)
+                    and all(isinstance(item, str) for item in entrypoint)
+                )
+            )
+            and (
+                command is None
+                or isinstance(command, str)
+                or (
+                    isinstance(command, list)
+                    and all(isinstance(item, str) for item in command)
+                )
+            )
+            and isinstance(restart_name, str)
+            and type(restart_maximum) is int
+            and type(auto_remove) is bool
+            and isinstance(status, str)
+            and type(running) is bool
+            and type(paused) is bool
+            and type(restarting) is bool
+            and type(dead) is bool
+        ):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_STATE_UNINSPECTABLE",
+                "Docker returned a malformed execution-lane state",
+            )
+
+        required_scope_flags = dict(_EXECUTION_LANE_REQUIRED_SCOPE_FLAGS)
+        raw_environment = config.get("Env")
+        labels = config.get("Labels")
+        if (
+            not isinstance(raw_environment, list)
+            or any(not isinstance(item, str) for item in raw_environment)
+            or not isinstance(labels, Mapping)
+        ):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_SCOPE_UNINSPECTABLE",
+                "legacy Docker execution scope is not inspectable",
+            )
+        observed_scope_flags: dict[str, bool] = {}
+        for item in raw_environment:
+            key, separator, raw_value = item.partition("=")
+            if not separator or key not in required_scope_flags:
+                continue
+            if key in observed_scope_flags:
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_SCOPE_UNSAFE",
+                    "legacy Docker execution scope contains duplicate authority flags",
+                )
+            normalized = raw_value.strip().casefold()
+            if normalized in {"1", "true", "yes", "on"}:
+                observed_scope_flags[key] = True
+            elif normalized in {"0", "false", "no", "off"}:
+                observed_scope_flags[key] = False
+            else:
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_SCOPE_UNSAFE",
+                    "legacy Docker execution scope contains an ambiguous authority flag",
+                )
+        compose_scope = {
+            "project": labels.get("com.docker.compose.project"),
+            "service": labels.get("com.docker.compose.service"),
+            "config_files": labels.get("com.docker.compose.project.config_files"),
+        }
+        if (
+            observed_scope_flags != required_scope_flags
+            or compose_scope
+            != {
+                "project": "chili-home-copilot",
+                "service": "momentum-exec-worker",
+                "config_files": r"D:\dev\chili-home-copilot\docker-compose.yml",
+            }
+        ):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_SCOPE_UNSAFE",
+                "legacy Docker lane lacks the pinned mixed-paper configuration and disabled live-entry masters",
+            )
+        scope_document = {
+            "execution_scope": "legacy:mixed-paper-config-live-masters-disabled",
+            "compose": compose_scope,
+            "authority_flags": {
+                key: observed_scope_flags[key]
+                for key in sorted(observed_scope_flags)
+            },
+            "live_cash_authorized": False,
+        }
+        recreator_probe = getattr(
+            self, "_execution_lane_recreator_probe", None
+        )
+        recreator_tasks = (
+            tuple(recreator_probe())
+            if callable(recreator_probe)
+            else self._inspect_execution_lane_recreator_tasks(
+                expected_image_id=image_id
+            )
+        )
+        if auto_remove is not False:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_ROLLBACK_UNSAFE",
+                "legacy Docker execution lane is configured for automatic removal",
+            )
+        if restart_name not in {"no", "on-failure", "unless-stopped"}:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RESTART_POLICY_UNSAFE",
+                "legacy Docker execution lane can restart after an explicit stop",
+            )
+        if restarting or dead:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_STATE_INVALID",
+                "legacy Docker execution lane is restarting or dead",
+            )
+        if running and not paused and status == "running":
+            normalized_state = "running"
+        elif not running and not paused and status == "exited":
+            normalized_state = "stopped"
+        else:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_STATE_INVALID",
+                "legacy Docker execution lane is not exactly running or stopped",
+            )
+        sanitized_config = {
+            "Path": executable,
+            "Args": list(args),
+            "Config": {
+                "Image": config_image,
+                "Entrypoint": entrypoint,
+                "Cmd": command,
+            },
+            "HostConfig": {
+                "RestartPolicy": {
+                    "Name": restart_name,
+                    "MaximumRetryCount": restart_maximum,
+                },
+                "AutoRemove": auto_remove,
+            },
+            "Created": created,
+        }
+        return LegacyExecutionLaneObservation(
+            container_name=name,
+            container_id=container_id,
+            image_id=image_id,
+            config_sha256=sha256_json(sanitized_config),
+            execution_scope="legacy:mixed-paper-config-live-masters-disabled",
+            scope_sha256=sha256_json(scope_document),
+            recreator_tasks=tuple(
+                sorted(recreator_tasks, key=lambda item: item.name)
+            ),
+            state=normalized_state,
+        )
+
+    def _inspect_execution_lane_recreator_tasks(
+        self, *, expected_image_id: str | None = None
+    ) -> tuple[ExecutionLaneRecreatorTaskObservation, ...]:
+        observations: list[ExecutionLaneRecreatorTaskObservation] = []
+        compose_projection_sha256, rendered_image_id = (
+            self._execution_lane_compose_projection()
+        )
+        if (
+            expected_image_id is not None
+            and rendered_image_id != expected_image_id
+        ):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_SCOPE_UNSAFE",
+                "rendered Compose image differs from the exact running legacy image",
+            )
+        for name in EXECUTION_LANE_RECREATOR_TASKS:
+            task = self.get_task(name)
+            if task is None:
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_MISSING",
+                    f"external execution-lane authority is missing: {name}",
+                )
+            command, arguments = _task_exec_from_xml(task.xml)
+            argv = _windows_command_line_to_argv(arguments)
+            command_token = command.strip()
+            command_name = Path(command_token).name.casefold()
+            if command_name in {"powershell", "powershell.exe"}:
+                native_command = _native_system32_executable("powershell.exe")
+                allowed_bare = {"powershell", "powershell.exe"}
+            elif command_name == "wscript.exe":
+                native_command = _native_system32_executable("wscript.exe")
+                allowed_bare = {"wscript.exe"}
+            else:
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_ACTION_DRIFT",
+                    f"external execution-lane command is not allowlisted: {name}",
+                )
+            command_is_bare = not _DRIVE_PATH_RE.match(command_token)
+            if (
+                command_is_bare
+                and command_token.casefold() not in allowed_bare
+            ) or (
+                not command_is_bare
+                and os.path.normcase(os.path.normpath(command_token))
+                != os.path.normcase(str(native_command))
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_ACTION_DRIFT",
+                    f"external execution-lane executable drifted: {name}",
+                )
+            resolved_command, command_sha256 = _stable_local_file_unrooted(
+                native_command,
+                field=f"execution-lane recreator executable {name}",
+            )
+            argv_paths = {
+                os.path.normcase(os.path.normpath(item))
+                for item in argv
+                if _DRIVE_PATH_RE.match(item)
+            }
+            direct_sources = _EXECUTION_LANE_RECREATOR_DIRECT_SOURCES[name]
+            if any(
+                os.path.normcase(os.path.normpath(source)) not in argv_paths
+                for source in direct_sources
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_ACTION_DRIFT",
+                    f"external execution-lane action drifted: {name}",
+                )
+            source_chain: list[Mapping[str, str]] = []
+            source_chain.append(
+                {
+                    "path": str(resolved_command),
+                    "sha256": command_sha256,
+                }
+            )
+            for source, expected_sha256 in _EXECUTION_LANE_RECREATOR_SOURCES[name]:
+                resolved, observed_sha256 = _stable_local_file_unrooted(
+                    source, field=f"execution-lane recreator source {name}"
+                )
+                if (
+                    os.path.normcase(str(resolved))
+                    != os.path.normcase(os.path.normpath(source))
+                    or observed_sha256 != expected_sha256
+                ):
+                    raise CapturedPaperHostCutoverError(
+                        "EXECUTION_LANE_RECREATOR_SOURCE_DRIFT",
+                        f"external execution-lane source drifted: {name}",
+                    )
+                source_chain.append(
+                    {"path": str(resolved), "sha256": observed_sha256}
+                )
+            if name in _EXECUTION_LANE_COMPOSE_DEPENDENT_TASKS:
+                source_chain.append(
+                    {
+                        "path": (
+                            "docker-compose://chili-home-copilot/"
+                            "momentum-exec-worker/sanitized"
+                        ),
+                        "sha256": compose_projection_sha256,
+                    }
+                )
+            observations.append(
+                ExecutionLaneRecreatorTaskObservation(
+                    name=name,
+                    definition_sha256=_task_definition_sha_ignoring_enabled(
+                        task.xml
+                    ),
+                    action_sha256=sha256_json(
+                        {
+                            "command": os.path.normcase(command),
+                            "argv": list(argv),
+                        }
+                    ),
+                    source_chain_sha256=sha256_json(source_chain),
+                    enabled=task.enabled,
+                )
+            )
+        return tuple(sorted(observations, key=lambda item: item.name))
+
+    def _execution_lane_compose_projection(self) -> tuple[str, str]:
+        compose_path, compose_sha256 = _stable_local_file_unrooted(
+            _EXECUTION_LANE_COMPOSE_FILE,
+            field="legacy momentum execution Compose file",
+        )
+        if compose_sha256 != _EXECUTION_LANE_COMPOSE_FILE_SHA256:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RECREATOR_SOURCE_DRIFT",
+                "legacy momentum execution Compose file drifted",
+            )
+        completed = self._docker_command(
+            (
+                "compose",
+                "--project-directory",
+                str(compose_path.parent),
+                "-f",
+                str(compose_path),
+                "--profile",
+                "live-momentum",
+                "config",
+                "--format",
+                "json",
+            )
+        )
+        rendered = _strict_json(
+            completed.stdout.strip(), "sanitized legacy Compose projection"
+        )
+        services = _mapping(rendered.get("services"), "legacy Compose services")
+        service = _mapping(
+            services.get("momentum-exec-worker"),
+            "legacy momentum execution Compose service",
+        )
+        environment = _mapping(
+            service.get("environment"), "legacy Compose service environment"
+        )
+
+        def flag(name: str) -> bool:
+            raw = environment.get(name)
+            if type(raw) is bool:
+                return bool(raw)
+            if isinstance(raw, (str, int)) and not isinstance(raw, bool):
+                normalized = str(raw).strip().casefold()
+                if normalized in {"1", "true", "yes", "on"}:
+                    return True
+                if normalized in {"0", "false", "no", "off"}:
+                    return False
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_SCOPE_UNSAFE",
+                "rendered legacy Compose scope contains an ambiguous authority flag",
+            )
+
+        authority_flags = {
+            name: flag(name)
+            for name in sorted(_EXECUTION_LANE_REQUIRED_SCOPE_FLAGS)
+        }
+        if authority_flags != dict(_EXECUTION_LANE_REQUIRED_SCOPE_FLAGS):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_SCOPE_UNSAFE",
+                "rendered legacy Compose scope changed its live-entry master policy",
+            )
+        profiles = service.get("profiles")
+        command = service.get("command")
+        entrypoint = service.get("entrypoint")
+        volumes = service.get("volumes")
+        if not (
+            service.get("container_name") == LEGACY_EXECUTION_LANE_NAME
+            and isinstance(service.get("image"), str)
+            and bool(service.get("image"))
+            and command == ["python", "scripts/scheduler_worker.py"]
+            and (entrypoint is None or isinstance(entrypoint, (str, list)))
+            and profiles == ["live-momentum"]
+            and service.get("restart") == "unless-stopped"
+            and isinstance(volumes, list)
+        ):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_SCOPE_UNSAFE",
+                "rendered legacy Compose service identity is not the pinned momentum worker",
+            )
+        volume_projection = []
+        for index, raw_volume in enumerate(volumes):
+            volume = _mapping(
+                raw_volume, f"legacy Compose volume[{index}]"
+            )
+            target = volume.get("target")
+            kind = volume.get("type")
+            read_only = volume.get("read_only", False)
+            if (
+                not isinstance(target, str)
+                or not target.startswith("/")
+                or not isinstance(kind, str)
+                or type(read_only) is not bool
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_SCOPE_UNSAFE",
+                    "rendered legacy Compose mount is malformed",
+                )
+            # Host source paths and secret values are deliberately excluded;
+            # their operational authority is captured by immutable targets,
+            # source-file/rendered-policy hashes, and credential presence.
+            volume_projection.append(
+                {"type": kind, "target": target, "read_only": read_only}
+            )
+        credential_names = {
+            "CHILI_ALPACA_API_KEY",
+            "CHILI_ALPACA_API_SECRET",
+            "CHILI_ALPACA_LIVE_API_KEY",
+            "CHILI_ALPACA_LIVE_API_SECRET",
+            "COINBASE_API_KEY",
+            "COINBASE_API_SECRET",
+        }
+        image_inspect = self._docker_command(
+            (
+                "image",
+                "inspect",
+                "--format",
+                "{{json .}}",
+                str(service["image"]),
+            )
+        )
+        image_document = _strict_json(
+            image_inspect.stdout.strip(), "rendered Compose image identity"
+        )
+        rendered_image_id = str(image_document.get("Id") or "").lower()
+        if not (
+            rendered_image_id.startswith("sha256:")
+            and _SHA256_RE.fullmatch(
+                rendered_image_id.removeprefix("sha256:")
+            )
+        ):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_SCOPE_UNSAFE",
+                "rendered Compose image has no immutable local image identity",
+            )
+        projection = {
+            "schema_version": "chili.legacy-momentum-compose-sanitized.v1",
+            "compose_file_sha256": compose_sha256,
+            "image": service["image"],
+            "image_id": rendered_image_id,
+            "container_name": service["container_name"],
+            "profiles": list(profiles),
+            "command": list(command),
+            "entrypoint": entrypoint,
+            "restart": service["restart"],
+            "authority_flags": authority_flags,
+            "credential_presence": {
+                name: name in environment for name in sorted(credential_names)
+            },
+            "volume_projection": sorted(
+                volume_projection,
+                key=lambda item: (item["target"], item["type"]),
+            ),
+            "live_cash_authorized": False,
+            "account_uuid_bound": False,
+        }
+        return sha256_json(projection), rendered_image_id
+
+    def inspect_legacy_execution_lane(self) -> LegacyExecutionLaneObservation:
+        return self._inspect_legacy_execution_lane_by(LEGACY_EXECUTION_LANE_NAME)
+
+    def _inspect_exact_execution_lane(
+        self, expected: LegacyExecutionLaneObservation
+    ) -> LegacyExecutionLaneObservation:
+        current = self._inspect_legacy_execution_lane_by(expected.container_id)
+        if current.identity_key() != expected.identity_key():
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_IDENTITY_DRIFT",
+                "Docker container identity changed after its durable baseline",
+            )
+        return current
+
+    def quiesce_legacy_execution_lane(
+        self, *, expected: LegacyExecutionLaneObservation
+    ) -> int:
+        current = self._inspect_exact_execution_lane(expected)
+        if current != expected:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_STATE_DRIFT",
+                "execution lane changed after its durable baseline was recorded",
+            )
+        mutations = 0
+        for authority in expected.recreator_tasks:
+            task = self.get_task(authority.name)
+            if (
+                task is None
+                or _task_definition_sha_ignoring_enabled(task.xml)
+                != authority.definition_sha256
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_DRIFT",
+                    f"external execution-lane authority drifted: {authority.name}",
+                )
+            if task.enabled:
+                self.set_task_enabled(authority.name, False)
+                mutations += 1
+            # End a concurrently running instance even after disabling its
+            # future triggers.  The backend treats an already-idle task as a
+            # successful no-op.
+            self.stop_task(authority.name)
+            mutations += 1
+        lingering = self.await_execution_lane_recreator_processes(
+            timeout_seconds=15.0
+        )
+        if lingering:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RECREATOR_STILL_RUNNING",
+                "an external execution-lane authority or descendant survived /End",
+            )
+        if expected.state == "running":
+            self._docker_command(("stop", expected.container_id))
+            mutations += 1
+        # A task may have spawned a detached Docker/PowerShell child just
+        # before /End.  Require a short stable, disabled interval after the
+        # exact-ID stop rather than trusting one immediate readback.
+        time.sleep(0.5)
+        lingering = self.await_execution_lane_recreator_processes(
+            timeout_seconds=0.0
+        )
+        if lingering:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RECREATOR_STILL_RUNNING",
+                "an external execution-lane descendant appeared after Docker stop",
+            )
+        stopped = self._inspect_exact_execution_lane(expected)
+        if stopped.state != "stopped" or any(
+            item.enabled for item in stopped.recreator_tasks
+        ):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_QUIESCE_FAILED",
+                "Docker lane or an external resurrection authority did not stop exactly",
+            )
+        return mutations
+
+    def restore_legacy_execution_lane(
+        self, *, expected: LegacyExecutionLaneObservation
+    ) -> int:
+        current = self._inspect_exact_execution_lane(expected)
+        if any(item.enabled for item in current.recreator_tasks):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RECREATOR_DRIFT",
+                "an external execution-lane authority re-enabled before rollback",
+            )
+        mutations = 0
+        if expected.state == "running":
+            if current.state == "stopped":
+                self._docker_command(("start", expected.container_id))
+                mutations += 1
+            elif current.state != "running":
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_STATE_INVALID",
+                    "execution lane cannot be restored to running",
+                )
+        else:
+            if current.state == "running":
+                self._docker_command(("stop", expected.container_id))
+                mutations += 1
+            elif current.state != "stopped":
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_STATE_INVALID",
+                    "execution lane cannot be restored to stopped",
+                )
+        for authority in expected.recreator_tasks:
+            task = self.get_task(authority.name)
+            if (
+                task is None
+                or _task_definition_sha_ignoring_enabled(task.xml)
+                != authority.definition_sha256
+                or task.enabled
+            ):
+                raise CapturedPaperHostCutoverError(
+                    "EXECUTION_LANE_RECREATOR_DRIFT",
+                    f"external execution-lane authority cannot restore exactly: {authority.name}",
+                )
+            if authority.enabled:
+                self.set_task_enabled(authority.name, True)
+                mutations += 1
+        restored = self._inspect_exact_execution_lane(expected)
+        if restored != expected:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RESTORE_FAILED",
+                "Docker lane or its external authorities did not restore exactly",
+            )
+        return mutations
 
     def _task_command(
         self,
@@ -6952,6 +9129,91 @@ class WindowsHostCutoverBackend:
             f"Task Scheduler rejected fixed operation {arguments[0]}",
         )
 
+    def await_execution_lane_recreator_processes(
+        self, *, timeout_seconds: float
+    ) -> tuple[str, ...]:
+        if timeout_seconds < 0 or not isinstance(timeout_seconds, (int, float)):
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RECREATOR_INVENTORY_INVALID",
+                "external execution-lane process timeout is invalid",
+            )
+        try:
+            import psutil  # type: ignore
+        except ImportError as exc:
+            raise CapturedPaperHostCutoverError(
+                "EXECUTION_LANE_RECREATOR_INVENTORY_UNAVAILABLE",
+                "external execution-lane process inventory is unavailable",
+            ) from exc
+        source_markers = {
+            os.path.normcase(os.path.normpath(path))
+            for chain in _EXECUTION_LANE_RECREATOR_SOURCES.values()
+            for path, _sha256 in chain
+        }
+        source_markers.add(
+            os.path.normcase(os.path.normpath(str(_EXECUTION_LANE_COMPOSE_FILE)))
+        )
+        relevant_names = {
+            "powershell.exe",
+            "pwsh.exe",
+            "wscript.exe",
+            "cscript.exe",
+            # The one-shot premarket wrapper invokes orchestrator.py through
+            # the shared Python runtime.  Task Scheduler /End can terminate
+            # the wrapper while that child is still alive, so excluding Python
+            # here would turn an orphaned activation authority into "idle".
+            # The exact allowlisted source-path marker below still prevents an
+            # unrelated Python process from being classified as a recreator.
+            "python.exe",
+            "pythonw.exe",
+            "docker.exe",
+        }
+
+        def inventory() -> tuple[str, ...]:
+            matches: list[str] = []
+            for process in psutil.process_iter(("pid", "name"), ad_value=None):
+                name = process.info.get("name")
+                if name is None:
+                    continue
+                normalized_name = str(name).casefold()
+                if normalized_name not in relevant_names:
+                    continue
+                try:
+                    cmdline = tuple(str(item) for item in process.cmdline())
+                except psutil.NoSuchProcess:
+                    continue
+                except (psutil.AccessDenied, psutil.ZombieProcess):
+                    matches.append(
+                        f"{int(process.info['pid'])}:{normalized_name}:uninspectable"
+                    )
+                    continue
+                normalized_tokens = {
+                    os.path.normcase(os.path.normpath(item))
+                    for item in cmdline
+                    if _DRIVE_PATH_RE.match(item)
+                }
+                lowered = " ".join(cmdline).casefold()
+                source_match = bool(source_markers & normalized_tokens)
+                docker_match = normalized_name == "docker.exe" and (
+                    "momentum-exec-worker" in lowered
+                    or "desktop restart" in lowered
+                    or (
+                        " compose " in f" {lowered} "
+                        and "chili-home-copilot" in lowered
+                    )
+                )
+                if source_match or docker_match:
+                    matches.append(
+                        f"{int(process.info['pid'])}:{normalized_name}:matched"
+                    )
+            return tuple(sorted(matches))
+
+        deadline = time.monotonic() + float(timeout_seconds)
+        while True:
+            found = inventory()
+            if not found or time.monotonic() >= deadline:
+                return found
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
     def _get_task_unrestricted(self, name: str) -> TaskObservation | None:
         if not name or len(name) > 238 or any(character in name for character in "\x00\r\n"):
             raise CapturedPaperHostCutoverError(
@@ -6969,19 +9231,27 @@ class WindowsHostCutoverBackend:
         return TaskObservation(name=name, xml=raw, enabled=enabled)
 
     def get_task(self, name: str) -> TaskObservation | None:
-        if name not in {*REQUIRED_LEGACY_TASKS, CANDIDATE_TASK_NAME}:
+        if name not in {
+            *REQUIRED_LEGACY_TASKS,
+            *EXECUTION_LANE_RECREATOR_TASKS,
+            CANDIDATE_TASK_NAME,
+        }:
             raise CapturedPaperHostCutoverError(
                 "TASK_NAME_INVALID", "Task Scheduler task name is not allowlisted"
             )
         return self._get_task_unrestricted(name)
 
     def set_task_enabled(self, name: str, enabled: bool) -> None:
-        if name not in REQUIRED_LEGACY_TASKS and not (
-            name == CANDIDATE_TASK_NAME and enabled is False
+        if (
+            name not in {
+                *REQUIRED_LEGACY_TASKS,
+                *EXECUTION_LANE_RECREATOR_TASKS,
+            }
+            and not (name == CANDIDATE_TASK_NAME and enabled is False)
         ):
             raise CapturedPaperHostCutoverError(
                 "TASK_NAME_INVALID",
-                "only legacy tasks or candidate disable are permitted",
+                "only sealed legacy/recreator tasks or candidate disable are permitted",
             )
         self._task_command(
             ("/Change", "/TN", name, "/ENABLE" if enabled else "/DISABLE")
@@ -7011,9 +9281,13 @@ class WindowsHostCutoverBackend:
         self._task_command(("/Run", "/TN", name))
 
     def stop_task(self, name: str) -> None:
-        if name != CANDIDATE_TASK_NAME:
+        if name not in {
+            *EXECUTION_LANE_RECREATOR_TASKS,
+            CANDIDATE_TASK_NAME,
+        }:
             raise CapturedPaperHostCutoverError(
-                "TASK_NAME_INVALID", "only the exact candidate task can be stopped"
+                "TASK_NAME_INVALID",
+                "only exact recreator or candidate tasks can be stopped",
             )
         self._task_command(("/End", "/TN", name), allow_not_running=True)
 
@@ -7438,18 +9712,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=(MODE_VALIDATE_ONLY, MODE_APPLY, MODE_ROLLBACK),
+        choices=(MODE_VALIDATE_ONLY, MODE_APPLY, MODE_ROLLBACK, MODE_RECOVER_ONLY),
         default=MODE_VALIDATE_ONLY,
     )
-    parser.add_argument("--manifest", required=True)
-    parser.add_argument("--manifest-sha256", required=True)
-    parser.add_argument("--candidate-root", required=True)
+    parser.add_argument("--manifest")
+    parser.add_argument("--manifest-sha256")
+    parser.add_argument("--candidate-root")
     parser.add_argument("--allow-read-root", action="append", required=True)
-    parser.add_argument("--task-snapshot", required=True)
-    parser.add_argument("--process-snapshot", required=True)
-    parser.add_argument("--restore-plan", required=True)
-    parser.add_argument("--candidate-task-template", required=True)
-    parser.add_argument("--candidate-action", required=True)
+    parser.add_argument("--task-snapshot")
+    parser.add_argument("--process-snapshot")
+    parser.add_argument("--restore-plan")
+    parser.add_argument("--candidate-task-template")
+    parser.add_argument("--candidate-action")
     parser.add_argument("--journal-root", required=True)
     parser.add_argument("--confirm-fake-money-paper")
     return parser
@@ -7492,7 +9766,7 @@ def _load_activation_for_mode(
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main_with_host_lock_held(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.mode == MODE_APPLY and (
         arguments.confirm_fake_money_paper != APPLY_CONFIRMATION
@@ -7511,7 +9785,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     try:
         roots = _strict_roots(arguments.allow_read_root)
-        if arguments.mode == MODE_ROLLBACK:
+        if arguments.mode == MODE_RECOVER_ONLY:
+            discovered = _discover_single_active_rollback_capsule(
+                journal_root=arguments.journal_root,
+                caller_roots=roots,
+            )
+            if discovered is None:
+                print(
+                    _canonical_json_bytes(
+                        {
+                            "schema_version": (
+                                "chili.captured-paper-host-cutover-recovery.v1"
+                            ),
+                            "mode": MODE_RECOVER_ONLY,
+                            "verdict": "NO_RECOVERY_REQUIRED",
+                            "account_scope": "alpaca:paper",
+                            "mutation_count": 0,
+                            "live_cash_authorized": False,
+                        }
+                    ).decode("utf-8")
+                )
+                return 0
+            prepared, state = discovered
+        elif any(
+            not getattr(arguments, field)
+            for field in (
+                "manifest",
+                "manifest_sha256",
+                "candidate_root",
+                "task_snapshot",
+                "process_snapshot",
+                "restore_plan",
+                "candidate_task_template",
+                "candidate_action",
+            )
+        ):
+            raise CapturedPaperHostCutoverError(
+                "ACTIVATION_ARGUMENTS_INCOMPLETE",
+                "non-recovery mode requires the complete sealed activation inputs",
+            )
+        elif arguments.mode == MODE_ROLLBACK:
             # Emergency rollback authority is the immutable capsule published
             # before the first host mutation.  Current manifests, receipts,
             # templates, and worktree source are deliberately not consulted.
@@ -7543,7 +9856,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             backend=backend,
             journal_root=Path(arguments.journal_root),
         )
-        if arguments.mode == MODE_VALIDATE_ONLY:
+        if arguments.mode == MODE_RECOVER_ONLY:
+            adopted = executor.adopt_pre_identity_journal_at_exact_baseline()
+            if adopted is not None:
+                report = adopted
+            elif state == "applied":
+                report = executor.apply()
+            else:
+                report = executor.rollback()
+        elif arguments.mode == MODE_VALIDATE_ONLY:
             report = executor.validate_only()
         elif arguments.mode == MODE_APPLY:
             # This is the real current-host ValidateOnly, deliberately later
@@ -7584,6 +9905,56 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def main(argv: Sequence[str] | None = None) -> int:
+    """Serialize every host cutover generation through one fixed host lock."""
+
+    arguments = _parser().parse_args(argv)
+    # Preserve the cheap, mutation-free confirmation rejection before any
+    # journal path is touched.
+    if arguments.mode == MODE_APPLY and (
+        arguments.confirm_fake_money_paper != APPLY_CONFIRMATION
+    ):
+        return _main_with_host_lock_held(argv)
+    try:
+        roots = _strict_roots(arguments.allow_read_root)
+        raw_root = Path(arguments.journal_root)
+        if arguments.mode == MODE_RECOVER_ONLY and not os.path.lexists(raw_root):
+            # A normal Apply cannot start without this pre-existing sealed
+            # root, so there is no competing transaction to serialize here.
+            return _main_with_host_lock_held(argv)
+        root = _strict_existing_dir(
+            raw_root, roots=roots, field="host cutover journal_root"
+        )
+        # Root-independent by construction: different valid artifact/journal
+        # roots cannot own concurrent host cutovers.  This lock is distinct
+        # from the outer activation-runner lock so the runner may invoke this
+        # child process without self-deadlocking.
+        with _JournalLock(
+            _HOST_WIDE_CUTOVER_LOCK_PATH,
+            mutex_name=_HOST_WIDE_CUTOVER_MUTEX_NAME,
+        ):
+            return _main_with_host_lock_held(argv)
+    except (
+        CapturedPaperHostCutoverError,
+        activation_contract.CapturedPaperActivationContractError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(
+            json.dumps(
+                {
+                    "verdict": "REJECTED",
+                    "reason_code": getattr(exc, "code", type(exc).__name__),
+                    "error_detail": "host-global cutover lock could not be acquired",
+                    "live_cash_authorized": False,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
 
@@ -7599,13 +9970,17 @@ __all__ = [
     "CutoverReport",
     "HostCutoverBackend",
     "LegacyProcessBinding",
+    "LegacyExecutionLaneObservation",
     "LegacyTaskLaunchContract",
+    "LEGACY_EXECUTION_LANE_NAME",
+    "LEGACY_EXECUTION_LANE_SCHEMA",
     "LEGACY_DIRECT_LAUNCH_KIND",
     "LEGACY_WRAPPER_LAUNCH_KIND",
     "MANIFEST_PATH_TOKEN",
     "MANIFEST_SHA256_TOKEN",
     "MODE_APPLY",
     "MODE_ROLLBACK",
+    "MODE_RECOVER_ONLY",
     "MODE_VALIDATE_ONLY",
     "PREACTIVATION_ROLLBACK_BASELINE_MODE",
     "PREACTIVATION_ROLLBACK_BASELINE_SCHEMA",

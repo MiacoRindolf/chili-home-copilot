@@ -38,7 +38,50 @@ def _active_authority(events=None, *, verdict=True):
     def consume():
         if events is not None:
             events.append("active_authority_consume")
-        return {
+        snapshot = {
+            "position_count": 0,
+            "open_order_count": 0,
+            "order_submission_call_count": 0,
+        }
+        order_census = {"exact_order_count": 0}
+        fill_census = {"exact_activity_count": 0}
+        broker_fixed_point = {
+            "schema_version": "chili.captured-paper-broker-fixed-point.v1",
+            "verdict": "PAPER_BROKER_QUIET_FIXED_POINT",
+            "account_scope": "alpaca:paper",
+            "expected_account_id": ACCOUNT_ID,
+            "activation_generation": GENERATION,
+            "activation_manifest_sha256": "4" * 64,
+            "assumption_bound": True,
+            "live_cash_certification": False,
+            "baseline_snapshot": snapshot,
+            "first_snapshot": snapshot,
+            "first_order_census": order_census,
+            "first_fill_activity_census": fill_census,
+            "second_snapshot": snapshot,
+            "second_order_census": order_census,
+            "second_fill_activity_census": fill_census,
+        }
+        kill_body = {
+            "schema_version": "chili.captured-paper-kill-switch-query.v1",
+            "activation_generation": GENERATION,
+            "account_scope": "alpaca:paper",
+            "expected_account_id": ACCOUNT_ID,
+            "active": False,
+        }
+        final_kill_switch = {
+            **kill_body,
+            "query_receipt_sha256": hashlib.sha256(
+                json.dumps(
+                    kill_body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        body = {
+            "schema_version": "chili.captured-paper-active-start-authority.v2",
             "verdict": (
                 "CAPTURED_ALPACA_PAPER_ACTIVE_START_AUTHORIZED"
                 if verdict
@@ -47,13 +90,70 @@ def _active_authority(events=None, *, verdict=True):
             "account_scope": "alpaca:paper",
             "expected_account_id": ACCOUNT_ID,
             "runtime_generation": GENERATION,
+            "activation_manifest_sha256": "4" * 64,
+            "kill_switch_receipt_sha256": "5" * 64,
+            "launcher_attestation_sha256": "6" * 64,
             "paper_order_submission_authorized": True,
             "launcher_attestation_consumed": True,
             "host_activation_permit_sha256": "d" * 64,
             "host_activation_permit_consumed": True,
+            "post_permit_broker_snapshot_sha256": "e" * 64,
+            "order_transition_fence_sha256": "f" * 64,
+            "host_quiet_horizon_event_sha256": "1" * 64,
+            "broker_fixed_point": broker_fixed_point,
+            "broker_fixed_point_sha256": hashlib.sha256(
+                json.dumps(
+                    broker_fixed_point,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "final_kill_switch_query": final_kill_switch,
+            "final_kill_switch_query_sha256": hashlib.sha256(
+                json.dumps(
+                    final_kill_switch,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
             "live_cash_authorized": False,
             "real_money_authorized": False,
         }
+        body["post_permit_broker_snapshot_sha256"] = hashlib.sha256(
+            json.dumps(
+                snapshot,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        body["order_transition_fence_sha256"] = hashlib.sha256(
+            json.dumps(
+                order_census,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        body["fill_activity_fence_sha256"] = hashlib.sha256(
+            json.dumps(
+                fill_census,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        body["authority_sha256"] = hashlib.sha256(
+            json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        return body
 
     return CapturedPaperActiveStartAuthority(
         expected_account_id=ACCOUNT_ID,
@@ -198,7 +298,13 @@ class _Fence:
         }
 
 
-def _supervisor(events, *, workers=()):
+def _supervisor(
+    events,
+    *,
+    workers=(),
+    pre_authority_workers=(),
+    post_quiesce=None,
+):
     host = _Host(events)
     fence = _Fence(events)
     live = {"running": False}
@@ -226,12 +332,83 @@ def _supervisor(events, *, workers=()):
             CapturedPaperManagedWorker(name=name, worker=worker)
             for name, worker in workers
         ),
+        active_pre_authority_workers=tuple(
+            CapturedPaperManagedWorker(name=name, worker=worker)
+            for name, worker in pre_authority_workers
+        ),
         live_loop_start=start_live,
         live_loop_stop=stop_live,
         live_loop_health=lambda: live["running"],
+        post_quiesce_before_fence_release=post_quiesce,
         runtime_registrar=register,
     )
     return supervisor, host, live
+
+
+def _post_quiesce(events, *, valid=True):
+    def callback():
+        events.append("post_quiesce")
+        application_sha256 = "a" * 64
+        rollback_sha256 = "b" * 64
+        target_variant_ids = [11, 12]
+        runtime_rollback_body = {
+                "schema_version": (
+                    "chili.captured-paper-selection-runtime-rollback.v2"
+                ),
+            "account_scope": "alpaca:paper",
+            "expected_account_id": ACCOUNT_ID,
+            "activation_generation": GENERATION,
+            "variant_application_sha256": application_sha256,
+            "variant_rollback_sha256": rollback_sha256,
+            "target_variant_ids": target_variant_ids,
+            "application_outcome": "rolled_back",
+            "strategy_variants_deactivated": True,
+            "paper_order_submission_authorized": False,
+            "live_cash_authorized": False,
+            "real_money_authorized": False,
+        }
+        body = {
+            "schema_version": "chili.captured-paper-post-quiesce.v3",
+            "verdict": (
+                "CAPTURED_PAPER_SELECTION_BINDINGS_ROLLED_BACK"
+                if valid
+                else "UNCONFIRMED"
+            ),
+            "account_scope": "alpaca:paper",
+            "expected_account_id": ACCOUNT_ID,
+            "runtime_generation": GENERATION,
+            "workers_stopped": True,
+            "runtime_unregistered": True,
+            "provider_stopped": True,
+            "application_outcome": "rolled_back",
+            "strategy_variants_deactivated": True,
+            "variant_application_sha256": application_sha256,
+            "variant_rollback_sha256": rollback_sha256,
+            "target_variant_ids": target_variant_ids,
+            "selection_runtime_rollback_sha256": hashlib.sha256(
+                json.dumps(
+                    runtime_rollback_body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "paper_order_submission_authorized": False,
+            "live_cash_authorized": False,
+            "real_money_authorized": False,
+        }
+        canonical = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return {
+            **body,
+            "receipt_sha256": hashlib.sha256(canonical).hexdigest(),
+        }
+
+    return callback
 
 
 def test_active_start_order_puts_live_ticks_after_durable_workers():
@@ -273,6 +450,93 @@ def test_active_start_order_puts_live_ticks_after_durable_workers():
     ]
 
 
+def test_selection_prime_precedes_fresh_authority_and_order_workers():
+    events = []
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, _host, _live = _supervisor(
+        events,
+        pre_authority_workers=(("selection", selection),),
+        workers=(("transport", transport),),
+    )
+
+    health = supervisor.start_active(
+        start_authority=_active_authority(events)
+    )
+
+    assert events == [
+        "service_fence_acquire",
+        "fenced_prestart_revalidate",
+        ("provider_start", {}),
+        "runtime_register",
+        "selection_start",
+        "active_authority_consume",
+        "transport_start",
+        "live_start",
+    ]
+    assert health["active_pre_authority_worker_names"] == ["selection"]
+    supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
+    assert events[-6:] == [
+        "live_stop",
+        ("transport_close", 1.0),
+        ("selection_close", 1.0),
+        "runtime_close",
+        "host_close",
+        "service_fence_release",
+    ]
+
+
+def test_post_quiesce_deactivation_runs_after_every_owner_and_before_fence_release():
+    events = []
+    selection = _Worker("selection", events)
+    transport = _Worker("transport", events)
+    supervisor, _host, _live = _supervisor(
+        events,
+        workers=(("selection", selection), ("transport", transport)),
+        post_quiesce=_post_quiesce(events),
+    )
+    supervisor.start_active(start_authority=_active_authority(events))
+
+    stopped = supervisor.close(
+        join_timeout_seconds=1.0,
+        quiesce_timeout_seconds=1.0,
+    )
+
+    assert events[-7:] == [
+        "live_stop",
+        ("transport_close", 1.0),
+        ("selection_close", 1.0),
+        "runtime_close",
+        "host_close",
+        "post_quiesce",
+        "service_fence_release",
+    ]
+    assert stopped["post_quiesce_completed"] is True
+    assert len(stopped["post_quiesce_receipt_sha256"]) == 64
+
+
+def test_post_quiesce_rejection_retains_process_fence():
+    events = []
+    supervisor, _host, _live = _supervisor(
+        events,
+        post_quiesce=_post_quiesce(events, valid=False),
+    )
+    supervisor.start_active(start_authority=_active_authority(events))
+
+    with pytest.raises(
+        CapturedPaperServiceSupervisorError,
+        match="shutdown_incomplete",
+    ):
+        supervisor.close(
+            join_timeout_seconds=1.0,
+            quiesce_timeout_seconds=1.0,
+        )
+
+    assert events[-2:] == ["host_close", "post_quiesce"]
+    assert "service_fence_release" not in events
+    assert supervisor._service_fence.held is True
+
+
 def test_revoked_authority_stops_before_next_worker_or_live_loop():
     events = []
     first = _Worker("first", events)
@@ -310,9 +574,12 @@ def test_revoked_authority_stops_before_next_worker_or_live_loop():
 
 def test_no_order_smoke_structurally_omits_workers_and_live_loop():
     events = []
+    selection = _Worker("selection", events)
     transport = _Worker("transport", events)
     supervisor, _host, _live = _supervisor(
-        events, workers=(("transport", transport),)
+        events,
+        pre_authority_workers=(("selection", selection),),
+        workers=(("transport", transport),),
     )
 
     health = supervisor.start_no_order_smoke()
@@ -327,8 +594,23 @@ def test_no_order_smoke_structurally_omits_workers_and_live_loop():
     assert health["service_fence_acquired"] is True
     assert health["service_fence"]["held"] is True
     assert health["live_loop_started"] is False
+    assert health["managed_workers"]["selection"]["ever_started"] is False
+    assert selection.running is False
     assert transport.running is False
     supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
+
+
+def test_no_order_smoke_never_invokes_strategy_rollback_callback():
+    events = []
+    supervisor, _host, _live = _supervisor(
+        events,
+        post_quiesce=_post_quiesce(events),
+    )
+    supervisor.start_no_order_smoke()
+    supervisor.close(join_timeout_seconds=1.0, quiesce_timeout_seconds=1.0)
+
+    assert "post_quiesce" not in events
+    assert events[-1] == "service_fence_release"
 
 
 def test_worker_health_failure_rolls_back_without_starting_live_loop():

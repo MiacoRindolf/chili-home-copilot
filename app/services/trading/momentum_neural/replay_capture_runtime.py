@@ -29,7 +29,7 @@ import socket
 import ssl
 import threading
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Protocol, runtime_checkable
 import uuid
 import zlib
 
@@ -9858,6 +9858,193 @@ class ContentAddressedCaptureStore:
             rows.append(value)
         return rows
 
+    @classmethod
+    def read_chunk_ref(
+        cls,
+        root: str | Path,
+        ref: ChunkRef,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Read one immutable chunk without acquiring mutable store ownership.
+
+        Live local consumers must follow exact commit references; they must not
+        glob an unsealed run and mistake a merely visible orphan for committed
+        queue input.  This helper verifies every byte/count/path claim carried
+        by that reference and performs no writes or repairs.
+        """
+
+        if not isinstance(ref, ChunkRef):
+            raise CaptureContractError("capture chunk reference is malformed")
+        digest = _validated_sha256(ref.sha256, "capture chunk SHA256")
+        row_count = _validated_integer(
+            ref.row_count, "capture chunk row_count", minimum=1
+        )
+        raw_bytes = _validated_integer(
+            ref.raw_bytes, "capture chunk raw_bytes", minimum=1
+        )
+        compressed_bytes = _validated_integer(
+            ref.compressed_bytes,
+            "capture chunk compressed_bytes",
+            minimum=1,
+        )
+        relative = _validated_relative_path(
+            ref.relative_path, "capture chunk relative_path"
+        )
+        resolved_root = Path(root).resolve()
+        path = (resolved_root / relative).resolve()
+        try:
+            path.relative_to(resolved_root)
+        except ValueError as exc:
+            raise CaptureContractError("capture chunk escaped capture root") from exc
+        if path.name.split(".", 1)[0] != digest or not (
+            path.name.endswith(".jsonl.zst")
+            or path.name.endswith(".jsonl.zlib")
+        ):
+            raise CaptureContractError("capture chunk path/content address mismatch")
+        try:
+            compressed = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise CaptureContractError("committed capture chunk is unavailable") from exc
+        if len(compressed) != compressed_bytes:
+            raise CaptureContractError("capture chunk compressed-size mismatch")
+        raw = cls._decompress(path, compressed)
+        if len(raw) != raw_bytes or hashlib.sha256(raw).hexdigest() != digest:
+            raise CaptureContractError("capture chunk raw content mismatch")
+        lines = raw.splitlines()
+        if len(lines) != row_count or not raw.endswith(b"\n"):
+            raise CaptureContractError("capture chunk row-count framing mismatch")
+        rows: list[Mapping[str, Any]] = []
+        for line in lines:
+            try:
+                value = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CaptureContractError("capture chunk row is invalid JSON") from exc
+            if not isinstance(value, Mapping) or canonical_json_bytes(value) != line:
+                raise CaptureContractError("capture chunk row is not canonical JSON")
+            rows.append(value)
+        return tuple(rows)
+
+    @classmethod
+    def read_payload_ref(
+        cls,
+        root: str | Path,
+        *,
+        payload_sha256: str,
+        relative_path: str,
+        expected_storage_policy_sha256: str,
+    ) -> Mapping[str, Any]:
+        """Resolve one exact standalone/packed payload through a commit ref."""
+
+        digest = _validated_sha256(payload_sha256, "payload SHA256")
+        expected_policy = _validated_sha256(
+            expected_storage_policy_sha256,
+            "payload storage policy SHA256",
+        )
+        relative = _validated_relative_path(relative_path, "event payload_ref")
+        root_path = Path(root).resolve()
+        path = (root_path / relative).resolve()
+        try:
+            path.relative_to(root_path)
+        except ValueError as exc:
+            raise CaptureContractError("payload ref escaped capture root") from exc
+        parts = Path(relative).parts
+        filename_digest = _validated_sha256(
+            path.name.split(".", 1)[0], "payload object filename SHA256"
+        )
+        try:
+            compressed = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise CaptureContractError("committed payload object is unavailable") from exc
+        raw = cls._decompress(path, compressed)
+        if hashlib.sha256(raw).hexdigest() != filename_digest:
+            raise CaptureContractError("payload physical object hash mismatch")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CaptureContractError("payload object is invalid JSON") from exc
+        if not isinstance(value, Mapping) or canonical_json_bytes(value) != raw:
+            raise CaptureContractError("payload object is not canonical JSON")
+        if (
+            len(parts) == 4
+            and parts[0] == "blobs"
+            and parts[1] == "sha256"
+            and parts[2] == digest[:2]
+            and filename_digest == digest
+        ):
+            if hashlib.sha256(canonical_json_bytes(value)).hexdigest() != digest:
+                raise CaptureContractError("standalone payload content mismatch")
+            return value
+        if not (
+            len(parts) == 5
+            and parts[0] == "blobs"
+            and parts[1] == "packs"
+            and parts[2] == "sha256"
+            and parts[3] == filename_digest[:2]
+            and value.get("schema_version") == PAYLOAD_PACK_SCHEMA_VERSION
+            and value.get("storage_policy_sha256") == expected_policy
+            and set(value) == {
+                "payloads",
+                "schema_version",
+                "storage_policy_sha256",
+            }
+        ):
+            raise CaptureContractError("payload ref/content address mismatch")
+        payload_rows = value.get("payloads")
+        if not isinstance(payload_rows, list) or not payload_rows:
+            raise CaptureContractError("payload pack inventory is malformed")
+        matches: list[Mapping[str, Any]] = []
+        ordered: list[str] = []
+        for row in payload_rows:
+            if not isinstance(row, Mapping) or set(row) != {
+                "payload",
+                "payload_sha256",
+            }:
+                raise CaptureContractError("payload pack record is malformed")
+            row_digest = _validated_sha256(
+                row.get("payload_sha256"), "packed payload SHA256"
+            )
+            payload = row.get("payload")
+            if not isinstance(payload, Mapping) or sha256_json(payload) != row_digest:
+                raise CaptureContractError("packed payload content mismatch")
+            ordered.append(row_digest)
+            if row_digest == digest:
+                matches.append(payload)
+        if ordered != sorted(ordered) or len(ordered) != len(set(ordered)):
+            raise CaptureContractError("payload pack ordering is not canonical")
+        if len(matches) != 1:
+            raise CaptureContractError("exact payload is absent or duplicated in pack")
+        return matches[0]
+
+    @staticmethod
+    def read_derived_ref(
+        root: str | Path,
+        ref: RetentionObjectRef,
+    ) -> Mapping[str, Any]:
+        """Read one exact immutable derived record without store mutation."""
+
+        if not isinstance(ref, RetentionObjectRef) or ref.tier != "derived":
+            raise CaptureContractError("derived object reference is malformed")
+        root_path = Path(root).resolve()
+        path = (root_path / ref.relative_path).resolve()
+        try:
+            path.relative_to(root_path)
+        except ValueError as exc:
+            raise CaptureContractError("derived object escaped capture root") from exc
+        if path.stem != ref.sha256:
+            raise CaptureContractError("derived object path/content address mismatch")
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise CaptureContractError("committed derived object is unavailable") from exc
+        if len(raw) != ref.bytes or hashlib.sha256(raw).hexdigest() != ref.sha256:
+            raise CaptureContractError("derived object content mismatch")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CaptureContractError("derived object is invalid JSON") from exc
+        if not isinstance(value, Mapping) or canonical_json_bytes(value) != raw:
+            raise CaptureContractError("derived object is not canonical JSON")
+        return value
+
     def _partition_identity(
         self, path: Path, *, kind: str
     ) -> tuple[str, str, int]:
@@ -10847,6 +11034,28 @@ def load_verified_replay_capture_v4(
     return verified
 
 
+@runtime_checkable
+class CaptureDurableBatchCommitter(Protocol):
+    """Optional two-phase durability hook for a live local capture consumer.
+
+    ``prepare_batch`` runs only after every chunk/blob in the batch has been
+    fsynced.  It may publish one immutable commit receipt.  The writer fsyncs
+    that receipt before calling ``acknowledge_batch``; consumers therefore
+    never need to treat an uncommitted chunk glob as authority.
+    """
+
+    def prepare_batch(
+        self,
+        *,
+        store: ContentAddressedCaptureStore,
+        batch: IngressBatch,
+        event_chunks: tuple[ChunkRef, ...],
+        gap_chunks: tuple[ChunkRef, ...],
+    ) -> Any: ...
+
+    def acknowledge_batch(self, token: Any) -> None: ...
+
+
 class CaptureWriterWorker:
     """Single batched writer; producers remain non-blocking and bounded."""
 
@@ -10859,6 +11068,7 @@ class CaptureWriterWorker:
         batch_bytes: int,
         poll_seconds: float = 0.1,
         flush_interval_seconds: float = 5.0,
+        durable_batch_committer: CaptureDurableBatchCommitter | None = None,
     ) -> None:
         if (
             min(batch_events, batch_bytes) <= 0
@@ -10883,6 +11093,13 @@ class CaptureWriterWorker:
         self.batch_bytes = int(batch_bytes)
         self.poll_seconds = float(poll_seconds)
         self.flush_interval_seconds = float(flush_interval_seconds)
+        if durable_batch_committer is not None and not isinstance(
+            durable_batch_committer, CaptureDurableBatchCommitter
+        ):
+            raise CaptureContractError(
+                "capture durable batch committer does not implement its capability"
+            )
+        self.durable_batch_committer = durable_batch_committer
         self._thread: threading.Thread | None = None
         self._lifecycle_lock = threading.Lock()
         self._has_started = False
@@ -10919,6 +11136,20 @@ class CaptureWriterWorker:
     def _write(self, batch: IngressBatch) -> None:
         event_refs = self.store.write_events(batch.events)
         gap_refs = self.store.write_gaps(batch.gaps)
+        commit_token: Any | None = None
+        if self.durable_batch_committer is not None:
+            # First make every referenced event/gap/payload object durable.
+            self.store.sync()
+            commit_token = self.durable_batch_committer.prepare_batch(
+                store=self.store,
+                batch=batch,
+                event_chunks=event_refs,
+                gap_chunks=gap_refs,
+            )
+            # Then make the append-only commit receipt durable before exposing
+            # the new frontier to an in-process consumer.
+            self.store.sync()
+            self.durable_batch_committer.acknowledge_batch(commit_token)
         self._event_chunks += len(event_refs)
         self._gap_chunks += len(gap_refs)
         self._events_written += len(batch.events)
@@ -11275,6 +11506,7 @@ class SharedCaptureWriterLease:
         batch_bytes: int,
         poll_seconds: float = 0.1,
         flush_interval_seconds: float = 5.0,
+        durable_batch_committer: CaptureDurableBatchCommitter | None = None,
     ) -> CaptureWriterWorker:
         """Build exactly one writer; aggregate concurrency is manager-bounded."""
 
@@ -11291,6 +11523,7 @@ class SharedCaptureWriterLease:
                 batch_bytes=batch_bytes,
                 poll_seconds=poll_seconds,
                 flush_interval_seconds=flush_interval_seconds,
+                durable_batch_committer=durable_batch_committer,
             )
             self._writer = writer
             return writer

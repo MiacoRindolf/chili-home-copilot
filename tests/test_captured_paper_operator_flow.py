@@ -353,6 +353,20 @@ def test_operator_flow_publishes_build_ready_and_only_no_order_next_command(
 def test_fixed_migration_rehearsal_owns_selection_and_rejects_forbidden_effects(
     tmp_path: Path,
 ) -> None:
+    assert operator.MIGRATION_REHEARSAL_NODE_IDS == (
+        "tests/test_captured_paper_outbox.py::"
+        "test_migration_337_is_registered_idempotent_and_installs_guards",
+        "tests/test_alpaca_fill_settlement_runtime_wiring.py::"
+        "test_migration_336_preserves_v1_and_requires_strict_v2",
+        "tests/test_captured_paper_selection_producer.py::"
+        "test_migration_350_is_registered_idempotent_and_installs_guards",
+        "tests/test_captured_paper_selection_producer.py::"
+        "test_batch_upsert_and_frontier_cas_commit_together",
+        "tests/test_captured_paper_selection_producer.py::"
+        "test_migration_353_route_state_schema_and_cas_guards",
+        "tests/test_captured_paper_variant_binding.py::"
+        "test_migration_352_receipt_and_append_only_transition_round_trip",
+    )
     python = write(tmp_path / "python.exe", b"python")
     seen: list[tuple[str, ...]] = []
 
@@ -382,7 +396,7 @@ def test_fixed_migration_rehearsal_owns_selection_and_rejects_forbidden_effects(
             for node in operator.MIGRATION_REHEARSAL_NODE_IDS
         )
         junit_path.write_text(
-            '<testsuites><testsuite tests="2" failures="0" errors="0" '
+            '<testsuites><testsuite tests="6" failures="0" errors="0" '
             f'skipped="0">{cases}</testsuite></testsuites>',
             encoding="utf-8",
         )
@@ -397,7 +411,7 @@ def test_fixed_migration_rehearsal_owns_selection_and_rejects_forbidden_effects(
         },
         command_runner=runner,
     )
-    assert rehearsal() == (0, 0)
+    assert rehearsal() == (0, 0, 0, 0, 0, 0)
     assert len(seen) == 1
     for node in operator.MIGRATION_REHEARSAL_NODE_IDS:
         assert node in seen[0]

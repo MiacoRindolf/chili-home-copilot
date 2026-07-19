@@ -67,6 +67,8 @@ def test_schtasks_ascii_utf16_declaration_is_reencoded_without_guessing() -> Non
 def test_backend_and_collector_normalize_identical_schtasks_xml(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows Task Scheduler backend requires Windows")
     # The exact ASCII-declaring-UTF-16 payload the collector repairs must
     # produce identical hash-authoritative bytes through the cutover backend.
     observed = _task_xml(command=r"C:\Windows\wscript.exe", arguments="x.vbs")
@@ -202,8 +204,14 @@ def _direct_fixture(tmp_path: Path):
     return tasks, (depth, trade)
 
 
-NATIVE_WSCRIPT = str(cutover._native_system32_executable("wscript.exe"))
-NATIVE_POWERSHELL = str(cutover._native_system32_executable("powershell.exe"))
+if os.name == "nt":
+    NATIVE_WSCRIPT = str(cutover._native_system32_executable("wscript.exe"))
+    NATIVE_POWERSHELL = str(cutover._native_system32_executable("powershell.exe"))
+else:
+    # Keep module import/collection platform-neutral. Tests that need these
+    # native identities skip in _wrapper_fixture before inspecting them.
+    NATIVE_WSCRIPT = ""
+    NATIVE_POWERSHELL = ""
 
 
 def _wrapper_fixture(
@@ -215,6 +223,8 @@ def _wrapper_fixture(
     extra_argv: tuple[str, ...] = (),
     starter_suffix: str = "",
 ):
+    if os.name != "nt":
+        pytest.skip("Windows wrapper launch identity requires Windows")
     executable = tmp_path / "python.exe"
     executable.write_bytes(b"python")
     wrapper = tmp_path / "run-hidden.vbs"
@@ -466,6 +476,8 @@ def test_wrapper_contract_rejects_shadow_system32_paths(tmp_path: Path) -> None:
 def test_probe_ignores_forged_systemroot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows Task Scheduler probe requires Windows")
     forged = tmp_path / "ForgedRoot"
     (forged / "System32").mkdir(parents=True)
     (forged / "System32" / "schTasks.exe").write_bytes(b"forged schtasks")
@@ -483,6 +495,8 @@ def test_probe_ignores_forged_systemroot(
 def test_backend_ignores_forged_systemroot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows Task Scheduler backend requires Windows")
     forged = tmp_path / "ForgedRoot"
     (forged / "System32").mkdir(parents=True)
     (forged / "System32" / "schTasks.exe").write_bytes(b"forged schtasks")

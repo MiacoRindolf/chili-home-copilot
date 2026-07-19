@@ -32,7 +32,10 @@ from scripts.captured_alpaca_paper_service import (
     _issue_post_smoke_refreshed_readiness,
     _no_order_smoke_receipt,
     _paper_broker_snapshot,
+    _paper_broker_quiet_fixed_point,
+    _paper_fill_activity_fence,
     _paper_kill_switch_snapshot,
+    _paper_order_transition_fence,
     _publish_canonical_json_once,
     _recover_fenced_initial_generations,
     _strict_new_local_json_path,
@@ -68,8 +71,16 @@ def _canonical(value: object) -> str:
 class _PaperAdapter:
     broker_environment = "paper"
 
-    def __init__(self, *, orders: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        orders: list[dict] | None = None,
+        transition_orders: list[dict] | None = None,
+        fill_activities: list[dict] | None = None,
+    ) -> None:
         self.orders = list(orders or [])
+        self.transition_orders = list(transition_orders or [])
+        self.fill_activities = list(fill_activities or [])
         self.bound_account_id: str | None = None
         self.generation = "alpaca-paper-rest:" + "d" * 64
         self.audit_generation = "9cf6d0c5-614d-449c-a1e9-c21e3643d69c"
@@ -153,13 +164,125 @@ class _PaperAdapter:
             "query_receipt_sha256": SHA_B,
         }
 
+    def get_paper_order_transition_census(
+        self, *, after, until, read_binding
+    ):
+        assert after < until
+        encoded = _canonical(self.transition_orders)
+        inventory_sha256 = hashlib.sha256(encoded.encode()).hexdigest()
+        return {
+            "readable": True,
+            "pagination_complete": True,
+            "broker_environment": "paper",
+            "asset_class": "us_equity",
+            "provider_account_id": ACCOUNT,
+            "adapter_connection_generation": self.generation,
+            "read_binding_sha256": sha256_json(read_binding),
+            "orders": list(self.transition_orders),
+            "inventory_sha256": inventory_sha256,
+            "query_receipt_sha256": SHA_C,
+            "available_at": NOW,
+        }
+
+    def get_paper_account_fill_activity_census(
+        self, *, after, until, read_binding
+    ):
+        assert after < until
+        encoded = _canonical(self.fill_activities)
+        inventory_sha256 = hashlib.sha256(encoded.encode()).hexdigest()
+        return {
+            "readable": True,
+            "pagination_complete": True,
+            "broker_environment": "paper",
+            "activity_scope": "all_account_fill_activities",
+            "provider_account_id": ACCOUNT,
+            "adapter_connection_generation": self.generation,
+            "read_binding_sha256": sha256_json(read_binding),
+            "activities": list(self.fill_activities),
+            "inventory_sha256": inventory_sha256,
+            "query_receipt_sha256": SHA_C,
+            "query_after": after.isoformat(),
+            "query_until": until.isoformat(),
+            "available_at": NOW,
+        }
+
 
 def _verified_stub() -> SimpleNamespace:
     return SimpleNamespace(
         expected_account_id=ACCOUNT,
         activation_generation=GENERATION,
         manifest_sha256=SHA_A,
+        generated_at=NOW - timedelta(seconds=5),
     )
+
+
+def _active_start_authority_fixture(
+    verified,
+    *,
+    permit_sha256: str,
+    quiet_horizon_sha256: str,
+) -> dict[str, object]:
+    snapshot = {
+        "position_count": 0,
+        "open_order_count": 0,
+        "order_submission_call_count": 0,
+    }
+    order_census = {"exact_order_count": 0}
+    fill_census = {"exact_activity_count": 0}
+    broker = {
+        "schema_version": "chili.captured-paper-broker-fixed-point.v1",
+        "verdict": "PAPER_BROKER_QUIET_FIXED_POINT",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": verified.expected_account_id,
+        "activation_generation": verified.activation_generation,
+        "activation_manifest_sha256": verified.manifest_sha256,
+        "assumption_bound": True,
+        "live_cash_certification": False,
+        "baseline_snapshot": snapshot,
+        "first_snapshot": snapshot,
+        "first_order_census": order_census,
+        "first_fill_activity_census": fill_census,
+        "second_snapshot": snapshot,
+        "second_order_census": order_census,
+        "second_fill_activity_census": fill_census,
+    }
+    kill_body = {
+        "schema_version": "chili.captured-paper-kill-switch-query.v1",
+        "activation_generation": verified.activation_generation,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": verified.expected_account_id,
+        "active": False,
+    }
+    final_kill = {
+        **kill_body,
+        "query_receipt_sha256": sha256_json(kill_body),
+    }
+    body = {
+        "schema_version": "chili.captured-paper-active-start-authority.v2",
+        "verdict": "CAPTURED_ALPACA_PAPER_ACTIVE_START_AUTHORIZED",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": verified.expected_account_id,
+        "runtime_generation": verified.activation_generation,
+        "activation_manifest_sha256": verified.manifest_sha256,
+        "kill_switch_receipt_sha256": SHA_B,
+        "launcher_attestation_sha256": SHA_C,
+        "launcher_attestation_consumed": True,
+        "host_activation_permit_sha256": permit_sha256,
+        "host_activation_permit_consumed": True,
+        "host_quiet_horizon_event_sha256": quiet_horizon_sha256,
+        "broker_fixed_point": broker,
+        "broker_fixed_point_sha256": sha256_json(broker),
+        "post_permit_broker_snapshot_sha256": sha256_json(snapshot),
+        "order_transition_fence_sha256": sha256_json(order_census),
+        "fill_activity_fence_sha256": sha256_json(fill_census),
+        "final_kill_switch_query": final_kill,
+        "final_kill_switch_query_sha256": sha256_json(final_kill),
+        "paper_order_submission_authorized": True,
+        "live_cash_authorized": False,
+        "real_money_authorized": False,
+    }
+    body["authority_sha256"] = sha256_json(body)
+    return body
 
 
 def _preactivation(tmp_path: Path) -> VerifiedCapturedPaperPreactivation:
@@ -639,6 +762,212 @@ def test_paper_broker_snapshot_rejects_existing_open_order() -> None:
             verified=_verified_stub(),
             purpose="pre_smoke",
             wall_clock=lambda: NOW,
+        )
+
+
+def test_post_permit_order_transition_fence_binds_empty_all_status_census() -> None:
+    verified = _verified_stub()
+    adapter = _PaperAdapter()
+    broker = _paper_broker_snapshot(
+        adapter,
+        verified=verified,
+        purpose="post_permit",
+        wall_clock=lambda: NOW,
+    )
+
+    fence = _paper_order_transition_fence(
+        adapter,
+        verified=verified,
+        broker_snapshot=broker,
+        after=verified.generated_at,
+        until=NOW,
+        purpose="post_permit",
+        wall_clock=lambda: NOW,
+    )
+
+    assert fence["verdict"] == "NO_PAPER_ORDER_TRANSITION_DURING_CUTOVER"
+    assert fence["account_scope"] == "alpaca:paper"
+    assert fence["exact_order_count"] == 0
+
+
+def test_post_permit_order_transition_fence_rejects_terminal_order() -> None:
+    verified = _verified_stub()
+    adapter = _PaperAdapter(
+        transition_orders=[
+            {
+                "id": "legacy-terminal-order",
+                "client_order_id": "legacy-terminal-cid",
+                "status": "canceled",
+            }
+        ]
+    )
+    broker = _paper_broker_snapshot(
+        adapter,
+        verified=verified,
+        purpose="post_permit",
+        wall_clock=lambda: NOW,
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="BROKER_RECENT_ORDER_TRANSITION_PRESENT",
+    ):
+        _paper_order_transition_fence(
+            adapter,
+            verified=verified,
+            broker_snapshot=broker,
+            after=verified.generated_at,
+            until=NOW,
+            purpose="post_permit",
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_post_permit_fill_activity_fence_binds_empty_paginated_census() -> None:
+    verified = _verified_stub()
+    adapter = _PaperAdapter()
+    broker = _paper_broker_snapshot(
+        adapter,
+        verified=verified,
+        purpose="post_permit_fill",
+        wall_clock=lambda: NOW,
+    )
+
+    fence = _paper_fill_activity_fence(
+        adapter,
+        verified=verified,
+        broker_snapshot=broker,
+        after=verified.generated_at,
+        until=NOW,
+        purpose="post_permit_fill",
+        wall_clock=lambda: NOW,
+    )
+
+    assert fence["verdict"] == "NO_PAPER_FILL_ACTIVITY_DURING_ACTIVATION"
+    assert fence["exact_activity_count"] == 0
+
+
+def test_post_permit_fill_activity_fence_rejects_delayed_fill() -> None:
+    verified = _verified_stub()
+    adapter = _PaperAdapter(
+        fill_activities=[
+            {
+                "id": "fill-1",
+                "order_id": "legacy-order",
+                "activity_type": "FILL",
+            }
+        ]
+    )
+    broker = _paper_broker_snapshot(
+        adapter,
+        verified=verified,
+        purpose="post_permit_fill",
+        wall_clock=lambda: NOW,
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="BROKER_RECENT_FILL_ACTIVITY_PRESENT",
+    ):
+        _paper_fill_activity_fence(
+            adapter,
+            verified=verified,
+            broker_snapshot=broker,
+            after=verified.generated_at,
+            until=NOW,
+            purpose="post_permit_fill",
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_final_broker_fixed_point_is_two_cycle_zero_post_and_fill(
+    monkeypatch,
+) -> None:
+    verified = _verified_stub()
+    adapter = _PaperAdapter()
+    baseline = _paper_broker_snapshot(
+        adapter,
+        verified=verified,
+        purpose="fixed_point_baseline",
+        wall_clock=lambda: NOW,
+    )
+    composition = _CapturedPaperServiceComposition(
+        supervisor=object(),
+        shared_capture_store=object(),
+        adapter=adapter,
+        connection_generation_receipt=baseline["connection_receipt"],
+        phase_one_reconciliation_receipt={},
+        restart_inventory_receipt={},
+        database_engine=object(),
+        initial_broker_snapshot=baseline,
+    )
+    monotonic = [0.0]
+    monkeypatch.setattr(
+        service_module,
+        "_no_order_smoke_order_window_start",
+        lambda _verified: NOW - timedelta(seconds=5),
+    )
+
+    result = _paper_broker_quiet_fixed_point(
+        adapter,
+        verified=verified,
+        composition=composition,
+        baseline_snapshot=baseline,
+        wall_clock=lambda: NOW,
+        monotonic_clock=lambda: monotonic[0],
+        wait=lambda seconds: monotonic.__setitem__(0, monotonic[0] + seconds),
+    )
+
+    assert result["verdict"] == "PAPER_BROKER_QUIET_FIXED_POINT"
+    assert result["assumption_bound"] is True
+    assert result["live_cash_certification"] is False
+    assert result["first_order_census"]["exact_order_count"] == 0
+    assert result["second_fill_activity_census"]["exact_activity_count"] == 0
+
+
+def test_final_broker_fixed_point_rejects_local_submission_audit_drift(
+    monkeypatch,
+) -> None:
+    verified = _verified_stub()
+    adapter = _PaperAdapter()
+    baseline = _paper_broker_snapshot(
+        adapter,
+        verified=verified,
+        purpose="fixed_point_baseline",
+        wall_clock=lambda: NOW,
+    )
+    adapter.submission_call_count = 1
+    composition = _CapturedPaperServiceComposition(
+        supervisor=object(),
+        shared_capture_store=object(),
+        adapter=adapter,
+        connection_generation_receipt=baseline["connection_receipt"],
+        phase_one_reconciliation_receipt={},
+        restart_inventory_receipt={},
+        database_engine=object(),
+        initial_broker_snapshot=baseline,
+    )
+    monotonic = [0.0]
+    monkeypatch.setattr(
+        service_module,
+        "_no_order_smoke_order_window_start",
+        lambda _verified: NOW - timedelta(seconds=5),
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="BROKER_FIXED_POINT_NOT_QUIET",
+    ):
+        _paper_broker_quiet_fixed_point(
+            adapter,
+            verified=verified,
+            composition=composition,
+            baseline_snapshot=baseline,
+            wall_clock=lambda: NOW,
+            monotonic_clock=lambda: monotonic[0],
+            wait=lambda seconds: monotonic.__setitem__(
+                0, monotonic[0] + seconds
+            ),
         )
 
 
@@ -1263,24 +1592,63 @@ def _publish_matching_host_permit(
         "live_cash_authorized": False,
         "real_money_authorized": False,
     }
-    authorization = {
+    lane_sha256 = "7" * 64
+    quiesced = {
         "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
         "transaction_id": transaction_id,
         "sequence": 1,
         "previous_event_sha256": "0" * 64,
+        "event_type": "legacy_execution_lane_quiesced",
+        "recorded_at": issued_at,
+        "payload": {
+            "legacy_execution_lane": {"state": "stopped"},
+            "legacy_execution_lane_sha256": lane_sha256,
+        },
+    }
+    quiesced["event_sha256"] = sha256_json(quiesced)
+    quiet = {
+        "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
+        "transaction_id": transaction_id,
+        "sequence": 2,
+        "previous_event_sha256": quiesced["event_sha256"],
+        "event_type": "legacy_paper_broker_quiet_horizon_completed",
+        "recorded_at": issued_at,
+        "payload": {
+            "policy": "alpaca-paper-assumption-bound-quiet-horizon.v1",
+            "assumption_bound": True,
+            "live_cash_certification": False,
+            "required_seconds": 30.0,
+            "observed_monotonic_seconds": 30.0,
+            "stabilized_probe_count": 2,
+            "first_zero_at": issued_at,
+            "last_zero_at": issued_at,
+            "legacy_execution_lane_sha256": lane_sha256,
+            "legacy_process_count": 0,
+            "recreator_process_count": 0,
+        },
+    }
+    quiet["event_sha256"] = sha256_json(quiet)
+    authorization = {
+        "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
+        "transaction_id": transaction_id,
+        "sequence": 3,
+        "previous_event_sha256": quiet["event_sha256"],
         "event_type": "activation_permit_issued",
         "recorded_at": issued_at,
         "payload": authorization_payload,
     }
     authorization["event_sha256"] = sha256_json(authorization)
     journal_path.write_bytes(
-        json.dumps(
-            authorization,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        + b"\n"
+        b"".join(
+            json.dumps(
+                event,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+            for event in (quiesced, quiet, authorization)
+        )
     )
     permit = {
         "schema_version": "chili.captured-paper-host-startup-permit.v1",
@@ -1288,13 +1656,124 @@ def _publish_matching_host_permit(
         **authorization_payload,
         "journal_path": str(journal_path),
         "journal_transaction_id": transaction_id,
-        "journal_authorization_sequence": 1,
+        "journal_authorization_sequence": 3,
         "journal_authorization_event_sha256": authorization["event_sha256"],
         "journal_authorization_event": authorization,
     }
     permit["permit_sha256"] = sha256_json(permit)
     _publish_canonical_json_once(handshake.permit_path, permit)
     return permit
+
+
+def _append_matching_apply_completed(
+    handshake,
+    *,
+    permit: dict,
+    recorded_at: datetime = NOW + timedelta(seconds=1),
+    payload_overrides: dict | None = None,
+) -> dict:
+    journal_path = Path(permit["journal_path"])
+    rows = [
+        json.loads(line)
+        for line in journal_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    lane = {
+        "schema_version": "chili.legacy-execution-lane-observation.v2",
+        "state": "stopped",
+        "recreator_tasks": [],
+    }
+    payload = {
+        "postcondition": "one_unified_candidate_host",
+        "activation_generation": handshake._verified.activation_generation,
+        "manifest_sha256": handshake._verified.manifest_sha256,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": handshake._verified.expected_account_id,
+        "service_pid": handshake._identity["service_pid"],
+        "service_create_time_ns": handshake._identity["service_create_time_ns"],
+        "service_executable_path": handshake._identity["service_executable_path"],
+        "service_executable_sha256": handshake._identity[
+            "service_executable_sha256"
+        ],
+        "service_cmdline_sha256": handshake._identity["service_cmdline_sha256"],
+        "legacy_task_count_disabled": 4,
+        "legacy_process_count": 0,
+        "prepared_receipt_sha256": handshake._prepared_sha256,
+        "activation_permit_sha256": handshake._permit_sha256,
+        "started_receipt_sha256": handshake._started_sha256,
+        "active_start_authority_sha256": handshake._active_start_authority_body[
+            "authority_sha256"
+        ],
+        "active_start_evidence_artifact_sha256": (
+            handshake._active_start_evidence_artifact_sha256
+        ),
+        "host_quiet_horizon_event_sha256": (
+            handshake._quiet_horizon_event_sha256
+        ),
+        "challenge_sha256": handshake._challenge_sha256,
+        "legacy_execution_lane": lane,
+        "legacy_execution_lane_sha256": sha256_json(lane),
+        "paper_execution_committed": True,
+        "live_cash_authorized": False,
+        "real_money_authorized": False,
+    }
+    payload.update(payload_overrides or {})
+    event = {
+        "schema_version": "chili.captured-paper-host-cutover-journal-event.v1",
+        "transaction_id": permit["journal_transaction_id"],
+        "sequence": len(rows) + 1,
+        "previous_event_sha256": rows[-1]["event_sha256"],
+        "event_type": "apply_completed",
+        "recorded_at": recorded_at.isoformat().replace("+00:00", "Z"),
+        "payload": payload,
+    }
+    event["event_sha256"] = sha256_json(event)
+    with journal_path.open("ab", buffering=0) as handle:
+        handle.write(_canonical(event).encode("utf-8") + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return event
+
+
+def _published_started_handshake(tmp_path: Path, *, clock: dict[str, datetime]):
+    (
+        handshake,
+        verified,
+        identity,
+        host_source,
+        executable,
+        service_cmdline,
+        issuer_live,
+    ) = _host_handshake_fixture(tmp_path, wall_clock=lambda: clock["now"])
+    handshake.publish_prepared()
+    permit = _publish_matching_host_permit(
+        handshake,
+        verified=verified,
+        identity=identity,
+        host_source=host_source,
+        executable=executable,
+        service_cmdline=service_cmdline,
+        issuer_live=issuer_live,
+    )
+    handshake.await_and_consume_permit()
+    authority = _active_start_authority_fixture(
+        verified,
+        permit_sha256=permit["permit_sha256"],
+        quiet_horizon_sha256=handshake.quiet_horizon_event_sha256,
+    )
+    evidence = handshake.publish_active_start_evidence(authority)
+    handshake.publish_started(
+        health={
+            "state": "active",
+            "active_start_authority_consumed": True,
+            "active_start_authority_sha256": authority["authority_sha256"],
+            "active_start_evidence_artifact_sha256": evidence[
+                "artifact_sha256"
+            ],
+        },
+        active_start_authority=authority,
+    )
+    return handshake, permit, issuer_live
 
 
 def test_two_phase_host_handshake_is_prepared_permit_started(
@@ -1333,6 +1812,7 @@ def test_two_phase_host_handshake_is_prepared_permit_started(
     )
     consumed = handshake.await_and_consume_permit()
     assert consumed["permit_sha256"] == permit["permit_sha256"]
+    handshake.assert_consumed_permit_current()
     with handshake.hold_dispatch_authority():
         assert handshake.dispatch_lock_path.exists()
 
@@ -1343,12 +1823,165 @@ def test_two_phase_host_handshake_is_prepared_permit_started(
         with handshake.hold_dispatch_authority():
             raise _BrokerBodyFailure("broker lifecycle")
 
-    started = handshake.publish_started(health={"state": "active"})
+    authority = _active_start_authority_fixture(
+        verified,
+        permit_sha256=permit["permit_sha256"],
+        quiet_horizon_sha256=handshake.quiet_horizon_event_sha256,
+    )
+    evidence = handshake.publish_active_start_evidence(authority)
+    started = handshake.publish_started(
+        health={
+            "state": "active",
+            "active_start_authority_consumed": True,
+            "active_start_authority_sha256": authority["authority_sha256"],
+            "active_start_evidence_artifact_sha256": evidence[
+                "artifact_sha256"
+            ],
+        },
+        active_start_authority=authority,
+    )
     assert started["state"] == "STARTED"
     assert started["activation_permit_sha256"] == permit["permit_sha256"]
     assert started["workers_started"] is True
     assert started["paper_execution_started"] is True
+    assert started["active_start_evidence_artifact_sha256"] == evidence[
+        "artifact_sha256"
+    ]
     assert handshake.permit_path.exists()
+
+
+def test_committed_host_authority_survives_startup_permit_expiry_but_not_revocation(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    handshake, permit, issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    committed = _append_matching_apply_completed(handshake, permit=permit)
+
+    consumed = handshake.await_and_consume_apply_completed_authority()
+    assert consumed["event_sha256"] == committed["event_sha256"]
+
+    clock["now"] = NOW + timedelta(minutes=2)
+    issuer_live.clear()
+    handshake.assert_dispatch_authority_current()
+    with handshake.hold_dispatch_authority():
+        pass
+
+    handshake.revocation_requested_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="REVOKED"):
+        handshake.assert_dispatch_authority_current()
+
+
+def test_uncommitted_host_authority_expires_fail_closed(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    handshake, _permit, issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    clock["now"] = NOW + timedelta(seconds=21)
+    issuer_live.clear()
+
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="PERMIT"):
+        handshake.assert_dispatch_authority_current()
+    with pytest.raises(CapturedAlpacaPaperServiceError):
+        with handshake.hold_dispatch_authority():
+            raise AssertionError("unreachable")
+
+
+def test_committed_host_authority_rejects_later_or_missing_journal(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    handshake, permit, _issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    _append_matching_apply_completed(handshake, permit=permit)
+    handshake.await_and_consume_apply_completed_authority()
+
+    _append_matching_apply_completed(handshake, permit=permit)
+    with pytest.raises(CapturedAlpacaPaperServiceError):
+        handshake.assert_dispatch_authority_current()
+
+    Path(permit["journal_path"]).unlink()
+    with pytest.raises(CapturedAlpacaPaperServiceError):
+        handshake.assert_dispatch_authority_current()
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"expected_account_id": "00000000-0000-4000-8000-000000000000"},
+        {"activation_generation": "00000000-0000-4000-8000-000000000000"},
+        {"service_pid": 999_999},
+        {"started_receipt_sha256": "0" * 64},
+        {"active_start_authority_sha256": "0" * 64},
+        {"live_cash_authorized": True},
+    ],
+)
+def test_host_apply_commit_identity_forgery_is_rejected(
+    tmp_path: Path,
+    override: dict,
+) -> None:
+    clock = {"now": NOW}
+    handshake, permit, _issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    _append_matching_apply_completed(
+        handshake,
+        permit=permit,
+        payload_overrides=override,
+    )
+
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="COMMIT_INVALID"):
+        handshake.await_and_consume_apply_completed_authority()
+
+
+def test_active_start_evidence_deletion_blocks_dispatch_before_commit(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    handshake, _permit, _issuer_live = _published_started_handshake(
+        tmp_path, clock=clock
+    )
+    handshake.active_start_evidence_path.unlink()
+
+    with pytest.raises(CapturedAlpacaPaperServiceError):
+        handshake.assert_active_start_evidence_current()
+
+
+def test_consumed_host_permit_expiry_blocks_post_read_worker_start(
+    tmp_path: Path,
+) -> None:
+    clock = {"now": NOW}
+    (
+        handshake,
+        verified,
+        identity,
+        host_source,
+        executable,
+        service_cmdline,
+        issuer_live,
+    ) = _host_handshake_fixture(tmp_path, wall_clock=lambda: clock["now"])
+    handshake.publish_prepared()
+    _publish_matching_host_permit(
+        handshake,
+        verified=verified,
+        identity=identity,
+        host_source=host_source,
+        executable=executable,
+        service_cmdline=service_cmdline,
+        issuer_live=issuer_live,
+    )
+    handshake.await_and_consume_permit()
+    clock["now"] = NOW + timedelta(seconds=21)
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="stale, mismatched, or untrusted",
+    ):
+        handshake.assert_consumed_permit_current()
 
 
 def test_dispatch_authority_never_creates_or_repairs_missing_lock(
@@ -1634,10 +2267,10 @@ def test_active_failure_reports_order_and_external_state_as_unknown(
         service_module,
         "_CapturedPaperHostActivationHandshake",
         SimpleNamespace(
-            prepare=lambda **_kwargs: SimpleNamespace(
-                assert_not_revoked=lambda: None,
-                hold_dispatch_authority=nullcontext,
-            )
+                prepare=lambda **_kwargs: SimpleNamespace(
+                    assert_dispatch_authority_current=lambda: None,
+                    hold_dispatch_authority=nullcontext,
+                )
         ),
     )
 
@@ -1789,8 +2422,40 @@ def _launcher_attestation_fixture(monkeypatch):
                 "CHILI-IQFeed-Trade-Bridge-Logon": False,
             },
             "legacy_bridge_processes": [],
+            "legacy_recreator_processes": [],
+            "legacy_execution_lane": {
+                "schema_version": "chili.legacy-execution-lane-observation.v2",
+                "container_name": "chili-clean-recovery-momentum-exec",
+                "container_id": SHA_C,
+                "image_id": "sha256:" + SHA_A,
+                "config_sha256": SHA_B,
+                "execution_scope": (
+                    "legacy:mixed-paper-config-live-masters-disabled"
+                ),
+                "scope_sha256": SHA_C,
+                "recreator_tasks": [
+                    {
+                        "name": name,
+                        "definition_sha256": SHA_A,
+                        "action_sha256": SHA_B,
+                        "source_chain_sha256": SHA_C,
+                        "enabled": False,
+                    }
+                    for name in (
+                        "CHILI-Docker-Socket-Guard",
+                        "CHILI-Premarket-Readiness",
+                        "CHILI-Premarket-Readiness-Recheck",
+                        "CHILI-captured-paper-premarket-activation",
+                        "CHILI-liveness-watchdog",
+                    )
+                ],
+                "state": "stopped",
+            },
         },
     }
+    evidence["cutover"]["legacy_execution_lane_sha256"] = (
+        sha256_json(evidence["cutover"]["legacy_execution_lane"])
+    )
     verified = SimpleNamespace(
         activation_generation=GENERATION,
         manifest_sha256=SHA_B,
@@ -1822,6 +2487,94 @@ def test_launcher_cutover_attestation_is_process_bound_and_one_shot(
         match="LAUNCH_ATTESTATION_ALREADY_CONSUMED",
     ):
         attestation.consume(wall_clock=lambda: NOW + timedelta(seconds=2))
+
+
+def test_launcher_cutover_attestation_rejects_docker_identity_drift(
+    monkeypatch,
+) -> None:
+    verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    attestation = service_module._issue_launcher_cutover_attestation(
+        verified=verified,
+        args=args,
+        process_probe=lambda: evidence,
+        cutover_probe=lambda: evidence["cutover"],
+        wall_clock=lambda: NOW,
+    )
+    evidence["cutover"]["legacy_execution_lane"]["container_id"] = "f" * 64
+    evidence["cutover"]["legacy_execution_lane_sha256"] = sha256_json(
+        evidence["cutover"]["legacy_execution_lane"]
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="HOST_CUTOVER_BINDING_DRIFT",
+    ):
+        attestation.consume(wall_clock=lambda: NOW + timedelta(seconds=1))
+
+
+def test_launcher_cutover_attestation_rejects_runnable_docker_lane(
+    monkeypatch,
+) -> None:
+    verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    evidence["cutover"]["legacy_execution_lane"]["state"] = "running"
+    evidence["cutover"]["legacy_execution_lane_sha256"] = sha256_json(
+        evidence["cutover"]["legacy_execution_lane"]
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="legacy Docker execution lane identity is incomplete or runnable",
+    ):
+        service_module._issue_launcher_cutover_attestation(
+            verified=verified,
+            args=args,
+            process_probe=lambda: evidence,
+            cutover_probe=lambda: evidence["cutover"],
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_launcher_cutover_attestation_rejects_recreator_authority(
+    monkeypatch,
+) -> None:
+    verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    evidence["cutover"]["legacy_execution_lane"]["recreator_tasks"][0][
+        "enabled"
+    ] = True
+    evidence["cutover"]["legacy_execution_lane_sha256"] = sha256_json(
+        evidence["cutover"]["legacy_execution_lane"]
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError, match="incomplete or runnable"
+    ):
+        service_module._issue_launcher_cutover_attestation(
+            verified=verified,
+            args=args,
+            process_probe=lambda: evidence,
+            cutover_probe=lambda: evidence["cutover"],
+            wall_clock=lambda: NOW,
+        )
+
+
+def test_launcher_cutover_attestation_rejects_recreator_descendant(
+    monkeypatch,
+) -> None:
+    verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    evidence["cutover"]["legacy_recreator_processes"] = [
+        "1234:docker.exe:matched"
+    ]
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError, match="HOST_CUTOVER_INCOMPLETE"
+    ):
+        service_module._issue_launcher_cutover_attestation(
+            verified=verified,
+            args=args,
+            process_probe=lambda: evidence,
+            cutover_probe=lambda: evidence["cutover"],
+            wall_clock=lambda: NOW,
+        )
 
 
 def test_launcher_cutover_attestation_rejects_direct_or_drifted_parent(
@@ -1880,6 +2633,7 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
         activation_generation=GENERATION,
         manifest_sha256=SHA_A,
         receipt_hashes={"kill_switch": SHA_B},
+        generated_at=NOW - timedelta(seconds=5),
     )
     reloads = []
 
@@ -1974,6 +2728,7 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         activation_generation=GENERATION,
         manifest_sha256=SHA_A,
         receipt_hashes={"kill_switch": SHA_B},
+        generated_at=NOW - timedelta(seconds=5),
     )
     events: list[str] = []
     handshake = object.__new__(
@@ -1984,8 +2739,18 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         events.append("permit_consumed") or {"permit_sha256": SHA_C}
     )
     handshake.assert_not_revoked = lambda: None
-    handshake.publish_started = lambda *, health: (
+    handshake.assert_consumed_permit_current = lambda: None
+    handshake.assert_active_start_evidence_current = lambda: None
+    handshake.publish_active_start_evidence = lambda _authority: (
+        events.append("evidence_published")
+        or {"authority_sha256": SHA_A, "artifact_sha256": SHA_B}
+    )
+    handshake._quiet_horizon_event_sha256 = SHA_B
+    handshake.publish_started = lambda *, health, active_start_authority: (
         events.append("started_ack") or {"state": "STARTED"}
+    )
+    handshake.await_and_consume_apply_completed_authority = lambda: (
+        events.append("apply_committed") or {"event_sha256": SHA_A}
     )
 
     class _Supervisor:
@@ -2032,6 +2797,21 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
         "_assert_composition_broker_generation",
         lambda *_args, **_kwargs: None,
     )
+    fixed_authority = _active_start_authority_fixture(
+        verified,
+        permit_sha256=SHA_C,
+        quiet_horizon_sha256=SHA_B,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_paper_broker_quiet_fixed_point",
+        lambda *_args, **_kwargs: fixed_authority["broker_fixed_point"],
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_paper_kill_switch_snapshot",
+        lambda *_args, **_kwargs: fixed_authority["final_kill_switch_query"],
+    )
     stopped = service_module.threading.Event()
     stopped.set()
     service_module._execute_active_service(
@@ -2046,11 +2826,123 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
 
     assert events.index("permit_consumed") < events.index("worker_started")
     assert events.index("health_confirmed") < events.index("started_ack")
+    assert events.index("started_ack") < events.index("apply_committed")
+
+
+def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
+    attested_verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    attestation = service_module._issue_launcher_cutover_attestation(
+        verified=attested_verified,
+        args=args,
+        process_probe=lambda: evidence,
+        cutover_probe=lambda: evidence["cutover"],
+        wall_clock=lambda: NOW,
+    )
+    verified = SimpleNamespace(
+        paper_order_submission_authorized=True,
+        expected_account_id=ACCOUNT,
+        activation_generation=GENERATION,
+        manifest_sha256=SHA_A,
+        receipt_hashes={"kill_switch": SHA_B},
+        generated_at=NOW - timedelta(seconds=5),
+    )
+    events: list[str] = []
+    handshake = object.__new__(
+        service_module._CapturedPaperHostActivationHandshake
+    )
+    handshake.publish_prepared = lambda: events.append("prepared")
+    handshake.await_and_consume_permit = lambda: (
+        events.append("permit_consumed") or {"permit_sha256": SHA_C}
+    )
+    handshake.assert_not_revoked = lambda: None
+    handshake.assert_consumed_permit_current = lambda: None
+    handshake._quiet_horizon_event_sha256 = SHA_B
+
+    class _Supervisor:
+        def start_active(self, *, start_authority):
+            events.append("provider_runtime_ready")
+            start_authority.consume()
+            events.append("worker_started")
+            return {"state": "active"}
+
+        def close(self, **_kwargs):
+            events.append("closed")
+            return {"state": "stopped"}
+
+    class _Store:
+        def close(self):
+            events.append("store_closed")
+
+    composition = _CapturedPaperServiceComposition(
+        supervisor=_Supervisor(),
+        shared_capture_store=_Store(),
+        adapter=object(),
+        connection_generation_receipt={},
+        phase_one_reconciliation_receipt={},
+        restart_inventory_receipt={},
+        database_engine=object(),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_reload_final_activation_authority",
+        lambda *_args, **_kwargs: verified,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_paper_broker_snapshot",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_assert_composition_broker_generation",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def reject_transition(*_args, **_kwargs):
+        events.append("transition_census")
+        raise CapturedAlpacaPaperServiceError(
+            "BROKER_RECENT_ORDER_TRANSITION_PRESENT",
+            "terminal legacy order observed",
+        )
+
+    monkeypatch.setattr(
+        service_module, "_paper_broker_quiet_fixed_point", reject_transition
+    )
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="BROKER_RECENT_ORDER_TRANSITION_PRESENT",
+    ):
+        service_module._execute_active_service(
+            verified=verified,
+            composition=composition,
+            allowed_read_roots=(
+                Path(service_module.__file__).resolve().parents[1],
+            ),
+            launcher_attestation=attestation,
+            host_activation_handshake=handshake,
+            stop_event=service_module.threading.Event(),
+            wall_clock=lambda: NOW,
+        )
+
+    assert events == [
+        "provider_runtime_ready",
+        "prepared",
+        "permit_consumed",
+        "transition_census",
+        "closed",
+        "store_closed",
+    ]
+    assert "worker_started" not in events
 
 
 def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -> None:
     calls: dict[str, list[tuple[tuple, dict]]] = {}
     instances: dict[str, list[object]] = {}
+    code_body = {"schema_version": "test-code-build.v1", "files": []}
+    code_sha = sha256_json(code_body)
+    policy_snapshot = {"policy_version": "test-adaptive-policy.v1"}
+    policy_sha = sha256_json(policy_snapshot)
 
     def recording_type(name: str, *, runtime: bool = False):
         class _Recorded:
@@ -2089,6 +2981,33 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
     fill_capture_type = recording_type("fill_capture")
     financial_breaker_type = recording_type("financial_breaker")
     initial_candidate_reader_type = recording_type("initial_candidate_reader")
+    deferred_reader_type = recording_type("deferred_candidate_reader")
+    class selection_worker_type:
+        def __init__(self, *args, **kwargs):
+            calls.setdefault("selection_worker", []).append((args, kwargs))
+            instances.setdefault("selection_worker", []).append(self)
+
+        def rollback_after_quiesce(self):
+            body = {
+                "schema_version": (
+                    "chili.captured-paper-selection-runtime-rollback.v2"
+                ),
+                "account_scope": "alpaca:paper",
+                "expected_account_id": ACCOUNT,
+                "activation_generation": GENERATION,
+                "variant_application_sha256": SHA_A,
+                "variant_rollback_sha256": SHA_B,
+                "target_variant_ids": [31, 32],
+                "application_outcome": "rolled_back",
+                "strategy_variants_deactivated": True,
+                "paper_order_submission_authorized": False,
+                "live_cash_authorized": False,
+                "real_money_authorized": False,
+            }
+            return {
+                **body,
+                "runtime_rollback_sha256": sha256_json(body),
+            }
 
     class _InitialControllerPolicy:
         def __init__(self, **kwargs):
@@ -2150,6 +3069,37 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
                 initial_candidate_reader_type
             )
         ),
+        "captured_paper_selection_runtime": SimpleNamespace(
+            DeferredCapturedPaperInitialCandidateReader=deferred_reader_type,
+            CapturedPaperSelectionLifecycleWorker=selection_worker_type,
+            CapturedPaperSelectionApplicationSetup=object,
+            CapturedPaperSelectionRuntimeComponents=object,
+        ),
+        "captured_paper_selection_source": SimpleNamespace(
+            SqlAlchemyCapturedViabilitySnapshotSource=object,
+        ),
+        "captured_paper_selection_queue": SimpleNamespace(
+            CapturedPaperSelectionQueuePublisher=object,
+            CapturedPaperSelectionQueueWriter=object,
+            CapturedPaperSelectionQueueInputPort=object,
+        ),
+        "captured_paper_selection_producer": SimpleNamespace(
+            CapturedPaperSelectionAuthority=object,
+            CapturedPaperSelectionVariantBinding=object,
+            CapturedPaperSelectionProducer=object,
+        ),
+        "captured_paper_variant_binding": SimpleNamespace(),
+        "momentum_viability": SimpleNamespace(
+            ViabilitySettingsProjection=SimpleNamespace(
+                from_runtime=lambda _settings: object()
+            )
+        ),
+        "replay_capture_contract": SimpleNamespace(CaptureRunIdentity=object),
+        "replay_capture_runtime": SimpleNamespace(BoundedCaptureIngress=object),
+        "app_db": SimpleNamespace(SessionLocal=lambda: None),
+        "yf_session": SimpleNamespace(
+            get_fundamentals_receipt=lambda _symbol: None
+        ),
         "captured_paper_initial_controller": SimpleNamespace(
             CapturedPaperInitialAdmissionController=_InitialController,
             CapturedPaperInitialControllerPolicy=_InitialControllerPolicy,
@@ -2179,7 +3129,12 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
     class _Host:
         composition = SimpleNamespace(
             binding=SimpleNamespace(
-                budget=SimpleNamespace(derived_hot_symbol_capacity=7)
+                budget=SimpleNamespace(
+                    derived_hot_symbol_capacity=7,
+                    max_writer_threads=8,
+                    max_queue_events=4096,
+                    async_queue_bytes=8 * 1024 * 1024,
+                )
             )
         )
 
@@ -2192,7 +3147,15 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
         reconciliation_retry_delay_seconds=5,
     )
     prepared = _PreparedCapturedPaperCapture(
-        preflight=SimpleNamespace(startup_process_instance_id=GENERATION),
+        preflight=SimpleNamespace(
+            startup_process_instance_id=GENERATION,
+            run_configuration={
+                "writer_batch_events": 256,
+                "writer_batch_bytes": 1024 * 1024,
+                "writer_poll_seconds": 0.05,
+                "writer_flush_interval_seconds": 0.25,
+            },
+        ),
         host=_Host(),
         shared_store=store,
         adapter=adapter,
@@ -2202,7 +3165,13 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
         },
         policy_authority=_CapturedPaperPolicyAuthority(
             policy_receipt=SimpleNamespace(
-                policy=SimpleNamespace(context_data_max_age_seconds=60.0)
+                policy=SimpleNamespace(
+                    context_data_max_age_seconds=60.0,
+                    policy_sha256=policy_sha,
+                ),
+                to_settings_projection=lambda: {
+                    "policy_snapshot": dict(policy_snapshot)
+                },
             ),
             policy_spec=object(),
             operational_policy=operational,
@@ -2212,10 +3181,13 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
     )
     verified = SimpleNamespace(
         expected_account_id=ACCOUNT,
-        code_build_sha256=SHA_A,
+        code_build_sha256=code_sha,
         settings_projection_sha256=SHA_B,
         capture_receipt_sha256=SHA_C,
         activation_generation=GENERATION,
+        manifest={
+            "code_build": {**code_body, "code_build_sha256": code_sha}
+        },
     )
     engine = object()
     factory = object()
@@ -2236,6 +3208,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
             chili_momentum_captured_paper_trigger_retry_delay_seconds=0.01,
             chili_momentum_captured_paper_trigger_future_tolerance_seconds=1.0,
             chili_momentum_captured_paper_trigger_exact_print_window_seconds=0.001,
+            chili_tenbeat_entry_tilt_weight=0.0,
         ),
         database_engine=engine,
         assert_external_authority_current=lambda: None,
@@ -2257,10 +3230,10 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
         "service_fence"
     ][0]
     assert owner_kwargs["allow_manual_staging"] is False
-    assert calls["initial_candidate_reader"][0][0] == (engine,)
+    assert "initial_candidate_reader" not in calls
     initial_kwargs = calls["initial_controller"][0][1]
     assert initial_kwargs["candidate_reader"] is instances[
-        "initial_candidate_reader"
+        "deferred_candidate_reader"
     ][0]
     assert initial_kwargs["assert_service_fence_held"].__self__ is instances[
         "service_fence"
@@ -2287,8 +3260,31 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
         "post_commit",
         "transport",
         "later_fill",
+        "selection",
     ]
+    selection_kwargs = calls["selection_worker"][0][1]
+    assert selection_kwargs["shared_capture_runtime"] is store
+    assert selection_kwargs["deferred_reader"] is instances[
+        "deferred_candidate_reader"
+    ][0]
+    assert selection_kwargs["assert_service_fence_held"].__self__ is instances[
+        "service_fence"
+    ][0]
     supervisor_kwargs = calls["supervisor"][0][1]
+    assert [
+        item.name for item in supervisor_kwargs["active_pre_authority_workers"]
+    ] == ["selection"]
+    assert callable(supervisor_kwargs["post_quiesce_before_fence_release"])
+    post_quiesce = supervisor_kwargs["post_quiesce_before_fence_release"]()
+    assert post_quiesce["schema_version"] == (
+        "chili.captured-paper-post-quiesce.v3"
+    )
+    assert post_quiesce["variant_application_sha256"] == SHA_A
+    assert post_quiesce["variant_rollback_sha256"] == SHA_B
+    assert post_quiesce["target_variant_ids"] == [31, 32]
+    post_body = dict(post_quiesce)
+    supplied_post_sha = post_body.pop("receipt_sha256")
+    assert sha256_json(post_body) == supplied_post_sha
     assert supervisor_kwargs["live_loop_start"]() is True
     assert supervisor_kwargs["live_loop_health"]() is True
     expected_scope = {
@@ -2557,6 +3553,11 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
         "alpaca_paper_fill_activities",
         "alpaca_paper_fill_query_observations",
         "alpaca_paper_post_settlement_fill_contradictions",
+        "captured_paper_selection_frontiers",
+        "captured_paper_selection_frontier_events",
+        "captured_paper_selection_route_states",
+        "captured_paper_variant_application_receipts",
+        "captured_paper_variant_application_events",
     )
 
     class _Result:
@@ -2567,8 +3568,9 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
             return self.rows
 
     class _Connection:
-        def __init__(self, versions):
+        def __init__(self, versions, *, missing_tables=()):
             self.versions = versions
+            self.missing_tables = frozenset(missing_tables)
 
         def __enter__(self):
             return self
@@ -2579,14 +3581,23 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
         def execute(self, statement):
             if "schema_version" in statement:
                 return _Result([(value,) for value in self.versions])
-            return _Result([(name, True) for name in required_tables])
+            return _Result(
+                [
+                    (name, name not in self.missing_tables)
+                    for name in required_tables
+                ]
+            )
 
     class _Engine:
-        def __init__(self, versions):
+        def __init__(self, versions, *, missing_tables=()):
             self.versions = versions
+            self.missing_tables = tuple(missing_tables)
 
         def connect(self):
-            return _Connection(self.versions)
+            return _Connection(
+                self.versions,
+                missing_tables=self.missing_tables,
+            )
 
     migrations = SimpleNamespace(
         MIGRATIONS=(("001", object()), ("002", object())),
@@ -2600,6 +3611,15 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
     with pytest.raises(CapturedAlpacaPaperServiceError, match="exact code generation"):
         _verify_database_schema(
             _Engine(("001", "002", "future_999")),
+            migrations_module=migrations,
+        )
+
+    with pytest.raises(CapturedAlpacaPaperServiceError, match="exact code generation"):
+        _verify_database_schema(
+            _Engine(
+                ("001", "002"),
+                missing_tables=("captured_paper_selection_route_states",),
+            ),
             migrations_module=migrations,
         )
 

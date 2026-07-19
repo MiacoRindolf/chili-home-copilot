@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -156,6 +158,396 @@ def _identity(
     )
 
 
+def _docker_lane_inspect(
+    *,
+    state: str = "running",
+    config_tag: str = "v1",
+    restart_name: str = "unless-stopped",
+    auto_remove: bool = False,
+) -> dict:
+    running = state == "running"
+    return {
+        "Id": "d" * 64,
+        "Image": "sha256:" + "e" * 64,
+        "Name": "/" + cutover.LEGACY_EXECUTION_LANE_NAME,
+        "Created": "2026-07-16T00:00:00Z",
+        "Path": "/usr/local/bin/python",
+        "Args": ["-m", "app", config_tag],
+        "Config": {
+            "Image": "chili:test",
+            "Entrypoint": ["/entrypoint"],
+            "Cmd": ["python", "-m", "app"],
+            "Env": [
+                "SECRET_MUST_NOT_BE_HASHED=value",
+                "CHILI_ALPACA_ENABLED=1",
+                "CHILI_ALPACA_PAPER=1",
+                "CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER=true",
+                "CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=true",
+                "CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=true",
+                "CHILI_AUTOTRADER_ENABLED=false",
+                "CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED=false",
+                "CHILI_MOMENTUM_EXEC_AUTO_ARM_LIVE_ENABLED=false",
+                "CHILI_MOMENTUM_EXEC_LIVE_RUNNER_ENABLED=false",
+                "CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=false",
+                "CHILI_COINBASE_AUTOTRADER_LIVE=0",
+                "COINBASE_AUTOTRADER_LIVE=0",
+            ],
+            "Labels": {
+                "com.docker.compose.project": "chili-home-copilot",
+                "com.docker.compose.service": "momentum-exec-worker",
+                "com.docker.compose.project.config_files": (
+                    r"D:\dev\chili-home-copilot\docker-compose.yml"
+                ),
+                "mutable": "ignored",
+            },
+        },
+        "HostConfig": {
+            "RestartPolicy": {"Name": restart_name, "MaximumRetryCount": 0},
+            "AutoRemove": auto_remove,
+            "Binds": ["ignored"],
+        },
+        "State": {
+            "Status": "running" if running else "exited",
+            "Running": running,
+            "Paused": False,
+            "Restarting": False,
+            "Dead": False,
+        },
+    }
+
+
+def _docker_backend_with_command(command):
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    backend._docker_command = command
+    tasks = {
+        name: cutover.TaskObservation(name, _task_xml(name), True)
+        for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
+    }
+
+    def probe():
+        return tuple(
+            cutover.ExecutionLaneRecreatorTaskObservation(
+                name=name,
+                definition_sha256=cutover._task_definition_sha_ignoring_enabled(
+                    task.xml
+                ),
+                action_sha256=cutover.sha256_json(
+                    {"name": name, "kind": "action"}
+                ),
+                source_chain_sha256=cutover.sha256_json(
+                    {"name": name, "kind": "source-chain"}
+                ),
+                enabled=task.enabled,
+            )
+            for name, task in sorted(tasks.items())
+        )
+
+    def set_enabled(name, enabled):
+        current = tasks[name]
+        tasks[name] = cutover.TaskObservation(
+            name, _set_task_enabled(current.xml, enabled), enabled
+        )
+
+    backend._execution_lane_recreator_probe = probe
+    backend.get_task = lambda name: tasks.get(name)
+    backend.set_task_enabled = set_enabled
+    backend.stop_task = lambda _name: None
+    # This unit fixture owns only the modeled Docker/task state.  Do not let
+    # the production descendant inventory inspect unrelated processes on the
+    # developer host during an otherwise hermetic state-transition test.
+    backend.await_execution_lane_recreator_processes = (
+        lambda *, timeout_seconds: ()
+    )
+    return backend
+
+
+def test_docker_execution_lane_stop_and_restore_use_full_container_id() -> None:
+    state = {"value": "running"}
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "stop":
+            assert args[1] == "d" * 64
+            state["value"] = "stopped"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        if args[0] == "start":
+            assert args[1] == "d" * 64
+            state["value"] = "running"
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        return SimpleNamespace(
+            stdout=json.dumps(
+                _docker_lane_inspect(state=state["value"])
+            ).encode("utf-8"),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    baseline = backend.inspect_legacy_execution_lane()
+    assert baseline.state == "running"
+    assert backend.quiesce_legacy_execution_lane(expected=baseline) == (
+        len(cutover.EXECUTION_LANE_RECREATOR_TASKS) * 2 + 1
+    )
+    assert state["value"] == "stopped"
+    assert not any(
+        item.enabled
+        for item in backend.inspect_legacy_execution_lane().recreator_tasks
+    )
+    assert not any(item[0] == "pause" for item in calls)
+    assert backend.restore_legacy_execution_lane(expected=baseline) == (
+        len(cutover.EXECUTION_LANE_RECREATOR_TASKS) + 1
+    )
+    assert state["value"] == "running"
+    assert ("stop", "d" * 64) in calls
+    assert ("start", "d" * 64) in calls
+
+
+def test_docker_execution_lane_identity_drift_blocks_before_stop() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def command(arguments):
+        args = tuple(arguments)
+        calls.append(args)
+        document = _docker_lane_inspect(config_tag="replacement")
+        return SimpleNamespace(
+            stdout=json.dumps(document).encode("utf-8"),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    expected = cutover.LegacyExecutionLaneObservation(
+        container_name=cutover.LEGACY_EXECUTION_LANE_NAME,
+        container_id="d" * 64,
+        image_id="sha256:" + "e" * 64,
+        config_sha256="f" * 64,
+        execution_scope="legacy:mixed-paper-config-live-masters-disabled",
+        scope_sha256="9" * 64,
+        recreator_tasks=tuple(
+            cutover.ExecutionLaneRecreatorTaskObservation(
+                name=name,
+                definition_sha256="1" * 64,
+                action_sha256="2" * 64,
+                source_chain_sha256="3" * 64,
+                enabled=True,
+            )
+            for name in sorted(cutover.EXECUTION_LANE_RECREATOR_TASKS)
+        ),
+        state="running",
+    )
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="EXECUTION_LANE_IDENTITY_DRIFT",
+    ):
+        backend.quiesce_legacy_execution_lane(expected=expected)
+    assert not any(item[0] == "stop" for item in calls)
+
+
+def test_docker_execution_lane_config_hash_excludes_secrets_and_labels() -> None:
+    first = _docker_lane_inspect()
+    second = _docker_lane_inspect()
+    second["Config"]["Env"] = [
+        "SECRET_MUST_NOT_BE_HASHED=other"
+        if item.startswith("SECRET_MUST_NOT_BE_HASHED=")
+        else item
+        for item in second["Config"]["Env"]
+    ]
+    second["Config"]["Labels"]["mutable"] = "different"
+    documents = iter((first, second))
+
+    def command(_arguments):
+        return SimpleNamespace(
+            stdout=json.dumps(next(documents)).encode("utf-8"),
+            stderr=b"",
+            returncode=0,
+        )
+
+    backend = _docker_backend_with_command(command)
+    one = backend.inspect_legacy_execution_lane()
+    two = backend.inspect_legacy_execution_lane()
+    assert one.identity_key() == two.identity_key()
+
+
+@pytest.mark.parametrize(
+    ("document", "reason_code"),
+    [
+        (
+            _docker_lane_inspect(auto_remove=True),
+            "EXECUTION_LANE_ROLLBACK_UNSAFE",
+        ),
+        (
+            _docker_lane_inspect(restart_name="always"),
+            "EXECUTION_LANE_RESTART_POLICY_UNSAFE",
+        ),
+    ],
+)
+def test_docker_execution_lane_rejects_rollback_unsafe_lifecycle_policy(
+    document: dict,
+    reason_code: str,
+) -> None:
+    backend = _docker_backend_with_command(
+        lambda _arguments: SimpleNamespace(
+            stdout=json.dumps(document).encode("utf-8"),
+            stderr=b"",
+            returncode=0,
+        )
+    )
+
+    with pytest.raises(cutover.CapturedPaperHostCutoverError, match=reason_code):
+        backend.inspect_legacy_execution_lane()
+
+
+def test_windows_backend_allows_only_recreator_query_toggle_and_end(
+    tmp_path: Path,
+) -> None:
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+    calls: list[tuple[str, ...]] = []
+
+    def task_command(arguments, **_kwargs):
+        args = tuple(arguments)
+        calls.append(args)
+        if args[0] == "/Query":
+            return SimpleNamespace(
+                stdout=_task_xml(str(args[2])), stderr=b"", returncode=0
+            )
+        return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+
+    backend._task_command = task_command
+    forbidden_xml = tmp_path / "forbidden.xml"
+    forbidden_xml.write_bytes(_task_xml("forbidden"))
+    for name in cutover.EXECUTION_LANE_RECREATOR_TASKS:
+        assert backend.get_task(name) is not None
+        backend.set_task_enabled(name, False)
+        backend.set_task_enabled(name, True)
+        backend.stop_task(name)
+        with pytest.raises(
+            cutover.CapturedPaperHostCutoverError, match="TASK_NAME_INVALID"
+        ):
+            backend.register_task(
+                name,
+                forbidden_xml,
+                cutover.sha256_bytes(forbidden_xml.read_bytes()),
+            )
+        with pytest.raises(
+            cutover.CapturedPaperHostCutoverError, match="TASK_NAME_INVALID"
+        ):
+            backend.start_task(name)
+        with pytest.raises(
+            cutover.CapturedPaperHostCutoverError, match="TASK_NAME_INVALID"
+        ):
+            backend.delete_task(name)
+
+    for name in cutover.EXECUTION_LANE_RECREATOR_TASKS:
+        assert ("/Query", "/TN", name, "/XML") in calls
+        assert ("/Change", "/TN", name, "/DISABLE") in calls
+        assert ("/Change", "/TN", name, "/ENABLE") in calls
+        assert ("/End", "/TN", name) in calls
+
+
+@pytest.mark.parametrize("python_name", ["python.exe", "pythonw.exe"])
+def test_recreator_inventory_detects_orphaned_python_orchestrator(
+    monkeypatch: pytest.MonkeyPatch,
+    python_name: str,
+) -> None:
+    import psutil
+
+    orchestrator_path = (
+        r"D:\CHILI-Docker\captured-paper\premarket-activation\orchestrator.py"
+    )
+
+    class OrphanedOrchestrator:
+        info = {"pid": 4242, "name": python_name}
+
+        @staticmethod
+        def cmdline() -> list[str]:
+            return [
+                rf"C:\Users\rindo\miniconda3\envs\chili-env\{python_name}",
+                orchestrator_path,
+            ]
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: (OrphanedOrchestrator(),),
+    )
+    backend = object.__new__(cutover.WindowsHostCutoverBackend)
+
+    assert backend.await_execution_lane_recreator_processes(
+        timeout_seconds=0.0
+    ) == (f"4242:{python_name}:matched",)
+
+
+def _active_start_authority_fixture(
+    prepared: cutover.PreparedCutover,
+    *,
+    permit_sha256: str,
+    quiet_horizon_event_sha256: str,
+) -> dict[str, object]:
+    snapshot = {
+        "position_count": 0,
+        "open_order_count": 0,
+        "order_submission_call_count": 0,
+    }
+    order_census = {"exact_order_count": 0}
+    fill_census = {"exact_activity_count": 0}
+    broker = {
+        "schema_version": "chili.captured-paper-broker-fixed-point.v1",
+        "verdict": "PAPER_BROKER_QUIET_FIXED_POINT",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": prepared.expected_account_id,
+        "activation_generation": prepared.activation_generation,
+        "activation_manifest_sha256": prepared.manifest_sha256,
+        "assumption_bound": True,
+        "live_cash_certification": False,
+        "baseline_snapshot": snapshot,
+        "first_snapshot": snapshot,
+        "first_order_census": order_census,
+        "first_fill_activity_census": fill_census,
+        "second_snapshot": snapshot,
+        "second_order_census": order_census,
+        "second_fill_activity_census": fill_census,
+    }
+    kill_body = {
+        "schema_version": "chili.captured-paper-kill-switch-query.v1",
+        "activation_generation": prepared.activation_generation,
+        "account_scope": "alpaca:paper",
+        "expected_account_id": prepared.expected_account_id,
+        "active": False,
+    }
+    final_kill = {
+        **kill_body,
+        "query_receipt_sha256": cutover.sha256_json(kill_body),
+    }
+    body = {
+        "schema_version": cutover.ACTIVE_START_AUTHORITY_SCHEMA,
+        "verdict": "CAPTURED_ALPACA_PAPER_ACTIVE_START_AUTHORIZED",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": prepared.expected_account_id,
+        "runtime_generation": prepared.activation_generation,
+        "activation_manifest_sha256": prepared.manifest_sha256,
+        "kill_switch_receipt_sha256": "7" * 64,
+        "launcher_attestation_sha256": "8" * 64,
+        "launcher_attestation_consumed": True,
+        "host_activation_permit_sha256": permit_sha256,
+        "host_activation_permit_consumed": True,
+        "host_quiet_horizon_event_sha256": quiet_horizon_event_sha256,
+        "broker_fixed_point": broker,
+        "broker_fixed_point_sha256": cutover.sha256_json(broker),
+        "post_permit_broker_snapshot_sha256": cutover.sha256_json(snapshot),
+        "order_transition_fence_sha256": cutover.sha256_json(order_census),
+        "fill_activity_fence_sha256": cutover.sha256_json(fill_census),
+        "final_kill_switch_query": final_kill,
+        "final_kill_switch_query_sha256": cutover.sha256_json(final_kill),
+        "paper_order_submission_authorized": True,
+        "live_cash_authorized": False,
+        "real_money_authorized": False,
+    }
+    body["authority_sha256"] = cutover.sha256_json(body)
+    return body
+
+
 class FakeHost:
     def __init__(
         self,
@@ -163,6 +555,7 @@ class FakeHost:
         *,
         fail_operation: str | None = None,
         fail_after_effect: bool = False,
+        execution_lane_state: str = "running",
     ) -> None:
         self.prepared = prepared
         self.tasks = {
@@ -180,6 +573,15 @@ class FakeHost:
         self.startup_receipt_overrides: dict[str, dict[str, object]] = {}
         self.startup_challenge = "c" * 64
         self.dispatch_lock_identity: dict[str, object] | None = None
+        self.initial_execution_lane_state = execution_lane_state
+        self.execution_lane_state = execution_lane_state
+        self.execution_lane_container_id = "d" * 64
+        self.execution_lane_image_id = "sha256:" + "e" * 64
+        self.execution_lane_config_sha256 = "f" * 64
+        self.execution_lane_scope_sha256 = "9" * 64
+        self.execution_lane_recreator_states = {
+            name: True for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
+        }
 
     def _maybe_fail(self, operation: str, *, after: bool = False) -> None:
         if (
@@ -366,16 +768,116 @@ class FakeHost:
         if phase == "started":
             permit_path = Path(f"{invocation.host_ready_receipt_base}.permit.json")
             permit = cutover._strict_json(permit_path.read_bytes(), "fake permit")
+            journal_path = Path(str(permit["journal_path"]))
+            journal_rows = [
+                cutover._strict_json(line, "fake journal event")
+                for line in journal_path.read_bytes().splitlines()
+                if line
+            ]
+            quiet_event = next(
+                row
+                for row in journal_rows
+                if row.get("event_type")
+                == "legacy_paper_broker_quiet_horizon_completed"
+            )
+            authority = _active_start_authority_fixture(
+                self.prepared,
+                permit_sha256=str(permit["permit_sha256"]),
+                quiet_horizon_event_sha256=str(quiet_event["event_sha256"]),
+            )
+            paths = cutover._startup_handshake_paths(
+                invocation, roots=self.prepared.allowed_read_roots
+            )
+            evidence_raw = cutover._canonical_json_bytes(authority)
+            paths["active_start_evidence"].write_bytes(evidence_raw)
             return dict(cutover.build_startup_started_receipt(
                 prepared=self.prepared,
                 service=expected_service,
                 challenge_sha256=self.startup_challenge,
                 prepared_receipt_sha256=str(permit["prepared_receipt_sha256"]),
                 activation_permit_sha256=str(permit["permit_sha256"]),
+                active_start_authority=authority,
+                active_start_evidence_artifact_sha256=(
+                    cutover.sha256_bytes(evidence_raw)
+                ),
                 started_at=NOW,
                 valid_until=NOW + timedelta(seconds=20),
             ))
         raise AssertionError(f"unexpected startup phase {phase}")
+
+    def inspect_legacy_execution_lane(
+        self,
+    ) -> cutover.LegacyExecutionLaneObservation:
+        return cutover.LegacyExecutionLaneObservation(
+            container_name=cutover.LEGACY_EXECUTION_LANE_NAME,
+            container_id=self.execution_lane_container_id,
+            image_id=self.execution_lane_image_id,
+            config_sha256=self.execution_lane_config_sha256,
+            execution_scope="legacy:mixed-paper-config-live-masters-disabled",
+            scope_sha256=self.execution_lane_scope_sha256,
+            recreator_tasks=tuple(
+                cutover.ExecutionLaneRecreatorTaskObservation(
+                    name=name,
+                    definition_sha256=cutover.sha256_json(
+                        {"name": name, "kind": "definition"}
+                    ),
+                    action_sha256=cutover.sha256_json(
+                        {"name": name, "kind": "action"}
+                    ),
+                    source_chain_sha256=cutover.sha256_json(
+                        {"name": name, "kind": "source-chain"}
+                    ),
+                    enabled=self.execution_lane_recreator_states[name],
+                )
+                for name in sorted(cutover.EXECUTION_LANE_RECREATOR_TASKS)
+            ),
+            state=self.execution_lane_state,
+        )
+
+    def await_execution_lane_recreator_processes(
+        self, *, timeout_seconds: float
+    ) -> tuple[str, ...]:
+        del timeout_seconds
+        return ()
+
+    def quiesce_legacy_execution_lane(
+        self, *, expected: cutover.LegacyExecutionLaneObservation
+    ) -> int:
+        assert self.inspect_legacy_execution_lane() == expected
+        if expected.state == "stopped" and not any(
+            item.enabled for item in expected.recreator_tasks
+        ):
+            return 0
+        operation = (
+            "execution-lane:stop"
+            if expected.state == "running"
+            else "execution-lane:quiesce-authorities"
+        )
+        self._maybe_fail(operation)
+        self.execution_lane_state = "stopped"
+        self.execution_lane_recreator_states = {
+            name: False for name in cutover.EXECUTION_LANE_RECREATOR_TASKS
+        }
+        self.mutations.append(operation)
+        self._maybe_fail(operation, after=True)
+        return 1
+
+    def restore_legacy_execution_lane(
+        self, *, expected: cutover.LegacyExecutionLaneObservation
+    ) -> int:
+        assert self.inspect_legacy_execution_lane().identity_key() == expected.identity_key()
+        current = self.inspect_legacy_execution_lane()
+        if current == expected:
+            return 0
+        operation = f"execution-lane:restore-{expected.state}"
+        self._maybe_fail(operation)
+        self.execution_lane_state = expected.state
+        self.execution_lane_recreator_states = {
+            item.name: item.enabled for item in expected.recreator_tasks
+        }
+        self.mutations.append(operation)
+        self._maybe_fail(operation, after=True)
+        return 1
 
 
 @pytest.fixture
@@ -583,11 +1085,18 @@ def _executor(
 ) -> cutover.CapturedPaperHostCutoverExecutor:
     journal = prepared.candidate_root / "journal"
     journal.mkdir(exist_ok=True)
+    monotonic = [0.0]
+
+    def wait(seconds: float) -> None:
+        monotonic[0] += float(seconds)
+
     return cutover.CapturedPaperHostCutoverExecutor(
         prepared=prepared,
         backend=backend,
         journal_root=journal,
         clock=lambda: NOW,
+        monotonic_clock=lambda: monotonic[0],
+        wait=wait,
     )
 
 
@@ -704,6 +1213,37 @@ def _seed_apply_started(
         {
             "rollback_capsule_path": str(capsule_path),
             "rollback_capsule_sha256": cutover.sha256_bytes(capsule_raw),
+            "legacy_execution_lane": dict(
+                cutover._legacy_execution_lane_document(
+                    cutover.LegacyExecutionLaneObservation(
+                        container_name=cutover.LEGACY_EXECUTION_LANE_NAME,
+                        container_id="d" * 64,
+                        image_id="sha256:" + "e" * 64,
+                        config_sha256="f" * 64,
+                        execution_scope="legacy:mixed-paper-config-live-masters-disabled",
+                        scope_sha256="9" * 64,
+                        recreator_tasks=tuple(
+                            cutover.ExecutionLaneRecreatorTaskObservation(
+                                name=name,
+                                definition_sha256=cutover.sha256_json(
+                                    {"name": name, "kind": "definition"}
+                                ),
+                                action_sha256=cutover.sha256_json(
+                                    {"name": name, "kind": "action"}
+                                ),
+                                source_chain_sha256=cutover.sha256_json(
+                                    {"name": name, "kind": "source-chain"}
+                                ),
+                                enabled=True,
+                            )
+                            for name in sorted(
+                                cutover.EXECUTION_LANE_RECREATOR_TASKS
+                            )
+                        ),
+                        state="running",
+                    )
+                )
+            ),
             **extra,
         },
     )
@@ -718,6 +1258,8 @@ def _assert_restored(prepared: cutover.PreparedCutover, backend: FakeHost) -> No
         for item in backend.find_legacy_processes(prepared.restore_plan.bindings)
     ) == ["iqfeed_depth_bridge", "iqfeed_trade_bridge"]
     assert backend.await_candidate_processes(prepared.invocation, timeout_seconds=0) == ()
+    assert backend.execution_lane_state == backend.initial_execution_lane_state
+    assert all(backend.execution_lane_recreator_states.values())
 
 
 def test_validate_only_is_default_and_performs_no_mutation(
@@ -757,10 +1299,263 @@ def test_apply_has_exact_postconditions_and_is_idempotent(
             prepared.invocation, timeout_seconds=0
         )
     ] == ["launcher", "service"]
+    assert backend.execution_lane_state == "stopped"
+    assert backend.mutations.index("execution-lane:stop") < backend.mutations.index(
+        f"start:{cutover.CANDIDATE_TASK_NAME}"
+    )
     before = list(backend.mutations)
     second = executor.apply()
     assert second.verdict == "ALREADY_APPLIED_EXACT"
     assert backend.mutations == before
+
+
+def test_recover_only_inventory_finds_one_active_capsule_and_ignores_baseline(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+
+    executor.apply()
+    discovered = cutover._discover_single_active_rollback_capsule(
+        journal_root=executor.journal_root,
+        caller_roots=prepared.allowed_read_roots,
+        clock=lambda: NOW,
+    )
+    assert discovered is not None
+    recovered, state = discovered
+    assert state == "applied"
+    assert recovered.activation_generation == prepared.activation_generation
+    assert recovered.manifest_sha256 == prepared.manifest_sha256
+
+    executor.rollback()
+    assert cutover._discover_single_active_rollback_capsule(
+        journal_root=executor.journal_root,
+        caller_roots=prepared.allowed_read_roots,
+        clock=lambda: NOW,
+    ) is None
+
+
+def test_recover_only_missing_journal_root_is_noop(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    missing = prepared.candidate_root / "never-created-recovery-journal"
+
+    assert cutover._discover_single_active_rollback_capsule(
+        journal_root=missing,
+        caller_roots=prepared.allowed_read_roots,
+        clock=lambda: NOW,
+    ) is None
+    assert not missing.exists()
+
+
+def _seed_pre_identity_apply_started(
+    journal: cutover.CutoverJournal,
+    prepared: cutover.PreparedCutover,
+) -> str:
+    for item in prepared.task_snapshot.tasks.values():
+        journal.publish_object(item.xml, kind="legacy_task_xml")
+    capsule_raw = cutover._canonical_json_bytes(
+        cutover.build_rollback_capsule_document(prepared)
+    )
+    capsule_path = journal.publish_object(capsule_raw, kind="rollback_capsule")
+    journal.append(
+        "apply_started",
+        {
+            "rollback_capsule_path": str(capsule_path),
+            "rollback_capsule_sha256": cutover.sha256_bytes(capsule_raw),
+            "legacy_schema_predates_docker_identity": True,
+        },
+    )
+    journal.append(
+        "immutable_runtime_staged",
+        {
+            "launcher_path": "sealed-launcher",
+            "launcher_sha256": "1" * 64,
+            "service_path": "sealed-service",
+            "service_sha256": "2" * 64,
+            "stage0_path": "sealed-stage0",
+            "stage0_sha256": "3" * 64,
+        },
+    )
+    journal.append(
+        "apply_failed",
+        {
+            "error_code": "TASK_XML_INVALID",
+            "error_type": "CapturedPaperHostCutoverError",
+        },
+    )
+    return cutover.sha256_bytes(journal.path.read_bytes())
+
+
+def test_recover_only_adopts_pre_identity_journal_only_at_exact_baseline(
+    prepared: cutover.PreparedCutover,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    journal_sha = _seed_pre_identity_apply_started(journal, prepared)
+    monkeypatch.setattr(
+        cutover, "_PRE_IDENTITY_JOURNAL_RECOVERY_ALLOWLIST", frozenset({journal_sha})
+    )
+
+    report = executor.adopt_pre_identity_journal_at_exact_baseline()
+
+    assert report is not None
+    assert report.verdict == "ROLLED_BACK_EXACT"
+    assert report.mutation_count == 0
+    assert backend.mutations == []
+    journal._events = journal._read_events()
+    assert cutover._journal_state(journal.events) == "baseline"
+    assert [item["event_type"] for item in journal.events][-3:] == [
+        "legacy_execution_lane_identity_adopted",
+        "rollback_started",
+        "rollback_completed",
+    ]
+    adopted = cutover._legacy_execution_lane_baseline(journal.events)
+    assert adopted == backend.inspect_legacy_execution_lane()
+
+
+def test_recover_only_refuses_pre_identity_adoption_on_host_drift(
+    prepared: cutover.PreparedCutover,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    journal_sha = _seed_pre_identity_apply_started(journal, prepared)
+    monkeypatch.setattr(
+        cutover, "_PRE_IDENTITY_JOURNAL_RECOVERY_ALLOWLIST", frozenset({journal_sha})
+    )
+    name = cutover.REQUIRED_LEGACY_TASKS[0]
+    backend.set_task_enabled(name, False)
+    before = list(backend.mutations)
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="ROLLBACK_POSTCONDITION_FAILED",
+    ):
+        executor.adopt_pre_identity_journal_at_exact_baseline()
+
+    assert backend.mutations == before
+    journal._events = journal._read_events()
+    assert not any(
+        item["event_type"] == "legacy_execution_lane_identity_adopted"
+        for item in journal.events
+    )
+
+
+def test_recover_only_refuses_allowlisted_pre_identity_mutation_history(
+    prepared: cutover.PreparedCutover,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    _seed_pre_identity_apply_started(journal, prepared)
+    journal.append(
+        "legacy_task_disabled",
+        {
+            "task_name": cutover.REQUIRED_LEGACY_TASKS[0],
+            "readback_xml_sha256": "4" * 64,
+        },
+    )
+    journal_sha = cutover.sha256_bytes(journal.path.read_bytes())
+    monkeypatch.setattr(
+        cutover, "_PRE_IDENTITY_JOURNAL_RECOVERY_ALLOWLIST", frozenset({journal_sha})
+    )
+
+    assert executor.adopt_pre_identity_journal_at_exact_baseline() is None
+    assert backend.mutations == []
+    journal._events = journal._read_events()
+    assert not any(
+        item["event_type"] == "legacy_execution_lane_identity_adopted"
+        for item in journal.events
+    )
+
+
+def test_cli_holds_one_host_global_lock_across_generation_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal_root = tmp_path / "journal"
+    journal_root.mkdir()
+    fixed_lock = tmp_path / "fixed-host-cutover.lock"
+    monkeypatch.setattr(cutover, "_HOST_WIDE_CUTOVER_LOCK_PATH", fixed_lock)
+    mutex_name = "Local\\CHILI-Captured-PAPER-Cutover-Test-" + str(time.time_ns())
+    monkeypatch.setattr(cutover, "_HOST_WIDE_CUTOVER_MUTEX_NAME", mutex_name)
+    observed = []
+
+    def inner(_argv) -> int:
+        contender_result: list[str] = []
+
+        def contend() -> None:
+            try:
+                with cutover._JournalLock(fixed_lock, mutex_name=mutex_name):
+                    contender_result.append("acquired")
+            except cutover.CapturedPaperHostCutoverError as exc:
+                contender_result.append(exc.code)
+
+        contender = threading.Thread(target=contend)
+        contender.start()
+        contender.join(timeout=10)
+        assert not contender.is_alive()
+        assert contender_result == ["CUTOVER_ALREADY_RUNNING"]
+        observed.append("locked")
+        return 0
+
+    monkeypatch.setattr(cutover, "_main_with_host_lock_held", inner)
+    assert cutover.main(
+        [
+            "--mode",
+            cutover.MODE_VALIDATE_ONLY,
+            "--allow-read-root",
+            str(tmp_path),
+            "--journal-root",
+            str(journal_root),
+        ]
+    ) == 0
+    assert observed == ["locked"]
+
+
+def test_stopped_execution_lane_is_preserved_across_apply_and_rollback(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared, execution_lane_state="stopped")
+    executor = _executor(prepared, backend)
+
+    assert executor.apply().verdict == "APPLIED_ALPACA_PAPER_ONLY"
+    assert backend.execution_lane_state == "stopped"
+    assert "execution-lane:stop" not in backend.mutations
+
+    assert executor.rollback().verdict == "ROLLED_BACK_EXACT"
+    _assert_restored(prepared, backend)
+
+
+def test_already_applied_service_crash_compensates_to_exact_legacy_state(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    backend = FakeHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+    crashed = next(
+        pid for pid, item in backend.processes.items()
+        if item.role == "candidate_service"
+    )
+    backend.processes.pop(crashed)
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="APPLIED_POSTCONDITION_RECOVERED",
+    ):
+        executor.apply()
+
+    _assert_restored(prepared, backend)
 
 
 def test_explicit_rollback_restores_exact_tasks_and_provenance_roles(
@@ -783,6 +1578,7 @@ def test_explicit_rollback_restores_exact_tasks_and_provenance_roles(
         *(f"task:{name}:disable" for name in cutover.REQUIRED_LEGACY_TASKS),
         "stop-process:iqfeed_depth_bridge",
         "stop-process:iqfeed_trade_bridge",
+        "execution-lane:stop",
         f"register:{cutover.CANDIDATE_TASK_NAME}",
         f"start:{cutover.CANDIDATE_TASK_NAME}",
     ],
@@ -841,17 +1637,17 @@ def test_foreign_candidate_task_is_never_stopped_or_deleted(
     )
     before = list(backend.mutations)
     with pytest.raises(
-        cutover.CapturedPaperHostCutoverError, match="FOREIGN_CANDIDATE_TASK"
+        cutover.CapturedPaperHostCutoverError,
+        match="FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
     ):
         executor.rollback()
     assert not any(item.startswith("stop:") for item in backend.mutations[len(before):])
     assert not any(item.startswith("delete:") for item in backend.mutations[len(before):])
-    for name, expected in prepared.task_snapshot.tasks.items():
-        assert backend.tasks[name] == expected
-    assert sorted(
-        item.role
-        for item in backend.find_legacy_processes(prepared.restore_plan.bindings)
-    ) == ["iqfeed_depth_bridge", "iqfeed_trade_bridge"]
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    assert backend.execution_lane_state == "stopped"
 
 
 def test_interrupted_journal_is_rolled_back_before_a_new_apply(
@@ -1144,21 +1940,61 @@ def test_foreign_alias_collision_restores_legacy_before_failing_closed(
     )
     with pytest.raises(
         cutover.CapturedPaperHostCutoverError,
-        match="ROLLBACK_POSTCONDITION_FAILED",
+        match="FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
     ):
         executor.rollback()
     assert alias in backend.tasks
     assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
-    for name, expected in prepared.task_snapshot.tasks.items():
-        assert backend.tasks[name] == expected
-    assert sorted(
-        item.role
-        for item in backend.find_legacy_processes(prepared.restore_plan.bindings)
-    ) == ["iqfeed_depth_bridge", "iqfeed_trade_bridge"]
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    assert backend.execution_lane_state == "stopped"
     journal = cutover.CutoverJournal(
         root=executor.journal_root, prepared=prepared, clock=lambda: NOW
     )
-    assert journal.events[-1]["event_type"] != "rollback_completed"
+    assert journal.events[-1]["event_type"] == "rollback_blocked_foreign_candidate"
+
+
+def test_foreign_candidate_after_docker_restore_requiesces_all_legacy_lanes(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    alias = "CHILI-foreign-after-docker-restore"
+
+    class LateCandidateHost(FakeHost):
+        def restore_legacy_execution_lane(
+            self, *, expected: cutover.LegacyExecutionLaneObservation
+        ) -> int:
+            mutations = super().restore_legacy_execution_lane(expected=expected)
+            self.tasks[alias] = cutover.TaskObservation(
+                alias, prepared.resolved_task_xml, True
+            )
+            return mutations
+
+    backend = LateCandidateHost(prepared)
+    executor = _executor(prepared, backend)
+    executor.apply()
+
+    with pytest.raises(
+        cutover.CapturedPaperHostCutoverError,
+        match="FOREIGN_CANDIDATE_EXECUTION_QUARANTINED",
+    ):
+        executor.rollback()
+
+    assert alias in backend.tasks
+    assert cutover.CANDIDATE_TASK_NAME not in backend.tasks
+    assert backend.execution_lane_state == "stopped"
+    assert backend.find_legacy_processes(prepared.restore_plan.bindings) == ()
+    assert all(
+        not backend.tasks[name].enabled for name in cutover.REQUIRED_LEGACY_TASKS
+    )
+    journal = cutover.CutoverJournal(
+        root=executor.journal_root, prepared=prepared, clock=lambda: NOW
+    )
+    assert journal.events[-1]["event_type"] == "rollback_blocked_foreign_candidate"
+    assert journal.events[-1]["payload"][
+        "legacy_execution_remains_quiesced"
+    ] is True
 
 
 def test_torn_final_journal_record_recovers_from_valid_prefix(
@@ -1531,6 +2367,187 @@ def test_candidate_task_semantic_weakening_is_rejected(
         cutover._validate_candidate_task_semantics(
             weakened, candidate_root=str(prepared.candidate_root)
         )
+
+
+def _reserialized_candidate_xml(raw: bytes) -> bytes:
+    """Model benign /Create -> /Query encoding/order/metadata changes."""
+
+    root = ET.fromstring(raw)
+    registration = root.find(f"{{{NS}}}RegistrationInfo")
+    assert registration is not None
+    uri = ET.SubElement(registration, f"{{{NS}}}URI")
+    uri.text = f"\\{cutover.CANDIDATE_TASK_NAME}"
+    principal = root.find(f"{{{NS}}}Principals/{{{NS}}}Principal")
+    settings = root.find(f"{{{NS}}}Settings")
+    assert principal is not None and settings is not None
+    ET.SubElement(principal, f"{{{NS}}}ProcessTokenSidType").text = "Default"
+    ET.SubElement(
+        settings, f"{{{NS}}}DisallowStartOnRemoteAppSession"
+    ).text = "false"
+    ET.SubElement(settings, f"{{{NS}}}UseUnifiedSchedulingEngine").text = "false"
+    idle = settings.find(f"{{{NS}}}IdleSettings")
+    assert idle is not None
+    ET.SubElement(idle, f"{{{NS}}}Duration").text = "PT10M"
+    ET.SubElement(idle, f"{{{NS}}}WaitTimeout").text = "PT1H"
+    principal[:] = list(reversed(list(principal)))
+    settings[:] = list(reversed(list(settings)))
+    return ET.tostring(root, encoding="utf-16", xml_declaration=True)
+
+
+def test_candidate_task_readback_normalizes_full_scheduler_policy(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    readback = _reserialized_candidate_xml(prepared.resolved_task_xml)
+
+    assert readback != prepared.resolved_task_xml
+    assert cutover._candidate_task_semantics_match(
+        readback, prepared.resolved_task_xml
+    )
+    projection = cutover._candidate_task_scheduler_projection_from_xml(readback)
+    assert projection["logon_type"] == "interactivetoken"
+    assert projection["run_level"] == "highestavailable"
+    assert projection["trigger_profile"] == "on_demand_only"
+    assert "Enabled" not in projection["settings"]
+
+
+def test_candidate_task_readback_accepts_omitted_scheduler_defaults(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    root = ET.fromstring(prepared.resolved_task_xml)
+    settings = root.find(f"{{{NS}}}Settings")
+    assert settings is not None
+    for name in (
+        "AllowHardTerminate",
+        "RunOnlyIfNetworkAvailable",
+        "AllowStartOnDemand",
+        "Enabled",
+        "Hidden",
+        "RunOnlyIfIdle",
+        "WakeToRun",
+        "Priority",
+    ):
+        node = settings.find(f"{{{NS}}}{name}")
+        assert node is not None
+        settings.remove(node)
+    idle = settings.find(f"{{{NS}}}IdleSettings")
+    assert idle is not None
+    restart = idle.find(f"{{{NS}}}RestartOnIdle")
+    assert restart is not None
+    idle.remove(restart)
+    readback = ET.tostring(root, encoding="utf-16", xml_declaration=True)
+
+    assert cutover._candidate_task_semantics_match(
+        readback, prepared.resolved_task_xml
+    )
+
+
+@pytest.mark.parametrize(
+    "required_name",
+    (
+        "MultipleInstancesPolicy",
+        "DisallowStartIfOnBatteries",
+        "StopIfGoingOnBatteries",
+        "StartWhenAvailable",
+        "ExecutionTimeLimit",
+    ),
+)
+def test_candidate_task_readback_rejects_omitted_nondefault_policy(
+    prepared: cutover.PreparedCutover,
+    required_name: str,
+) -> None:
+    root = ET.fromstring(prepared.resolved_task_xml)
+    settings = root.find(f"{{{NS}}}Settings")
+    assert settings is not None
+    node = settings.find(f"{{{NS}}}{required_name}")
+    assert node is not None
+    settings.remove(node)
+    readback = ET.tostring(root, encoding="utf-16", xml_declaration=True)
+
+    assert not cutover._candidate_task_semantics_match(
+        readback, prepared.resolved_task_xml
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("<LogonType>InteractiveToken</LogonType>", "<LogonType>Password</LogonType>"),
+        ("<RunLevel>HighestAvailable</RunLevel>", "<RunLevel>LeastPrivilege</RunLevel>"),
+        ("<Triggers />", "<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>"),
+        ("<StartWhenAvailable>true</StartWhenAvailable>", "<StartWhenAvailable>false</StartWhenAvailable>"),
+        ("</Settings>", "<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings>"),
+    ],
+)
+def test_candidate_task_readback_rejects_scheduler_policy_drift(
+    prepared: cutover.PreparedCutover, old: str, new: str
+) -> None:
+    text = prepared.resolved_task_xml.decode("utf-16")
+    assert old in text
+    drifted = text.replace(old, new, 1).encode("utf-16")
+
+    assert not cutover._candidate_task_semantics_match(
+        drifted, prepared.resolved_task_xml
+    )
+
+
+def test_candidate_task_is_one_shot_without_restart_or_automatic_trigger(
+    prepared: cutover.PreparedCutover,
+) -> None:
+    root = ET.fromstring(prepared.resolved_task_xml)
+    triggers = root.find(f"{{{NS}}}Triggers")
+    settings = root.find(f"{{{NS}}}Settings")
+
+    assert triggers is not None and list(triggers) == []
+    assert settings is not None
+    assert settings.find(f"{{{NS}}}RestartOnFailure") is None
+
+
+def test_real_default_cutover_probe_accepts_scheduler_reserialization_without_host_mutation(
+    prepared: cutover.PreparedCutover,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import captured_alpaca_paper_service as service
+    import psutil
+
+    backend = FakeHost(prepared, execution_lane_state="stopped")
+    backend.tasks = {
+        name: cutover.TaskObservation(name, _set_task_enabled(item.xml, False), False)
+        for name, item in prepared.task_snapshot.tasks.items()
+    }
+    candidate_xml = _reserialized_candidate_xml(prepared.resolved_task_xml)
+    backend.tasks[cutover.CANDIDATE_TASK_NAME] = cutover.TaskObservation(
+        cutover.CANDIDATE_TASK_NAME, candidate_xml, True
+    )
+    backend.processes = {}
+    monkeypatch.setattr(
+        cutover,
+        "WindowsHostCutoverBackend",
+        lambda *, bindings: backend,
+    )
+    monkeypatch.setattr(psutil, "process_iter", lambda *_args, **_kwargs: ())
+    source = Path(cutover.__file__).resolve(strict=True)
+    verified = SimpleNamespace(
+        source_paths={"captured_paper_host_cutover": source},
+        source_hashes={
+            "captured_paper_host_cutover": hashlib.sha256(
+                source.read_bytes()
+            ).hexdigest()
+        },
+    )
+
+    observed = service._default_cutover_probe(
+        verified=verified,
+        projection={},
+        expected_parent_tail=prepared.invocation.launcher_arguments,
+        parent_executable_path=prepared.invocation.powershell_executable_path,
+    )
+
+    assert observed["candidate_task_name"] == cutover.CANDIDATE_TASK_NAME
+    assert observed["candidate_task_enabled"] is True
+    assert observed["legacy_bridge_processes"] == []
+    assert observed["legacy_execution_lane"]["state"] == "stopped"
+    assert all(value is False for value in observed["legacy_task_enabled"].values())
+    assert backend.mutations == []
 
 
 def test_ads_path_alias_is_never_local_authority() -> None:

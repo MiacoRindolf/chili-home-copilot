@@ -179,6 +179,21 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "captured_paper_selection": (
             "app/services/trading/momentum_neural/captured_paper_selection.py"
         ),
+        "captured_paper_selection_frontier_model": (
+            "app/models/captured_paper_selection_frontier.py"
+        ),
+        "captured_paper_selection_producer": (
+            "app/services/trading/momentum_neural/captured_paper_selection_producer.py"
+        ),
+        "captured_paper_selection_queue": (
+            "app/services/trading/momentum_neural/captured_paper_selection_queue.py"
+        ),
+        "captured_paper_selection_runtime": (
+            "app/services/trading/momentum_neural/captured_paper_selection_runtime.py"
+        ),
+        "captured_paper_selection_source": (
+            "app/services/trading/momentum_neural/captured_paper_selection_source.py"
+        ),
         "captured_paper_service_supervisor": (
             "app/services/trading/momentum_neural/captured_paper_service_supervisor.py"
         ),
@@ -190,6 +205,12 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         ),
         "captured_paper_transport_worker": (
             "app/services/trading/momentum_neural/captured_paper_transport_worker.py"
+        ),
+        "captured_paper_variant_binding": (
+            "app/services/trading/momentum_neural/captured_paper_variant_binding.py"
+        ),
+        "captured_viability_adapter": (
+            "app/services/trading/momentum_neural/captured_viability_adapter.py"
         ),
         "entry_gates": "app/services/trading/momentum_neural/entry_gates.py",
         "execution_family_registry": "app/services/trading/execution_family_registry.py",
@@ -207,6 +228,9 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "live_replay_capture": "app/services/trading/momentum_neural/live_replay_capture.py",
         "live_runner": "app/services/trading/momentum_neural/live_runner.py",
         "live_runner_loop": "app/services/trading/momentum_neural/live_runner_loop.py",
+        "momentum_viability": (
+            "app/services/trading/momentum_neural/viability.py"
+        ),
         "replay_capture_contract": (
             "app/services/trading/momentum_neural/replay_capture_contract.py"
         ),
@@ -214,6 +238,7 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "readiness_evidence": "scripts/captured_paper_readiness_evidence.py",
         "runtime_environment": "scripts/captured_paper_runtime_env.py",
         "trading_models": "app/models/trading.py",
+        "yf_session": "app/services/yf_session.py",
     }
 )
 

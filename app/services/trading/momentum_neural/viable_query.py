@@ -19,6 +19,7 @@ from .operator_readiness import build_momentum_operator_readiness
 from .pipeline import VIABILITY_NODE_ID
 from .strategy_params import summarize_strategy_params
 from .viability_scope import VIABILITY_SCOPE_SYMBOL
+from .variants import CAPTURED_PAPER_VARIANT_KEY_PREFIX
 
 _log = logging.getLogger(__name__)
 
@@ -233,6 +234,9 @@ def _hot_variants_by_family_version(
             .filter(
                 MomentumStrategyVariant.family.in_(missing_families),
                 MomentumStrategyVariant.is_active.is_(True),
+                MomentumStrategyVariant.variant_key.notlike(
+                    f"{CAPTURED_PAPER_VARIANT_KEY_PREFIX}%"
+                ),
             )
             .order_by(
                 MomentumStrategyVariant.family.asc(),
@@ -405,6 +409,11 @@ def build_viable_strategies_payload(
         db.query(MomentumSymbolViability, MomentumStrategyVariant)
         .join(MomentumStrategyVariant, MomentumStrategyVariant.id == MomentumSymbolViability.variant_id)
         .filter(MomentumStrategyVariant.is_active.is_(True))
+        .filter(
+            MomentumStrategyVariant.variant_key.notlike(
+                f"{CAPTURED_PAPER_VARIANT_KEY_PREFIX}%"
+            )
+        )
         .filter(MomentumSymbolViability.symbol == sym)
         .filter(MomentumSymbolViability.scope == VIABILITY_SCOPE_SYMBOL)
         .order_by(MomentumSymbolViability.viability_score.desc())

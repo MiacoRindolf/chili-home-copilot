@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import desc
@@ -18,6 +19,156 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ViabilitySettingsProjection:
+    """Exact settings values consulted by the viability arithmetic.
+
+    Values intentionally retain their runtime representation.  The core keeps
+    the existing local ``bool``/``float`` coercion and fail-open behavior, while
+    PAPER/Replay can content-bind this projection instead of reading the process
+    settings singleton.
+    """
+
+    chili_momentum_ofi_tilt_weight: Any
+    chili_momentum_ofi_threshold: Any
+    chili_momentum_trade_flow_agreement_gain: Any
+    chili_momentum_trade_flow_threshold: Any
+    chili_momentum_a_setup_quality_floor_float_ceiling_shares: Any
+    chili_momentum_explosive_rvol_floor: Any
+    chili_momentum_a_setup_quality_floor_change_pct_min: Any
+    chili_momentum_exclude_leveraged_etfs: Any
+    chili_momentum_exclude_fund_structures_enabled: Any
+    chili_momentum_live_eligible_max_spread_bps: Any
+    chili_momentum_thin_spread_squeeze_lane_enabled: Any
+    chili_momentum_thin_spread_squeeze_top_pctl: Any
+    chili_momentum_thin_spread_ceiling_squeeze_slope: Any
+    chili_momentum_risk_max_spread_bps_abs_cap: Any
+    chili_momentum_live_eligible_allow_extreme_explosive: Any
+    chili_momentum_a_setup_quality_floor_enabled: Any
+    chili_momentum_no_signal_derank_enabled: Any
+    chili_momentum_no_signal_derank_fraction: Any
+    chili_momentum_catalyst_grade_gate_enabled: Any
+    chili_momentum_dilution_history_derate_enabled: Any
+    chili_momentum_theme_sympathy_enabled: Any
+    chili_momentum_thick_tape_veto_enabled: Any
+    chili_momentum_nonmonotonic_volume_enabled: Any
+    chili_momentum_explosive_prequal_floor_enabled: Any
+    chili_momentum_explosive_prequal_bar_ref: Any
+    chili_momentum_explosive_prequal_margin: Any
+
+    @classmethod
+    def from_runtime(cls, source: Any) -> "ViabilitySettingsProjection":
+        defaults = {
+            "chili_momentum_ofi_tilt_weight": 0.015,
+            "chili_momentum_ofi_threshold": 0.25,
+            "chili_momentum_trade_flow_agreement_gain": 0.5,
+            "chili_momentum_trade_flow_threshold": 0.25,
+            "chili_momentum_a_setup_quality_floor_float_ceiling_shares": 20_000_000.0,
+            "chili_momentum_explosive_rvol_floor": 3.0,
+            "chili_momentum_a_setup_quality_floor_change_pct_min": 10.0,
+            "chili_momentum_exclude_leveraged_etfs": True,
+            "chili_momentum_exclude_fund_structures_enabled": True,
+            "chili_momentum_live_eligible_max_spread_bps": 0.0,
+            "chili_momentum_thin_spread_squeeze_lane_enabled": True,
+            "chili_momentum_thin_spread_squeeze_top_pctl": 0.80,
+            "chili_momentum_thin_spread_ceiling_squeeze_slope": 1.0,
+            "chili_momentum_risk_max_spread_bps_abs_cap": 1500.0,
+            "chili_momentum_live_eligible_allow_extreme_explosive": True,
+            "chili_momentum_a_setup_quality_floor_enabled": False,
+            "chili_momentum_no_signal_derank_enabled": False,
+            "chili_momentum_no_signal_derank_fraction": 1.0,
+            "chili_momentum_catalyst_grade_gate_enabled": True,
+            "chili_momentum_dilution_history_derate_enabled": True,
+            "chili_momentum_theme_sympathy_enabled": True,
+            "chili_momentum_thick_tape_veto_enabled": True,
+            "chili_momentum_nonmonotonic_volume_enabled": True,
+            "chili_momentum_explosive_prequal_floor_enabled": True,
+            "chili_momentum_explosive_prequal_bar_ref": 0.56,
+            "chili_momentum_explosive_prequal_margin": 0.02,
+        }
+        values = {name: getattr(source, name, default) for name, default in defaults.items()}
+        # The legacy trade-flow threshold defaults dynamically to the resolved
+        # OFI threshold when absent.  Pydantic settings normally provides both,
+        # but preserve the old fallback for arbitrary test/runtime sources.
+        if not hasattr(source, "chili_momentum_trade_flow_threshold"):
+            values["chili_momentum_trade_flow_threshold"] = values[
+                "chili_momentum_ofi_threshold"
+            ]
+        return cls(**values)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            field_name: getattr(self, field_name)
+            for field_name in self.__dataclass_fields__
+        }
+
+
+@dataclass(frozen=True)
+class ViabilityExternalInputs:
+    """All results previously obtained through classifiers, DB reads, or helpers
+    whose own implementation reads global settings.
+
+    The explicit core only consumes these scalar facts.  The default live
+    wrapper below resolves them exactly as before; a sealed consumer must record
+    them and their upstream capture provenance instead of re-running the
+    resolver against current state.
+    """
+
+    leveraged_etf: bool
+    excluded_fund: bool
+    symbol_family_memory_adjust: float
+    dilution_history_derate: float
+    ross_rvol: float | None
+    ross_change_pct: float | None
+    ross_float_shares: float | None
+    squeeze_fuel_rank_pct: float | None
+    below_explosive_floor: bool
+    catalyst_delta: float
+    catalyst_grade_delta: float
+    fake_catalyst_delta: float
+    sympathy_delta: float
+    theme_sympathy_delta: float
+    close_strength_delta: float
+    thick_tape_delta: float
+    nonmonotonic_volume_delta: float
+    ross_quality_viability_tilt: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            field_name: getattr(self, field_name)
+            for field_name in self.__dataclass_fields__
+        }
+
+    @classmethod
+    def neutral(
+        cls,
+        *,
+        ross_quality_viability_tilt: float = 0.0,
+        leveraged_etf: bool = False,
+        excluded_fund: bool = False,
+    ) -> "ViabilityExternalInputs":
+        return cls(
+            leveraged_etf=leveraged_etf,
+            excluded_fund=excluded_fund,
+            symbol_family_memory_adjust=0.0,
+            dilution_history_derate=0.0,
+            ross_rvol=None,
+            ross_change_pct=None,
+            ross_float_shares=None,
+            squeeze_fuel_rank_pct=None,
+            below_explosive_floor=False,
+            catalyst_delta=0.0,
+            catalyst_grade_delta=0.0,
+            fake_catalyst_delta=0.0,
+            sympathy_delta=0.0,
+            theme_sympathy_delta=0.0,
+            close_strength_delta=0.0,
+            thick_tape_delta=0.0,
+            nonmonotonic_volume_delta=0.0,
+            ross_quality_viability_tilt=float(ross_quality_viability_tilt),
+        )
 
 
 @dataclass(frozen=True)
@@ -100,15 +251,298 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
     return 0.0
 
 
-def score_viability(
+def _resolve_viability_external_inputs(
     symbol: str,
     family: MomentumStrategyFamily,
     ctx: MomentumRegimeContext,
     feats: ExecutionReadinessFeatures,
     *,
-    db: "Session | None" = None,
+    db: "Session | None",
+    settings_projection: ViabilitySettingsProjection,
+    captured_leveraged_etf: bool | None = None,
+    captured_excluded_fund: bool | None = None,
+    decision_as_of: "datetime | None" = None,
+) -> ViabilityExternalInputs:
+    """Resolve helper/DB facts for the live wrapper or an explicit capture.
+
+    ``captured_*`` values deliberately bypass the process-global fundamentals
+    caches.  The capture producer resolves and records the exact instrument
+    metadata once, then supplies the two pure classifier results here.  The
+    default live wrapper leaves them as ``None`` and preserves the historical
+    lookup path byte-for-byte.
+    """
+
+    if captured_leveraged_etf is not None and type(captured_leveraged_etf) is not bool:
+        raise TypeError("captured_leveraged_etf must be bool or None")
+    if captured_excluded_fund is not None and type(captured_excluded_fund) is not bool:
+        raise TypeError("captured_excluded_fund must be bool or None")
+    leveraged = False
+    if bool(settings_projection.chili_momentum_exclude_leveraged_etfs):
+        leveraged = (
+            captured_leveraged_etf
+            if captured_leveraged_etf is not None
+            else bool(symbol_is_leveraged_etf(symbol))
+        )
+    if leveraged:
+        # Preserve the original hard-veto short circuit: no fund classifier,
+        # DB memory, catalyst helper, or other external read occurs afterward.
+        return ViabilityExternalInputs.neutral(leveraged_etf=True)
+    excluded_fund = False
+    if bool(settings_projection.chili_momentum_exclude_fund_structures_enabled):
+        excluded_fund = (
+            captured_excluded_fund
+            if captured_excluded_fund is not None
+            else bool(symbol_is_excluded_fund(symbol))
+        )
+    memory_adjust = 0.0
+    if db is not None:
+        try:
+            memory_adjust = float(
+                _symbol_family_memory_adjust(db, symbol, family.family_id)
+            )
+        except Exception:
+            memory_adjust = 0.0
+
+    signal = None
+    try:
+        raw_signals = (
+            feats.meta.get("ross_signals")
+            if isinstance(getattr(feats, "meta", None), dict)
+            else None
+        )
+        signal = raw_signals.get(symbol) if isinstance(raw_signals, dict) else None
+    except (TypeError, AttributeError):
+        signal = None
+    rvol = change = float_shares = squeeze_rank = None
+    below_floor = False
+    if isinstance(signal, dict) and signal:
+        try:
+            from .ross_momentum import (
+                _extract_pillars,
+                _first_float,
+                _to_float,
+                below_explosive_floor,
+            )
+
+            rvol, change, _liquidity, _tradeable_liquidity = _extract_pillars(
+                signal
+            )
+            float_shares = _first_float(signal, "float_shares")
+            squeeze_rank = _to_float(signal.get("squeeze_fuel_rank_pct"))
+            below_floor = bool(below_explosive_floor(signal))
+        except (TypeError, ValueError, AttributeError, ImportError):
+            rvol = change = float_shares = squeeze_rank = None
+            below_floor = False
+
+    ross_quality_tilt = 0.0
+    try:
+        ross_scores = (
+            ctx.meta.get("ross_scores")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        tilt_is_used = isinstance(ross_scores, dict) and (
+            symbol in ross_scores
+            or (
+                bool(ross_scores)
+                and bool(
+                    settings_projection.chili_momentum_no_signal_derank_enabled
+                )
+            )
+        )
+        if tilt_is_used:
+            # Match the legacy scorer's lazy dependency: do not import the Ross
+            # module for names whose scoring path never consults this constant.
+            from .ross_momentum import ROSS_QUALITY_VIABILITY_TILT
+
+            ross_quality_tilt = float(ROSS_QUALITY_VIABILITY_TILT)
+    except (TypeError, ValueError, AttributeError):
+        ross_quality_tilt = 0.0
+
+    catalyst_delta = catalyst_grade_delta = fake_delta = 0.0
+    sympathy_delta = theme_delta = close_delta = 0.0
+    meta = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+    try:
+        catalyst_symbols = meta.get("catalyst_symbols")
+        if catalyst_symbols:
+            from .catalyst import catalyst_viability_delta
+
+            catalyst_delta = float(
+                catalyst_viability_delta(
+                    symbol,
+                    catalyst_symbols,
+                    hot_tape=bool(meta.get("hot_tape")),
+                    hq_country=(meta.get("symbol_countries") or {}).get(symbol),
+                    theme_symbols=(
+                        set(meta.get("theme_symbols"))
+                        if meta.get("theme_symbols")
+                        else None
+                    ),
+                    weak_symbols=(
+                        set(meta.get("weak_catalyst_symbols"))
+                        if meta.get("weak_catalyst_symbols")
+                        else None
+                    ),
+                )
+            )
+    except (TypeError, ValueError, AttributeError):
+        catalyst_delta = 0.0
+    try:
+        if bool(settings_projection.chili_momentum_catalyst_grade_gate_enabled):
+            weak = meta.get("weak_catalyst_symbols")
+            strong = meta.get("strong_catalyst_symbols")
+            fake = meta.get("fake_catalyst_symbols")
+            actions = meta.get("catalyst_action_deltas")
+            if weak or strong or fake:
+                from .catalyst import catalyst_grade_selection_delta
+
+                catalyst_grade_delta = float(
+                    catalyst_grade_selection_delta(
+                        symbol,
+                        weak_symbols=set(weak) if weak else None,
+                        strong_symbols=set(strong) if strong else None,
+                        fake_symbols=set(fake) if fake else None,
+                        action_deltas=(
+                            dict(actions)
+                            if isinstance(actions, dict) and actions
+                            else None
+                        ),
+                    )
+                )
+    except (TypeError, ValueError, AttributeError):
+        catalyst_grade_delta = 0.0
+    try:
+        fake = meta.get("fake_catalyst_symbols")
+        if fake:
+            from .catalyst import fake_catalyst_viability_delta
+
+            fake_delta = float(fake_catalyst_viability_delta(symbol, set(fake)))
+    except (TypeError, ValueError, AttributeError):
+        fake_delta = 0.0
+    try:
+        sympathy = meta.get("sympathy_symbols")
+        if sympathy:
+            from .catalyst import sympathy_viability_delta
+
+            sympathy_delta = float(sympathy_viability_delta(symbol, set(sympathy)))
+    except (TypeError, ValueError, AttributeError):
+        sympathy_delta = 0.0
+    try:
+        if bool(settings_projection.chili_momentum_theme_sympathy_enabled):
+            theme = meta.get("theme_sympathy_symbols")
+            if theme:
+                from .theme_detector import theme_sympathy_viability_delta
+
+                theme_delta = float(
+                    theme_sympathy_viability_delta(symbol, set(theme))
+                )
+    except (TypeError, ValueError, AttributeError):
+        theme_delta = 0.0
+    try:
+        priors = meta.get("close_strength_priors")
+        if priors:
+            from .catalyst import close_strength_viability_delta
+
+            close_delta = float(close_strength_viability_delta(symbol, priors))
+    except (TypeError, ValueError, AttributeError):
+        close_delta = 0.0
+
+    dilution_derate = 0.0
+    try:
+        if bool(settings_projection.chili_momentum_dilution_history_derate_enabled):
+            strong = meta.get("strong_catalyst_symbols")
+            fresh_squeeze = bool(
+                strong and str(symbol or "").strip().upper() in set(strong)
+            )
+            if not fresh_squeeze:
+                from .dilution_history import dilution_history_derate
+
+                dilution_derate = float(
+                    dilution_history_derate(
+                        db,
+                        symbol,
+                        now_utc=decision_as_of,
+                    )
+                )
+    except (TypeError, ValueError, AttributeError):
+        dilution_derate = 0.0
+
+    thick_tape_delta = nonmonotonic_delta = 0.0
+    try:
+        if (
+            bool(settings_projection.chili_momentum_thick_tape_veto_enabled)
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            signals = (
+                feats.meta.get("ross_signals")
+                if isinstance(getattr(feats, "meta", None), dict)
+                else None
+            )
+            if signals:
+                from .distribution_filters import thick_tape_discount
+
+                thick_tape_delta = float(
+                    thick_tape_discount(
+                        symbol, signals, atr_pct=getattr(ctx, "atr_pct", None)
+                    )
+                )
+    except (TypeError, ValueError, AttributeError):
+        thick_tape_delta = 0.0
+    try:
+        if (
+            bool(settings_projection.chili_momentum_nonmonotonic_volume_enabled)
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            signals = (
+                feats.meta.get("ross_signals")
+                if isinstance(getattr(feats, "meta", None), dict)
+                else None
+            )
+            if signals:
+                from .distribution_filters import nonmonotonic_volume_rolloff
+
+                nonmonotonic_delta = float(
+                    nonmonotonic_volume_rolloff(symbol, signals)
+                )
+    except (TypeError, ValueError, AttributeError):
+        nonmonotonic_delta = 0.0
+
+    return ViabilityExternalInputs(
+        leveraged_etf=leveraged,
+        excluded_fund=excluded_fund,
+        symbol_family_memory_adjust=memory_adjust,
+        dilution_history_derate=dilution_derate,
+        ross_rvol=rvol,
+        ross_change_pct=change,
+        ross_float_shares=float_shares,
+        squeeze_fuel_rank_pct=squeeze_rank,
+        below_explosive_floor=below_floor,
+        catalyst_delta=catalyst_delta,
+        catalyst_grade_delta=catalyst_grade_delta,
+        fake_catalyst_delta=fake_delta,
+        sympathy_delta=sympathy_delta,
+        theme_sympathy_delta=theme_delta,
+        close_strength_delta=close_delta,
+        thick_tape_delta=thick_tape_delta,
+        nonmonotonic_volume_delta=nonmonotonic_delta,
+        ross_quality_viability_tilt=ross_quality_tilt,
+    )
+
+
+def score_viability_explicit(
+    symbol: str,
+    family: MomentumStrategyFamily,
+    ctx: MomentumRegimeContext,
+    feats: ExecutionReadinessFeatures,
+    *,
+    settings: ViabilitySettingsProjection,
+    external: ViabilityExternalInputs,
 ) -> ViabilityResult:
-    """Heuristic score in [0,1]; tightens live eligibility on spread/vol/fees."""
+    """Pure existing viability arithmetic over fully explicit inputs."""
+    if type(settings) is not ViabilitySettingsProjection:
+        raise TypeError("settings must be ViabilitySettingsProjection")
+    if type(external) is not ViabilityExternalInputs:
+        raise TypeError("external must be ViabilityExternalInputs")
     warnings: list[str] = []
     base = 0.48
 
@@ -299,7 +733,7 @@ def score_viability(
     # classifier (no hardcoded list); fail-open there means a fundamentals miss does
     # not veto a real mover — the arm-queue quality tier is the backstop. Default-ON;
     # kill-switch CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS=0.
-    if bool(getattr(settings, "chili_momentum_exclude_leveraged_etfs", True)) and symbol_is_leveraged_etf(symbol):
+    if bool(getattr(settings, "chili_momentum_exclude_leveraged_etfs", True)) and external.leveraged_etf:
         return ViabilityResult(
             symbol=symbol,
             family_id=family.family_id,
@@ -320,7 +754,7 @@ def score_viability(
     # CHILI armed it at 5:50 ET). Reuses the adaptive name classifier (no hardcoded list);
     # fail-open there (a fundamentals miss classifies False) so a real mover is never
     # wrongly demoted. Default-ON; kill-switch CHILI_MOMENTUM_EXCLUDE_FUND_STRUCTURES=0.
-    if bool(getattr(settings, "chili_momentum_exclude_fund_structures_enabled", True)) and symbol_is_excluded_fund(symbol):
+    if bool(getattr(settings, "chili_momentum_exclude_fund_structures_enabled", True)) and external.excluded_fund:
         base -= 0.12
         warnings.append("REIT / closed-end fund structure — down-weighted from Ross momentum lane")
 
@@ -356,22 +790,9 @@ def score_viability(
                 and "-USD" not in str(symbol or "").upper()
             ):
                 try:
-                    _rsig_th = (
-                        feats.meta.get("ross_signals")
-                        if isinstance(getattr(feats, "meta", None), dict)
-                        else None
-                    )
-                    _sig_th = _rsig_th.get(symbol) if isinstance(_rsig_th, dict) else None
-                    if isinstance(_sig_th, dict) and _sig_th:
-                        from .ross_momentum import (
-                            _extract_pillars,
-                            _first_float,
-                            _to_float,
-                            below_explosive_floor,
-                        )
-
-                        _rvol_th, _, _, _ = _extract_pillars(_sig_th)
-                        _sq_rank_th = _to_float(_sig_th.get("squeeze_fuel_rank_pct"))
+                    _rvol_th = external.ross_rvol
+                    _sq_rank_th = external.squeeze_fuel_rank_pct
+                    if _rvol_th is not None or _sq_rank_th is not None:
                         _rvol_floor_th = float(
                             getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0
                         )
@@ -383,7 +804,7 @@ def score_viability(
                         # floor + the lane's own affirmative explosiveness (not below the floor).
                         _rvol_ok_th = _rvol_th is not None and _rvol_th >= _rvol_floor_th
                         _sq_ok_th = _sq_rank_th is not None and _sq_rank_th >= _sq_top_th
-                        if _rvol_ok_th and _sq_ok_th and not below_explosive_floor(_sig_th):
+                        if _rvol_ok_th and _sq_ok_th and not external.below_explosive_floor:
                             # EM/squeeze-scaled ceiling: base ceiling * (1 + slope*squeeze_excess),
                             # hard-capped by the abs broken-quote ceiling. squeeze_excess in [0,1]
                             # is how far past the top percentile this name sits, so only the most
@@ -448,19 +869,14 @@ def score_viability(
     # live_eligible) so the thin-spread carve-out (above) is not clobbered here.
     if _allow_extreme_explosive and "-USD" not in str(symbol or "").upper():
         try:
-            _rsig_x = (
-                feats.meta.get("ross_signals")
-                if isinstance(getattr(feats, "meta", None), dict)
-                else None
-            )
-            _sig_x = _rsig_x.get(symbol) if isinstance(_rsig_x, dict) else None
-            if isinstance(_sig_x, dict) and _sig_x:
-                from .ross_momentum import (
-                    _extract_pillars,
-                    _first_float,
-                    below_explosive_floor,
+            if any(
+                value is not None
+                for value in (
+                    external.ross_rvol,
+                    external.ross_change_pct,
+                    external.ross_float_shares,
                 )
-
+            ):
                 _spread_ok = True
                 _max_sp = float(
                     getattr(settings, "chili_momentum_live_eligible_max_spread_bps", 0.0) or 0.0
@@ -482,8 +898,9 @@ def score_viability(
                 # Rebind the hoisted VALUES from the live signal (the floors
                 # _float_ceil_x/_rvol_floor_x/_chg_floor_x are already computed at the
                 # hoist near the top from the SAME settings — single source of truth).
-                _rvol_x, _chg_x, _liq_x, _ = _extract_pillars(_sig_x)
-                _float_x = _first_float(_sig_x, "float_shares")
+                _rvol_x = external.ross_rvol
+                _chg_x = external.ross_change_pct
+                _float_x = external.ross_float_shares
                 _affirm_explosive = (
                     (
                         _float_x is not None
@@ -497,7 +914,7 @@ def score_viability(
                     feats.product_tradable is not False
                     and _spread_ok
                     and _affirm_explosive
-                    and not below_explosive_floor(_sig_x)
+                    and not external.below_explosive_floor
                 ):
                     _is_genuine_explosive = True
         except (TypeError, ValueError, AttributeError):
@@ -556,17 +973,17 @@ def score_viability(
             and bool(getattr(settings, "chili_momentum_a_setup_quality_floor_enabled", False))
             and "-USD" not in str(symbol or "").upper()
         ):
-            _rsig_a = (
-                feats.meta.get("ross_signals")
-                if isinstance(getattr(feats, "meta", None), dict)
-                else None
-            )
-            _sig_a = _rsig_a.get(symbol) if isinstance(_rsig_a, dict) else None
-            if isinstance(_sig_a, dict):
-                from .ross_momentum import _extract_pillars, _first_float
-
-                _rvol_a, _chg_a, _liq_a, _ = _extract_pillars(_sig_a)
-                _float_a = _first_float(_sig_a, "float_shares")
+            if any(
+                value is not None
+                for value in (
+                    external.ross_rvol,
+                    external.ross_change_pct,
+                    external.ross_float_shares,
+                )
+            ):
+                _rvol_a = external.ross_rvol
+                _chg_a = external.ross_change_pct
+                _float_a = external.ross_float_shares
                 _ceil = float(
                     getattr(
                         settings,
@@ -631,23 +1048,10 @@ def score_viability(
                 if _reason is not None:
                     live_eligible = False
                     warnings.append(f"Below A-setup quality floor ({_reason}) — not a live setup")
-                    logger.info(
-                        "[momentum_viability] A-setup quality floor REJECT live %s: %s "
-                        "(float=%s rvol=%s change=%s)",
-                        symbol,
-                        _reason,
-                        f"{_float_a:,.0f}" if _float_a is not None else None,
-                        _rvol_a,
-                        _chg_a,
-                    )
     except (TypeError, ValueError, AttributeError):
         pass
 
-    if db is not None:
-        try:
-            base += _symbol_family_memory_adjust(db, symbol, family.family_id)
-        except Exception:
-            pass
+    base += external.symbol_family_memory_adjust
 
     # Ross momentum-quality tilt (M2): prefer EXPLOSIVE instruments (high relative
     # volume + already-moving + low float) — the selection edge a momentum
@@ -664,10 +1068,8 @@ def score_viability(
             else None
         )
         if isinstance(_ross_scores, dict) and symbol in _ross_scores:
-            from .ross_momentum import ROSS_QUALITY_VIABILITY_TILT
-
             _rqf = float(_ross_scores[symbol])
-            base += ROSS_QUALITY_VIABILITY_TILT * (_rqf - 0.5)
+            base += external.ross_quality_viability_tilt * (_rqf - 0.5)
             if _rqf >= 0.8:
                 warnings.append(f"High Ross momentum quality ({_rqf:.2f})")
             elif _rqf <= 0.2:
@@ -689,12 +1091,14 @@ def score_viability(
             # empty-signal name clearly below a scored mover. A scored real mover (symbol IN
             # _ross_scores) takes the IF branch above and is NEVER touched by this penalty. OFF
             # (default) / no scored names ⇒ this branch is skipped ⇒ byte-identical.
-            from .ross_momentum import ROSS_QUALITY_VIABILITY_TILT
-
             _derank_frac = float(
                 getattr(settings, "chili_momentum_no_signal_derank_fraction", 1.0) or 1.0
             )
-            _penalty = ROSS_QUALITY_VIABILITY_TILT * 0.5 * max(0.0, _derank_frac)
+            _penalty = (
+                external.ross_quality_viability_tilt
+                * 0.5
+                * max(0.0, _derank_frac)
+            )
             base -= _penalty
             warnings.append("No Ross momentum signal — de-ranked below scored movers")
     except (TypeError, ValueError, AttributeError):
@@ -704,30 +1108,15 @@ def score_viability(
     # likely a real Ross gapper than a random spike. Additive boost (never a
     # penalty); no-op when the catalyst set is absent or for crypto. (catalyst.py)
     try:
-        _cat_syms = (
-            ctx.meta.get("catalyst_symbols")
-            if isinstance(getattr(ctx, "meta", None), dict)
-            else None
-        )
-        if _cat_syms:
-            from .catalyst import catalyst_viability_delta
-
+        _cat_delta = external.catalyst_delta
+        if _cat_delta:
+            base += _cat_delta
             _meta = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
-            _hot = bool(_meta.get("hot_tape"))
-            _ctry = (_meta.get("symbol_countries") or {}).get(symbol)
-            _theme_syms = _meta.get("theme_symbols")
-            _weak_syms = _meta.get("weak_catalyst_symbols")
-            _cat_delta = catalyst_viability_delta(
-                symbol, _cat_syms, hot_tape=_hot, hq_country=_ctry,
-                theme_symbols=set(_theme_syms) if _theme_syms else None,
-                weak_symbols=set(_weak_syms) if _weak_syms else None,
+            warnings.append(
+                "Hot tape — no-news speculation room (Ross-style)"
+                if bool(_meta.get("hot_tape"))
+                else "News catalyst (earnings) — Ross-style"
             )
-            if _cat_delta:
-                base += _cat_delta
-                warnings.append(
-                    "Hot tape — no-news speculation room (Ross-style)"
-                    if _hot else "News catalyst (earnings) — Ross-style"
-                )
     except (TypeError, ValueError, AttributeError):
         pass
 
@@ -751,15 +1140,7 @@ def score_viability(
             # byte-identical strong boost.
             _action_g = _meta2.get("catalyst_action_deltas")
             if _weak_g or _strong_g or _fake_g:
-                from .catalyst import catalyst_grade_selection_delta
-
-                _grade_delta = catalyst_grade_selection_delta(
-                    symbol,
-                    weak_symbols=set(_weak_g) if _weak_g else None,
-                    strong_symbols=set(_strong_g) if _strong_g else None,
-                    fake_symbols=set(_fake_g) if _fake_g else None,
-                    action_deltas=dict(_action_g) if isinstance(_action_g, dict) and _action_g else None,
-                )
+                _grade_delta = external.catalyst_grade_delta
                 if _grade_delta < 0:
                     base += _grade_delta
                     live_eligible = False
@@ -786,9 +1167,7 @@ def score_viability(
             _strong_a10 = _meta_a10.get("strong_catalyst_symbols")
             _is_fresh_squeeze = bool(_strong_a10 and str(symbol or "").strip().upper() in set(_strong_a10))
             if not _is_fresh_squeeze:  # carve-out: a fresh squeeze / strong catalyst today wins
-                from .dilution_history import dilution_history_derate
-
-                _dil_derate = dilution_history_derate(db, symbol)
+                _dil_derate = external.dilution_history_derate
                 if _dil_derate > 0:
                     base -= _dil_derate
                     warnings.append(
@@ -807,9 +1186,7 @@ def score_viability(
         _meta3 = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
         _fake_syms = _meta3.get("fake_catalyst_symbols")
         if _fake_syms:
-            from .catalyst import fake_catalyst_viability_delta
-
-            _fake_delta = fake_catalyst_viability_delta(symbol, set(_fake_syms))
+            _fake_delta = external.fake_catalyst_delta
             if _fake_delta:
                 base += _fake_delta
                 warnings.append(
@@ -828,9 +1205,7 @@ def score_viability(
             else None
         )
         if _symp:
-            from .catalyst import sympathy_viability_delta
-
-            _symp_delta = sympathy_viability_delta(symbol, set(_symp))
+            _symp_delta = external.sympathy_delta
             if _symp_delta:
                 base += _symp_delta
                 warnings.append("Sector sympathy peer (Ross hot-potato) — Ross-style")
@@ -851,9 +1226,7 @@ def score_viability(
                 else None
             )
             if _theme_symp:
-                from .theme_detector import theme_sympathy_viability_delta
-
-                _ts_delta = theme_sympathy_viability_delta(symbol, set(_theme_symp))
+                _ts_delta = external.theme_sympathy_delta
                 if _ts_delta:
                     base += _ts_delta
                     warnings.append("Theme sympathy peer (shared-catalyst leader) — Ross-style")
@@ -906,9 +1279,7 @@ def score_viability(
             else None
         )
         if _csp:
-            from .catalyst import close_strength_viability_delta
-
-            _csp_delta = close_strength_viability_delta(symbol, _csp)
+            _csp_delta = external.close_strength_delta
             if _csp_delta:
                 base += _csp_delta
                 if _csp_delta > 0:
@@ -934,9 +1305,7 @@ def score_viability(
                 else None
             )
             if _rsig:
-                from .distribution_filters import thick_tape_discount
-
-                _tt = thick_tape_discount(symbol, _rsig, atr_pct=getattr(ctx, "atr_pct", None))
+                _tt = external.thick_tape_delta
                 if _tt < 0.0 and not _extreme_mover:
                     base += _tt
                     warnings.append("Thick tape — high volume, no net progress (distribution)")
@@ -962,9 +1331,7 @@ def score_viability(
                 else None
             )
             if _rsig2:
-                from .distribution_filters import nonmonotonic_volume_rolloff
-
-                _nm = nonmonotonic_volume_rolloff(symbol, _rsig2)
+                _nm = external.nonmonotonic_volume_delta
                 if _nm < 0.0:
                     base += _nm
                     warnings.append("Extreme RVOL tail — choppy/crowded (inverted-U roll-off)")
@@ -990,7 +1357,6 @@ def score_viability(
     # is acceptable (Ross sits out the midday lull anyway). Kill-switch
     # CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_FLOOR_ENABLED.
     _floored = False
-    _prefloor_base = base
     try:
         if (
             bool(getattr(settings, "chili_momentum_explosive_prequal_floor_enabled", True))
@@ -1023,16 +1389,6 @@ def score_viability(
         pass
     if _floored:
         _extreme_vol_risk_bounded = True  # couple to size-DOWN
-        logger.info(
-            "[momentum_neural] explosive-prequal floor sym=%s base=%s->%s "
-            "(float=%s rvol=%s change=%s)",
-            symbol,
-            f"{_prefloor_base:.4f}",
-            f"{base:.4f}",
-            f"{_float_x:,.0f}" if _float_x is not None else None,
-            _rvol_x,
-            _chg_x,
-        )
 
     viability = max(0.0, min(1.0, base))
 
@@ -1058,4 +1414,83 @@ def score_viability(
         # blocked name needs no sizing signal). Keeps the field a clean "this LIVE
         # entry must be risk-bounded" marker for the live_runner size-down lever.
         extreme_vol_risk_bounded=bool(_extreme_vol_risk_bounded and _final_live_eligible),
+    )
+
+
+def score_viability(
+    symbol: str,
+    family: MomentumStrategyFamily,
+    ctx: MomentumRegimeContext,
+    feats: ExecutionReadinessFeatures,
+    *,
+    db: "Session | None" = None,
+) -> ViabilityResult:
+    """Backward-compatible live wrapper around the explicit pure core."""
+
+    projection = ViabilitySettingsProjection.from_runtime(settings)
+    external = _resolve_viability_external_inputs(
+        symbol,
+        family,
+        ctx,
+        feats,
+        db=db,
+        settings_projection=projection,
+    )
+    return score_viability_explicit(
+        symbol,
+        family,
+        ctx,
+        feats,
+        settings=projection,
+        external=external,
+    )
+
+
+def resolve_viability_external_inputs_for_capture(
+    symbol: str,
+    family: MomentumStrategyFamily,
+    ctx: MomentumRegimeContext,
+    feats: ExecutionReadinessFeatures,
+    *,
+    db: "Session | None",
+    settings_projection: ViabilitySettingsProjection,
+    leveraged_etf: bool,
+    excluded_fund: bool,
+    decision_as_of: "datetime",
+) -> ViabilityExternalInputs:
+    """Resolve the legacy helper/DB facts once so a capture can seal them.
+
+    This is intentionally separate from :func:`score_viability_explicit`.
+    PAPER/Replay consumers must use the sealed ``ViabilityExternalInputs`` and
+    never call this resolver.  The production capture source may call it inside
+    its read-only repeatable-read snapshot, then persist every returned scalar
+    with the source evidence used by the hermetic scorer.
+    """
+
+    if type(settings_projection) is not ViabilitySettingsProjection:
+        raise TypeError("settings_projection must be ViabilitySettingsProjection")
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ValueError("symbol is required")
+    if type(family) is not MomentumStrategyFamily:
+        raise TypeError("family must be MomentumStrategyFamily")
+    if type(ctx) is not MomentumRegimeContext:
+        raise TypeError("ctx must be MomentumRegimeContext")
+    if type(feats) is not ExecutionReadinessFeatures:
+        raise TypeError("feats must be ExecutionReadinessFeatures")
+    if type(leveraged_etf) is not bool or type(excluded_fund) is not bool:
+        raise TypeError("captured instrument classifications must be booleans")
+    if not isinstance(decision_as_of, datetime):
+        raise TypeError("decision_as_of must be a datetime")
+    if decision_as_of.tzinfo is None or decision_as_of.utcoffset() is None:
+        raise ValueError("decision_as_of must be timezone-aware")
+    return _resolve_viability_external_inputs(
+        symbol,
+        family,
+        ctx,
+        feats,
+        db=db,
+        settings_projection=settings_projection,
+        captured_leveraged_etf=leveraged_etf,
+        captured_excluded_fund=excluded_fund,
+        decision_as_of=decision_as_of,
     )

@@ -335,6 +335,72 @@ def focused_authority() -> StaticAuthority:
     )
 
 
+def test_focused_regression_roster_owns_complete_captured_paper_critical_path() -> None:
+    required_compile_paths = {
+        "app/migrations.py",
+        "app/models/captured_paper_selection_frontier.py",
+        "app/services/yf_session.py",
+        "app/services/trading/momentum_neural/variants.py",
+        "scripts/build_captured_paper_runtime_env.py",
+        "scripts/build_captured_paper_preactivation.py",
+        "scripts/captured_alpaca_paper_service.py",
+        "scripts/captured_paper_host_cutover.py",
+        "scripts/captured_paper_operator_flow.py",
+        "scripts/captured_paper_runtime_env.py",
+        "scripts/captured_paper_activation_contract.py",
+        "scripts/run_captured_paper_operator_chain.py",
+        "app/services/trading/momentum_neural/captured_paper_initial_candidate_reader.py",
+        "app/services/trading/momentum_neural/captured_paper_selection_producer.py",
+        "app/services/trading/momentum_neural/captured_paper_selection_queue.py",
+        "app/services/trading/momentum_neural/captured_paper_selection_runtime.py",
+        "app/services/trading/momentum_neural/captured_paper_selection_source.py",
+        "app/services/trading/momentum_neural/captured_paper_service_supervisor.py",
+        "app/services/trading/momentum_neural/captured_paper_variant_binding.py",
+    }
+    assert required_compile_paths <= set(probes.FOCUSED_COMPILE_RELATIVE_PATHS)
+    assert "scripts/captured_paper_activation_runner.py" not in (
+        probes.FOCUSED_COMPILE_RELATIVE_PATHS
+    )
+
+    required_test_nodes = {
+        "tests/test_captured_paper_selection_source.py::test_source_captures_full_four_stream_envelope_and_scores_without_fallback",
+        "tests/test_captured_paper_selection_source.py::test_missing_typed_fundamentals_receipt_fails_only_that_decision",
+        "tests/test_captured_paper_selection_queue.py::test_visible_commit_is_ignored_until_post_fsync_gate_acknowledges_it",
+        "tests/test_captured_paper_selection_queue.py::test_coverage_unavailable_event_emits_route_tombstone_not_empty_advance",
+        "tests/test_captured_paper_selection_producer.py::test_batch_upsert_and_frontier_cas_commit_together",
+        "tests/test_captured_paper_selection_producer.py::test_crash_rollback_then_restart_is_atomic_and_idempotent",
+        "tests/test_captured_paper_selection_producer.py::test_migration_353_route_state_schema_and_cas_guards",
+        "tests/test_captured_paper_selection_runtime.py::test_constructor_is_fully_inert_then_prime_precedes_reader_install",
+        "tests/test_captured_paper_selection_runtime.py::test_hash_bound_not_applied_outcome_never_builds_runtime_or_calls_rollback",
+        "tests/test_captured_paper_initial_candidate_reader.py::test_real_db_reader_returns_only_exact_current_captured_row_without_mutation",
+        "tests/test_captured_paper_variant_binding.py::test_migration_352_receipt_and_append_only_transition_round_trip",
+        "tests/test_captured_paper_variant_binding.py::test_reserved_clone_is_invisible_to_generic_readers_and_mutators",
+        "tests/test_captured_paper_service_supervisor.py::test_selection_prime_precedes_fresh_authority_and_order_workers",
+        "tests/test_captured_paper_service_supervisor.py::test_post_quiesce_deactivation_runs_after_every_owner_and_before_fence_release",
+        "tests/test_captured_alpaca_paper_service.py::test_composition_uses_measured_capacity_and_one_exact_adapter_generation",
+        "tests/test_captured_paper_service_selection_integration.py::test_real_service_selection_lifecycle_primes_reads_and_rolls_back",
+        "tests/test_yf_session_fundamentals_receipt.py::test_authoritative_empty_is_distinct_from_provider_error",
+        "tests/test_yf_session_fundamentals_receipt.py::test_stale_cache_is_not_reclassified_as_fresh_when_circuit_is_open",
+        "tests/test_adaptive_risk_policy_settings.py::test_replay_and_captured_paper_use_identical_policy_projection",
+        "tests/test_adaptive_risk_policy_settings.py::test_builder_cannot_bind_magic_dollar_or_one_symbol_activation_caps",
+        "tests/test_adaptive_risk_policy.py::test_concurrency_emerges_from_aggregate_risk_not_one_symbol_cap",
+        "tests/test_adaptive_risk_runtime_contract.py::test_atomic_three_dimension_reservation_and_no_magic_activation_caps_are_required",
+        "tests/test_run_captured_paper_operator_chain.py::test_import_is_inert_and_does_not_touch_network_db_broker_or_host",
+        "tests/test_run_captured_paper_operator_chain.py::test_chain_request_is_canonical_hash_bound_and_pinned_by_outer_request",
+        "tests/test_run_captured_paper_operator_chain.py::test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash_bound",
+        "tests/test_captured_paper_operator_flow.py::test_operator_flow_publishes_build_ready_and_only_no_order_next_command",
+        "tests/test_captured_paper_operator_flow.py::test_materialization_runs_runtime_after_long_shards_and_short_ttl_reads_last",
+        "tests/test_captured_paper_runtime_env.py::test_installs_equity_only_candidate_and_excludes_every_live_credential",
+        "tests/test_captured_paper_host_cutover.py::test_validate_only_is_default_and_performs_no_mutation",
+        "tests/test_build_captured_paper_preactivation.py::test_code_inventory_exactly_matches_activation_contract_and_local_dependency_closure",
+    }
+    assert required_test_nodes <= set(probes.FOCUSED_PYTEST_NODE_IDS)
+    assert not any(
+        node.startswith("tests/test_captured_paper_activation_runner.py::")
+        for node in probes.FOCUSED_PYTEST_NODE_IDS
+    )
+
+
 def lifecycle_authority(*, omit_event: bool = False) -> StaticAuthority:
     events = {
         "ownership_idempotency": ["claim_acquired", "duplicate_claim_refused"],
@@ -507,6 +573,65 @@ def test_runtime_and_broker_producers_derive_authority_and_reject_self_attestati
             BrokerAuthority(FakePaperAdapter(mutate_audit=True)),
             context=ctx,
             now=NOW,
+        )
+
+
+def test_database_probe_requires_captured_selection_route_state_table(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "capture").mkdir()
+    ctx = context(tmp_path)
+    assert "captured_paper_selection_route_states" in (
+        readiness.REQUIRED_DATABASE_TABLES
+    )
+    roster = ("001", "002")
+    missing_route_state = tuple(
+        name
+        for name in readiness.REQUIRED_DATABASE_TABLES
+        if name != "captured_paper_selection_route_states"
+    )
+    authority = StaticAuthority(
+        probes.DatabaseNativeObservation(
+            migration_roster=roster,
+            applied_migrations=roster,
+            table_names=missing_route_state,
+            rehearsal_case_exit_codes=(0, 0),
+            observed_at=NOW,
+        )
+    )
+
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="migration/table roster is incomplete",
+    ):
+        probes._database_observations(authority, context=ctx, now=NOW)
+
+    valid = dict(
+        probes._database_observations(
+            database_authority(),
+            context=ctx,
+            now=NOW,
+        )
+    )
+    with pytest.raises(
+        readiness.CapturedPaperReadinessEvidenceError,
+        match="database evidence is not exact, complete, and rehearsed",
+    ):
+        readiness._validate_database(
+            {
+                "schema_version": (
+                    "chili.captured-paper-readiness-evidence."
+                    "database_schema.v3"
+                ),
+                "source_receipts": {
+                    "schema_probe": valid["applied_migrations_sha256"],
+                    "idempotent_rehearsal": h("idempotent-rehearsal"),
+                },
+                **valid,
+                "required_tables": list(missing_route_state),
+            },
+            ctx,
+            captured_at=NOW,
         )
 
 

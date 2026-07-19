@@ -18,6 +18,9 @@ from app.services.trading.momentum_neural.replay_capture_contract import (
     CaptureStream,
     sha256_json,
 )
+from app.services.trading.momentum_neural.captured_paper_dispatcher import (
+    CapturedPaperDispatchRequest,
+)
 from app.services.trading.momentum_neural.live_replay_capture import (
     CaptureIdentityEvidence,
     LiveCaptureRunInputs,
@@ -854,7 +857,22 @@ def test_unified_host_routes_hot_admission_to_depth_lifecycle(tmp_path, monkeypa
     host.close()
 
 
-def test_unified_host_installs_typed_first_dip_bridge_around_real_fsm_tick(
+def _captured_paper_dispatch(*, symbol: str = "VEEE") -> CapturedPaperDispatchRequest:
+    return CapturedPaperDispatchRequest(
+        session_id=17,
+        symbol=symbol,
+        execution_family="alpaca_spot",
+        account_scope="alpaca:paper",
+        expected_account_id="c349bc0f-a5e2-48f8-ad5e-ec5d531414ac",
+        code_build_sha256=sha256_json({"kind": "bootstrap-test-build"}),
+        config_sha256=sha256_json({"kind": "bootstrap-test-config"}),
+        capture_receipt_sha256=sha256_json({"kind": "bootstrap-test-capture"}),
+        runtime_generation="66cdcb77-684f-4466-917a-547090575793",
+        first_dip_policy_mode="candidate",
+    )
+
+
+def test_unified_host_rejects_untyped_dispatch_before_fsm_tick(
     tmp_path, monkeypatch
 ):
     bundle = _make_bundle(tmp_path)
@@ -865,204 +883,57 @@ def test_unified_host_installs_typed_first_dip_bridge_around_real_fsm_tick(
     )
     host = capture_host.IqfeedCaptureHost(composition, wall_clock=lambda: NOW)
     host.bind()
-    observed: dict[str, Any] = {
-        "inside": False,
-        "scanner_inside": False,
-        "ohlcv_inside": False,
-        "microstructure_inside": False,
-        "tick_calls": 0,
-    }
-    coordinator = type("Coordinator", (), {"certification_symbol": "VEEE"})()
-    monkeypatch.setattr(
-        composition.service,
-        "coordinator_for",
-        lambda symbol: coordinator if symbol == "VEEE" else None,
-    )
-
-    class FakeBridge:
-        def __init__(self, **kwargs):
-            observed["bridge"] = kwargs
-            self.final_capture_frontier = None
-
-        def install(self):
-            class Scope:
-                def __enter__(self):
-                    observed["inside"] = True
-                    return self
-
-                def __exit__(self, *_exc):
-                    observed["inside"] = False
-                    return False
-
-            return Scope()
-
-    class FakeScannerBridge:
-        def __init__(self, **kwargs):
-            observed["scanner_bridge"] = kwargs
-            self.captured_reads = ()
-
-        def install(self):
-            class Scope:
-                def __enter__(self):
-                    observed["scanner_inside"] = True
-                    return self
-
-                def __exit__(self, *_exc):
-                    observed["scanner_inside"] = False
-                    return False
-
-            return Scope()
-
-    class FakeOhlcvBridge:
-        def __init__(self, **kwargs):
-            observed["ohlcv_bridge"] = kwargs
-            self.captured_reads = ()
-
-        def install(self):
-            class Scope:
-                def __enter__(self):
-                    observed["ohlcv_inside"] = True
-                    return self
-
-                def __exit__(self, *_exc):
-                    observed["ohlcv_inside"] = False
-                    return False
-
-            return Scope()
-
-    class FakeMicrostructureBridge:
-        def __init__(self, **kwargs):
-            observed["microstructure_bridge"] = kwargs
-            self.captured_reads = ()
-
-        def install(self):
-            class Scope:
-                def __enter__(self):
-                    observed["microstructure_inside"] = True
-                    return self
-
-                def __exit__(self, *_exc):
-                    observed["microstructure_inside"] = False
-                    return False
-
-            return Scope()
-
-    def tick(db, session_id, *, adapter_factory):
-        assert observed["inside"] is True
-        assert observed["scanner_inside"] is True
-        assert observed["ohlcv_inside"] is True
-        assert observed["microstructure_inside"] is True
-        observed["tick_calls"] += 1
-        observed["tick"] = (db, session_id, adapter_factory)
-        observed["tick_decision_now"] = capture_host.momentum_live_runner._utcnow()
-        return {"ok": True, "state": "watching_live"}
-
-    monkeypatch.setattr(
-        capture_host,
-        "LiveFirstDipAdaptiveCaptureBridge",
-        FakeBridge,
-    )
-    monkeypatch.setattr(
-        capture_host,
-        "LiveScannerSnapshotCaptureBridge",
-        FakeScannerBridge,
-    )
-    monkeypatch.setattr(
-        capture_host,
-        "LiveOhlcvCaptureBridge",
-        FakeOhlcvBridge,
-    )
-    monkeypatch.setattr(
-        capture_host,
-        "LiveMicrostructureCaptureBridge",
-        FakeMicrostructureBridge,
-    )
-    monkeypatch.setattr(
-        capture_host.momentum_live_runner,
-        "tick_live_session",
-        tick,
-    )
-    source = type(
-        "Source",
-        (),
-        {"inputs": type("Inputs", (), {"symbol": "VEEE"})()},
-    )()
-    adapter_factory = lambda _session: object()
-    result = host.tick_captured_alpaca_paper_session(
-        object(),
-        17,
-        symbol="veee",
-        detector_attestation=type(
-            "DetectorAttestation",
-            (),
-            {"decision_id": "captured-paper-test-decision"},
-        )(),
-        detector_policy=object(),
-        adaptive_source=source,
-        final_read_provider=lambda **_kwargs: object(),
-        adapter_factory=adapter_factory,
-    )
-
-    assert dict(result.fsm_result) == {"ok": True, "state": "watching_live"}
-    assert result.decision_at == NOW
-    assert result.first_dip_final_capture_frontier is None
-    assert result.scanner_snapshot_read_ids == ()
-    assert result.ohlcv_read_ids == ()
-    assert result.microstructure_read_ids == ()
-    assert observed["tick_calls"] == 1
-    assert observed["tick_decision_now"] == NOW.replace(tzinfo=None)
-    assert observed["bridge"]["coordinator"] is coordinator
-    assert observed["bridge"]["adaptive_source"] is source
-    assert observed["scanner_bridge"]["coordinator"] is coordinator
-    assert observed["ohlcv_bridge"]["coordinator"] is coordinator
-    assert observed["ohlcv_bridge"]["macro_cache"] == {}
-    assert observed["microstructure_bridge"]["coordinator"] is coordinator
-    assert observed["tick"][1:] == (17, adapter_factory)
-    assert observed["inside"] is False
-    assert observed["scanner_inside"] is False
-    assert observed["ohlcv_inside"] is False
-    assert observed["microstructure_inside"] is False
-    assert capture_host.momentum_live_runner._SIM_NOW.get() is None
-    assert host.health()["captured_paper_runner_invocations_in_flight"] == ()
-    host.close()
-
-
-def test_unified_host_rejects_foreign_adaptive_source_before_fsm_tick(
-    tmp_path, monkeypatch
-):
-    bundle = _make_bundle(tmp_path)
-    composition = bootstrap.prepare_iqfeed_capture_ingress(
-        _load(bundle),
-        pressure_sample=_pressure_sample(bundle),
-        wall_clock=lambda: NOW,
-    )
-    host = capture_host.IqfeedCaptureHost(composition, wall_clock=lambda: NOW)
-    host.bind()
-    tick_calls: list[int] = []
-    monkeypatch.setattr(
-        capture_host.momentum_live_runner,
-        "tick_live_session",
-        lambda *_args, **_kwargs: tick_calls.append(1),
-    )
-    foreign = type(
-        "Source",
-        (),
-        {"inputs": type("Inputs", (), {"symbol": "PLSM"})()},
-    )()
-
-    with pytest.raises(CaptureContractError, match="source symbol mismatch"):
-        host.tick_captured_alpaca_paper_session(
-            object(),
-            17,
-            symbol="VEEE",
-            detector_attestation=object(),
-            detector_policy=object(),
-            adaptive_source=foreign,
-            final_read_provider=lambda **_kwargs: object(),
-            adapter_factory=lambda _session: object(),
+    try:
+        tick_calls: list[int] = []
+        monkeypatch.setattr(
+            capture_host.momentum_live_runner,
+            "tick_live_session",
+            lambda *_args, **_kwargs: tick_calls.append(1),
         )
-    assert tick_calls == []
-    host.close()
+        with pytest.raises(
+            CaptureContractError, match="dispatch request is not typed"
+        ):
+            host.tick_captured_alpaca_paper_session(
+                object(),
+                dispatch_request=object(),
+                decision_material=object(),
+                adapter_factory=lambda: object(),
+            )
+        assert tick_calls == []
+    finally:
+        host.close()
+
+
+def test_unified_host_rejects_raw_adaptive_material_before_fsm_tick(
+    tmp_path, monkeypatch
+):
+    bundle = _make_bundle(tmp_path)
+    composition = bootstrap.prepare_iqfeed_capture_ingress(
+        _load(bundle),
+        pressure_sample=_pressure_sample(bundle),
+        wall_clock=lambda: NOW,
+    )
+    host = capture_host.IqfeedCaptureHost(composition, wall_clock=lambda: NOW)
+    host.bind()
+    try:
+        tick_calls: list[int] = []
+        monkeypatch.setattr(
+            capture_host.momentum_live_runner,
+            "tick_live_session",
+            lambda *_args, **_kwargs: tick_calls.append(1),
+        )
+        with pytest.raises(
+            CaptureContractError, match="decision material is not typed"
+        ):
+            host.tick_captured_alpaca_paper_session(
+                object(),
+                dispatch_request=_captured_paper_dispatch(),
+                decision_material=object(),
+                adapter_factory=lambda: object(),
+            )
+        assert tick_calls == []
+    finally:
+        host.close()
 
 
 def test_hot_admission_remains_explicitly_blocked_until_external_lifecycle_exists(

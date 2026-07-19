@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ....config import settings
 from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, MomentumSymbolViability
 from .strategy_params import params_signature, refine_strategy_params
+from .variants import is_generic_visible_variant_key
 from ..brain_neural_mesh.repository import get_or_create_state
 
 EVOLUTION_NODE_ID = "nm_momentum_evolution_trace"
@@ -524,6 +525,15 @@ def maybe_pause_symbol_variant_after_losses(db: Session, outcome_row: MomentumAu
 
 def maybe_kill_underperforming_variant(db: Session, *, variant_id: int) -> dict[str, Any]:
     """Deactivate variant + viability if sustained poor track record (Phase 5c)."""
+    v = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.id == int(variant_id))
+        .one_or_none()
+    )
+    if v is None or not bool(v.is_active):
+        return {"ok": True, "skipped": "inactive_or_missing"}
+    if not is_generic_visible_variant_key(v.variant_key):
+        return {"ok": True, "skipped": "reserved_captured_paper_variant"}
     outcomes = _recent_outcomes_for_variant(db, variant_id=int(variant_id), days=90)
     # Broker-truth label switch (mig309), mode-aware: paper keeps self-report; live uses
     # the broker-true bps (flag-ON) and unreconciled-live rows are EXCLUDED — never KILL a
@@ -544,13 +554,6 @@ def maybe_kill_underperforming_variant(db: Session, *, variant_id: int) -> dict[
     if wr >= 0.35 or mean_bps >= -30.0:
         return {"ok": True, "skipped": "above_threshold"}
 
-    v = (
-        db.query(MomentumStrategyVariant)
-        .filter(MomentumStrategyVariant.id == int(variant_id))
-        .one_or_none()
-    )
-    if v is None or not bool(v.is_active):
-        return {"ok": True, "skipped": "inactive_or_missing"}
     v.is_active = False
     v.updated_at = datetime.utcnow()
     for row in (
@@ -596,6 +599,8 @@ def maybe_publish_refined_variant(db: Session, *, variant_id: int) -> dict[str, 
     )
     if variant is None:
         return {"ok": False, "error": "variant_not_found"}
+    if not is_generic_visible_variant_key(variant.variant_key):
+        return {"ok": True, "skipped": "reserved_captured_paper_variant"}
     if not bool(variant.is_active):
         return {"ok": True, "skipped": "variant_inactive"}
 

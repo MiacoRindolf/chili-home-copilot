@@ -73,6 +73,14 @@ MIGRATION_REHEARSAL_NODE_IDS = (
     "test_migration_337_is_registered_idempotent_and_installs_guards",
     "tests/test_alpaca_fill_settlement_runtime_wiring.py::"
     "test_migration_336_preserves_v1_and_requires_strict_v2",
+    "tests/test_captured_paper_selection_producer.py::"
+    "test_migration_350_is_registered_idempotent_and_installs_guards",
+    "tests/test_captured_paper_selection_producer.py::"
+    "test_batch_upsert_and_frontier_cas_commit_together",
+    "tests/test_captured_paper_selection_producer.py::"
+    "test_migration_353_route_state_schema_and_cas_guards",
+    "tests/test_captured_paper_variant_binding.py::"
+    "test_migration_352_receipt_and_append_only_transition_round_trip",
 )
 
 _PLAN_KEYS = frozenset(

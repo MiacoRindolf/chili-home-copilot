@@ -119,10 +119,24 @@ def _health_mapping(value: Any) -> Mapping[str, Any]:
     )
 
 
+def _sha256_json(value: Mapping[str, Any]) -> str:
+    """Hash one canonical JSON object without accepting non-finite values."""
+
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 class CapturedPaperServiceSupervisor:
     """Own one process generation of the fake-money PAPER runtime."""
 
-    HEALTH_SCHEMA_VERSION = "chili.captured-paper-service-supervisor-health.v1"
+    HEALTH_SCHEMA_VERSION = "chili.captured-paper-service-supervisor-health.v2"
     _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
     def __init__(
@@ -136,6 +150,12 @@ class CapturedPaperServiceSupervisor:
         live_loop_start: Callable[[], bool],
         live_loop_stop: Callable[[], bool],
         live_loop_health: Callable[[], bool],
+        active_pre_authority_workers: Sequence[
+            CapturedPaperManagedWorker
+        ] = (),
+        post_quiesce_before_fence_release: (
+            Callable[[], Mapping[str, Any]] | None
+        ) = None,
         runtime_registrar: Callable[
             [CapturedPaperRuntime], CapturedPaperRuntimeHandle
         ] = register_captured_paper_runtime,
@@ -157,11 +177,17 @@ class CapturedPaperServiceSupervisor:
                     f"captured_paper_service_fence_lacks_{method}"
                 )
         workers = tuple(managed_workers)
-        if any(type(item) is not CapturedPaperManagedWorker for item in workers):
+        pre_authority_workers = tuple(active_pre_authority_workers)
+        if any(
+            type(item) is not CapturedPaperManagedWorker
+            for item in (*pre_authority_workers, *workers)
+        ):
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_managed_worker_invalid"
             )
-        names = tuple(item.name for item in workers)
+        names = tuple(
+            item.name for item in (*pre_authority_workers, *workers)
+        )
         if len(names) != len(set(names)):
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_managed_worker_duplicated"
@@ -179,25 +205,41 @@ class CapturedPaperServiceSupervisor:
                 raise CapturedPaperServiceSupervisorError(
                     f"captured_paper_{label}_invalid"
                 )
+        if (
+            post_quiesce_before_fence_release is not None
+            and not callable(post_quiesce_before_fence_release)
+        ):
+            raise CapturedPaperServiceSupervisorError(
+                "captured_paper_post_quiesce_callback_invalid"
+            )
         self._host = host
         self._runtime = runtime
         self._service_fence = service_fence
         self._fenced_prestart_revalidate = fenced_prestart_revalidate
+        self._pre_authority_workers = pre_authority_workers
         self._workers = workers
         self._live_loop_start = live_loop_start
         self._live_loop_stop = live_loop_stop
         self._live_loop_health = live_loop_health
+        self._post_quiesce_before_fence_release = (
+            post_quiesce_before_fence_release
+        )
         self._registrar = runtime_registrar
         self._monotonic = monotonic_clock
         self._wait = wait
         self._state = CapturedPaperServiceState.PREPARED
         self._runtime_handle: Any | None = None
+        self._started_pre_authority_workers: list[
+            CapturedPaperManagedWorker
+        ] = []
         self._started_workers: list[CapturedPaperManagedWorker] = []
         self._provider_receipt: Mapping[str, Any] | None = None
         self._service_fence_receipt: Mapping[str, Any] | None = None
         self._fenced_prestart_receipt: Mapping[str, Any] | None = None
         self._active_start_authority_receipt: Mapping[str, Any] | None = None
+        self._post_quiesce_receipt: Mapping[str, Any] | None = None
         self._live_loop_started = False
+        self._active_path_started = False
 
     @property
     def state(self) -> CapturedPaperServiceState:
@@ -407,35 +449,153 @@ class CapturedPaperServiceSupervisor:
         try:
             self._start_capture_and_runtime(provider_options=provider_options)
             self._service_fence.assert_held()
+            self._active_path_started = True
+            # Broker-incapable selection/capture work primes here, before the
+            # short-lived final order authority is consumed.  Clone binding,
+            # provider reads, async fsync and frontier catch-up can legitimately
+            # exceed that authority window; none of these workers can POST.
+            for managed in self._pre_authority_workers:
+                self._service_fence.assert_held()
+                managed.worker.start()
+                self._started_pre_authority_workers.append(managed)
+                worker_health = _health_mapping(managed.worker.health())
+                if (
+                    worker_health.get("ever_started") is not True
+                    or worker_health.get("running") is not True
+                    or worker_health.get("fatal") is True
+                ):
+                    raise CapturedPaperServiceSupervisorError(
+                        f"captured_paper_{managed.name}_pre_authority_start_unconfirmed"
+                    )
+                self._service_fence.assert_held()
             # This intentionally runs *after* provider startup and runtime
-            # registration.  Those bounded operations may consume meaningful
-            # wall time, so authority checked only during composition is not
-            # fresh enough to start broker/order workers.
+            # registration *and* broker-incapable selection priming.  Those
+            # bounded operations may consume meaningful wall time, so authority
+            # checked only during composition is not fresh enough to start
+            # broker/order workers.
             final_authority = start_authority.consume()
+            authority_body = (
+                dict(final_authority) if isinstance(final_authority, Mapping) else {}
+            )
+            supplied_authority_sha256 = str(
+                authority_body.pop("authority_sha256", "") or ""
+            )
+            broker_fixed_point = authority_body.get("broker_fixed_point")
+            final_kill_switch = authority_body.get("final_kill_switch_query")
+            kill_switch_body = (
+                dict(final_kill_switch)
+                if isinstance(final_kill_switch, Mapping)
+                else {}
+            )
+            supplied_kill_switch_sha256 = str(
+                kill_switch_body.pop("query_receipt_sha256", "") or ""
+            )
+            expected_authority_fields = {
+                "schema_version",
+                "verdict",
+                "account_scope",
+                "expected_account_id",
+                "runtime_generation",
+                "activation_manifest_sha256",
+                "kill_switch_receipt_sha256",
+                "launcher_attestation_sha256",
+                "launcher_attestation_consumed",
+                "host_activation_permit_sha256",
+                "host_activation_permit_consumed",
+                "host_quiet_horizon_event_sha256",
+                "broker_fixed_point",
+                "broker_fixed_point_sha256",
+                "post_permit_broker_snapshot_sha256",
+                "order_transition_fence_sha256",
+                "fill_activity_fence_sha256",
+                "final_kill_switch_query",
+                "final_kill_switch_query_sha256",
+                "paper_order_submission_authorized",
+                "live_cash_authorized",
+                "real_money_authorized",
+            }
+            try:
+                authority_hash_valid = (
+                    self._SHA256_RE.fullmatch(supplied_authority_sha256)
+                    and _sha256_json(authority_body) == supplied_authority_sha256
+                )
+                broker_hash_valid = (
+                    isinstance(broker_fixed_point, Mapping)
+                    and _sha256_json(dict(broker_fixed_point))
+                    == authority_body.get("broker_fixed_point_sha256")
+                    and _sha256_json(dict(broker_fixed_point["second_snapshot"]))
+                    == authority_body.get("post_permit_broker_snapshot_sha256")
+                    and _sha256_json(dict(broker_fixed_point["second_order_census"]))
+                    == authority_body.get("order_transition_fence_sha256")
+                    and _sha256_json(
+                        dict(broker_fixed_point["second_fill_activity_census"])
+                    )
+                    == authority_body.get("fill_activity_fence_sha256")
+                )
+                kill_switch_hash_valid = (
+                    isinstance(final_kill_switch, Mapping)
+                    and self._SHA256_RE.fullmatch(supplied_kill_switch_sha256)
+                    and _sha256_json(kill_switch_body)
+                    == supplied_kill_switch_sha256
+                    and _sha256_json(dict(final_kill_switch))
+                    == authority_body.get("final_kill_switch_query_sha256")
+                )
+            except (KeyError, TypeError, ValueError):
+                authority_hash_valid = False
+                broker_hash_valid = False
+                kill_switch_hash_valid = False
             if not isinstance(final_authority, Mapping) or not (
-                final_authority.get("verdict")
+                set(authority_body) == expected_authority_fields
+                and authority_hash_valid
+                and broker_hash_valid
+                and kill_switch_hash_valid
+                and authority_body.get("schema_version")
+                == "chili.captured-paper-active-start-authority.v2"
+                and authority_body.get("verdict")
                 == "CAPTURED_ALPACA_PAPER_ACTIVE_START_AUTHORIZED"
-                and final_authority.get("account_scope") == "alpaca:paper"
-                and final_authority.get("expected_account_id")
+                and authority_body.get("account_scope") == "alpaca:paper"
+                and authority_body.get("expected_account_id")
                 == self._runtime.expected_account_id
-                and final_authority.get("runtime_generation")
+                and authority_body.get("runtime_generation")
                 == self._runtime.runtime_generation
-                and final_authority.get("paper_order_submission_authorized")
+                and authority_body.get("paper_order_submission_authorized")
                 is True
-                and final_authority.get("launcher_attestation_consumed") is True
-                and isinstance(
-                    final_authority.get("host_activation_permit_sha256"), str
-                )
-                and len(final_authority["host_activation_permit_sha256"]) == 64
+                and authority_body.get("launcher_attestation_consumed") is True
+                and authority_body.get("host_activation_permit_consumed") is True
                 and all(
-                    character in "0123456789abcdef"
-                    for character in final_authority[
-                        "host_activation_permit_sha256"
-                    ]
+                    self._SHA256_RE.fullmatch(str(authority_body.get(field) or ""))
+                    for field in (
+                        "activation_manifest_sha256",
+                        "kill_switch_receipt_sha256",
+                        "launcher_attestation_sha256",
+                        "host_activation_permit_sha256",
+                        "post_permit_broker_snapshot_sha256",
+                        "order_transition_fence_sha256",
+                        "fill_activity_fence_sha256",
+                        "host_quiet_horizon_event_sha256",
+                        "broker_fixed_point_sha256",
+                        "final_kill_switch_query_sha256",
+                    )
                 )
-                and final_authority.get("host_activation_permit_consumed") is True
-                and final_authority.get("live_cash_authorized") is False
-                and final_authority.get("real_money_authorized") is False
+                and broker_fixed_point.get("schema_version")
+                == "chili.captured-paper-broker-fixed-point.v1"
+                and broker_fixed_point.get("verdict")
+                == "PAPER_BROKER_QUIET_FIXED_POINT"
+                and broker_fixed_point.get("account_scope") == "alpaca:paper"
+                and broker_fixed_point.get("expected_account_id")
+                == self._runtime.expected_account_id
+                and broker_fixed_point.get("activation_generation")
+                == self._runtime.runtime_generation
+                and broker_fixed_point.get("assumption_bound") is True
+                and broker_fixed_point.get("live_cash_certification") is False
+                and final_kill_switch.get("account_scope") == "alpaca:paper"
+                and final_kill_switch.get("expected_account_id")
+                == self._runtime.expected_account_id
+                and final_kill_switch.get("activation_generation")
+                == self._runtime.runtime_generation
+                and final_kill_switch.get("active") is False
+                and authority_body.get("live_cash_authorized") is False
+                and authority_body.get("real_money_authorized") is False
             ):
                 raise CapturedPaperServiceSupervisorError(
                     "captured_paper_active_start_authority_rejected"
@@ -492,7 +652,10 @@ class CapturedPaperServiceSupervisor:
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_provider_health_lost"
             )
-        for managed in self._started_workers:
+        for managed in (
+            *self._started_pre_authority_workers,
+            *self._started_workers,
+        ):
             health = _health_mapping(managed.worker.health())
             if (
                 health.get("running") is not True
@@ -537,6 +700,125 @@ class CapturedPaperServiceSupervisor:
                     raise
                 self._wait(min(0.05, max(0.0, deadline - self._monotonic())))
 
+    def _consume_post_quiesce_receipt(self) -> None:
+        callback = self._post_quiesce_before_fence_release
+        if (
+            callback is None
+            or not self._active_path_started
+            or self._post_quiesce_receipt is not None
+        ):
+            return
+        raw = callback()
+        body = dict(raw) if isinstance(raw, Mapping) else {}
+        supplied_sha256 = str(body.pop("receipt_sha256", "") or "")
+        expected_keys = {
+            "schema_version",
+            "verdict",
+            "account_scope",
+            "expected_account_id",
+            "runtime_generation",
+            "workers_stopped",
+            "runtime_unregistered",
+            "provider_stopped",
+            "application_outcome",
+            "strategy_variants_deactivated",
+            "variant_application_sha256",
+            "variant_rollback_sha256",
+            "target_variant_ids",
+            "selection_runtime_rollback_sha256",
+            "paper_order_submission_authorized",
+            "live_cash_authorized",
+            "real_money_authorized",
+        }
+        target_variant_ids = body.get("target_variant_ids")
+        runtime_rollback_body = {
+            "schema_version": (
+                "chili.captured-paper-selection-runtime-rollback.v2"
+            ),
+            "account_scope": body.get("account_scope"),
+            "expected_account_id": body.get("expected_account_id"),
+            "activation_generation": body.get("runtime_generation"),
+            "variant_application_sha256": body.get(
+                "variant_application_sha256"
+            ),
+            "variant_rollback_sha256": body.get("variant_rollback_sha256"),
+            "target_variant_ids": target_variant_ids,
+            "application_outcome": body.get("application_outcome"),
+            "strategy_variants_deactivated": body.get(
+                "strategy_variants_deactivated"
+            ),
+            "paper_order_submission_authorized": body.get(
+                "paper_order_submission_authorized"
+            ),
+            "live_cash_authorized": body.get("live_cash_authorized"),
+            "real_money_authorized": body.get("real_money_authorized"),
+        }
+        if not (
+            isinstance(raw, Mapping)
+            and set(body) == expected_keys
+            and body.get("schema_version")
+            == "chili.captured-paper-post-quiesce.v3"
+            and (
+                (
+                    body.get("application_outcome") == "rolled_back"
+                    and body.get("verdict")
+                    == "CAPTURED_PAPER_SELECTION_BINDINGS_ROLLED_BACK"
+                    and body.get("strategy_variants_deactivated") is True
+                    and isinstance(target_variant_ids, list)
+                    and bool(target_variant_ids)
+                )
+                or (
+                    body.get("application_outcome") == "not_applied"
+                    and body.get("verdict")
+                    == "CAPTURED_PAPER_SELECTION_APPLICATION_NOT_APPLIED"
+                    and body.get("strategy_variants_deactivated") is False
+                    and target_variant_ids == []
+                )
+            )
+            and body.get("account_scope") == "alpaca:paper"
+            and body.get("expected_account_id")
+            == self._runtime.expected_account_id
+            and body.get("runtime_generation")
+            == self._runtime.runtime_generation
+            and body.get("workers_stopped") is True
+            and body.get("runtime_unregistered") is True
+            and body.get("provider_stopped") is True
+            and self._SHA256_RE.fullmatch(
+                str(body.get("variant_application_sha256") or "")
+            )
+            and self._SHA256_RE.fullmatch(
+                str(body.get("variant_rollback_sha256") or "")
+            )
+            and isinstance(target_variant_ids, list)
+            and all(
+                type(value) is int and value > 0
+                for value in target_variant_ids
+            )
+            and target_variant_ids == sorted(set(target_variant_ids))
+            and self._SHA256_RE.fullmatch(
+                str(body.get("selection_runtime_rollback_sha256") or "")
+            )
+            and _sha256_json(runtime_rollback_body)
+            == body.get("selection_runtime_rollback_sha256")
+            and body.get("paper_order_submission_authorized") is False
+            and body.get("live_cash_authorized") is False
+            and body.get("real_money_authorized") is False
+            and self._SHA256_RE.fullmatch(supplied_sha256)
+            and hashlib.sha256(
+                json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            == supplied_sha256
+        ):
+            raise CapturedPaperServiceSupervisorError(
+                "captured_paper_post_quiesce_receipt_rejected"
+            )
+        self._post_quiesce_receipt = dict(raw)
+
     def close(
         self,
         *,
@@ -575,6 +857,14 @@ class CapturedPaperServiceSupervisor:
             except BaseException as exc:
                 failures.append(exc)
         self._started_workers.clear()
+        for managed in reversed(self._started_pre_authority_workers):
+            try:
+                managed.worker.close(
+                    join_timeout_seconds=float(join_timeout_seconds)
+                )
+            except BaseException as exc:
+                failures.append(exc)
+        self._started_pre_authority_workers.clear()
         deadline = self._monotonic() + float(quiesce_timeout_seconds)
         try:
             self._close_runtime_with_retry(deadline)
@@ -584,6 +874,16 @@ class CapturedPaperServiceSupervisor:
             self._close_host_with_retry(deadline)
         except BaseException as exc:
             failures.append(exc)
+        # Strategy-clone deactivation is permitted only after the live loop,
+        # every managed worker, the dispatch runtime, and the capture host are
+        # quiesced.  It still runs while the process-wide PostgreSQL exclusion
+        # fence is held; a failed/ambiguous rollback therefore retains that
+        # fence and cannot race another PAPER generation.
+        if not failures:
+            try:
+                self._consume_post_quiesce_receipt()
+            except BaseException as exc:
+                failures.append(exc)
         # The process-wide exclusion fence is released last.  If any earlier
         # shutdown stage is unconfirmed, retain it so a generic Alpaca arm path
         # cannot race a partially quiesced captured runtime.  Process exit (or
@@ -623,7 +923,7 @@ class CapturedPaperServiceSupervisor:
     def health(self) -> Mapping[str, Any]:
         worker_health = {
             managed.name: _health_mapping(managed.worker.health())
-            for managed in self._workers
+            for managed in (*self._pre_authority_workers, *self._workers)
         }
         return MappingProxyType(
             {
@@ -649,8 +949,29 @@ class CapturedPaperServiceSupervisor:
                 "active_start_authority_consumed": (
                     self._active_start_authority_receipt is not None
                 ),
+                "active_start_authority_sha256": (
+                    self._active_start_authority_receipt.get("authority_sha256")
+                    if self._active_start_authority_receipt is not None
+                    else None
+                ),
+                "active_start_evidence_artifact_sha256": (
+                    _sha256_json(dict(self._active_start_authority_receipt))
+                    if self._active_start_authority_receipt is not None
+                    else None
+                ),
+                "post_quiesce_completed": (
+                    self._post_quiesce_receipt is not None
+                ),
+                "post_quiesce_receipt_sha256": (
+                    self._post_quiesce_receipt.get("receipt_sha256")
+                    if self._post_quiesce_receipt is not None
+                    else None
+                ),
                 "live_loop_started": self._live_loop_started,
                 "managed_workers": worker_health,
+                "active_pre_authority_worker_names": [
+                    managed.name for managed in self._pre_authority_workers
+                ],
                 "host": dict(self._host.health()),
                 "live_cash_authorized": False,
                 "real_money_authorized": False,
