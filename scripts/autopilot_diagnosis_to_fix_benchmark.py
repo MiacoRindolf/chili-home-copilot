@@ -2925,6 +2925,77 @@ def _incomplete_review_budget_deferral(
     }
 
 
+def _observed_model_latency_sec(
+    calls: Sequence[Mapping[str, Any]],
+    model: str,
+) -> float | None:
+    """Conservative (max) observed successful wall time for ``model``, in seconds.
+
+    Repair scheduling uses this so a slow local reasoner re-plan never launches when
+    the remaining budget cannot also fund the edit. Max (not mean) is intentional: it
+    is safer to over-estimate the reasoner and route to the faster model or stop than
+    to start a call that clamps to a doomed timeout and wastes the remaining budget.
+    Returns None when the model has no successful observation yet.
+    """
+    target = str(model)
+    observed: list[float] = []
+    for entry in calls:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("model") or "") != target or not entry.get("ok"):
+            continue
+        wall = entry.get("wall_ms")
+        if not isinstance(wall, (int, float)):
+            wall = entry.get("latency_ms")
+        if isinstance(wall, (int, float)) and wall > 0:
+            observed.append(float(wall) / 1000.0)
+    return max(observed) if observed else None
+
+
+def _budget_aware_repair_plan_schedule(
+    calls: Sequence[Mapping[str, Any]],
+    timeout: float,
+    *,
+    reasoning_model: str,
+    editor_model: str,
+) -> dict[str, Any]:
+    """Pick a repair-plan model that still leaves room for the edit under budget pressure.
+
+    The re-plan and the edit are two separate local calls that share one per-case model
+    budget. When an earlier slow diagnosis has drained most of that budget, issuing the
+    plan against the slower reasoning model clamps its timeout and the call dies without
+    ever reaching the editor, wasting the remainder. This scheduler is adaptive: it reads
+    the *observed* latency of each model from the call ledger (no fixed magic latency) and
+    prefers, in order, the reasoning model, the faster editor model, then a deterministic
+    stop. It is a no-op with ample budget or before any model has been observed.
+
+    Returns ``{"model", "num_predict", "stop", "detail"}``.
+    """
+    editor_reserve = min(max(0.0, float(timeout)), REPAIR_EDITOR_RESERVE_SEC)
+    remaining = _remaining_local_model_budget_sec(calls)
+    reasoner = reasoning_model or editor_model
+    detail: dict[str, Any] = {
+        "remaining_sec": None if remaining is None else round(remaining, 3),
+        "editor_reserve_sec": round(editor_reserve, 3),
+    }
+    if remaining is None:
+        return {"model": reasoner, "num_predict": 700, "stop": False,
+                "detail": {**detail, "route": "reasoner_unbounded_budget"}}
+    reasoner_latency = _observed_model_latency_sec(calls, reasoner)
+    editor_latency = _observed_model_latency_sec(calls, editor_model)
+    detail["reasoner_latency_sec"] = reasoner_latency
+    detail["editor_latency_sec"] = editor_latency
+    if reasoner_latency is None or remaining >= reasoner_latency + editor_reserve:
+        return {"model": reasoner, "num_predict": 700, "stop": False,
+                "detail": {**detail, "route": "reasoner"}}
+    fast_estimate = editor_latency if editor_latency is not None else reasoner_latency
+    if remaining >= fast_estimate + editor_reserve:
+        return {"model": editor_model, "num_predict": 500, "stop": False,
+                "detail": {**detail, "route": "editor_fallback"}}
+    return {"model": editor_model, "num_predict": 500, "stop": True,
+            "detail": {**detail, "route": "budget_stop"}}
+
+
 def _diagnostic_json_call(
     model: str,
     stage: str,
@@ -4719,8 +4790,29 @@ def _repair_after_failure(
         f"Current candidate contents:\n{context}"
         f"{refinement_instruction}"
     )
+    plan_schedule = _budget_aware_repair_plan_schedule(
+        calls,
+        timeout,
+        reasoning_model=planning_model or model,
+        editor_model=model,
+    )
+    if plan_schedule["stop"]:
+        return {
+            "round": round_index,
+            "plan": {},
+            "selected_file": "",
+            "selected_files": [],
+            "ownership_augmented_files": [],
+            "feedback_context_files": [],
+            "patch_applied": False,
+            "repair_plan_budget_stop": plan_schedule["detail"],
+            "warnings": [
+                "Skipped repair re-plan: the remaining local model budget could not fund a plan and an "
+                "edit, so it stopped deterministically instead of clamping a plan call into a timeout."
+            ],
+        }
     plan_text = _local_call(
-        planning_model or model,
+        plan_schedule["model"],
         [
             {"role": "system", "content": "You are CHILI's local test-repair architect. Return JSON only."},
             {"role": "user", "content": repair_prompt},
@@ -4728,7 +4820,7 @@ def _repair_after_failure(
         stage=f"repair_plan_{round_index}",
         calls=calls,
         timeout=timeout,
-        num_predict=700,
+        num_predict=plan_schedule["num_predict"],
         json_mode=True,
     )
     plan = code_agent._parse_plan_json(plan_text) or {}

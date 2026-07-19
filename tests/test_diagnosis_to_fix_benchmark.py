@@ -3032,6 +3032,139 @@ def test_repeated_plan_fingerprint_does_not_fan_out_edits(tmp_path, monkeypatch)
     assert edit_calls == 1
 
 
+def test_observed_model_latency_uses_conservative_max_of_successful_calls():
+    ledger = [
+        {"model": "qwen3:8b", "ok": True, "wall_ms": 96000},
+        {"model": "qwen3:8b", "ok": True, "wall_ms": 132000},
+        {"model": "qwen3:8b", "ok": False, "wall_ms": 500000},  # failed: ignored
+        {"model": "qwen2.5-coder:7b", "ok": True, "latency_ms": 47000},
+    ]
+    assert benchmark._observed_model_latency_sec(ledger, "qwen3:8b") == 132.0
+    assert benchmark._observed_model_latency_sec(ledger, "qwen2.5-coder:7b") == 47.0
+    assert benchmark._observed_model_latency_sec(ledger, "never-seen") is None
+
+
+def test_budget_aware_repair_plan_prefers_reasoner_with_ample_budget():
+    calls = benchmark._ModelCallLedger(model_time_budget=690.0)
+    schedule = benchmark._budget_aware_repair_plan_schedule(
+        calls,
+        180.0,
+        reasoning_model="qwen3:8b",
+        editor_model="qwen2.5-coder:7b",
+    )
+    assert schedule["model"] == "qwen3:8b"
+    assert schedule["stop"] is False
+    assert schedule["num_predict"] == 700
+
+
+def test_budget_aware_repair_plan_falls_back_to_editor_model_under_pressure():
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 322.0  # remaining ~158s
+    calls.append({"model": "qwen3:8b", "ok": True, "wall_ms": 132000})
+    calls.append({"model": "qwen2.5-coder:7b", "ok": True, "wall_ms": 47000})
+    schedule = benchmark._budget_aware_repair_plan_schedule(
+        calls,
+        180.0,
+        reasoning_model="qwen3:8b",
+        editor_model="qwen2.5-coder:7b",
+    )
+    # 158 < 132 + 60 (reasoner starves the edit) but 158 >= 47 + 60 (fast model fits).
+    assert schedule["model"] == "qwen2.5-coder:7b"
+    assert schedule["stop"] is False
+    assert schedule["detail"]["route"] == "editor_fallback"
+
+
+def test_budget_aware_repair_plan_stops_when_neither_plan_plus_edit_fits():
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 440.0  # remaining ~40s
+    calls.append({"model": "qwen3:8b", "ok": True, "wall_ms": 132000})
+    calls.append({"model": "qwen2.5-coder:7b", "ok": True, "wall_ms": 47000})
+    schedule = benchmark._budget_aware_repair_plan_schedule(
+        calls,
+        180.0,
+        reasoning_model="qwen3:8b",
+        editor_model="qwen2.5-coder:7b",
+    )
+    assert schedule["stop"] is True
+    assert schedule["detail"]["route"] == "budget_stop"
+
+
+def test_repair_reroutes_plan_to_editor_model_when_reasoner_would_starve_edit(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    used: list[dict[str, object]] = []
+
+    def fake_call(model, _messages, *, stage, calls, timeout, num_predict, json_mode):
+        used.append({"model": model, "stage": stage, "num_predict": num_predict})
+        return ""  # empty plan short-circuits right after the (routed) plan call
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 322.0  # remaining ~158s
+    calls.append({"model": "qwen3:8b", "ok": True, "wall_ms": 132000})
+    calls.append({"model": "qwen2.5-coder:7b", "ok": True, "wall_ms": 47000})
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {"prompt": "Repair the owner.", "candidate_paths": ["owner.py"], "max_files": 1},
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "tests/test_owner.py::test_value FAILED",
+        "qwen2.5-coder:7b",
+        calls,
+        180.0,
+        1,
+        feedback_context="from owner import VALUE",
+        contract_evidence={"failed_ids": ["tests/test_owner.py::test_value"]},
+        planning_model="qwen3:8b",
+        future_round_available=True,
+    )
+    assert used and used[0]["stage"] == "repair_plan_1"
+    assert used[0]["model"] == "qwen2.5-coder:7b"  # routed off the slow reasoner
+    assert used[0]["num_predict"] == 500
+    assert result["patch_applied"] is False
+
+
+def test_repair_stops_deterministically_when_budget_cannot_fund_plan_and_edit(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def forbidden_call(*_args, **_kwargs):
+        pytest.fail("no repair-plan call may run once budget cannot fund a plan and an edit")
+
+    monkeypatch.setattr(benchmark, "_local_call", forbidden_call)
+    calls = benchmark._ModelCallLedger(model_time_budget=480.0)
+    calls.model_time_used = 445.0  # remaining ~35s
+    calls.append({"model": "qwen3:8b", "ok": True, "wall_ms": 132000})
+    calls.append({"model": "qwen2.5-coder:7b", "ok": True, "wall_ms": 47000})
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {"prompt": "Repair the owner.", "candidate_paths": ["owner.py"], "max_files": 1},
+        {"report": {"conclusion": {"dimension": "code"}}},
+        {},
+        "tests/test_owner.py::test_value FAILED",
+        "qwen2.5-coder:7b",
+        calls,
+        180.0,
+        1,
+        feedback_context="from owner import VALUE",
+        contract_evidence={"failed_ids": ["tests/test_owner.py::test_value"]},
+        planning_model="qwen3:8b",
+        future_round_available=True,
+    )
+    assert result["patch_applied"] is False
+    assert result["repair_plan_budget_stop"]["route"] == "budget_stop"
+
+
 def test_contract_owner_plan_edits_mapped_owner_instead_of_distractor(
     tmp_path,
     monkeypatch,
