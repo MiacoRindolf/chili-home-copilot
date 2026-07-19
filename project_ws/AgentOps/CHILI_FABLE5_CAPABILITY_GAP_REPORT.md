@@ -783,6 +783,24 @@ draft left only 26.9 seconds and the final local edit timed out. This confirms t
 isolating repair-budget scheduling as the next bottleneck. Full details:
 `project_ws/AgentOps/FABLE5_HISTORICAL_TRADING_SCOPE_LANE_PILOT_CONTRACT_BOUND_ATTEMPT_RECEIPT.md`.
 
+A later budget/health-aware scheduling pass then addressed the reliability half of that
+bottleneck generically. Commit `542d9535` schedules the repair re-plan within the shared per-case
+budget (route to the faster editor model, or stop deterministically, rather than clamp a doomed
+reasoner call), and commit `0f9e8d67` falls back to the warm editor model once the reasoner has
+timed out. On the 8 GB measurement host the dual-model configuration is unreliable: `qwen3:8b`
+(reasoner) and `qwen2.5-coder:7b` (editor) cannot co-reside, so every diagnosis↔edit switch cold-
+loads (~18 s), and the ~30 tok/s thinking reasoner lands at the ~135 s clamped timeout. Without a
+fallback, the pipeline collapses to an all-timeout no-op (25/100, zero stages run). With the two
+commits the reasoner timeout is detected and the plan/edit/repair stages reliably run on the warm
+editor model — verified across two mechanism families (scope-lane ×2, queue-priority ×1) with
+deterministic budget stops. This is a reproducible reliability improvement; the resulting score
+remains stochastic (25–55) and bounded by local 7B editor synthesis, sealed-final stayed 0/1 in
+every run, and the swap-free single-model run reached 55/100 with a retained correct-owner patch
+and all repair-feedback tests green but still 2/6 failing sealed-final tests. Focused validation
+passed 388 tests, zero premium calls. It does not change the untouched 40/100 scope-lane result or
+prove Fable 5 parity. Full details:
+`project_ws/AgentOps/FABLE5_DIAGNOSTIC_REASONING_BUDGET_HEALTH_SCHEDULING_RECEIPT.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
