@@ -1686,11 +1686,11 @@ def _task_enabled_from_xml(raw: bytes) -> bool:
 def _normalize_schtasks_xml_output(raw: bytes) -> bytes:
     """Repair only the observed schtasks pipe encoding/declaration mismatch.
 
-    On Windows, ``schtasks /Query /XML`` can write single-byte ASCII XML to a
-    pipe while retaining ``encoding="UTF-16"`` in the XML declaration.  Those
-    bytes are not parseable or safely restorable as declared.  When (and only
-    when) the entire payload is strict ASCII and declares UTF-16, re-encode it
-    as BOM-bearing UTF-16.  Non-ASCII ambiguous output fails closed instead of
+    On Windows, ``schtasks /Query /XML`` can write UTF-8 XML to a pipe while
+    retaining ``encoding="UTF-16"`` in the XML declaration.  Those bytes are
+    not parseable or safely restorable as declared.  When (and only when) the
+    entire payload is strict UTF-8 and declares UTF-16, re-encode it as
+    BOM-bearing UTF-16.  Other single-byte output fails closed instead of
     guessing a console code page.  Shared by the read-only collector and the
     cutover backend so both authorities observe identical task bytes.
     """
@@ -1704,7 +1704,7 @@ def _normalize_schtasks_xml_output(raw: bytes) -> bytes:
     declaration = raw[:256]
     if re.search(br"encoding\s*=\s*['\"]UTF-16['\"]", declaration, re.I):
         try:
-            text = raw.decode("ascii", errors="strict")
+            text = raw.decode("utf-8-sig", errors="strict")
         except UnicodeDecodeError as exc:
             raise CapturedPaperHostCutoverError(
                 "TASK_XML_ENCODING_UNINSPECTABLE",

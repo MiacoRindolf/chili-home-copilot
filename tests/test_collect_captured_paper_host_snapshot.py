@@ -64,6 +64,22 @@ def test_schtasks_ascii_utf16_declaration_is_reencoded_without_guessing() -> Non
     assert collector._normalize_schtasks_xml_output(normalized) == normalized
 
 
+def test_schtasks_utf8_non_ascii_utf16_declaration_is_reencoded_exactly() -> None:
+    arguments = "\u201cbackground update\u201d"
+    observed = _task_xml(
+        command=r"C:\Windows\wscript.exe", arguments=arguments
+    ).replace(b'encoding="UTF-8"', b'encoding="UTF-16"')
+
+    normalized = collector._normalize_schtasks_xml_output(observed)
+
+    assert normalized.startswith(b"\xff\xfe")
+    assert cutover._task_exec_from_xml(normalized) == (
+        r"C:\Windows\wscript.exe",
+        arguments,
+    )
+    assert collector._normalize_schtasks_xml_output(normalized) == normalized
+
+
 def test_backend_and_collector_normalize_identical_schtasks_xml(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
