@@ -731,6 +731,10 @@ def _captured_paper_external_import_roots(
     # (naranasan live: "unsealed import rejected: ta" sa no-order boot).
     external: set[str] = {
         "alpaca",
+        # The capsule builder imports Requirement inside a function, which
+        # the module-import AST walk intentionally excludes.  It still must
+        # be present in the sealed -I/-S runtime that builds the next capsule.
+        "packaging",
         "pandas",
         "psutil",
         "psycopg2",
