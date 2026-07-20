@@ -1624,12 +1624,13 @@ def _validate_no_order_launcher_authority(
         "projection_python_sha256": projection.get("python_executable_sha256")
         == request.python_executable_sha256,
         "projection_dependency_root": _same_path(
-            projection.get("python_dependency_root"), request.python_dependency_root
+            projection.get("python_dependency_root"),
+            Path(str(cutover.get("python_dependency_root") or "")),
         ),
         "projection_dependency_identity": projection.get(
             "python_dependency_root_identity_sha256"
         )
-        == request.python_dependency_root_identity_sha256,
+        == cutover.get("python_dependency_root_identity_sha256"),
         "projection_allowed_read_roots": tuple(
             sorted(
                 os.path.normcase(str(root))

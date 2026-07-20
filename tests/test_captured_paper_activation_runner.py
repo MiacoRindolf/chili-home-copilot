@@ -265,18 +265,19 @@ class FakeExecutor:
 
     def _prepare_chain_documents(self) -> None:
         self.receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        dependency_root = self.request.python_dependency_root
-        dependency_identity = contract.python_dependency_root_identity_sha256(
-            dependency_root=dependency_root,
-            python_executable=self.request.python_executable,
-            python_executable_sha256=self.request.python_executable_sha256,
-        )
         source_paths = {
             role: self.request.candidate_root / relative
             for role, relative in runner._LAUNCHER_SOURCE_PATHS.items()
         }
         source_hashes = {role: _sha(path.read_bytes()) for role, path in source_paths.items()}
         staged_root = self.request.artifact_root / "activation" / GENERATION
+        dependency_root = staged_root / "dependencies" / "site-packages"
+        dependency_root.mkdir(parents=True, exist_ok=True)
+        dependency_identity = contract.python_dependency_root_identity_sha256(
+            dependency_root=dependency_root,
+            python_executable=self.request.python_executable,
+            python_executable_sha256=self.request.python_executable_sha256,
+        )
         staged_paths: dict[str, Path] = {}
         for role, suffix in (
             ("activation_launcher", ".ps1"),
@@ -349,6 +350,8 @@ class FakeExecutor:
                 "candidate_root": str(self.request.candidate_root),
                 "launcher_arguments_path": str(launcher_path),
                 "launcher_arguments_sha256": launcher_sha,
+                "python_dependency_root": str(dependency_root),
+                "python_dependency_root_identity_sha256": dependency_identity,
             },
         }
         preactivation_document["activation_manifest_sha256"] = contract.sha256_json(
@@ -1156,6 +1159,24 @@ def test_validate_only_reaches_real_validate_boundary_but_never_apply(
     tmp_path: Path,
 ) -> None:
     executor = FakeExecutor(request_fixture.request, tmp_path)
+    preactivation = json.loads(
+        executor.preactivation_path.read_text(encoding="utf-8")
+    )
+    launcher = json.loads(
+        Path(preactivation["cutover"]["launcher_arguments_path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    no_order_projection = launcher["invocations"]["NoOrderSmoke"]["projection"]
+    assert Path(no_order_projection["python_dependency_root"]).resolve() != (
+        request_fixture.request.python_dependency_root
+    )
+    assert Path(preactivation["cutover"]["python_dependency_root"]).resolve() == Path(
+        no_order_projection["python_dependency_root"]
+    ).resolve()
+    assert preactivation["cutover"]["python_dependency_root_identity_sha256"] == (
+        no_order_projection["python_dependency_root_identity_sha256"]
+    )
 
     result = _run(request_fixture.request, executor)
 
