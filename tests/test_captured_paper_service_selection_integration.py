@@ -224,6 +224,22 @@ class _Recorded:
         self.kwargs = kwargs
 
 
+class _FillCapture(_Recorded):
+    def complete_exit_post_commit(self, _request):
+        return {"ok": True}
+
+    def recover_exit_owner_inventory_bounded(self, **_kwargs):
+        body = {
+            "exit_owner_inventory_resolved": True,
+            "exit_owner_recovery_bounded": True,
+            "exit_owner_recovery_exhausted": False,
+            "paper_order_submission_authorized": False,
+            "live_cash_authorized": False,
+            "real_money_authorized": False,
+        }
+        return {**body, "receipt_sha256": sha256_json(body)}
+
+
 class _RuntimeOwner(_Recorded):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -292,7 +308,8 @@ def _fake_modules(*, fundamentals_calls: list[str]):
             SqlAlchemyCapturedPaperPositiveAcceptanceRecorder=_Recorded
         ),
         "captured_paper_fill_capture": SimpleNamespace(
-            SqlAlchemyCapturedPaperFillCapture=_Recorded
+            SqlAlchemyCapturedPaperFillCapture=_FillCapture,
+            CapturedPaperExitOwnerWorker=_Recorded,
         ),
         "captured_paper_financial_breaker": SimpleNamespace(
             SqlAlchemyCapturedPaperFinancialBreakerIssuer=_Recorded
@@ -339,6 +356,11 @@ def _fake_modules(*, fundamentals_calls: list[str]):
         ),
         "captured_paper_service_fence": SimpleNamespace(
             CapturedPaperServiceFence=_Fence,
+        ),
+        "live_runner": SimpleNamespace(
+            build_captured_paper_exit_transport_post_commit_handler=(
+                lambda **_kwargs: (lambda _request: {"ok": True})
+            ),
         ),
         "live_runner_loop": SimpleNamespace(
             start_captured_paper_live_runner_loop=lambda **_kwargs: True,
