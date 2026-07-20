@@ -1869,6 +1869,7 @@ def run_activation(
         _install_sealed_dependency_root(request)
         env = _install_paper_environment(request, pycache_root=pycache_root)
         recorder = _StageRecorder(run_root)
+        journal_root = request.artifact_root / "cutover-journal"
         recovery_read_roots: list[str] = []
         for root in request.allowed_read_roots:
             recovery_read_roots.extend(("--allow-read-root", root))
@@ -1882,7 +1883,7 @@ def run_activation(
                 "--mode",
                 "RecoverOnly",
                 "--journal-root",
-                str(request.artifact_root / "cutover-journal"),
+                str(journal_root),
                 *recovery_read_roots,
             ],
             timeout=request.timeouts.rollback,
@@ -1911,6 +1912,17 @@ def run_activation(
             raise CapturedPaperActivationRunnerError(
                 "RECOVERY_RESULT_INVALID", "cutover recovery returned an unknown state"
             )
+        _reject_reparse_chain(journal_root)
+        try:
+            journal_root.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise CapturedPaperActivationRunnerError(
+                "PATH_UNAVAILABLE",
+                "host cutover journal root could not be prepared",
+            ) from exc
+        journal_root = _strict_directory(
+            str(journal_root), field="host_cutover_journal_root"
+        )
         if _paper_task_exists(request, executor, env):
             raise CapturedPaperActivationRunnerError(
                 "EXISTING_PAPER_TASK_REQUIRES_RECONCILIATION",
@@ -2114,7 +2126,7 @@ def run_activation(
             "--candidate-action",
             str(action),
             "--journal-root",
-            str(request.artifact_root / "cutover-journal"),
+            str(journal_root),
         ]
         validate = _run_stage(
             name="validate-only",

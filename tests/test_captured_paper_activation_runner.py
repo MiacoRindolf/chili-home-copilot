@@ -590,6 +590,7 @@ class FakeExecutor:
                     0, '{"verdict":"NO_RECOVERY_REQUIRED"}\n', ""
                 )
             if mode == "ValidateOnly":
+                assert (self.request.artifact_root / "cutover-journal").is_dir()
                 return runner.CommandResult(
                     0, '{"verdict":"VALIDATED_NO_HOST_MUTATION"}\n', ""
                 )
@@ -1178,6 +1179,7 @@ def test_validate_only_reaches_real_validate_boundary_but_never_apply(
         no_order_projection["python_dependency_root_identity_sha256"]
     )
 
+    assert not (request_fixture.request.artifact_root / "cutover-journal").exists()
     result = _run(request_fixture.request, executor)
 
     assert result == {
@@ -1193,6 +1195,7 @@ def test_validate_only_reaches_real_validate_boundary_but_never_apply(
         "paper_started": False,
     }
     assert executor.modes == ["RecoverOnly", "ValidateOnly"]
+    assert (request_fixture.request.artifact_root / "cutover-journal").is_dir()
     assert executor.task_queries == 1
     chain_argv = next(
         argv
