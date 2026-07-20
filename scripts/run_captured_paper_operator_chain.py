@@ -835,12 +835,22 @@ def run_operator_chain(
             "BRIDGE_CONFIGURATION_INVALID", "bridge configuration is incomplete"
         )
 
-    install_captured_paper_runtime_environment(
+    if "app.config" in sys.modules:
+        raise CapturedPaperOperatorChainError(
+            "APPLICATION_IMPORTED_TOO_EARLY",
+            "app.config was loaded before the sealed PAPER environment install",
+        )
+    preinstalled_runtime_receipt = install_captured_paper_runtime_environment(
         activation_request.runtime_env_path,
         expected_env_sha256=activation_request.runtime_env_sha256,
         expected_account_id=activation_request.expected_account_id,
         first_dip_policy_mode="candidate",
     )
+    if "app.config" in sys.modules:
+        raise CapturedPaperOperatorChainError(
+            "APPLICATION_IMPORTED_DURING_INSTALL",
+            "app.config loaded before the sealed PAPER environment install completed",
+        )
     account, account_query, requested_at, account_available_at = _read_exact_paper_account(
         expected_account_id=activation_request.expected_account_id
     )
@@ -993,7 +1003,10 @@ def run_operator_chain(
     _publish_once(plan_path, plan_raw)
 
     configuration = operator_flow.configuration_from_plan(plan)
-    composition = operator_flow.build_live_operator_composition(configuration)
+    composition = operator_flow.build_live_operator_composition(
+        configuration,
+        preinstalled_runtime_receipt=preinstalled_runtime_receipt,
+    )
     result = operator_flow.run_captured_paper_operator_flow(composition)
     document = result.to_dict()
     document["activation_runner_request_sha256"] = activation_request.request_sha256

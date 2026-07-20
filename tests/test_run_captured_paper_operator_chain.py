@@ -943,19 +943,49 @@ def test_candidate_preselection_rejects_execution_surface_attestation(
     assert not tuple((artifact_root / "capture-preselection").glob("*"))
 
 
+def test_full_operator_chain_rejects_application_loaded_before_runtime_install(
+    monkeypatch: pytest.MonkeyPatch,
+    chain_fixture: ChainFixture,
+) -> None:
+    activation, _path, _digest = chain_fixture.publish()
+    monkeypatch.setitem(chain.sys.modules, "app.config", ModuleType("app.config"))
+    installed = False
+
+    def fail_if_installed(*_args, **_kwargs):
+        nonlocal installed
+        installed = True
+        raise AssertionError("runtime installer must not run")
+
+    monkeypatch.setattr(
+        chain, "install_captured_paper_runtime_environment", fail_if_installed
+    )
+
+    with pytest.raises(
+        chain.CapturedPaperOperatorChainError,
+        match="APPLICATION_IMPORTED_TOO_EARLY",
+    ):
+        chain.run_operator_chain(
+            activation_request=activation,
+            chain_document=chain_fixture.document,
+        )
+    assert installed is False
+
+
 def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash_bound(
     monkeypatch: pytest.MonkeyPatch,
     chain_fixture: ChainFixture,
 ) -> None:
     activation, _path, _digest = chain_fixture.publish()
+    monkeypatch.delitem(chain.sys.modules, "app.config", raising=False)
     calls: list[str] = []
+    runtime_receipt = object()
     manifest = activation.artifact_root / "bootstrap" / "artifacts" / "manifest.json"
     manifest_sha = _write(manifest, _canonical({"paper": True}))
 
     monkeypatch.setattr(
         chain,
         "install_captured_paper_runtime_environment",
-        lambda *_a, **_k: calls.append("install-runtime"),
+        lambda *_a, **_k: calls.append("install-runtime") or runtime_receipt,
     )
     monkeypatch.setattr(
         chain,
@@ -1070,10 +1100,16 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
 
     composition = object()
     monkeypatch.setattr(chain.operator_flow, "configuration_from_plan", fake_configuration)
+    def fake_build_composition(
+        _configuration: object, *, preinstalled_runtime_receipt: object
+    ) -> object:
+        assert preinstalled_runtime_receipt is runtime_receipt
+        return composition
+
     monkeypatch.setattr(
         chain.operator_flow,
         "build_live_operator_composition",
-        lambda _configuration: composition,
+        fake_build_composition,
     )
 
     class Result:

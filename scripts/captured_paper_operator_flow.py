@@ -880,6 +880,7 @@ def _measure_capture_pressure(
 def build_live_operator_composition(
     configuration: CapturedPaperOperatorConfiguration,
     *,
+    preinstalled_runtime_receipt: CapturedPaperRuntimeEnvironmentReceipt | None = None,
     environ: MutableMapping[str, str] | None = None,
     command_runner: Callable[..., Any] = subprocess.run,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -888,10 +889,20 @@ def build_live_operator_composition(
     """Install exact PAPER runtime objects; perform no external read yet."""
 
     config = _validated_configuration(configuration)
-    if "app.config" in sys.modules:
+    application_was_imported = "app.config" in sys.modules
+    if application_was_imported and type(preinstalled_runtime_receipt) is not (
+        CapturedPaperRuntimeEnvironmentReceipt
+    ):
         raise CapturedPaperOperatorFlowError(
             "APPLICATION_IMPORTED_TOO_EARLY",
-            "the PAPER environment must be installed before app.config import",
+            "app.config import lacks an exact preinstalled PAPER receipt",
+        )
+    if preinstalled_runtime_receipt is not None and type(
+        preinstalled_runtime_receipt
+    ) is not CapturedPaperRuntimeEnvironmentReceipt:
+        raise CapturedPaperOperatorFlowError(
+            "RUNTIME_ENVIRONMENT_RECEIPT_INVALID",
+            "the preinstalled PAPER environment receipt is malformed",
         )
     if environ is not None and environ is not os.environ:
         raise CapturedPaperOperatorFlowError(
@@ -907,14 +918,64 @@ def build_live_operator_composition(
             first_dip_policy_mode="candidate",
             environ=target,
         )
-        from app.config import settings
+        if preinstalled_runtime_receipt is not None:
+            initial_authority = {
+                "schema_version": preinstalled_runtime_receipt.schema_version,
+                "source_path": preinstalled_runtime_receipt.source_path,
+                "source_sha256": preinstalled_runtime_receipt.source_sha256,
+                "expected_account_id": (
+                    preinstalled_runtime_receipt.expected_account_id
+                ),
+                "first_dip_policy_mode": (
+                    preinstalled_runtime_receipt.first_dip_policy_mode
+                ),
+                "effective_config": dict(
+                    preinstalled_runtime_receipt.effective_config
+                ),
+                "secret_fingerprints": dict(
+                    preinstalled_runtime_receipt.secret_fingerprints
+                ),
+                "configuration_sha256": (
+                    preinstalled_runtime_receipt.configuration_sha256
+                ),
+            }
+            refreshed_authority = {
+                "schema_version": runtime_receipt.schema_version,
+                "source_path": runtime_receipt.source_path,
+                "source_sha256": runtime_receipt.source_sha256,
+                "expected_account_id": runtime_receipt.expected_account_id,
+                "first_dip_policy_mode": runtime_receipt.first_dip_policy_mode,
+                "effective_config": dict(runtime_receipt.effective_config),
+                "secret_fingerprints": dict(runtime_receipt.secret_fingerprints),
+                "configuration_sha256": runtime_receipt.configuration_sha256,
+            }
+            # removed_forbidden_keys is sanitation history, not authority.  A
+            # second idempotent install normally has nothing left to remove.
+            if initial_authority != refreshed_authority:
+                raise CapturedPaperOperatorFlowError(
+                    "RUNTIME_ENVIRONMENT_RECEIPT_MISMATCH",
+                    "the preinstalled PAPER environment authority changed",
+                )
+
+        from app import config as app_config
+
+        settings = app_config.settings
+        if application_was_imported:
+            fresh_settings = app_config.load_process_settings()
+            cached_dump = settings.model_dump(mode="python")
+            fresh_dump = fresh_settings.model_dump(mode="python")
+            if type(settings) is not type(fresh_settings) or cached_dump != fresh_dump:
+                raise CapturedPaperOperatorFlowError(
+                    "CACHED_APPLICATION_SETTINGS_MISMATCH",
+                    "cached application settings differ from the sealed PAPER environment",
+                )
+        settings_projection = validate_installed_captured_paper_settings(
+            settings, runtime_receipt, environ=target
+        )
         from app.db import engine
         from app import migrations
         from app.services.trading.venue.alpaca_spot import AlpacaSpotAdapter
 
-        settings_projection = validate_installed_captured_paper_settings(
-            settings, runtime_receipt, environ=target
-        )
         adapter = AlpacaSpotAdapter()
     except CapturedPaperOperatorFlowError:
         raise

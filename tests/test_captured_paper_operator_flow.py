@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+import sys
+from types import MappingProxyType, ModuleType, SimpleNamespace
 
 import pytest
 
@@ -148,6 +150,189 @@ def settings_projection(receipt: CapturedPaperRuntimeEnvironmentReceipt):
         "cash_broker_environment_keys_present": False,
     }
     return {**body, "settings_projection_sha256": readiness.sha256_json(body)}
+
+
+class _FakeSettings:
+    def __init__(self, values: Mapping[str, object]) -> None:
+        self._values = dict(values)
+
+    def model_dump(self, *, mode: str) -> dict[str, object]:
+        assert mode == "python"
+        return dict(self._values)
+
+
+def _install_fake_application_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cached_settings: _FakeSettings,
+    fresh_settings: _FakeSettings,
+    adapter_type: type,
+) -> None:
+    app_module = ModuleType("app")
+    app_module.__path__ = []  # type: ignore[attr-defined]
+    config_module = ModuleType("app.config")
+    config_module.settings = cached_settings  # type: ignore[attr-defined]
+    config_module.load_process_settings = lambda: fresh_settings  # type: ignore[attr-defined]
+    db_module = ModuleType("app.db")
+    db_module.engine = object()  # type: ignore[attr-defined]
+    migrations_module = ModuleType("app.migrations")
+    services_module = ModuleType("app.services")
+    services_module.__path__ = []  # type: ignore[attr-defined]
+    trading_module = ModuleType("app.services.trading")
+    trading_module.__path__ = []  # type: ignore[attr-defined]
+    venue_module = ModuleType("app.services.trading.venue")
+    venue_module.__path__ = []  # type: ignore[attr-defined]
+    alpaca_module = ModuleType("app.services.trading.venue.alpaca_spot")
+    alpaca_module.AlpacaSpotAdapter = adapter_type  # type: ignore[attr-defined]
+    app_module.config = config_module  # type: ignore[attr-defined]
+    app_module.db = db_module  # type: ignore[attr-defined]
+    app_module.migrations = migrations_module  # type: ignore[attr-defined]
+    app_module.services = services_module  # type: ignore[attr-defined]
+    services_module.trading = trading_module  # type: ignore[attr-defined]
+    trading_module.venue = venue_module  # type: ignore[attr-defined]
+    venue_module.alpaca_spot = alpaca_module  # type: ignore[attr-defined]
+    for name, module in {
+        "app": app_module,
+        "app.config": config_module,
+        "app.db": db_module,
+        "app.migrations": migrations_module,
+        "app.services": services_module,
+        "app.services.trading": trading_module,
+        "app.services.trading.venue": venue_module,
+        "app.services.trading.venue.alpaca_spot": alpaca_module,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def test_live_composition_rejects_cached_application_without_preinstall_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = configuration(tmp_path)
+    monkeypatch.setitem(sys.modules, "app.config", ModuleType("app.config"))
+    called = False
+
+    def fail_if_installed(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("runtime installer must not run")
+
+    monkeypatch.setattr(
+        operator, "install_captured_paper_runtime_environment", fail_if_installed
+    )
+
+    with pytest.raises(
+        operator.CapturedPaperOperatorFlowError,
+        match="APPLICATION_IMPORTED_TOO_EARLY",
+    ):
+        operator.build_live_operator_composition(config)
+    assert called is False
+
+
+def test_live_composition_rejects_mismatched_preinstall_receipt_before_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = configuration(tmp_path)
+    initial = runtime_receipt(config)
+    mismatched = replace(initial, source_sha256="f" * 64)
+    monkeypatch.setitem(sys.modules, "app.config", ModuleType("app.config"))
+    monkeypatch.setattr(
+        operator,
+        "install_captured_paper_runtime_environment",
+        lambda *_args, **_kwargs: initial,
+    )
+
+    with pytest.raises(
+        operator.CapturedPaperOperatorFlowError,
+        match="RUNTIME_ENVIRONMENT_RECEIPT_MISMATCH",
+    ):
+        operator.build_live_operator_composition(
+            config, preinstalled_runtime_receipt=mismatched
+        )
+
+
+def test_live_composition_accepts_exact_preinstall_and_revalidates_cached_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = configuration(tmp_path)
+    monkeypatch.setenv(
+        "TEST_DATABASE_URL", "postgresql://chili:chili@127.0.0.1:55432/chili_test"
+    )
+    initial = runtime_receipt(config)
+    refreshed = replace(initial, removed_forbidden_keys=())
+    cached_settings = _FakeSettings({"database_url": "postgresql://paper"})
+    fresh_settings = _FakeSettings({"database_url": "postgresql://paper"})
+    adapters: list[object] = []
+
+    class Adapter:
+        def __init__(self) -> None:
+            adapters.append(self)
+
+    _install_fake_application_modules(
+        monkeypatch,
+        cached_settings=cached_settings,
+        fresh_settings=fresh_settings,
+        adapter_type=Adapter,
+    )
+    monkeypatch.setattr(
+        operator,
+        "install_captured_paper_runtime_environment",
+        lambda *_args, **_kwargs: refreshed,
+    )
+    validated: list[object] = []
+
+    def validate(settings, receipt, *, environ):
+        validated.extend((settings, receipt, environ))
+        return MappingProxyType({"validated": True})
+
+    monkeypatch.setattr(
+        operator, "validate_installed_captured_paper_settings", validate
+    )
+
+    composition = operator.build_live_operator_composition(
+        config, preinstalled_runtime_receipt=initial
+    )
+
+    assert composition.runtime_receipt is refreshed
+    assert composition.settings_projection == {"validated": True}
+    assert validated[:2] == [cached_settings, refreshed]
+    assert len(adapters) == 1
+
+
+def test_live_composition_rejects_stale_cached_settings_before_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = configuration(tmp_path)
+    initial = runtime_receipt(config)
+    adapters: list[object] = []
+
+    class Adapter:
+        def __init__(self) -> None:
+            adapters.append(self)
+
+    _install_fake_application_modules(
+        monkeypatch,
+        cached_settings=_FakeSettings({"database_url": "postgresql://stale"}),
+        fresh_settings=_FakeSettings({"database_url": "postgresql://paper"}),
+        adapter_type=Adapter,
+    )
+    # A stale settings rejection must happen before importing app.db, whose
+    # real module constructs a process-global engine at import time.
+    monkeypatch.delitem(sys.modules, "app.db")
+    monkeypatch.delattr(sys.modules["app"], "db")
+    monkeypatch.setattr(
+        operator,
+        "install_captured_paper_runtime_environment",
+        lambda *_args, **_kwargs: replace(initial, removed_forbidden_keys=()),
+    )
+
+    with pytest.raises(
+        operator.CapturedPaperOperatorFlowError,
+        match="CACHED_APPLICATION_SETTINGS_MISMATCH",
+    ):
+        operator.build_live_operator_composition(
+            config, preinstalled_runtime_receipt=initial
+        )
+    assert adapters == []
 
 
 def test_operator_flow_publishes_build_ready_and_only_no_order_next_command(
