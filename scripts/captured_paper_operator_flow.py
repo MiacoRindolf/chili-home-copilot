@@ -73,6 +73,8 @@ MIGRATION_REHEARSAL_NODE_IDS = (
     "test_migration_337_is_registered_idempotent_and_installs_guards",
     "tests/test_alpaca_fill_settlement_runtime_wiring.py::"
     "test_migration_336_preserves_v1_and_requires_strict_v2",
+    "tests/test_alpaca_fill_activity_capture.py::"
+    "test_migration_354_survives_legacy_repair_reapply",
     "tests/test_captured_paper_selection_producer.py::"
     "test_migration_350_is_registered_idempotent_and_installs_guards",
     "tests/test_captured_paper_selection_producer.py::"

@@ -32433,3 +32433,22 @@ def _run_migrations_unlocked(engine: Engine) -> None:
             except Exception as e:
                 conn.rollback()
                 raise RuntimeError(f"Migration {version_id} failed: {e}") from e
+
+        # Migration 354 owns replaceable functions/triggers whose executable
+        # definition can be corrected without changing retained row shape.
+        # Reassert an already-registered 354 under the same startup schema lock
+        # so a previously migrated database cannot keep stale trigger bytes;
+        # a current contract remains verify-only and takes no repair DDL locks.
+        if _MIGRATION_354_ID in applied:
+            try:
+                try:
+                    _verify_migration_354_physical_contract(conn)
+                except RuntimeError:
+                    _reassert_354_if_present(conn)
+                    _verify_migration_354_physical_contract(conn)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise RuntimeError(
+                    "Migration 354 contract reassertion failed: " + str(e)
+                ) from e
