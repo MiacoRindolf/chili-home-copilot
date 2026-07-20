@@ -49,6 +49,7 @@ _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,15}$")
 _MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_BENCHMARK_BYTES = 64 * 1024 * 1024
 _PRESELECTION_SEED_LIMIT = 8
+_PRESELECTION_SEED_TAIL_ROWS = 100_000
 _CHAIN_KEYS = frozenset(
     {
         "schema_version",
@@ -389,6 +390,9 @@ def _delay_is_zero(symbol: str, *, timeout_seconds: float = 4.0) -> bool:
         connection.sendall(f"w{symbol}\r\n".encode("ascii"))
         deadline = time.monotonic() + timeout_seconds
         buffer = b""
+        server_connected = False
+        customer_realtime = False
+        delay_field_selected = False
         while time.monotonic() < deadline:
             try:
                 chunk = connection.recv(4096)
@@ -397,11 +401,31 @@ def _delay_is_zero(symbol: str, *, timeout_seconds: float = 4.0) -> bool:
             if not chunk:
                 break
             buffer += chunk
-            lines = buffer.decode("ascii", errors="replace").splitlines()
-            for line in lines:
+            while b"\n" in buffer:
+                raw_line, buffer = buffer.split(b"\n", 1)
+                line = raw_line.rstrip(b"\r").decode("ascii", errors="replace")
                 parts = line.split(",")
-                if len(parts) >= 4 and parts[0] in {"P", "Q"} and parts[1] == symbol:
-                    return (parts[3] or "").strip() == "0"
+                if parts[:2] == ["S", "SERVER CONNECTED"]:
+                    server_connected = True
+                elif len(parts) >= 3 and parts[:2] == ["S", "CUST"]:
+                    customer_realtime = parts[2].strip().lower() == "real_time"
+                elif parts[:2] == ["S", "CURRENT UPDATE FIELDNAMES"]:
+                    fields = tuple(part.strip() for part in parts[2:] if part.strip())
+                    delay_field_selected = fields == (
+                        "Symbol",
+                        "Most Recent Trade",
+                        "Delay",
+                    )
+                elif len(parts) >= 4 and parts[0] == "Q" and parts[1] == symbol:
+                    if not (
+                        server_connected
+                        and customer_realtime
+                        and delay_field_selected
+                    ):
+                        continue
+                    # IQFeed 6.2 emits an empty Delay field for real-time
+                    # symbols and a positive minute count for delayed symbols.
+                    return (parts[3] or "").strip() in {"", "0"}
         return False
     finally:
         try:
@@ -434,12 +458,18 @@ def _discover_capture_seed_symbols() -> tuple[str, ...]:
                 connection.execute(text("SET TRANSACTION READ ONLY"))
                 rows = connection.execute(
                     text(
-                        "SELECT symbol, count(*) AS n "
-                        "FROM iqfeed_trade_ticks "
+                        "WITH recent_tail AS MATERIALIZED ("
+                        "SELECT symbol, observed_at FROM iqfeed_trade_ticks "
+                        "ORDER BY id DESC LIMIT :tail_rows"
+                        ") SELECT symbol, count(*) AS n "
+                        "FROM recent_tail "
                         "WHERE observed_at > now() - interval '15 minutes' "
                         "GROUP BY symbol ORDER BY n DESC, symbol ASC LIMIT :limit"
                     ),
-                    {"limit": _PRESELECTION_SEED_LIMIT},
+                    {
+                        "tail_rows": _PRESELECTION_SEED_TAIL_ROWS,
+                        "limit": _PRESELECTION_SEED_LIMIT,
+                    },
                 ).fetchall()
         finally:
             engine.dispose()
@@ -460,7 +490,7 @@ def _discover_capture_seed_symbols() -> tuple[str, ...]:
     if not seeds:
         raise CapturedPaperOperatorChainError(
             "LIVE_TAPE_REALTIME_SEED_UNAVAILABLE",
-            "no Delay=0 discovery seed is available for candidate capture",
+            "no real-time discovery seed is available for candidate capture",
         )
     return tuple(seeds)
 
@@ -507,9 +537,10 @@ def _capture_candidate_exact_print_preselection(
                 "CAPTURE_ROOT_MISMATCH", "candidate preselection changed capture root"
             )
         pressure = operator_flow._measure_capture_pressure(preflight=preflight)
-        # The first seed is already Delay=0.  Keeping this preselection lane to
+        # The first seed already has verified real-time Delay status.  Keep
+        # this preselection lane to
         # one symbol bounds provider and depth work; the final selection still
-        # rechecks both candidate DB provenance and current Delay=0 state.
+        # rechecks both candidate DB provenance and current real-time Delay state.
         certification_seed = normalized[0]
         evidence = run_capture_only_preactivation_smoke(
             CaptureOnlySmokeConfiguration(
@@ -716,7 +747,7 @@ def _select_live_certification_symbol(
             return symbol
     raise CapturedPaperOperatorChainError(
         "LIVE_TAPE_REALTIME_SYMBOL_UNAVAILABLE",
-        "no current Delay=0 exact-print symbol can certify capture",
+        "no current real-time exact-print symbol can certify capture",
     )
 
 

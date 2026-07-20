@@ -480,10 +480,19 @@ class _FakeIqfeedSocket:
         self.closed = True
 
 
-def test_iqfeed_delay_zero_is_required_and_unsubscribes(
+@pytest.mark.parametrize("delay", ["", "0"])
+def test_iqfeed_realtime_delay_is_required_and_unsubscribes(
     monkeypatch: pytest.MonkeyPatch,
+    delay: str,
 ) -> None:
-    connection = _FakeIqfeedSocket([b"Q,AAPL,201.25,0\r\n"])
+    connection = _FakeIqfeedSocket(
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            + f"Q,AAPL,201.25,{delay},\r\n".encode("ascii")
+        ]
+    )
     monkeypatch.setattr(
         chain.socket,
         "create_connection",
@@ -492,6 +501,65 @@ def test_iqfeed_delay_zero_is_required_and_unsubscribes(
 
     assert chain._delay_is_zero("AAPL") is True
     assert b"wAAPL\r\n" in connection.sent
+    assert b"rAAPL\r\n" in connection.sent
+    assert connection.closed is True
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            b"Q,AAPL,201.25,15,\r\n"
+        ],
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,delayed,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            b"Q,AAPL,201.25,,\r\n"
+        ],
+        [b"Q,AAPL,201.25,,\r\n"],
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade\r\n"
+            b"Q,AAPL,201.25,,\r\n"
+        ],
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            b"P,AAPL,201.25,,\r\n"
+        ],
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            b"Q,AAPL,201.25,",
+            b"15,\r\n",
+        ],
+        [
+            b"Q,AAPL,201.25,,\r\n"
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+        ],
+    ],
+)
+def test_iqfeed_realtime_delay_fails_closed_without_exact_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    frames: list[bytes],
+) -> None:
+    connection = _FakeIqfeedSocket(frames)
+    monkeypatch.setattr(
+        chain.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: connection,
+    )
+
+    assert chain._delay_is_zero("AAPL") is False
     assert b"rAAPL\r\n" in connection.sent
     assert connection.closed is True
 
@@ -599,6 +667,13 @@ def test_discovery_rows_are_only_seeds_and_require_delay_zero(
     assert chain._discover_capture_seed_symbols() == ("VIVS",)
     assert checked == ["LEGACY", "VIVS"]
     assert engine.disposed is True
+    query, parameters = engine.executions[-1]
+    assert "WITH recent_tail AS MATERIALIZED" in query
+    assert "ORDER BY id DESC LIMIT :tail_rows" in query
+    assert parameters == {
+        "tail_rows": chain._PRESELECTION_SEED_TAIL_ROWS,
+        "limit": chain._PRESELECTION_SEED_LIMIT,
+    }
 
 
 def test_live_certification_symbol_fails_closed_when_no_delay_zero_symbol(
