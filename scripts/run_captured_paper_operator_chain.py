@@ -946,14 +946,26 @@ def run_operator_chain(
     paths = dict(persisted.artifact_paths)
     hashes = dict(persisted.artifact_sha256s)
 
+    operator_output_root = artifact_root / "operator"
+    preactivation_output_root = artifact_root / "preactivation"
+    activation_artifact_root = artifact_root / "activation"
+    receipt_output_root = artifact_root / "receipts"
+    for output_root in (
+        operator_output_root,
+        preactivation_output_root,
+        activation_artifact_root,
+        receipt_output_root,
+    ):
+        output_root.mkdir(mode=0o700, parents=False, exist_ok=False)
+
     plan = {
         "schema_version": operator_flow.OPERATOR_PLAN_SCHEMA_VERSION,
         "activation_generation": generation,
         "expected_account_id": activation_request.expected_account_id,
         "candidate_root": str(activation_request.candidate_root),
-        "operator_output_root": str(artifact_root / "operator"),
-        "preactivation_output_root": str(artifact_root / "preactivation"),
-        "activation_artifact_root": str(artifact_root / "activation"),
+        "operator_output_root": str(operator_output_root),
+        "preactivation_output_root": str(preactivation_output_root),
+        "activation_artifact_root": str(activation_artifact_root),
         "capture_store_root": str(capture_store_root),
         "runtime_env_path": str(activation_request.runtime_env_path),
         "runtime_env_sha256": activation_request.runtime_env_sha256,
@@ -962,7 +974,7 @@ def run_operator_chain(
         "python_executable": str(activation_request.python_executable),
         "python_dependency_root": str(dependency_root),
         "no_order_receipt_output": str(
-            artifact_root / "receipts" / f"no-order-receipt-{generation}.json"
+            receipt_output_root / f"no-order-receipt-{generation}.json"
         ),
         "powershell_executable": str(activation_request.powershell_executable),
         "host_principal_user_id": principal,
@@ -977,7 +989,7 @@ def run_operator_chain(
     }
     plan_raw = _canonical_json_bytes(plan)
     plan_sha = _sha256_bytes(plan_raw)
-    plan_path = artifact_root / "operator" / f"{plan_sha}.plan.json"
+    plan_path = operator_output_root / f"{plan_sha}.plan.json"
     _publish_once(plan_path, plan_raw)
 
     configuration = operator_flow.configuration_from_plan(plan)

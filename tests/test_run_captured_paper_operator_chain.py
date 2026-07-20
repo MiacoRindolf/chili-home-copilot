@@ -1059,6 +1059,13 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     def fake_configuration(plan: Mapping[str, Any]) -> object:
         calls.append("plan-validated")
         observed_plan.update(plan)
+        for field in (
+            "operator_output_root",
+            "preactivation_output_root",
+            "activation_artifact_root",
+        ):
+            assert Path(str(plan[field])).is_dir()
+        assert Path(str(plan["no_order_receipt_output"])).parent.is_dir()
         return object()
 
     composition = object()
