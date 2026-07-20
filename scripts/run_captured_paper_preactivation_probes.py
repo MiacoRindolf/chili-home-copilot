@@ -1405,7 +1405,12 @@ def _focused_regression_observations(
         )
     selected, failures, errors, _skipped, case_names = _parse_junit(native.junit_xml)
     expected_case_names = tuple(node.rsplit("::", 1)[1] for node in FOCUSED_PYTEST_NODE_IDS)
-    if sorted(case_names) != sorted(expected_case_names):
+    observed_case_names = tuple(name.split("[", 1)[0] for name in case_names)
+    if (
+        len(set(expected_case_names)) != len(expected_case_names)
+        or set(observed_case_names) != set(expected_case_names)
+        or any(observed_case_names.count(name) < 1 for name in expected_case_names)
+    ):
         raise CapturedPaperPreactivationProbeError(
             "REGRESSION_TEST_ROSTER_MISMATCH",
             "JUnit testcases differ from the fixed focused shard",

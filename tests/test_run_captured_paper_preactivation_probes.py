@@ -791,6 +791,45 @@ def test_fixed_command_and_rollback_producers_reject_caller_selected_passes(
     assert rollback["final_validate_only_performed"] is False
 
 
+def test_focused_regression_roster_accepts_only_fixed_parameterized_cases(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "capture").mkdir()
+    ctx = context(tmp_path)
+    native = focused_authority().value
+    expected_names = [
+        node.rsplit("::", 1)[1] for node in probes.FOCUSED_PYTEST_NODE_IDS
+    ]
+    parameterized = expected_names[0]
+    case_names = [f"{parameterized}[case-0]", f"{parameterized}[case-1]"]
+    case_names.extend(expected_names[1:])
+    junit = (
+        f'<testsuite tests="{len(case_names)}" failures="0" errors="0" skipped="0">'
+        + "".join(f'<testcase name="{name}" />' for name in case_names)
+        + "</testsuite>"
+    ).encode()
+    expanded = replace(native, junit_xml=junit)
+
+    result = probes._focused_regression_observations(
+        StaticAuthority(expanded), context=ctx, now=NOW
+    )
+    assert result["selected_test_count"] == len(case_names)
+
+    forged = replace(
+        native,
+        junit_xml=junit.replace(
+            f"{parameterized}[case-1]".encode(), b"test_not_in_fixed_roster[case-1]"
+        ),
+    )
+    with pytest.raises(
+        probes.CapturedPaperPreactivationProbeError,
+        match="REGRESSION_TEST_ROSTER_MISMATCH",
+    ):
+        probes._focused_regression_observations(
+            StaticAuthority(forged), context=ctx, now=NOW
+        )
+
+
 def _write_side_effect_report(path: Path, *, fake_transport: int = 0) -> None:
     body = {
         "schema_version": "chili.captured-paper-pytest-side-effect-census.v1",
