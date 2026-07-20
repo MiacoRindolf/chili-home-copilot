@@ -31139,6 +31139,15 @@ def _install_migration_354_contradiction_guards(conn) -> None:
                     OLD.last_broker_available_at THEN
                 RETURN NEW;
             END IF;
+            IF OLD.post_settlement_net_position_quantity_shares IS NULL
+               AND NEW.post_settlement_net_position_quantity_shares IS NULL
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM alpaca_paper_cycle_settlements
+                    WHERE reservation_id = NEW.reservation_id
+               ) THEN
+                RETURN NEW;
+            END IF;
             SELECT * INTO contradiction_row
             FROM alpaca_paper_post_settlement_fill_contradictions
             WHERE reservation_id = NEW.reservation_id
@@ -31767,6 +31776,8 @@ def _verify_migration_354_physical_contract(conn) -> None:
             "terminal_fill_sequence",
         ),
         "chili_require_alpaca_post_settlement_fill_projection()": (
+            "alpaca_paper_cycle_settlements",
+            "post_settlement_net_position_quantity_shares",
             "signed quarantined projection differs from v2 row",
         ),
         "chili_require_alpaca_post_settlement_batch_complete()": (
