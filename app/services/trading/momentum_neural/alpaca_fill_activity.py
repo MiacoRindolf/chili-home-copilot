@@ -65,8 +65,11 @@ PREPARED_FILL_BATCH_SCHEMA_VERSION = "chili.alpaca-paper-fill-batch.v2"
 FILL_QUERY_RECEIPT_SCHEMA_VERSION = "chili.alpaca-paper-fill-query-receipt.v1"
 FILL_READ_CAPABILITY_SCHEMA_VERSION = "chili.alpaca-paper-fill-read-capability.v1"
 FILL_READ_BINDING_SCHEMA_VERSION = "chili.alpaca-paper-fill-read-binding.v1"
-POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION = (
+LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION = (
     "chili.alpaca-paper-post-settlement-fill-contradiction.v1"
+)
+POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION = (
+    "chili.alpaca-paper-post-settlement-fill-contradiction.v2"
 )
 POST_SETTLEMENT_FILL_CONTRADICTION_DURABILITY_KIND = (
     "committed_alpaca_post_settlement_fill_contradiction"
@@ -819,6 +822,7 @@ class PreparedAlpacaPaperFillBatch:
     activities: tuple[PreparedAlpacaPaperFillActivity, ...]
     batch_content_sha256: str
     read_capability: AlpacaFillReadCapability = field(repr=False, compare=False)
+    exit_owner_receipt_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.cycle, AlpacaPaperFillCycleBinding):
@@ -840,9 +844,21 @@ class PreparedAlpacaPaperFillBatch:
         _require_sha(self.query_receipt_sha256, "query_receipt_sha256")
         _require_sha(self.read_binding_sha256, "read_binding_sha256")
         _require_sha(self.batch_content_sha256, "batch_content_sha256")
+        if self.order_role == "entry":
+            if self.exit_owner_receipt_sha256 is not None:
+                raise AlpacaFillActivityError(
+                    "prepared entry batch cannot carry exit-owner authority"
+                )
+        elif self.order_role == "exit":
+            _require_sha(
+                self.exit_owner_receipt_sha256,
+                "exit_owner_receipt_sha256",
+            )
+        else:
+            raise AlpacaFillActivityError("prepared batch order role is invalid")
 
     def content_body(self) -> dict[str, Any]:
-        return {
+        body = {
             "batch_schema_version": self.batch_schema_version,
             "cycle": self.cycle.to_payload(),
             "provider_order_id": self.provider_order_id,
@@ -876,6 +892,12 @@ class PreparedAlpacaPaperFillBatch:
                 for item in self.activities
             ],
         }
+        if self.order_role == "exit":
+            body["exit_owner_receipt_sha256"] = _require_sha(
+                self.exit_owner_receipt_sha256,
+                "exit_owner_receipt_sha256",
+            )
+        return body
 
     def computed_batch_content_sha256(self) -> str:
         _canonical, digest = _canonical_json_text(
@@ -920,16 +942,30 @@ def _fill_read_binding(
     provider_order_id: str,
     expected_client_order_id: str,
     order_role: str,
+    exit_owner_receipt_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Build the exact reservation/cycle scope authorized for one broker read."""
 
-    return {
+    binding = {
         "schema_version": FILL_READ_BINDING_SCHEMA_VERSION,
         "cycle": cycle.to_payload(),
         "provider_order_id": provider_order_id,
         "expected_client_order_id": expected_client_order_id,
         "order_role": order_role,
     }
+    if order_role == "entry":
+        if exit_owner_receipt_sha256 is not None:
+            raise AlpacaFillActivityError(
+                "entry fill read cannot carry exit-owner authority"
+            )
+    elif order_role == "exit":
+        binding["exit_owner_receipt_sha256"] = _require_sha(
+            exit_owner_receipt_sha256,
+            "exit_owner_receipt_sha256",
+        )
+    else:
+        raise AlpacaFillActivityError("fill read order role is invalid")
+    return binding
 
 
 def _verify_read_binding(batch: PreparedAlpacaPaperFillBatch) -> dict[str, Any]:
@@ -943,6 +979,7 @@ def _verify_read_binding(batch: PreparedAlpacaPaperFillBatch) -> dict[str, Any]:
         provider_order_id=batch.provider_order_id,
         expected_client_order_id=batch.expected_client_order_id,
         order_role=batch.order_role,
+        exit_owner_receipt_sha256=batch.exit_owner_receipt_sha256,
     )
     expected_json, expected_sha256 = _canonical_json_text(
         expected, "expected_read_binding"
@@ -2458,6 +2495,12 @@ _POST_SETTLEMENT_CONTRADICTION_BODY_FIELDS = (
     "fee_usd",
     "fee_evidence_sha256",
 )
+_POST_SETTLEMENT_CONTRADICTION_V2_BODY_FIELDS = (
+    "provider_client_order_id",
+    "exit_owner_receipt_sha256",
+    "projection_prior_net_position_quantity_shares",
+    "projected_net_position_quantity_shares",
+)
 _POST_SETTLEMENT_CONTRADICTION_DECIMAL_FIELDS = frozenset(
     {
         "settlement_entry_quantity",
@@ -2500,7 +2543,15 @@ def _post_settlement_contradiction_content_body(
         return getattr(values, name)
 
     body: dict[str, Any] = {}
-    for name in _POST_SETTLEMENT_CONTRADICTION_BODY_FIELDS:
+    schema_version = read("contradiction_schema_version")
+    field_names = _POST_SETTLEMENT_CONTRADICTION_BODY_FIELDS
+    if schema_version == POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION:
+        field_names += _POST_SETTLEMENT_CONTRADICTION_V2_BODY_FIELDS
+    elif schema_version != LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION:
+        raise AlpacaFillActivityCorruption(
+            "post-settlement contradiction schema is unsupported"
+        )
+    for name in field_names:
         value = read(name)
         if value is None:
             body[name] = None
@@ -2526,7 +2577,10 @@ def verify_alpaca_paper_post_settlement_fill_contradiction_row(
         )
     if not (
         row.contradiction_schema_version
-        == POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+        in {
+            LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION,
+            POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION,
+        }
         and row.authority_status == "verified"
         and row.durability_kind
         == POST_SETTLEMENT_FILL_CONTRADICTION_DURABILITY_KIND
@@ -2535,6 +2589,55 @@ def verify_alpaca_paper_post_settlement_fill_contradiction_row(
     ):
         raise AlpacaFillActivityCorruption(
             "post-settlement fill contradiction authority changed"
+        )
+    if row.contradiction_schema_version == (
+        LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+    ):
+        exact_role = (
+            row.side == "buy"
+            and row.order_role == "entry"
+            and row.order_ownership_status == "reservation_bound"
+            and row.provider_order_id == row.broker_order_id
+            and row.provider_client_order_id is None
+            and row.exit_owner_receipt_sha256 is None
+            and row.projection_prior_net_position_quantity_shares is None
+            and row.projected_net_position_quantity_shares is None
+        )
+    else:
+        signed_projection = (
+            row.projection_prior_net_position_quantity_shares is not None
+            and row.projected_net_position_quantity_shares is not None
+        ) if row.is_projection_terminal else (
+            row.projection_prior_net_position_quantity_shares is None
+            and row.projected_net_position_quantity_shares is None
+        )
+        if row.side == "buy":
+            exact_role = (
+                row.order_role == "entry"
+                and row.order_ownership_status == "reservation_bound"
+                and row.provider_order_id == row.broker_order_id
+                and row.provider_client_order_id is None
+                and row.exit_owner_receipt_sha256 is None
+                and signed_projection
+            )
+        else:
+            exact_role = (
+                row.side == "sell"
+                and row.order_role == "exit"
+                and row.order_ownership_status == "exit_owner_receipt_bound"
+                and bool(str(row.provider_client_order_id or "").strip())
+                and row.provider_client_order_id
+                != row.expected_client_order_id
+                and _SHA256_RE.fullmatch(
+                    str(row.exit_owner_receipt_sha256 or "").strip().lower()
+                )
+                is not None
+                and row.provider_order_id != row.broker_order_id
+                and signed_projection
+            )
+    if not exact_role:
+        raise AlpacaFillActivityCorruption(
+            "post-settlement fill contradiction role authority changed"
         )
     canonical_pairs = (
         (
@@ -2627,6 +2730,102 @@ def _exact_alpaca_paper_fill_reader(adapter: Any) -> tuple[Any, str]:
     return authoritative_adapter, bound_account_id
 
 
+def _verify_exit_owner_receipt_scope(
+    receipt: Any,
+    *,
+    cycle: AlpacaPaperFillCycleBinding,
+) -> None:
+    """Verify an already-loaded exit owner without database or broker I/O."""
+
+    from .adaptive_risk_reservation import (
+        AdaptiveExitOwnerReceipt,
+        AdaptiveExitOwnerTransportBinding,
+    )
+
+    if type(receipt) is not AdaptiveExitOwnerReceipt:
+        raise AlpacaFillActivityError(
+            "exit fill read requires the exact typed owner receipt"
+        )
+    binding = receipt.binding
+    if type(binding) is not AdaptiveExitOwnerTransportBinding:
+        raise AlpacaFillActivityError("exit-owner transport binding is malformed")
+    _require_sha(
+        receipt.receipt_sha256,
+        "exit_owner_receipt.receipt_sha256",
+    )
+    _require_sha(
+        receipt.transport_started_event_sha256,
+        "exit_owner_receipt.transport_started_event_sha256",
+    )
+    if any(
+        isinstance(value, bool)
+        for value in (
+            receipt.sequence,
+            receipt.provider_cumulative_quantity,
+            receipt.observer_session_id,
+            receipt.observer_generation,
+        )
+    ):
+        raise AlpacaFillActivityError(
+            "exit-owner numeric authority cannot be boolean"
+        )
+    try:
+        receipt_sequence = int(receipt.sequence)
+        provider_cumulative = int(receipt.provider_cumulative_quantity)
+        observer_session_id = int(receipt.observer_session_id)
+        observer_generation = int(receipt.observer_generation)
+    except (TypeError, ValueError) as exc:
+        raise AlpacaFillActivityError(
+            "exit-owner numeric authority is invalid"
+        ) from exc
+    try:
+        expected_account_identity = alpaca_paper_account_identity_sha256(
+            binding.expected_account_id
+        )
+    except ValueError as exc:
+        raise AlpacaFillActivityError(
+            "exit-owner PAPER account UUID is malformed"
+        ) from exc
+    exact = (
+        receipt.event_type in {
+            "alpaca_exit_owner_submitted",
+            "alpaca_exit_owner_reconciled",
+        }
+        and receipt_sequence > 0
+        and receipt_sequence == receipt.sequence
+        and receipt.reservation_id == cycle.reservation_id
+        and binding.reservation_id == cycle.reservation_id
+        and binding.decision_packet_sha256 == cycle.decision_packet_sha256
+        and binding.account_scope == cycle.account_scope == "alpaca:paper"
+        and binding.account_identity_sha256
+        == cycle.account_identity_sha256
+        == expected_account_identity
+        and binding.broker_environment == "paper"
+        and binding.execution_family == cycle.execution_family == "alpaca_spot"
+        and binding.symbol == cycle.symbol
+        and binding.entry_client_order_id == cycle.cycle_client_order_id
+        and receipt.provider_client_order_id == binding.exit_client_order_id
+        and receipt.provider_order_id != cycle.entry_provider_order_id
+        and bool(str(receipt.provider_order_id or "").strip())
+        and bool(str(receipt.provider_status or "").strip())
+        and provider_cumulative >= 0
+        and provider_cumulative == receipt.provider_cumulative_quantity
+        and bool(str(receipt.observer_claim_token or "").strip())
+        and observer_session_id > 0
+        and observer_session_id == receipt.observer_session_id
+        and observer_generation > 0
+        and observer_generation == receipt.observer_generation
+        and bool(str(receipt.observer_runtime_generation or "").strip())
+        and bool(str(receipt.observer_connection_generation or "").strip())
+        and _utc(receipt.effective_at, "exit_owner_receipt.effective_at")
+        <= _utc(receipt.available_at, "exit_owner_receipt.available_at")
+    )
+    if not exact:
+        raise AlpacaFillActivityConflict(
+            "exit-owner receipt differs from immutable PAPER cycle/order scope"
+        )
+
+
 def read_verified_alpaca_paper_fill_batch(
     adapter: Any,
     *,
@@ -2652,20 +2851,70 @@ def read_verified_alpaca_paper_fill_batch(
         "expected_client_order_id",
         max_length=160,
     )
-    order_role = "entry" if order_id == cycle.entry_provider_order_id else "exit"
-    if order_role == "entry":
-        if expected_cid != cycle.cycle_client_order_id:
-            raise AlpacaFillActivityConflict(
-                "entry expected CID differs from immutable cycle CID"
-            )
-    else:
-        # A string supplied by the caller is not durable order ownership. The
-        # forthcoming lifecycle transaction must load and seal the exact exit
-        # owner receipt, then this reader can consume that opaque capability.
-        # Until that issuer is wired, exit capture fails before broker I/O.
-        raise AlpacaFillActivityError(
-            "sealed durable exit-order ownership receipt is required"
+    if not (
+        order_id == cycle.entry_provider_order_id
+        and expected_cid == cycle.cycle_client_order_id
+    ):
+        raise AlpacaFillActivityConflict(
+            "entry fill read differs from immutable cycle order"
         )
+    return _read_verified_alpaca_paper_fill_batch(
+        adapter,
+        cycle=cycle,
+        provider_order_id=order_id,
+        expected_client_order_id=expected_cid,
+        exit_owner_receipt=None,
+    )
+
+
+def read_verified_alpaca_paper_exit_fill_batch(
+    adapter: Any,
+    *,
+    cycle: AlpacaPaperFillCycleBinding,
+    exit_owner_receipt: Any,
+) -> PreparedAlpacaPaperFillBatch:
+    """Read one owned exit after local receipt checks pass at zero I/O."""
+
+    if not isinstance(cycle, AlpacaPaperFillCycleBinding):
+        raise AlpacaFillActivityError("cycle must be an immutable fill binding")
+    _verify_exit_owner_receipt_scope(exit_owner_receipt, cycle=cycle)
+    return _read_verified_alpaca_paper_fill_batch(
+        adapter,
+        cycle=cycle,
+        provider_order_id=exit_owner_receipt.provider_order_id,
+        expected_client_order_id=exit_owner_receipt.provider_client_order_id,
+        exit_owner_receipt=exit_owner_receipt,
+    )
+
+
+def _read_verified_alpaca_paper_fill_batch(
+    adapter: Any,
+    *,
+    cycle: AlpacaPaperFillCycleBinding,
+    provider_order_id: str,
+    expected_client_order_id: str,
+    exit_owner_receipt: Any | None,
+) -> PreparedAlpacaPaperFillBatch:
+    """Shared DB-free exact reader after role authority has been resolved."""
+
+    order_id = _required_text(
+        provider_order_id, "provider_order_id", max_length=160
+    )
+    expected_cid = _required_text(
+        expected_client_order_id,
+        "expected_client_order_id",
+        max_length=160,
+    )
+    order_role = "exit" if exit_owner_receipt is not None else "entry"
+    if order_role == "exit":
+        _verify_exit_owner_receipt_scope(exit_owner_receipt, cycle=cycle)
+        if not (
+            order_id == exit_owner_receipt.provider_order_id
+            and expected_cid == exit_owner_receipt.provider_client_order_id
+        ):
+            raise AlpacaFillActivityConflict(
+                "exit fill read differs from immutable owner receipt"
+            )
 
     authoritative_adapter, bound_account_id = _exact_alpaca_paper_fill_reader(adapter)
     try:
@@ -2690,6 +2939,11 @@ def read_verified_alpaca_paper_fill_batch(
         provider_order_id=order_id,
         expected_client_order_id=expected_cid,
         order_role=order_role,
+        exit_owner_receipt_sha256=(
+            exit_owner_receipt.receipt_sha256
+            if exit_owner_receipt is not None
+            else None
+        ),
     )
     expected_read_binding_json, expected_read_binding_sha256 = (
         _canonical_json_text(expected_read_binding, "read_binding")
@@ -2976,6 +3230,11 @@ def read_verified_alpaca_paper_fill_batch(
         activities=tuple(prepared_items),
         batch_content_sha256="0" * 64,
         read_capability=batch.get("_capture_capability"),
+        exit_owner_receipt_sha256=(
+            exit_owner_receipt.receipt_sha256
+            if exit_owner_receipt is not None
+            else None
+        ),
     )
     prepared_batch = replace(
         provisional,
@@ -4030,15 +4289,16 @@ def _build_alpaca_paper_entry_fill_handoff(
     return verify_alpaca_paper_entry_fill_handoff(session, proof)
 
 
-def _publish_post_settlement_entry_fill_contradictions(
+def _publish_post_settlement_fill_contradictions(
     session: Session,
     batch: PreparedAlpacaPaperFillBatch,
     *,
     reservation: AdaptiveRiskReservation,
     packet: AdaptiveRiskDecisionPacket,
     settlement: AlpacaPaperCycleSettlement,
+    exit_owner_receipt: Any,
 ) -> AlpacaPaperEntryFillPublicationResult:
-    """Append an exact late-fill lineage without touching the settled chain."""
+    """Append one exact v2 BUY/SELL batch without touching settled P&L."""
 
     from .adaptive_risk_reservation import AdaptiveRiskReservationStore
     from .alpaca_cycle_settlement import verify_cycle_settlement_content
@@ -4081,9 +4341,54 @@ def _publish_post_settlement_entry_fill_contradictions(
         "post_settlement.provider_order.qty",
         positive=True,
     )
-    if provider_quantity != int(reservation.planned_quantity_shares):
+    session_bind = session.get_bind()
+    store = AdaptiveRiskReservationStore(
+        getattr(session_bind, "engine", session_bind)
+    )
+    if batch.order_role == "entry":
+        if not (
+            batch.provider_order_id == reservation.broker_order_id
+            and batch.expected_client_order_id == packet.client_order_id
+            and batch.exit_owner_receipt_sha256 is None
+            and provider_quantity == int(reservation.planned_quantity_shares)
+        ):
+            raise AlpacaFillActivityConflict(
+                "post-settlement entry order differs from adaptive plan"
+            )
+    elif batch.order_role == "exit":
+        receipt_sha = _require_sha(
+            batch.exit_owner_receipt_sha256,
+            "post_settlement.exit_owner_receipt_sha256",
+        )
+        if exit_owner_receipt is None:
+            raise AlpacaFillActivityConflict(
+                "post-settlement exit batch lacks its prelocked owner receipt"
+            )
+        if exit_owner_receipt.receipt_sha256 != receipt_sha:
+            raise AlpacaFillActivityConflict(
+                "prelocked exit-owner receipt identity changed"
+            )
+        _verify_exit_owner_receipt_scope(
+            exit_owner_receipt,
+            cycle=batch.cycle,
+        )
+        request_quantity = _whole_share_quantity(
+            exit_owner_receipt.binding.order_request.get("base_size"),
+            "post_settlement.exit_owner.order_request.base_size",
+            positive=True,
+        )
+        if not (
+            batch.provider_order_id == exit_owner_receipt.provider_order_id
+            and batch.expected_client_order_id
+            == exit_owner_receipt.provider_client_order_id
+            and provider_quantity == request_quantity
+        ):
+            raise AlpacaFillActivityConflict(
+                "post-settlement exit batch differs from durable owner receipt"
+            )
+    else:
         raise AlpacaFillActivityConflict(
-            "post-settlement provider quantity differs from adaptive plan"
+            "post-settlement batch order role is invalid"
         )
 
     capability_verified_at = datetime.now(UTC)
@@ -4142,17 +4447,52 @@ def _publish_post_settlement_entry_fill_contradictions(
             )
         previous_contradiction = row.contradiction_sha256
 
+    if contradiction_rows and (
+        batch.available_at < contradiction_rows[-1].provider_available_at
+        or batch.available_at < contradiction_rows[-1].query_available_at
+    ):
+        raise AlpacaFillActivityConflict(
+            "post-settlement observation availability regressed"
+        )
+
+    global_identities: dict[str, str] = {}
     known: dict[str, str] = {}
+    order_prior_cumulative = 0
     for row in settled_rows:
-        if row.order_role != "entry" or row.provider_order_id != batch.provider_order_id:
-            continue
-        if row.provider_activity_id in known:
+        retained = global_identities.setdefault(
+            row.provider_activity_id,
+            row.immutable_fill_identity_sha256,
+        )
+        if retained != row.immutable_fill_identity_sha256:
             raise AlpacaFillActivityCorruption(
-                "settled entry fill identity is duplicated"
+                "settled provider activity aliases another execution"
             )
+        if row.provider_order_id != batch.provider_order_id:
+            continue
+        if row.order_role != batch.order_role or row.side != (
+            "buy" if batch.order_role == "entry" else "sell"
+        ):
+            raise AlpacaFillActivityCorruption(
+                "settled order-local fill role changed"
+            )
+        quantity = _whole_share_quantity(
+            row.quantity,
+            "settled_order_fill.quantity",
+            positive=True,
+        )
+        cumulative = _whole_share_quantity(
+            row.cumulative_quantity,
+            "settled_order_fill.cumulative_quantity",
+            positive=True,
+        )
+        if cumulative != order_prior_cumulative + quantity:
+            raise AlpacaFillActivityCorruption(
+                "settled order-local cumulative lineage changed"
+            )
+        order_prior_cumulative = cumulative
         known[row.provider_activity_id] = row.immutable_fill_identity_sha256
     for row in contradiction_rows:
-        retained = known.setdefault(
+        retained = global_identities.setdefault(
             row.provider_activity_id,
             row.immutable_fill_identity_sha256,
         )
@@ -4160,6 +4500,26 @@ def _publish_post_settlement_entry_fill_contradictions(
             raise AlpacaFillActivityCorruption(
                 "post-settlement provider activity aliases another execution"
             )
+        if row.provider_order_id != batch.provider_order_id:
+            continue
+        if not (
+            row.order_role == batch.order_role
+            and row.side == ("buy" if batch.order_role == "entry" else "sell")
+            and _whole_share_quantity(
+                row.prior_recorded_cumulative_quantity,
+                "contradiction.prior_recorded_cumulative_quantity",
+            )
+            == order_prior_cumulative
+        ):
+            raise AlpacaFillActivityCorruption(
+                "post-settlement order-local contradiction lineage changed"
+            )
+        order_prior_cumulative = _whole_share_quantity(
+            row.broker_observed_cumulative_quantity,
+            "contradiction.broker_observed_cumulative_quantity",
+            positive=True,
+        )
+        known[row.provider_activity_id] = row.immutable_fill_identity_sha256
 
     prepared_by_id = {
         item.provider_activity_id: item for item in batch.activities
@@ -4187,44 +4547,36 @@ def _publish_post_settlement_entry_fill_contradictions(
                 "post-settlement provider activity identity changed"
             )
 
-    store = AdaptiveRiskReservationStore(session.get_bind())
     if not new_items:
         if reservation.state == "closed":
-            raise AlpacaFillActivityConflict(
-                "closed cycle has no new post-settlement execution"
+            if batch.order_role == "entry":
+                raise AlpacaFillActivityConflict(
+                    "closed cycle has no new post-settlement execution"
+                )
+            state = store.lock_reservation(
+                reservation.reservation_id,
+                session=session,
             )
-        if not contradiction_rows or not bool(
-            contradiction_rows[-1].is_projection_terminal
-        ):
-            raise AlpacaFillActivityCorruption(
-                "quarantined cycle lacks its terminal contradiction"
+        else:
+            if not contradiction_rows or not bool(
+                contradiction_rows[-1].is_projection_terminal
+            ):
+                raise AlpacaFillActivityCorruption(
+                    "quarantined cycle lacks its terminal contradiction"
+                )
+            terminal_row = contradiction_rows[-1]
+            state = store.apply_post_settlement_fill_contradiction(
+                reservation.reservation_id,
+                contradiction_sha256=terminal_row.contradiction_sha256,
+                session=session,
             )
-        terminal_row = contradiction_rows[-1]
-        state = store.apply_post_settlement_fill_contradiction(
-            reservation.reservation_id,
-            contradiction_sha256=terminal_row.contradiction_sha256,
-            session=session,
-        )
-        provider_event_id = (
-            f"alpaca-post-settlement-fill:{terminal_row.contradiction_sha256}"
-        )
-        proof = _build_alpaca_paper_entry_fill_handoff(
-            session,
-            publication_kind="post_settlement_contradiction",
-            reservation_id=reservation.reservation_id,
-            lifecycle_provider_event_id=provider_event_id,
-            observation_sha256=terminal_row.observation_sha256,
-            immutable_fill_identity_sha256=(
-                terminal_row.immutable_fill_identity_sha256
-            ),
-        )
         return AlpacaPaperEntryFillPublicationResult(
             capture=None,
             reservation_state=state,
             publication_kind="post_settlement_contradiction",
             contradiction_sha256s=(),
             settlement_sha256=settlement.settlement_sha256,
-            handoff_proof=proof,
+            handoff_proof=None,
         )
 
     projection_prior = int(reservation.cumulative_filled_quantity_shares)
@@ -4233,7 +4585,7 @@ def _publish_post_settlement_entry_fill_contradictions(
         "post_settlement.terminal_cumulative_quantity",
         positive=True,
     )
-    projection_delta = terminal_cumulative - projection_prior
+    projection_delta = terminal_cumulative - order_prior_cumulative
     if projection_delta <= 0:
         raise AlpacaFillActivityConflict(
             "post-settlement fill does not increase durable exposure"
@@ -4247,37 +4599,72 @@ def _publish_post_settlement_entry_fill_contradictions(
         "post_settlement.first_quantity",
         positive=True,
     )
-    if first_prior != projection_prior:
+    if first_prior != order_prior_cumulative:
         raise AlpacaFillActivityConflict(
-            "post-settlement fill suffix does not start at durable cumulative truth"
+            "post-settlement fill suffix does not start at order-local cumulative truth"
         )
 
     planned = Decimal(int(reservation.planned_quantity_shares))
 
-    def project(planned_value: Any, open_value: Any) -> Decimal:
-        increment = (
-            Decimal(planned_value) / planned * Decimal(projection_delta)
-        ).quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_EVEN)
-        return (Decimal(open_value) + increment).quantize(
-            _MONEY_QUANTUM, rounding=ROUND_HALF_EVEN
+    prior_terminal = next(
+        (row for row in reversed(contradiction_rows) if row.is_projection_terminal),
+        None,
+    )
+    if reservation.post_settlement_net_position_quantity_shares is not None:
+        prior_net = int(reservation.post_settlement_net_position_quantity_shares)
+        if not (
+            prior_terminal is not None
+            and prior_terminal.contradiction_schema_version
+            == POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+            and prior_terminal.projected_net_position_quantity_shares == prior_net
+        ):
+            raise AlpacaFillActivityCorruption(
+                "signed quarantine differs from terminal v2 contradiction"
+            )
+    elif prior_terminal is None:
+        if reservation.state != "closed" or int(reservation.open_quantity_shares) != 0:
+            raise AlpacaFillActivityConflict(
+                "zero signed baseline requires a flat closed cycle"
+            )
+        prior_net = 0
+    elif (
+        prior_terminal.contradiction_schema_version
+        == LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION
+        and reservation.state == "exposure_quarantined"
+        and int(reservation.open_quantity_shares)
+        == int(prior_terminal.projected_open_quantity_shares)
+        and reservation.last_source_event_content_sha256
+        == prior_terminal.contradiction_sha256
+    ):
+        prior_net = int(prior_terminal.projected_open_quantity_shares)
+    else:
+        raise AlpacaFillActivityConflict(
+            "v1-to-v2 signed bridge lacks exact terminal authority"
         )
+    projected_net = prior_net + (
+        projection_delta if batch.order_role == "entry" else -projection_delta
+    )
+    projected_open_quantity = abs(projected_net)
 
-    projected_open_quantity = int(reservation.open_quantity_shares) + projection_delta
+    def project(planned_value: Any) -> Decimal:
+        return (
+            Decimal(planned_value)
+            / planned
+            * Decimal(projected_open_quantity)
+        ).quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_EVEN)
+
     projected_open_risk = project(
         reservation.planned_structural_risk_usd,
-        reservation.open_structural_risk_usd,
     )
     projected_open_gross = project(
         reservation.planned_gross_notional_usd,
-        reservation.open_gross_notional_usd,
     )
     projected_open_bp = project(
         reservation.planned_buying_power_impact_usd,
-        reservation.open_buying_power_impact_usd,
     )
 
     next_sequence = len(contradiction_rows) + 1
-    prior_cumulative = projection_prior
+    prior_cumulative = order_prior_cumulative
     previous_sha = previous_contradiction
     created_hashes: list[str] = []
     for ordinal, item in enumerate(new_items):
@@ -4314,10 +4701,22 @@ def _publish_post_settlement_entry_fill_contradictions(
             "symbol": packet.symbol,
             "expected_client_order_id": packet.client_order_id,
             "broker_order_id": reservation.broker_order_id,
+            "provider_client_order_id": (
+                batch.expected_client_order_id
+                if batch.order_role == "exit"
+                else None
+            ),
             "broker_connection_generation": (
-                reservation.broker_connection_generation
+                exit_owner_receipt.observer_connection_generation
+                if exit_owner_receipt is not None
+                else reservation.broker_connection_generation
             ),
             "source_state": reservation.state,
+            "exit_owner_receipt_sha256": (
+                exit_owner_receipt.receipt_sha256
+                if exit_owner_receipt is not None
+                else None
+            ),
             "settlement_terminal_fill_event_sha256": (
                 settlement.terminal_fill_event_sha256
             ),
@@ -4362,7 +4761,11 @@ def _publish_post_settlement_entry_fill_contradictions(
             "provider_available_at": batch.available_at,
             "side": item.side,
             "order_role": item.order_role,
-            "order_ownership_status": item.order_ownership_status,
+            "order_ownership_status": (
+                "exit_owner_receipt_bound"
+                if batch.order_role == "exit"
+                else item.order_ownership_status
+            ),
             "quantity": item.quantity,
             "price": item.price,
             "leaves_quantity": item.leaves_quantity,
@@ -4374,6 +4777,12 @@ def _publish_post_settlement_entry_fill_contradictions(
             ),
             "projection_positive_fill_delta": (
                 Decimal(projection_delta) if terminal else None
+            ),
+            "projection_prior_net_position_quantity_shares": (
+                prior_net if terminal else None
+            ),
+            "projected_net_position_quantity_shares": (
+                projected_net if terminal else None
             ),
             "projected_open_quantity_shares": (
                 projected_open_quantity if terminal else None
@@ -4432,27 +4841,89 @@ def _publish_post_settlement_entry_fill_contradictions(
         contradiction_sha256=terminal_row.contradiction_sha256,
         session=session,
     )
-    provider_event_id = (
-        f"alpaca-post-settlement-fill:{terminal_row.contradiction_sha256}"
-    )
-    proof = _build_alpaca_paper_entry_fill_handoff(
-        session,
-        publication_kind="post_settlement_contradiction",
-        reservation_id=reservation.reservation_id,
-        lifecycle_provider_event_id=provider_event_id,
-        observation_sha256=terminal_row.observation_sha256,
-        immutable_fill_identity_sha256=(
-            terminal_row.immutable_fill_identity_sha256
-        ),
-    )
+    session.flush()
     return AlpacaPaperEntryFillPublicationResult(
         capture=None,
         reservation_state=state,
         publication_kind="post_settlement_contradiction",
         contradiction_sha256s=tuple(created_hashes),
         settlement_sha256=settlement.settlement_sha256,
-        handoff_proof=proof,
+        handoff_proof=None,
     )
+
+
+def publish_prepared_alpaca_paper_post_settlement_fill_batch(
+    session: Session,
+    batch: PreparedAlpacaPaperFillBatch,
+) -> AlpacaPaperEntryFillPublicationResult:
+    """Publish one already-read late BUY/SELL batch with zero broker I/O."""
+
+    _verify_prepared_alpaca_paper_fill_batch(batch)
+    if not session.in_transaction():
+        raise AlpacaFillActivityError(
+            "post-settlement publication requires a caller-owned transaction"
+        )
+    with session.begin_nested():
+        from .adaptive_risk_reservation import AdaptiveRiskReservationStore
+
+        bind = session.get_bind()
+        engine = getattr(bind, "engine", bind)
+        store = AdaptiveRiskReservationStore(engine)
+        exit_owner_receipt = None
+        if batch.order_role == "exit":
+            # Projection and restart paths share the one global order:
+            # account locks -> settlement head -> reservation.  Loading the
+            # exact durable owner in projection mode establishes that order
+            # before any reservation row is taken by this publisher.
+            exit_owner_receipt = store.load_exit_owner_receipt(
+                _require_sha(
+                    batch.exit_owner_receipt_sha256,
+                    "exit_owner_receipt_sha256",
+                ),
+                reservation_id=batch.cycle.reservation_id,
+                for_projection=True,
+                session=session,
+            )
+        else:
+            store._lock_post_settlement_projection_reservation(
+                session,
+                batch.cycle.reservation_id,
+            )
+        reservation = session.scalar(
+            select(AdaptiveRiskReservation)
+            .where(
+                AdaptiveRiskReservation.reservation_id
+                == batch.cycle.reservation_id
+            )
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        if reservation is None:
+            raise AlpacaFillActivityConflict("adaptive reservation is missing")
+        packet = session.get(
+            AdaptiveRiskDecisionPacket,
+            reservation.decision_packet_sha256,
+        )
+        settlement = session.scalar(
+            select(AlpacaPaperCycleSettlement)
+            .where(
+                AlpacaPaperCycleSettlement.reservation_id
+                == reservation.reservation_id
+            )
+            .with_for_update()
+        )
+        if packet is None or settlement is None:
+            raise AlpacaFillActivityConflict(
+                "post-settlement publication lacks immutable cycle authority"
+            )
+        return _publish_post_settlement_fill_contradictions(
+            session,
+            batch,
+            reservation=reservation,
+            packet=packet,
+            settlement=settlement,
+            exit_owner_receipt=exit_owner_receipt,
+        )
 
 
 def publish_prepared_alpaca_paper_entry_fill_batch(
@@ -4491,6 +4962,23 @@ def publish_prepared_alpaca_paper_entry_fill_batch(
             session,
             account_scope=batch.cycle.account_scope,
         )
+        # A retained settlement selects the dedicated late-fill path before
+        # this ordinary entry publisher acquires the reservation in its normal
+        # pre-settlement order.  The account locks are already held, so a
+        # settlement cannot commit between this test and the reservation lock;
+        # this also avoids an A1/A2 -> reservation -> settlement-head inversion
+        # against restart projection.
+        retained_settlement = session.scalar(
+            select(AlpacaPaperCycleSettlement.reservation_id).where(
+                AlpacaPaperCycleSettlement.reservation_id
+                == batch.cycle.reservation_id
+            )
+        )
+        if retained_settlement is not None:
+            return publish_prepared_alpaca_paper_post_settlement_fill_batch(
+                session,
+                batch,
+            )
         reservation = session.scalar(
             select(AdaptiveRiskReservation)
             .where(
@@ -4510,23 +4998,6 @@ def publish_prepared_alpaca_paper_entry_fill_batch(
             raise AlpacaFillActivityConflict(
                 "immutable decision packet is missing"
             )
-        settlement = session.scalar(
-            select(AlpacaPaperCycleSettlement)
-            .where(
-                AlpacaPaperCycleSettlement.reservation_id
-                == reservation.reservation_id
-            )
-            .with_for_update()
-        )
-        if settlement is not None:
-            return _publish_post_settlement_entry_fill_contradictions(
-                session,
-                batch,
-                reservation=reservation,
-                packet=packet,
-                settlement=settlement,
-            )
-
         provider_order = _reparse_canonical_json(
             batch.provider_order_payload_canonical_json,
             batch.provider_order_payload_sha256,
@@ -5158,6 +5629,8 @@ __all__ = [
     "AlpacaPaperOrderFillCaptureResult",
     "AUTHORITATIVE_CAPTURE_SCHEMA_VERSION",
     "ALPACA_PAPER_ENTRY_FILL_HANDOFF_SCHEMA_VERSION",
+    "LEGACY_POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION",
+    "POST_SETTLEMENT_FILL_CONTRADICTION_SCHEMA_VERSION",
     "POST_SETTLEMENT_FILL_CONTRADICTION_DURABILITY_KIND",
     "PREPARED_FILL_BATCH_SCHEMA_VERSION",
     "PreparedAlpacaPaperFillActivity",
@@ -5171,8 +5644,10 @@ __all__ = [
     "prepare_alpaca_paper_terminal_fill_observation_receipt",
     "prepare_verified_alpaca_paper_fill_activity",
     "publish_prepared_alpaca_paper_entry_fill_batch",
+    "publish_prepared_alpaca_paper_post_settlement_fill_batch",
     "query_pending_alpaca_paper_cycle_settlements",
     "read_verified_alpaca_paper_fill_batch",
+    "read_verified_alpaca_paper_exit_fill_batch",
     "verify_alpaca_paper_fill_activity_chain",
     "verify_alpaca_paper_fill_activity_row",
     "verify_alpaca_paper_entry_fill_handoff",

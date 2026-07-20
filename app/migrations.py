@@ -21837,15 +21837,42 @@ def _migration_323_adaptive_db_paper_atomic_lifecycle(conn) -> None:
             ALTER TABLE adaptive_risk_reservations
             DROP CONSTRAINT IF EXISTS ck_adaptive_risk_reservation_quantities
         """))
-        conn.execute(text("""
-            ALTER TABLE adaptive_risk_reservations
-            ADD CONSTRAINT ck_adaptive_risk_reservation_quantities CHECK (
-                planned_quantity_shares > 0
-                AND cumulative_filled_quantity_shares >= 0
-                AND open_quantity_shares >= 0
-                AND open_quantity_shares <= cumulative_filled_quantity_shares
-            )
-        """))
+        if "post_settlement_net_position_quantity_shares" in _columns(
+            conn, "adaptive_risk_reservations"
+        ):
+            conn.execute(text("""
+                ALTER TABLE adaptive_risk_reservations
+                ADD CONSTRAINT ck_adaptive_risk_reservation_quantities CHECK (
+                    planned_quantity_shares > 0
+                    AND cumulative_filled_quantity_shares >= 0
+                    AND open_quantity_shares >= 0
+                    AND (
+                        (
+                            post_settlement_net_position_quantity_shares IS NULL
+                            AND open_quantity_shares <=
+                                cumulative_filled_quantity_shares
+                        ) OR (
+                            post_settlement_net_position_quantity_shares
+                                IS NOT NULL
+                            AND state = 'exposure_quarantined'
+                            AND open_quantity_shares = abs(
+                                post_settlement_net_position_quantity_shares
+                            )
+                        )
+                    )
+                )
+            """))
+        else:
+            conn.execute(text("""
+                ALTER TABLE adaptive_risk_reservations
+                ADD CONSTRAINT ck_adaptive_risk_reservation_quantities CHECK (
+                    planned_quantity_shares > 0
+                    AND cumulative_filled_quantity_shares >= 0
+                    AND open_quantity_shares >= 0
+                    AND open_quantity_shares <=
+                        cumulative_filled_quantity_shares
+                )
+            """))
     if "trading_automation_simulated_fills" in tables:
         conn.execute(text("SET LOCAL lock_timeout = '5s'"))
         conn.execute(text("""
@@ -21854,6 +21881,7 @@ def _migration_323_adaptive_db_paper_atomic_lifecycle(conn) -> None:
             ((marker_json ->> 'adaptive_risk_lifecycle_event_id'))
             WHERE marker_json ? 'adaptive_risk_lifecycle_event_id'
         """))
+    _reassert_354_if_present(conn)
     conn.commit()
     logger.info(
         "[mig323] fenced adaptive DB-paper lifecycle ids and partial exposure"
@@ -24563,6 +24591,7 @@ def _migration_335_adaptive_late_fill_exposure_quarantine(conn) -> None:
         END;
         $$ LANGUAGE plpgsql
     """))
+    _reassert_354_if_present(conn)
     logger.info(
         "[mig335] installed fail-closed adaptive late-fill exposure quarantine"
     )
@@ -27135,6 +27164,7 @@ def _migration_343_alpaca_post_settlement_fill_contradictions(conn) -> None:
             "post-settlement fill contradiction schema is incomplete: "
             f"{sorted(missing_columns)}"
         )
+    _reassert_354_if_present(conn)
     conn.commit()
     logger.info(
         "[mig343] installed append-only post-settlement fill quarantine ledger"
@@ -29098,6 +29128,2788 @@ def _migration_353_captured_paper_selection_route_state(conn) -> None:
     )
 
 
+_MIGRATION_354_ID = "354_alpaca_exit_owner_and_post_settlement_exit_v2"
+_MIGRATION_354_V1_SCHEMA = (
+    "chili.alpaca-paper-post-settlement-fill-contradiction.v1"
+)
+_MIGRATION_354_COLUMN_CONTRACT = {
+    "adaptive_risk_reservations": {
+        "post_settlement_net_position_quantity_shares": "bigint",
+    },
+    "alpaca_paper_post_settlement_fill_contradictions": {
+        "exit_owner_receipt_sha256": "character varying(64)",
+        "provider_client_order_id": "character varying(160)",
+        "projection_prior_net_position_quantity_shares": "bigint",
+        "projected_net_position_quantity_shares": "bigint",
+    },
+}
+
+
+def _migration_354_has_install_marker(conn) -> bool:
+    """Return true only when the typed-owner insert trigger is installed.
+
+    Column presence alone is deliberately not a marker: ``Base.create_all``
+    can materialize the ORM shape before the migration-owned functions and
+    triggers exist.
+    """
+
+    row = conn.execute(text("""
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_trigger AS trigger_row
+            JOIN pg_proc AS function_row
+              ON function_row.oid = trigger_row.tgfoid
+            WHERE trigger_row.tgrelid =
+                    'adaptive_risk_reservation_events'::regclass
+              AND trigger_row.tgname =
+                    'trg_adaptive_exit_owner_event_insert'
+              AND function_row.proname =
+                    'chili_guard_adaptive_exit_owner_event_insert'
+              AND NOT trigger_row.tgisinternal
+        )
+    """)).scalar_one()
+    return bool(row)
+
+
+def _migration_354_schema_version_applied(conn) -> bool:
+    """Return true only for a committed migration-354 registry record."""
+
+    if "schema_version" not in _tables(conn):
+        return False
+    return bool(conn.execute(
+        text("""
+            SELECT EXISTS (
+                SELECT 1 FROM schema_version WHERE version_id = :version_id
+            )
+        """),
+        {"version_id": _MIGRATION_354_ID},
+    ).scalar_one())
+
+
+def _migration_354_preflight_columns(conn, *, initial_install: bool) -> None:
+    """Reject malformed partial columns before issuing any migration DDL."""
+
+    for table_name, expected in _MIGRATION_354_COLUMN_CONTRACT.items():
+        rows = conn.execute(
+            text("""
+                SELECT attribute.attname,
+                       format_type(attribute.atttypid, attribute.atttypmod),
+                       attribute.attnotnull,
+                       pg_get_expr(default_row.adbin, default_row.adrelid)
+                FROM pg_attribute AS attribute
+                LEFT JOIN pg_attrdef AS default_row
+                  ON default_row.adrelid = attribute.attrelid
+                 AND default_row.adnum = attribute.attnum
+                WHERE attribute.attrelid = to_regclass(:table_name)
+                  AND attribute.attnum > 0
+                  AND NOT attribute.attisdropped
+                  AND attribute.attname = ANY(:column_names)
+            """),
+            {
+                "table_name": table_name,
+                "column_names": list(expected),
+            },
+        ).fetchall()
+        present = {
+            str(row[0]): (
+                str(row[1]).lower(), bool(row[2]),
+                None if row[3] is None else str(row[3]),
+            )
+            for row in rows
+        }
+        malformed = {
+            column_name: present[column_name]
+            for column_name, expected_type in expected.items()
+            if column_name in present
+            and present[column_name] != (expected_type, False, None)
+        }
+        if malformed:
+            raise RuntimeError(
+                "migration 354 partial column contract differs: "
+                f"{table_name}={malformed}"
+            )
+        if initial_install and present:
+            predicates = [
+                f'"{column_name}" IS NOT NULL'
+                for column_name in present
+            ]
+            retained = conn.execute(text(
+                f'SELECT EXISTS (SELECT 1 FROM "{table_name}" WHERE '
+                + " OR ".join(predicates)
+                + ")"
+            )).scalar_one()
+            if retained:
+                raise RuntimeError(
+                    "migration 354 found non-null pre-contract state requiring "
+                    f"sealed adjudication: {table_name}"
+                )
+
+    if "exit_owner_receipt_sha256" in _columns(
+        conn, "alpaca_paper_post_settlement_fill_contradictions"
+    ):
+        fk_rows = conn.execute(text("""
+            SELECT constraint_row.conname,
+                   lower(pg_get_constraintdef(constraint_row.oid))
+            FROM pg_constraint AS constraint_row
+            JOIN pg_attribute AS attribute
+              ON attribute.attrelid = constraint_row.conrelid
+             AND attribute.attnum = ANY(constraint_row.conkey)
+            WHERE constraint_row.conrelid =
+                    'alpaca_paper_post_settlement_fill_contradictions'::regclass
+              AND constraint_row.contype = 'f'
+              AND attribute.attname = 'exit_owner_receipt_sha256'
+        """)).fetchall()
+        for name, definition in fk_rows:
+            normalized = " ".join(str(definition).split())
+            if (
+                str(name) != "fk_alpaca_ps_fill_exit_owner_receipt"
+                or "foreign key (exit_owner_receipt_sha256) references "
+                   "adaptive_risk_reservation_events(event_sha256) "
+                   "on delete restrict" not in normalized
+            ):
+                raise RuntimeError(
+                    "migration 354 exit-owner FK is malformed: "
+                    f"{name}={normalized}"
+                )
+
+
+def _migration_354_preflight_retained_v1(conn) -> None:
+    """Freeze the empty owner namespace and prove retained v1 batch authority."""
+
+    reserved_count = conn.execute(
+        text("""
+            SELECT count(*)
+            FROM adaptive_risk_reservation_events
+            WHERE left(
+                event_type, char_length('alpaca_exit_owner_')
+            ) = 'alpaca_exit_owner_'
+        """),
+    ).scalar_one()
+    if int(reserved_count) != 0:
+        raise RuntimeError(
+            "migration 354 reserved owner-event namespace is not empty"
+        )
+
+    invalid_non_v1 = conn.execute(
+        text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM alpaca_paper_post_settlement_fill_contradictions
+                WHERE contradiction_schema_version <>
+                    :v1_schema
+            )
+        """),
+        {"v1_schema": _MIGRATION_354_V1_SCHEMA},
+    ).scalar_one()
+    if invalid_non_v1:
+        raise RuntimeError(
+            "migration 354 found pre-contract non-v1 contradiction rows"
+        )
+
+    # Migration 343 had no deferred batch-completeness trigger.  Never infer a
+    # signed starting position from a partial historical append: every retained
+    # v1 batch and the reservation-global hash chain must already be complete.
+    invalid_v1 = conn.execute(text("""
+        WITH ordered AS (
+            SELECT row_data.*,
+                   lag(row_data.contradiction_sha256) OVER (
+                       PARTITION BY row_data.reservation_id
+                       ORDER BY row_data.contradiction_sequence
+                   ) AS expected_previous,
+                   row_number() OVER (
+                       PARTITION BY row_data.reservation_id
+                       ORDER BY row_data.contradiction_sequence
+                   ) AS expected_sequence
+            FROM alpaca_paper_post_settlement_fill_contradictions AS row_data
+        ), batch_state AS (
+            SELECT reservation_id, batch_content_sha256,
+                   count(*) AS row_count,
+                   min(batch_activity_count) AS min_declared_count,
+                   max(batch_activity_count) AS max_declared_count,
+                   min(batch_activity_ordinal) AS min_ordinal,
+                   max(batch_activity_ordinal) AS max_ordinal,
+                   count(DISTINCT batch_activity_ordinal) AS distinct_ordinals,
+                   count(*) FILTER (WHERE is_projection_terminal) AS terminals,
+                   count(DISTINCT settlement_sha256) AS settlements,
+                   count(DISTINCT broker_order_id) AS orders,
+                   count(DISTINCT side) AS sides,
+                   count(DISTINCT order_role) AS roles,
+                   count(DISTINCT (
+                       contradiction_schema_version, authority_status,
+                       durability_kind, settlement_sha256,
+                       decision_packet_sha256, account_scope,
+                       account_identity_sha256, broker_environment,
+                       execution_family, upper(symbol),
+                       expected_client_order_id, broker_order_id,
+                       broker_connection_generation, source_state,
+                       settlement_terminal_fill_event_sha256,
+                       settlement_source_fill_count,
+                       settlement_entry_quantity, settlement_exit_quantity,
+                       settlement_net_realized_pnl_usd,
+                       batch_activity_count, batch_content_canonical_json,
+                       batch_content_sha256, observation_sha256,
+                       provider_order_payload_sha256, query_receipt_sha256,
+                       read_binding_sha256, adapter_connection_generation,
+                       adapter_build_sha256, capability_authority_status,
+                       capability_verified_at, query_after, query_until,
+                       query_received_at, query_available_at, query_expires_at
+                   )) AS invariants
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            GROUP BY reservation_id, batch_content_sha256
+        ), latest AS (
+            SELECT DISTINCT ON (row_data.reservation_id) row_data.*
+            FROM alpaca_paper_post_settlement_fill_contradictions AS row_data
+            ORDER BY row_data.reservation_id,
+                     row_data.contradiction_sequence DESC
+        )
+        SELECT EXISTS (
+            SELECT 1 FROM ordered
+            WHERE contradiction_sequence <> expected_sequence
+               OR previous_contradiction_sha256 IS DISTINCT FROM
+                    expected_previous
+            UNION ALL
+            SELECT 1 FROM batch_state
+            WHERE row_count <> min_declared_count
+               OR min_declared_count <> max_declared_count
+               OR min_ordinal <> 0
+               OR max_ordinal <> row_count - 1
+               OR distinct_ordinals <> row_count
+               OR terminals <> 1
+               OR settlements <> 1 OR orders <> 1
+               OR sides <> 1 OR roles <> 1 OR invariants <> 1
+            UNION ALL
+            SELECT 1
+            FROM latest
+            JOIN adaptive_risk_reservations AS reservation
+              ON reservation.reservation_id = latest.reservation_id
+            WHERE NOT latest.is_projection_terminal
+               OR reservation.state <> 'exposure_quarantined'
+               OR reservation.cumulative_filled_quantity_shares <>
+                    latest.broker_observed_cumulative_quantity
+               OR reservation.open_quantity_shares <>
+                    latest.projected_open_quantity_shares
+               OR reservation.open_structural_risk_usd IS DISTINCT FROM
+                    latest.projected_open_structural_risk_usd
+               OR reservation.open_gross_notional_usd IS DISTINCT FROM
+                    latest.projected_open_gross_notional_usd
+               OR reservation.open_buying_power_impact_usd IS DISTINCT FROM
+                    latest.projected_open_buying_power_impact_usd
+               OR reservation.last_source_event_content_sha256 IS DISTINCT FROM
+                    latest.contradiction_sha256
+        )
+    """)).scalar_one()
+    if invalid_v1:
+        raise RuntimeError(
+            "migration 354 retained v1 contradiction chain is incomplete "
+            "or differs from its reservation projection"
+        )
+
+
+def _migration_354_add_columns(conn) -> None:
+    conn.execute(text("""
+        ALTER TABLE adaptive_risk_reservations
+        ADD COLUMN IF NOT EXISTS
+            post_settlement_net_position_quantity_shares BIGINT NULL
+    """))
+    conn.execute(text("""
+        ALTER TABLE alpaca_paper_post_settlement_fill_contradictions
+        ADD COLUMN IF NOT EXISTS exit_owner_receipt_sha256 VARCHAR(64) NULL,
+        ADD COLUMN IF NOT EXISTS provider_client_order_id VARCHAR(160) NULL,
+        ADD COLUMN IF NOT EXISTS
+            projection_prior_net_position_quantity_shares BIGINT NULL,
+        ADD COLUMN IF NOT EXISTS
+            projected_net_position_quantity_shares BIGINT NULL
+    """))
+
+
+def _install_migration_354_constraints(conn) -> None:
+    """Install only migration-354-owned physical constraints and indexes."""
+
+    for constraint_name in (
+        "ck_adaptive_risk_reservation_quantities",
+        "ck_adaptive_risk_reservation_contradiction",
+    ):
+        conn.execute(text(
+            "ALTER TABLE adaptive_risk_reservations "
+            f'DROP CONSTRAINT IF EXISTS "{constraint_name}"'
+        ))
+    conn.execute(text("""
+        ALTER TABLE adaptive_risk_reservations
+        ADD CONSTRAINT ck_adaptive_risk_reservation_quantities CHECK (
+            planned_quantity_shares > 0
+            AND cumulative_filled_quantity_shares >= 0
+            AND open_quantity_shares >= 0
+            AND (
+                (post_settlement_net_position_quantity_shares IS NULL
+                 AND open_quantity_shares <= cumulative_filled_quantity_shares)
+                OR
+                (post_settlement_net_position_quantity_shares IS NOT NULL
+                 AND state = 'exposure_quarantined'
+                 AND open_quantity_shares =
+                    abs(post_settlement_net_position_quantity_shares))
+            )
+        ),
+        ADD CONSTRAINT ck_adaptive_risk_reservation_contradiction CHECK (
+            (
+                state = 'exposure_quarantined'
+                AND lifecycle_contradiction_source_state IS NOT NULL
+                AND lifecycle_contradiction_at IS NOT NULL
+                AND lifecycle_contradiction_evidence_sha256 IS NOT NULL
+                AND lifecycle_contradiction_evidence_sha256 ~ '^[0-9a-f]{64}$'
+                AND cumulative_filled_quantity_shares > 0
+                AND (
+                    post_settlement_net_position_quantity_shares IS NULL
+                    OR open_quantity_shares =
+                        abs(post_settlement_net_position_quantity_shares)
+                )
+            ) OR (
+                state <> 'exposure_quarantined'
+                AND lifecycle_contradiction_source_state IS NULL
+                AND lifecycle_contradiction_at IS NULL
+                AND lifecycle_contradiction_evidence_sha256 IS NULL
+                AND post_settlement_net_position_quantity_shares IS NULL
+            )
+        )
+    """))
+
+    for constraint_name in (
+        "ck_alpaca_post_settlement_fill_schema",
+        "ck_alpaca_post_settlement_fill_scope",
+        "ck_alpaca_post_settlement_fill_lineage",
+        "ck_alpaca_post_settlement_fill_values",
+        "ck_alpaca_post_settlement_fill_clocks",
+        "ck_alpaca_post_settlement_fill_fee",
+        "ck_alpaca_post_settlement_fill_hashes",
+        "uq_alpaca_ps_fill_batch_ordinal",
+        "fk_alpaca_ps_fill_exit_owner_receipt",
+    ):
+        conn.execute(text(
+            "ALTER TABLE alpaca_paper_post_settlement_fill_contradictions "
+            f'DROP CONSTRAINT IF EXISTS "{constraint_name}"'
+        ))
+    conn.execute(text("""
+        ALTER TABLE alpaca_paper_post_settlement_fill_contradictions
+        ADD CONSTRAINT fk_alpaca_ps_fill_exit_owner_receipt
+            FOREIGN KEY (exit_owner_receipt_sha256)
+            REFERENCES adaptive_risk_reservation_events(event_sha256)
+            ON DELETE RESTRICT,
+        ADD CONSTRAINT uq_alpaca_ps_fill_batch_ordinal UNIQUE (
+            reservation_id, batch_content_sha256, batch_activity_ordinal
+        ),
+        ADD CONSTRAINT ck_alpaca_post_settlement_fill_schema CHECK (
+            contradiction_schema_version IN (
+                'chili.alpaca-paper-post-settlement-fill-contradiction.v1',
+                'chili.alpaca-paper-post-settlement-fill-contradiction.v2'
+            )
+            AND authority_status = 'verified'
+            AND durability_kind =
+                'committed_alpaca_post_settlement_fill_contradiction'
+        ),
+        ADD CONSTRAINT ck_alpaca_post_settlement_fill_scope CHECK (
+            account_scope = 'alpaca:paper'
+            AND broker_environment = 'paper'
+            AND execution_family = 'alpaca_spot'
+            AND source_state IN ('closed', 'exposure_quarantined')
+            AND capability_authority_status =
+                'process_private_hmac_verified_before_commit'
+            AND (
+                (
+                    contradiction_schema_version =
+                        'chili.alpaca-paper-post-settlement-fill-contradiction.v1'
+                    AND side = 'buy' AND order_role = 'entry'
+                    AND order_ownership_status = 'reservation_bound'
+                    AND provider_order_id = broker_order_id
+                    AND exit_owner_receipt_sha256 IS NULL
+                    AND provider_client_order_id IS NULL
+                    AND projection_prior_net_position_quantity_shares IS NULL
+                    AND projected_net_position_quantity_shares IS NULL
+                ) OR (
+                    contradiction_schema_version =
+                        'chili.alpaca-paper-post-settlement-fill-contradiction.v2'
+                    AND (
+                        (
+                            side = 'buy' AND order_role = 'entry'
+                            AND order_ownership_status = 'reservation_bound'
+                            AND provider_order_id = broker_order_id
+                            AND exit_owner_receipt_sha256 IS NULL
+                            AND provider_client_order_id IS NULL
+                        ) OR (
+                            side = 'sell' AND order_role = 'exit'
+                            AND order_ownership_status =
+                                'exit_owner_receipt_bound'
+                            AND exit_owner_receipt_sha256 IS NOT NULL
+                            AND provider_client_order_id IS NOT NULL
+                            AND char_length(provider_client_order_id) > 0
+                            AND provider_order_id <> broker_order_id
+                            AND provider_client_order_id <>
+                                expected_client_order_id
+                        )
+                    )
+                )
+            )
+        ),
+        ADD CONSTRAINT ck_alpaca_post_settlement_fill_lineage CHECK (
+            contradiction_sequence > 0
+            AND (
+                (contradiction_sequence = 1
+                 AND previous_contradiction_sha256 IS NULL)
+                OR
+                (contradiction_sequence > 1
+                 AND previous_contradiction_sha256 IS NOT NULL)
+            )
+            AND batch_activity_count > 0
+            AND batch_activity_ordinal >= 0
+            AND batch_activity_ordinal < batch_activity_count
+            AND is_projection_terminal =
+                (batch_activity_ordinal = batch_activity_count - 1)
+        ),
+        ADD CONSTRAINT ck_alpaca_post_settlement_fill_values CHECK (
+            settlement_source_fill_count > 0
+            AND settlement_entry_quantity > 0
+            AND settlement_exit_quantity = settlement_entry_quantity
+            AND quantity > 0 AND price > 0 AND leaves_quantity >= 0
+            AND positive_fill_delta = quantity
+            AND quantity = trunc(quantity)
+            AND broker_observed_cumulative_quantity =
+                trunc(broker_observed_cumulative_quantity)
+            AND broker_observed_cumulative_quantity =
+                prior_recorded_cumulative_quantity + positive_fill_delta
+            AND (
+                (side = 'buy' AND prior_recorded_cumulative_quantity >=
+                    settlement_entry_quantity)
+                OR
+                (side = 'sell' AND prior_recorded_cumulative_quantity >= 0)
+            )
+            AND (
+                (
+                    is_projection_terminal
+                    AND projection_prior_cumulative_quantity IS NOT NULL
+                    AND projection_positive_fill_delta IS NOT NULL
+                    AND projection_positive_fill_delta > 0
+                    AND projected_open_quantity_shares IS NOT NULL
+                    AND projected_open_structural_risk_usd IS NOT NULL
+                    AND projected_open_gross_notional_usd IS NOT NULL
+                    AND projected_open_buying_power_impact_usd IS NOT NULL
+                    AND (
+                        side = 'sell'
+                        OR broker_observed_cumulative_quantity =
+                            projection_prior_cumulative_quantity
+                            + projection_positive_fill_delta
+                    )
+                    AND (
+                        (
+                            contradiction_schema_version =
+                              'chili.alpaca-paper-post-settlement-fill-contradiction.v1'
+                            AND projection_prior_net_position_quantity_shares
+                                IS NULL
+                            AND projected_net_position_quantity_shares IS NULL
+                        ) OR (
+                            contradiction_schema_version =
+                              'chili.alpaca-paper-post-settlement-fill-contradiction.v2'
+                            AND projection_prior_net_position_quantity_shares
+                                IS NOT NULL
+                            AND projected_net_position_quantity_shares
+                                IS NOT NULL
+                        )
+                    )
+                ) OR (
+                    NOT is_projection_terminal
+                    AND projection_prior_cumulative_quantity IS NULL
+                    AND projection_positive_fill_delta IS NULL
+                    AND projected_open_quantity_shares IS NULL
+                    AND projected_open_structural_risk_usd IS NULL
+                    AND projected_open_gross_notional_usd IS NULL
+                    AND projected_open_buying_power_impact_usd IS NULL
+                    AND projection_prior_net_position_quantity_shares IS NULL
+                    AND projected_net_position_quantity_shares IS NULL
+                )
+            )
+        ),
+        ADD CONSTRAINT ck_alpaca_post_settlement_fill_clocks CHECK (
+            query_after <= query_until
+            AND query_until <= query_received_at
+            AND query_received_at <= query_available_at
+            AND query_available_at < query_expires_at
+            AND provider_transaction_at <= provider_available_at
+            AND provider_available_at <= query_available_at
+            AND capability_verified_at >= query_available_at
+            AND capability_verified_at <= query_expires_at
+        ),
+        ADD CONSTRAINT ck_alpaca_post_settlement_fill_fee CHECK (
+            fee_status = 'authoritative' AND fee_usd >= 0
+            AND char_length(fee_evidence_canonical_json) > 1
+        ),
+        ADD CONSTRAINT ck_alpaca_post_settlement_fill_hashes CHECK (
+            contradiction_sha256 = contradiction_content_sha256
+            AND contradiction_sha256 ~ '^[0-9a-f]{64}$'
+            AND decision_packet_sha256 ~ '^[0-9a-f]{64}$'
+            AND account_identity_sha256 ~ '^[0-9a-f]{64}$'
+            AND settlement_sha256 ~ '^[0-9a-f]{64}$'
+            AND settlement_terminal_fill_event_sha256 ~ '^[0-9a-f]{64}$'
+            AND batch_content_sha256 ~ '^[0-9a-f]{64}$'
+            AND observation_sha256 ~ '^[0-9a-f]{64}$'
+            AND provider_order_payload_sha256 ~ '^[0-9a-f]{64}$'
+            AND query_receipt_sha256 ~ '^[0-9a-f]{64}$'
+            AND read_binding_sha256 ~ '^[0-9a-f]{64}$'
+            AND adapter_build_sha256 ~ '^[0-9a-f]{64}$'
+            AND immutable_fill_identity_sha256 ~ '^[0-9a-f]{64}$'
+            AND provider_payload_sha256 ~ '^[0-9a-f]{64}$'
+            AND fee_evidence_sha256 ~ '^[0-9a-f]{64}$'
+            AND (
+                exit_owner_receipt_sha256 IS NULL
+                OR exit_owner_receipt_sha256 ~ '^[0-9a-f]{64}$'
+            )
+            AND char_length(contradiction_content_canonical_json) > 1
+            AND (
+                previous_contradiction_sha256 IS NULL
+                OR previous_contradiction_sha256 ~ '^[0-9a-f]{64}$'
+            )
+        )
+    """))
+    conn.execute(text("""
+        DROP INDEX IF EXISTS ix_alpaca_ps_fill_order_sequence
+    """))
+    conn.execute(text("""
+        CREATE INDEX ix_alpaca_ps_fill_order_sequence
+        ON alpaca_paper_post_settlement_fill_contradictions (
+            reservation_id, provider_order_id, contradiction_sequence
+        )
+    """))
+
+
+def _install_migration_354_owner_event_guards(conn) -> None:
+    """Install structural typed-owner and bidirectional head guards.
+
+    PostgreSQL deliberately does not claim to recompute the application
+    content hash.  It proves immutable relational binding and ancestry; the
+    application must canonically reparse/re-hash ``payload_json`` before use.
+    """
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_guard_adaptive_exit_owner_event_insert()
+        RETURNS trigger AS $$
+        DECLARE
+            reservation_row adaptive_risk_reservations%ROWTYPE;
+            packet_row adaptive_risk_decision_packets%ROWTYPE;
+            started_row adaptive_risk_reservation_events%ROWTYPE;
+            details JSONB;
+            started_details JSONB;
+            started_sha VARCHAR(64);
+            started_is_ancestor BOOLEAN;
+            request_json JSONB;
+            requested_close_quantity NUMERIC;
+        BEGIN
+            IF left(
+                    NEW.event_type, char_length('alpaca_exit_owner_')
+               ) = 'alpaca_exit_owner_'
+               AND NEW.event_type NOT IN (
+                'alpaca_exit_owner_transport_started',
+                'alpaca_exit_owner_submitted',
+                'alpaca_exit_owner_reconciled',
+                'alpaca_exit_owner_submit_indeterminate',
+                'alpaca_exit_owner_proven_no_transport'
+            ) THEN
+                RAISE EXCEPTION
+                    'unknown adaptive exit-owner event type'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF left(
+                    NEW.event_type, char_length('alpaca_exit_owner_')
+               ) <> 'alpaca_exit_owner_' THEN
+                RETURN NEW;
+            END IF;
+            details := NEW.payload_json -> 'details';
+            IF jsonb_typeof(NEW.payload_json) IS DISTINCT FROM 'object'
+               OR jsonb_typeof(details) IS DISTINCT FROM 'object'
+               OR NEW.event_sha256 !~ '^[0-9a-f]{64}$'
+               OR NEW.broker_event_id IS NULL
+               OR btrim(NEW.broker_event_id) = ''
+               OR NEW.payload_json ->> 'event_type' IS DISTINCT FROM
+                    NEW.event_type
+               OR NEW.payload_json ->> 'reservation_id' IS DISTINCT FROM
+                    NEW.reservation_id::text
+               OR (NEW.payload_json ->> 'sequence')::bigint IS DISTINCT FROM
+                    NEW.sequence
+               OR (NEW.payload_json ->> 'effective_at')::timestamptz
+                    IS DISTINCT FROM NEW.effective_at
+               OR details ->> 'owner_receipt_schema_version' IS DISTINCT FROM
+                    'chili.alpaca-exit-owner-receipt.v1'
+               OR details ->> 'account_scope' IS DISTINCT FROM 'alpaca:paper'
+               OR details ->> 'broker_environment' IS DISTINCT FROM 'paper'
+               OR details ->> 'execution_family' IS DISTINCT FROM 'alpaca_spot'
+               OR coalesce(details ->> 'account_identity_sha256', '')
+                    !~ '^[0-9a-f]{64}$'
+               OR coalesce(details ->> 'decision_packet_sha256', '')
+                    !~ '^[0-9a-f]{64}$'
+               OR coalesce(details ->> 'request_sha256', '')
+                    !~ '^[0-9a-f]{64}$'
+               OR coalesce(btrim(details ->> 'expected_account_id'), '') = ''
+               OR coalesce(btrim(details ->> 'symbol'), '') = ''
+               OR coalesce(btrim(details ->> 'entry_client_order_id'), '') = ''
+               OR coalesce(btrim(details ->> 'exit_client_order_id'), '') = ''
+               OR details ->> 'exit_client_order_id' =
+                    details ->> 'entry_client_order_id'
+               OR coalesce(btrim(details ->> 'transport_claim_token'), '') = ''
+               OR coalesce(
+                    btrim(details ->> 'transport_owner_session_id'), ''
+               ) = ''
+               OR coalesce(
+                    btrim(details ->> 'transport_owner_generation'), ''
+               ) = ''
+               OR coalesce(btrim(details ->> 'transport_owner_kind'), '') = ''
+               OR coalesce(btrim(details ->> 'transport_lease_id'), '') = ''
+               OR coalesce(
+                    btrim(details ->> 'transport_runtime_generation'), ''
+               ) = ''
+               OR coalesce(
+                    btrim(details ->> 'transport_connection_generation'), ''
+               ) = ''
+               OR coalesce(
+                    btrim(details ->> 'request_canonical_json'), ''
+               ) = ''
+               OR details ->> 'available_at' IS NULL
+               OR (details ->> 'available_at')::timestamptz < NEW.effective_at
+               OR NEW.payload_json ->> 'previous_event_sha256'
+                    IS DISTINCT FROM NEW.previous_event_sha256
+               OR NEW.payload_json ->> 'broker_event_id'
+                    IS DISTINCT FROM NEW.broker_event_id
+            THEN
+                RAISE EXCEPTION
+                    'adaptive exit-owner event payload is incomplete'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            SELECT * INTO reservation_row
+            FROM adaptive_risk_reservations
+            WHERE reservation_id = NEW.reservation_id
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'adaptive exit-owner reservation is missing'
+                    USING ERRCODE = '23503';
+            END IF;
+            SELECT * INTO packet_row
+            FROM adaptive_risk_decision_packets
+            WHERE decision_packet_sha256 =
+                reservation_row.decision_packet_sha256;
+            IF NOT FOUND
+               OR reservation_row.account_scope <> 'alpaca:paper'
+               OR reservation_row.state NOT IN (
+                    'partially_filled', 'filled', 'flat_pending_settlement',
+                    'closed', 'exposure_quarantined'
+               )
+               OR NOT (
+                    (
+                        NEW.sequence = reservation_row.event_sequence + 1
+                        AND NEW.previous_event_sha256 IS NOT DISTINCT FROM
+                            reservation_row.last_event_sha256
+                    ) OR (
+                        NEW.sequence = reservation_row.event_sequence
+                        AND NEW.event_sha256 IS NOT DISTINCT FROM
+                            reservation_row.last_event_sha256
+                    )
+               )
+               OR details ->> 'decision_packet_sha256' IS DISTINCT FROM
+                    reservation_row.decision_packet_sha256
+               OR details ->> 'entry_client_order_id' IS DISTINCT FROM
+                    packet_row.client_order_id
+               OR NEW.payload_json ->> 'state' IS DISTINCT FROM
+                    reservation_row.state
+               OR (NEW.payload_json ->> 'planned_quantity_shares')::bigint
+                    IS DISTINCT FROM reservation_row.planned_quantity_shares
+               OR (NEW.payload_json ->>
+                        'cumulative_filled_quantity_shares')::bigint
+                    IS DISTINCT FROM
+                        reservation_row.cumulative_filled_quantity_shares
+               OR (NEW.payload_json ->> 'open_quantity_shares')::bigint
+                    IS DISTINCT FROM reservation_row.open_quantity_shares
+               OR details ->> 'account_scope' IS DISTINCT FROM
+                    reservation_row.account_scope
+               OR upper(details ->> 'symbol') IS DISTINCT FROM
+                    upper(reservation_row.symbol)
+               OR details ->> 'account_identity_sha256' IS DISTINCT FROM
+                    packet_row.account_identity_sha256
+               OR details ->> 'broker_environment' IS DISTINCT FROM
+                    packet_row.broker_environment
+               OR details ->> 'execution_family' IS DISTINCT FROM
+                    packet_row.execution_family
+            THEN
+                RAISE EXCEPTION
+                    'adaptive exit-owner event differs from reservation/packet'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            started_sha := details ->> 'transport_started_event_sha256';
+            IF NEW.event_type = 'alpaca_exit_owner_transport_started' THEN
+                request_json :=
+                    (details ->> 'request_canonical_json')::jsonb;
+                requested_close_quantity :=
+                    (request_json ->> 'base_size')::numeric;
+                IF reservation_row.state = 'closed'
+                   OR reservation_row.state NOT IN (
+                        'partially_filled', 'filled', 'exposure_quarantined'
+                    )
+                   OR reservation_row.open_quantity_shares <= 0
+                   OR (
+                        reservation_row.state = 'exposure_quarantined'
+                        AND reservation_row
+                            .post_settlement_net_position_quantity_shares
+                            IS NOT NULL
+                        AND reservation_row
+                            .post_settlement_net_position_quantity_shares <= 0
+                   )
+                   OR jsonb_typeof(request_json) IS DISTINCT FROM 'object'
+                   OR request_json ->> 'account_scope' IS DISTINCT FROM
+                        details ->> 'account_scope'
+                   OR request_json ->> 'alpaca_account_id' IS DISTINCT FROM
+                        details ->> 'expected_account_id'
+                   OR upper(request_json ->> 'product_id') IS DISTINCT FROM
+                        upper(details ->> 'symbol')
+                   OR request_json ->> 'client_order_id' IS DISTINCT FROM
+                        details ->> 'exit_client_order_id'
+                   OR lower(request_json ->> 'side') <> 'sell'
+                   OR lower(request_json ->> 'position_intent') <>
+                        'sell_to_close'
+                   OR requested_close_quantity <= 0
+                   OR requested_close_quantity >
+                        reservation_row.open_quantity_shares
+                   OR (
+                        reservation_row.state = 'exposure_quarantined'
+                        AND reservation_row
+                            .post_settlement_net_position_quantity_shares
+                            IS NOT NULL
+                        AND requested_close_quantity > reservation_row
+                            .post_settlement_net_position_quantity_shares
+                   )
+                   OR started_sha IS NOT NULL
+                   OR details ? 'provider_order_id'
+                   OR details ? 'provider_client_order_id' THEN
+                    RAISE EXCEPTION
+                        'transport-started owner event claims an outcome'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF started_sha !~ '^[0-9a-f]{64}$' THEN
+                RAISE EXCEPTION
+                    'exit-owner outcome lacks exact transport-started receipt'
+                    USING ERRCODE = '23514';
+            END IF;
+            SELECT * INTO started_row
+            FROM adaptive_risk_reservation_events
+            WHERE event_sha256 = started_sha
+              AND reservation_id = NEW.reservation_id
+              AND event_type = 'alpaca_exit_owner_transport_started';
+            IF NOT FOUND THEN
+                RAISE EXCEPTION
+                    'exit-owner transport-started receipt is missing'
+                    USING ERRCODE = '23503';
+            END IF;
+            started_details := started_row.payload_json -> 'details';
+            IF started_details ->> 'account_scope' IS DISTINCT FROM
+                    details ->> 'account_scope'
+               OR started_details ->> 'account_identity_sha256'
+                    IS DISTINCT FROM details ->> 'account_identity_sha256'
+               OR started_details ->> 'expected_account_id' IS DISTINCT FROM
+                    details ->> 'expected_account_id'
+               OR started_details ->> 'decision_packet_sha256' IS DISTINCT FROM
+                    details ->> 'decision_packet_sha256'
+               OR upper(started_details ->> 'symbol') IS DISTINCT FROM
+                    upper(details ->> 'symbol')
+               OR started_details ->> 'entry_client_order_id' IS DISTINCT FROM
+                    details ->> 'entry_client_order_id'
+               OR started_details ->> 'exit_client_order_id' IS DISTINCT FROM
+                    details ->> 'exit_client_order_id'
+               OR started_details ->> 'request_sha256' IS DISTINCT FROM
+                    details ->> 'request_sha256'
+               OR started_details ->> 'request_canonical_json' IS DISTINCT FROM
+                    details ->> 'request_canonical_json'
+               OR started_details ->> 'transport_claim_token' IS DISTINCT FROM
+                    details ->> 'transport_claim_token'
+               OR started_details ->> 'transport_owner_session_id'
+                    IS DISTINCT FROM details ->> 'transport_owner_session_id'
+               OR started_details ->> 'transport_owner_generation'
+                    IS DISTINCT FROM details ->> 'transport_owner_generation'
+               OR started_details ->> 'transport_owner_kind' IS DISTINCT FROM
+                    details ->> 'transport_owner_kind'
+               OR started_details ->> 'transport_lease_id' IS DISTINCT FROM
+                    details ->> 'transport_lease_id'
+               OR started_details ->> 'transport_runtime_generation'
+                    IS DISTINCT FROM details ->> 'transport_runtime_generation'
+               OR started_details ->> 'transport_connection_generation'
+                    IS DISTINCT FROM
+                        details ->> 'transport_connection_generation' THEN
+                RAISE EXCEPTION
+                    'exit-owner outcome changed immutable transport authority'
+                    USING ERRCODE = '23514';
+            END IF;
+            WITH RECURSIVE ancestry AS (
+                SELECT event_sha256, previous_event_sha256, sequence
+                FROM adaptive_risk_reservation_events
+                WHERE reservation_id = NEW.reservation_id
+                  AND event_sha256 = NEW.previous_event_sha256
+                UNION ALL
+                SELECT prior.event_sha256,
+                       prior.previous_event_sha256,
+                       prior.sequence
+                FROM adaptive_risk_reservation_events AS prior
+                JOIN ancestry AS child
+                  ON child.previous_event_sha256 = prior.event_sha256
+                WHERE prior.reservation_id = NEW.reservation_id
+                  AND prior.sequence < child.sequence
+                  AND prior.sequence >= started_row.sequence
+            )
+            SELECT EXISTS (
+                SELECT 1 FROM ancestry
+                WHERE event_sha256 = started_sha
+                  AND sequence = started_row.sequence
+            ) INTO started_is_ancestor;
+            IF NOT started_is_ancestor THEN
+                RAISE EXCEPTION
+                    'exit-owner outcome is not descended from started receipt'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF reservation_row.state = 'closed'
+               AND (
+                    reservation_row.closed_at IS NULL
+                    OR started_row.effective_at > reservation_row.closed_at
+               ) THEN
+                RAISE EXCEPTION
+                    'post-close exit-owner outcome lacks a pre-close ancestor'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF coalesce(btrim(details ->> 'observer_claim_token'), '') = ''
+               OR coalesce(btrim(details ->> 'observer_session_id'), '') = ''
+               OR coalesce(btrim(details ->> 'observer_generation'), '') = ''
+               OR coalesce(
+                    btrim(details ->> 'observer_runtime_generation'), ''
+               ) = ''
+               OR coalesce(
+                    btrim(details ->> 'observer_connection_generation'), ''
+               ) = '' THEN
+                RAISE EXCEPTION
+                    'exit-owner outcome lacks exact observer authority'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF NEW.event_type IN (
+                    'alpaca_exit_owner_submitted',
+                    'alpaca_exit_owner_reconciled'
+               ) AND (
+                    coalesce(btrim(details ->> 'provider_order_id'), '') = ''
+                    OR coalesce(
+                        btrim(details ->> 'provider_client_order_id'), ''
+                    ) = ''
+                    OR coalesce(btrim(details ->> 'provider_status'), '') = ''
+                    OR coalesce(
+                        details ->> 'provider_cumulative_quantity', ''
+                    ) !~ '^[0-9]+([.]0+)?$'
+               ) THEN
+                RAISE EXCEPTION
+                    'OID-bearing exit-owner receipt is incomplete'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF NEW.event_type IN (
+                    'alpaca_exit_owner_submit_indeterminate',
+                    'alpaca_exit_owner_proven_no_transport'
+               ) AND (
+                    details ? 'provider_order_id'
+                    OR details ? 'provider_client_order_id'
+               ) THEN
+                RAISE EXCEPTION
+                    'non-authoritative exit-owner outcome claims an OID'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        EXCEPTION
+            WHEN invalid_text_representation OR datetime_field_overflow THEN
+                RAISE EXCEPTION 'adaptive exit-owner payload has invalid types'
+                    USING ERRCODE = '23514';
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_require_adaptive_exit_owner_event_head()
+        RETURNS trigger AS $$
+        DECLARE
+            reservation_sequence BIGINT;
+            reservation_head VARCHAR(64);
+            reaches_event BOOLEAN;
+            chain_count BIGINT;
+            claim_row broker_symbol_action_claims%ROWTYPE;
+            details JSONB;
+            claim_metadata JSONB;
+            transport JSONB;
+            expected_phase VARCHAR(32);
+            expected_started_sha VARCHAR(64);
+        BEGIN
+            IF NEW.event_type NOT IN (
+                'alpaca_exit_owner_transport_started',
+                'alpaca_exit_owner_submitted',
+                'alpaca_exit_owner_reconciled',
+                'alpaca_exit_owner_submit_indeterminate',
+                'alpaca_exit_owner_proven_no_transport',
+                'post_settlement_fill_quarantine_projected'
+            ) THEN
+                RETURN NEW;
+            END IF;
+            SELECT event_sequence, last_event_sha256
+              INTO reservation_sequence, reservation_head
+            FROM adaptive_risk_reservations
+            WHERE reservation_id = NEW.reservation_id;
+            WITH RECURSIVE ancestry AS (
+                SELECT event_sha256, previous_event_sha256, sequence
+                FROM adaptive_risk_reservation_events
+                WHERE reservation_id = NEW.reservation_id
+                  AND event_sha256 = reservation_head
+                UNION ALL
+                SELECT prior.event_sha256,
+                       prior.previous_event_sha256,
+                       prior.sequence
+                FROM adaptive_risk_reservation_events AS prior
+                JOIN ancestry AS child
+                  ON child.previous_event_sha256 = prior.event_sha256
+                WHERE prior.reservation_id = NEW.reservation_id
+                  AND prior.sequence = child.sequence - 1
+                  AND prior.sequence >= NEW.sequence
+            )
+            SELECT bool_or(event_sha256 = NEW.event_sha256
+                           AND sequence = NEW.sequence),
+                   count(*)
+              INTO reaches_event, chain_count
+            FROM ancestry;
+            IF reservation_sequence < NEW.sequence
+               OR reservation_head IS NULL
+               OR NOT coalesce(reaches_event, FALSE)
+               OR chain_count < reservation_sequence - NEW.sequence + 1 THEN
+                RAISE EXCEPTION
+                    'typed exit-owner event and reservation head are not atomic'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF NEW.event_type =
+                    'post_settlement_fill_quarantine_projected' THEN
+                RETURN NEW;
+            END IF;
+            details := NEW.payload_json -> 'details';
+            SELECT * INTO claim_row
+            FROM broker_symbol_action_claims
+            WHERE account_scope = details ->> 'account_scope'
+              AND symbol = upper(details ->> 'symbol')
+            FOR UPDATE;
+            claim_metadata := claim_row.metadata_json;
+            transport := claim_metadata -> 'owner_transport';
+            expected_phase := CASE NEW.event_type
+                WHEN 'alpaca_exit_owner_transport_started' THEN 'submitting'
+                WHEN 'alpaca_exit_owner_submitted' THEN 'submitted'
+                WHEN 'alpaca_exit_owner_submit_indeterminate'
+                    THEN 'submit_indeterminate'
+                WHEN 'alpaca_exit_owner_reconciled' THEN CASE
+                    WHEN lower(details ->> 'provider_status') IN (
+                        'filled', 'done', 'closed', 'canceled', 'cancelled',
+                        'expired', 'rejected', 'failed'
+                    ) THEN 'resolved'
+                    WHEN lower(details ->> 'provider_status') IN (
+                        'new', 'partially_filled', 'accepted', 'pending_new',
+                        'accepted_for_bidding', 'calculated', 'done_for_day',
+                        'held', 'pending_cancel', 'pending_replace',
+                        'pending_review', 'stopped', 'suspended'
+                    ) THEN 'submitted'
+                    ELSE NULL
+                END
+                WHEN 'alpaca_exit_owner_proven_no_transport' THEN 'resolved'
+                ELSE NULL
+            END;
+            expected_started_sha := CASE
+                WHEN NEW.event_type =
+                    'alpaca_exit_owner_transport_started'
+                THEN NEW.event_sha256
+                ELSE details ->> 'transport_started_event_sha256'
+            END;
+            IF claim_row.account_scope IS NULL
+               OR claim_row.action <> 'entry'
+               OR claim_row.phase = 'resolved'
+               OR claim_row.claim_token IS DISTINCT FROM
+                    details ->> 'transport_claim_token'
+               OR claim_row.owner_session_id::text IS DISTINCT FROM
+                    details ->> 'transport_owner_session_id'
+               OR claim_row.client_order_id IS DISTINCT FROM
+                    details ->> 'entry_client_order_id'
+               OR coalesce(
+                    claim_metadata ->> 'alpaca_account_id',
+                    claim_metadata -> 'order_request' ->> 'alpaca_account_id'
+                  ) IS DISTINCT FROM details ->> 'expected_account_id'
+               OR jsonb_typeof(transport) IS DISTINCT FROM 'object'
+               OR transport ->> 'identity_contract' IS DISTINCT FROM
+                    'alpaca_owner_transport_v1'
+               OR transport ->> 'reservation_id' IS DISTINCT FROM
+                    NEW.reservation_id::text
+               OR transport ->> 'owner_receipt_schema_version' IS DISTINCT FROM
+                    'chili.alpaca-exit-owner-receipt.v1'
+               OR transport ->> 'account_scope' IS DISTINCT FROM
+                    details ->> 'account_scope'
+               OR transport ->> 'expected_account_id' IS DISTINCT FROM
+                    details ->> 'expected_account_id'
+               OR transport ->> 'account_identity_sha256' IS DISTINCT FROM
+                    details ->> 'account_identity_sha256'
+               OR transport ->> 'broker_environment' IS DISTINCT FROM
+                    details ->> 'broker_environment'
+               OR transport ->> 'execution_family' IS DISTINCT FROM
+                    details ->> 'execution_family'
+               OR transport ->> 'transport_connection_generation'
+                    IS DISTINCT FROM
+                    details ->> 'transport_connection_generation'
+               OR transport ->> 'decision_packet_sha256' IS DISTINCT FROM
+                    details ->> 'decision_packet_sha256'
+               OR upper(transport ->> 'symbol') IS DISTINCT FROM
+                    upper(details ->> 'symbol')
+               OR transport ->> 'entry_client_order_id' IS DISTINCT FROM
+                    details ->> 'entry_client_order_id'
+               OR transport ->> 'exit_client_order_id' IS DISTINCT FROM
+                    details ->> 'exit_client_order_id'
+               OR transport ->> 'client_order_id' IS DISTINCT FROM
+                    details ->> 'exit_client_order_id'
+               OR transport ->> 'request_canonical_json' IS DISTINCT FROM
+                    details ->> 'request_canonical_json'
+               OR transport ->> 'request_sha256' IS DISTINCT FROM
+                    details ->> 'request_sha256'
+               OR transport ->> 'transport_claim_token' IS DISTINCT FROM
+                    details ->> 'transport_claim_token'
+               OR transport ->> 'transport_owner_session_id' IS DISTINCT FROM
+                    details ->> 'transport_owner_session_id'
+               OR transport ->> 'transport_owner_generation' IS DISTINCT FROM
+                    details ->> 'transport_owner_generation'
+               OR transport ->> 'transport_owner_kind' IS DISTINCT FROM
+                    details ->> 'transport_owner_kind'
+               OR transport ->> 'transport_kind' IS DISTINCT FROM
+                    details ->> 'transport_owner_kind'
+               OR transport ->> 'transport_lease_id' IS DISTINCT FROM
+                    details ->> 'transport_lease_id'
+               OR transport ->> 'lease_token' IS DISTINCT FROM
+                    details ->> 'transport_lease_id'
+               OR transport ->> 'transport_runtime_generation' IS DISTINCT FROM
+                    details ->> 'transport_runtime_generation'
+               OR (
+                    NEW.event_type <>
+                        'alpaca_exit_owner_transport_started'
+                    AND (
+                        details ->> 'observer_claim_token' IS DISTINCT FROM
+                            claim_row.claim_token
+                        OR details ->> 'observer_session_id' IS DISTINCT FROM
+                            claim_row.owner_session_id::text
+                        OR transport ->> 'observer_claim_token'
+                            IS DISTINCT FROM
+                            details ->> 'observer_claim_token'
+                        OR transport ->> 'observer_session_id'
+                            IS DISTINCT FROM
+                            details ->> 'observer_session_id'
+                        OR transport ->> 'observer_generation'
+                            IS DISTINCT FROM
+                            details ->> 'observer_generation'
+                        OR transport ->> 'observer_runtime_generation'
+                            IS DISTINCT FROM
+                            details ->> 'observer_runtime_generation'
+                        OR transport ->> 'observer_connection_generation'
+                            IS DISTINCT FROM
+                            details ->> 'observer_connection_generation'
+                    )
+               )
+               OR transport ->> 'phase' IS DISTINCT FROM expected_phase
+               OR transport -> 'order_request' IS DISTINCT FROM
+                    (details ->> 'request_canonical_json')::jsonb
+               OR transport ->> 'exit_owner_transport_started_event_sha256'
+                    IS DISTINCT FROM expected_started_sha
+               OR (
+                    NEW.event_type =
+                        'alpaca_exit_owner_transport_started'
+                    AND (
+                        (transport ->> 'effective_at')::timestamptz
+                            IS DISTINCT FROM NEW.effective_at
+                        OR (transport ->> 'available_at')::timestamptz
+                            IS DISTINCT FROM
+                            (details ->> 'available_at')::timestamptz
+                    )
+               )
+               OR (
+                    NEW.event_type <>
+                        'alpaca_exit_owner_transport_started'
+                    AND (
+                        transport ->> 'exit_owner_last_event_sha256'
+                            IS DISTINCT FROM NEW.event_sha256
+                        OR transport ->> 'exit_owner_last_event_type'
+                            IS DISTINCT FROM NEW.event_type
+                    )
+               )
+               OR (
+                    NEW.event_type IN (
+                        'alpaca_exit_owner_submitted',
+                        'alpaca_exit_owner_reconciled'
+                    )
+                    AND transport ->> 'broker_order_id' IS DISTINCT FROM
+                        details ->> 'provider_order_id'
+               ) THEN
+                RAISE EXCEPTION
+                    'typed exit-owner event lacks exact action-claim binding'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_require_adaptive_reservation_event_head()
+        RETURNS trigger AS $$
+        DECLARE
+            reaches_old_head BOOLEAN;
+            chain_count BIGINT;
+            head_event_type VARCHAR(64);
+            head_effective_at TIMESTAMPTZ;
+            economic_transition BOOLEAN;
+        BEGIN
+            IF NEW.event_sequence IS NOT DISTINCT FROM OLD.event_sequence
+               AND NEW.last_event_sha256 IS NOT DISTINCT FROM
+                    OLD.last_event_sha256 THEN
+                RETURN NEW;
+            END IF;
+            IF NEW.event_sequence <= OLD.event_sequence
+               OR NEW.last_event_sha256 IS NULL THEN
+                RAISE EXCEPTION 'adaptive reservation event head regressed'
+                    USING ERRCODE = '23514';
+            END IF;
+            WITH RECURSIVE ancestry AS (
+                SELECT event_sha256, previous_event_sha256, sequence
+                FROM adaptive_risk_reservation_events
+                WHERE reservation_id = NEW.reservation_id
+                  AND event_sha256 = NEW.last_event_sha256
+                  AND sequence = NEW.event_sequence
+                UNION ALL
+                SELECT prior.event_sha256,
+                       prior.previous_event_sha256,
+                       prior.sequence
+                FROM adaptive_risk_reservation_events AS prior
+                JOIN ancestry AS child
+                  ON child.previous_event_sha256 = prior.event_sha256
+                WHERE prior.reservation_id = NEW.reservation_id
+                  AND prior.sequence = child.sequence - 1
+                  AND prior.sequence > OLD.event_sequence
+            )
+            SELECT bool_or(
+                       sequence = OLD.event_sequence + 1
+                       AND previous_event_sha256 IS NOT DISTINCT FROM
+                            OLD.last_event_sha256
+                   ), count(*)
+              INTO reaches_old_head, chain_count
+            FROM ancestry;
+            IF NOT coalesce(reaches_old_head, FALSE)
+               OR chain_count <> NEW.event_sequence - OLD.event_sequence THEN
+                RAISE EXCEPTION
+                    'adaptive reservation head lacks a contiguous event chain'
+                    USING ERRCODE = '23514';
+            END IF;
+            SELECT event_type, effective_at
+              INTO head_event_type, head_effective_at
+            FROM adaptive_risk_reservation_events
+            WHERE reservation_id = NEW.reservation_id
+              AND event_sha256 = NEW.last_event_sha256
+              AND sequence = NEW.event_sequence;
+            economic_transition := (
+                NEW.cumulative_filled_quantity_shares IS DISTINCT FROM
+                    OLD.cumulative_filled_quantity_shares
+                OR NEW.open_quantity_shares IS DISTINCT FROM
+                    OLD.open_quantity_shares
+                OR NEW.pending_structural_risk_usd IS DISTINCT FROM
+                    OLD.pending_structural_risk_usd
+                OR NEW.open_structural_risk_usd IS DISTINCT FROM
+                    OLD.open_structural_risk_usd
+                OR NEW.pending_gross_notional_usd IS DISTINCT FROM
+                    OLD.pending_gross_notional_usd
+                OR NEW.open_gross_notional_usd IS DISTINCT FROM
+                    OLD.open_gross_notional_usd
+                OR NEW.pending_buying_power_impact_usd IS DISTINCT FROM
+                    OLD.pending_buying_power_impact_usd
+                OR NEW.open_buying_power_impact_usd IS DISTINCT FROM
+                    OLD.open_buying_power_impact_usd
+                OR NEW.post_settlement_net_position_quantity_shares
+                    IS DISTINCT FROM
+                    OLD.post_settlement_net_position_quantity_shares
+                OR NEW.last_source_event_content_sha256 IS DISTINCT FROM
+                    OLD.last_source_event_content_sha256
+                OR NEW.last_broker_observed_at IS DISTINCT FROM
+                    OLD.last_broker_observed_at
+                OR NEW.last_broker_available_at IS DISTINCT FROM
+                    OLD.last_broker_available_at
+            );
+            IF head_event_type =
+                    'post_settlement_fill_quarantine_projected'
+               AND (
+                    NEW.state <> 'exposure_quarantined'
+                    OR NOT (OLD.state = 'closed' OR economic_transition)
+               ) THEN
+                RAISE EXCEPTION
+                    'post-settlement projection head lacks an economic transition'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF OLD.account_scope = 'alpaca:paper'
+               AND OLD.state IN (
+                    'flat_pending_settlement', 'closed',
+                    'exposure_quarantined'
+               ) AND NEW.state = OLD.state
+               AND head_event_type NOT IN (
+                     'alpaca_exit_owner_transport_started',
+                     'alpaca_exit_owner_submitted',
+                     'alpaca_exit_owner_reconciled',
+                     'alpaca_exit_owner_submit_indeterminate',
+                     'alpaca_exit_owner_proven_no_transport',
+                     'post_settlement_fill_quarantine_projected',
+                     'quarantined_cumulative_fill_advanced',
+                     'open_exposure_reduced',
+                     'quarantined_exposure_flat_observed',
+                     'quarantined_entry_remainder_released'
+                ) THEN
+                RAISE EXCEPTION
+                    'terminal reservation head may advance only for typed exit ownership'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF head_event_type IN (
+                    'quarantined_cumulative_fill_advanced',
+                    'open_exposure_reduced',
+                    'quarantined_exposure_flat_observed',
+                    'quarantined_entry_remainder_released'
+               ) AND NOT economic_transition THEN
+                RAISE EXCEPTION
+                    'quarantine economic event lacks an economic transition'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF OLD.account_scope = 'alpaca:paper'
+               AND OLD.state = 'closed'
+               AND NEW.state = 'exposure_quarantined'
+               AND head_event_type <>
+                    'post_settlement_fill_quarantine_projected' THEN
+                RAISE EXCEPTION
+                    'post-settlement quarantine lacks its typed projection event'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF head_event_type IN (
+                     'alpaca_exit_owner_transport_started',
+                     'alpaca_exit_owner_submitted',
+                     'alpaca_exit_owner_reconciled',
+                     'alpaca_exit_owner_submit_indeterminate',
+                     'alpaca_exit_owner_proven_no_transport',
+                     'post_settlement_fill_quarantine_projected',
+                     'quarantined_cumulative_fill_advanced',
+                     'open_exposure_reduced',
+                     'quarantined_exposure_flat_observed',
+                     'quarantined_entry_remainder_released'
+               ) AND (
+                    NEW.event_sequence <> OLD.event_sequence + 1
+                    OR NEW.version <> OLD.version + 1
+                    OR NEW.updated_at IS DISTINCT FROM
+                        greatest(OLD.updated_at, head_effective_at)
+               ) THEN
+                RAISE EXCEPTION
+                    'typed exit-owner head/version/time update is not exact'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_adaptive_exit_owner_event_insert
+        ON adaptive_risk_reservation_events
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_adaptive_exit_owner_event_insert
+        BEFORE INSERT ON adaptive_risk_reservation_events
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_guard_adaptive_exit_owner_event_insert()
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_adaptive_exit_owner_event_head
+        ON adaptive_risk_reservation_events
+    """))
+    conn.execute(text("""
+        CREATE CONSTRAINT TRIGGER trg_adaptive_exit_owner_event_head
+        AFTER INSERT ON adaptive_risk_reservation_events
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_require_adaptive_exit_owner_event_head()
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_adaptive_reservation_event_head
+        ON adaptive_risk_reservations
+    """))
+    conn.execute(text("""
+        CREATE CONSTRAINT TRIGGER trg_adaptive_reservation_event_head
+        AFTER UPDATE OF event_sequence, last_event_sha256
+        ON adaptive_risk_reservations
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_require_adaptive_reservation_event_head()
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS
+            trg_adaptive_risk_reservation_events_append_only
+        ON adaptive_risk_reservation_events
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_adaptive_risk_reservation_events_append_only
+        BEFORE UPDATE OR DELETE ON adaptive_risk_reservation_events
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_reject_adaptive_append_only_mutation()
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS
+            trg_adaptive_risk_reservation_events_no_truncate
+        ON adaptive_risk_reservation_events
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_adaptive_risk_reservation_events_no_truncate
+        BEFORE TRUNCATE ON adaptive_risk_reservation_events
+        FOR EACH STATEMENT EXECUTE FUNCTION
+            chili_reject_adaptive_append_only_mutation()
+    """))
+
+
+def _install_migration_354_reservation_guard(conn) -> None:
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_guard_alpaca_reservation_settlement_state()
+        RETURNS trigger AS $$
+        DECLARE
+            settlement_row alpaca_paper_cycle_settlements%ROWTYPE;
+            head_row alpaca_paper_account_settlement_heads%ROWTYPE;
+            packet_identity VARCHAR(64);
+            terminal_head_only BOOLEAN;
+        BEGIN
+            IF TG_OP = 'INSERT' THEN
+                IF NEW.account_scope = 'alpaca:paper'
+                   AND NEW.state IN (
+                        'flat_pending_settlement', 'closed',
+                        'exposure_quarantined'
+                   ) THEN
+                    RAISE EXCEPTION
+                        'Alpaca reservation cannot be inserted terminal or quarantined'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF OLD.account_scope <> 'alpaca:paper'
+               AND NEW.account_scope <> 'alpaca:paper' THEN
+                RETURN NEW;
+            END IF;
+            IF NEW.reservation_id IS DISTINCT FROM OLD.reservation_id
+               OR NEW.decision_packet_sha256 IS DISTINCT FROM
+                    OLD.decision_packet_sha256
+               OR NEW.opportunity_claim_id IS DISTINCT FROM
+                    OLD.opportunity_claim_id
+               OR NEW.account_scope IS DISTINCT FROM OLD.account_scope
+               OR NEW.symbol IS DISTINCT FROM OLD.symbol
+               OR NEW.trading_date IS DISTINCT FROM OLD.trading_date
+               OR NEW.setup_family IS DISTINCT FROM OLD.setup_family
+               OR NEW.correlation_cluster IS DISTINCT FROM
+                    OLD.correlation_cluster
+               OR NEW.planned_quantity_shares IS DISTINCT FROM
+                    OLD.planned_quantity_shares
+               OR NEW.planned_structural_risk_usd IS DISTINCT FROM
+                    OLD.planned_structural_risk_usd
+               OR NEW.planned_gross_notional_usd IS DISTINCT FROM
+                    OLD.planned_gross_notional_usd
+               OR NEW.planned_buying_power_impact_usd IS DISTINCT FROM
+                    OLD.planned_buying_power_impact_usd
+               OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+                RAISE EXCEPTION
+                    'Alpaca reservation identity/provenance is immutable'
+                    USING ERRCODE = '55000';
+            END IF;
+            IF NEW.event_sequence < OLD.event_sequence
+               OR (
+                    NEW.event_sequence = OLD.event_sequence
+                    AND NEW.last_event_sha256 IS DISTINCT FROM
+                        OLD.last_event_sha256
+               ) THEN
+                RAISE EXCEPTION 'Alpaca reservation event head regressed'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            terminal_head_only := (
+                OLD.state IN (
+                    'partially_filled', 'filled', 'flat_pending_settlement',
+                    'closed', 'exposure_quarantined'
+                )
+                AND NEW.state = OLD.state
+                AND NEW.event_sequence = OLD.event_sequence + 1
+                AND NEW.version = OLD.version + 1
+                AND NEW.updated_at >= OLD.updated_at
+                AND NEW.cumulative_filled_quantity_shares =
+                    OLD.cumulative_filled_quantity_shares
+                AND NEW.open_quantity_shares = OLD.open_quantity_shares
+                AND NEW.post_settlement_net_position_quantity_shares
+                    IS NOT DISTINCT FROM
+                    OLD.post_settlement_net_position_quantity_shares
+                AND NEW.pending_structural_risk_usd =
+                    OLD.pending_structural_risk_usd
+                AND NEW.pending_gross_notional_usd =
+                    OLD.pending_gross_notional_usd
+                AND NEW.pending_buying_power_impact_usd =
+                    OLD.pending_buying_power_impact_usd
+                AND NEW.open_structural_risk_usd =
+                    OLD.open_structural_risk_usd
+                AND NEW.open_gross_notional_usd = OLD.open_gross_notional_usd
+                AND NEW.open_buying_power_impact_usd =
+                    OLD.open_buying_power_impact_usd
+                AND NEW.broker_order_id IS NOT DISTINCT FROM OLD.broker_order_id
+                AND NEW.broker_source IS NOT DISTINCT FROM OLD.broker_source
+                AND NEW.broker_connection_generation IS NOT DISTINCT FROM
+                    OLD.broker_connection_generation
+                AND NEW.last_broker_observed_at IS NOT DISTINCT FROM
+                    OLD.last_broker_observed_at
+                AND NEW.last_broker_available_at IS NOT DISTINCT FROM
+                    OLD.last_broker_available_at
+                AND NEW.last_source_event_content_sha256 IS NOT DISTINCT FROM
+                    OLD.last_source_event_content_sha256
+                AND NEW.release_reason IS NOT DISTINCT FROM OLD.release_reason
+                AND NEW.lifecycle_contradiction_source_state IS NOT DISTINCT FROM
+                    OLD.lifecycle_contradiction_source_state
+                AND NEW.lifecycle_contradiction_at IS NOT DISTINCT FROM
+                    OLD.lifecycle_contradiction_at
+                AND NEW.lifecycle_contradiction_evidence_sha256 IS NOT DISTINCT FROM
+                    OLD.lifecycle_contradiction_evidence_sha256
+                AND NEW.submitted_at IS NOT DISTINCT FROM OLD.submitted_at
+                AND NEW.first_fill_at IS NOT DISTINCT FROM OLD.first_fill_at
+                AND NEW.released_at IS NOT DISTINCT FROM OLD.released_at
+                AND NEW.closed_at IS NOT DISTINCT FROM OLD.closed_at
+            );
+            IF terminal_head_only THEN
+                RETURN NEW;
+            END IF;
+
+            IF OLD.state IN (
+                    'partially_filled', 'filled',
+                    'flat_pending_settlement', 'closed',
+                    'exposure_quarantined'
+               ) AND (
+                    NEW.broker_source IS DISTINCT FROM OLD.broker_source
+                    OR NEW.broker_connection_generation IS DISTINCT FROM
+                        OLD.broker_connection_generation
+                    OR NEW.broker_order_id IS DISTINCT FROM OLD.broker_order_id
+               ) THEN
+                RAISE EXCEPTION
+                    'filled Alpaca reservation broker identity is immutable'
+                    USING ERRCODE = '55000';
+            END IF;
+
+            IF NEW.state = 'exposure_quarantined' THEN
+                IF OLD.state = 'exposure_quarantined' THEN
+                    IF NEW.lifecycle_contradiction_source_state IS DISTINCT FROM
+                            OLD.lifecycle_contradiction_source_state
+                       OR NEW.lifecycle_contradiction_at IS DISTINCT FROM
+                            OLD.lifecycle_contradiction_at
+                       OR NEW.lifecycle_contradiction_evidence_sha256 IS DISTINCT FROM
+                            OLD.lifecycle_contradiction_evidence_sha256
+                       OR NEW.cumulative_filled_quantity_shares <
+                            OLD.cumulative_filled_quantity_shares
+                       OR (
+                            OLD.post_settlement_net_position_quantity_shares
+                                IS NOT NULL
+                            AND NEW.post_settlement_net_position_quantity_shares
+                                IS NULL
+                       )
+                       OR NEW.closed_at IS DISTINCT FROM OLD.closed_at
+                       OR NEW.released_at IS DISTINCT FROM OLD.released_at
+                       OR NEW.release_reason IS DISTINCT FROM OLD.release_reason
+                       OR NEW.submitted_at IS DISTINCT FROM OLD.submitted_at
+                       OR NEW.first_fill_at IS DISTINCT FROM OLD.first_fill_at
+                       OR (
+                            NEW.cumulative_filled_quantity_shares =
+                                OLD.cumulative_filled_quantity_shares
+                            AND NEW.open_quantity_shares =
+                                OLD.open_quantity_shares
+                            AND NEW.post_settlement_net_position_quantity_shares
+                                IS NOT DISTINCT FROM
+                                OLD.post_settlement_net_position_quantity_shares
+                            AND NEW.pending_structural_risk_usd =
+                                OLD.pending_structural_risk_usd
+                            AND NEW.pending_gross_notional_usd =
+                                OLD.pending_gross_notional_usd
+                            AND NEW.pending_buying_power_impact_usd =
+                                OLD.pending_buying_power_impact_usd
+                            AND NEW.open_structural_risk_usd =
+                                OLD.open_structural_risk_usd
+                            AND NEW.open_gross_notional_usd =
+                                OLD.open_gross_notional_usd
+                            AND NEW.open_buying_power_impact_usd =
+                                OLD.open_buying_power_impact_usd
+                            AND NEW.last_source_event_content_sha256
+                                IS NOT DISTINCT FROM
+                                OLD.last_source_event_content_sha256
+                            AND NEW.last_broker_observed_at IS NOT DISTINCT FROM
+                                OLD.last_broker_observed_at
+                            AND NEW.last_broker_available_at IS NOT DISTINCT FROM
+                                OLD.last_broker_available_at
+                       ) THEN
+                        RAISE EXCEPTION
+                            'quarantined Alpaca exposure transition is invalid'
+                            USING ERRCODE = '23514';
+                    END IF;
+                    RETURN NEW;
+                END IF;
+                IF OLD.state NOT IN (
+                        'reserved', 'submitted', 'submit_indeterminate',
+                        'partially_filled', 'filled',
+                        'flat_pending_settlement', 'released', 'closed'
+                   )
+                   OR NEW.lifecycle_contradiction_source_state IS DISTINCT FROM
+                        OLD.state
+                   OR NEW.lifecycle_contradiction_at IS NULL
+                   OR NEW.lifecycle_contradiction_evidence_sha256 IS NULL
+                   OR NEW.lifecycle_contradiction_evidence_sha256 IS DISTINCT FROM
+                        NEW.last_source_event_content_sha256
+                   OR NEW.closed_at IS DISTINCT FROM OLD.closed_at
+                   OR NEW.released_at IS DISTINCT FROM OLD.released_at
+                   OR (
+                        NEW.cumulative_filled_quantity_shares =
+                            OLD.cumulative_filled_quantity_shares
+                        AND NEW.post_settlement_net_position_quantity_shares
+                            IS NULL
+                   )
+                   OR NEW.cumulative_filled_quantity_shares <
+                        OLD.cumulative_filled_quantity_shares THEN
+                    RAISE EXCEPTION
+                        'Alpaca exposure quarantine lacks exact late-fill proof'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF OLD.state = 'exposure_quarantined' THEN
+                RAISE EXCEPTION 'quarantined Alpaca exposure is fail-closed'
+                    USING ERRCODE = '55000';
+            END IF;
+            IF OLD.state = 'closed' THEN
+                RAISE EXCEPTION 'closed Alpaca reservation is immutable'
+                    USING ERRCODE = '55000';
+            END IF;
+            IF OLD.state = 'flat_pending_settlement'
+               AND NEW.state IS NOT DISTINCT FROM OLD.state THEN
+                RAISE EXCEPTION
+                    'flat_pending_settlement Alpaca reservation is immutable'
+                    USING ERRCODE = '55000';
+            END IF;
+            IF NEW.state IS NOT DISTINCT FROM OLD.state THEN
+                RETURN NEW;
+            END IF;
+            IF NEW.state = 'flat_pending_settlement' THEN
+                IF OLD.state NOT IN ('partially_filled', 'filled')
+                   OR EXISTS (
+                        SELECT 1 FROM alpaca_paper_cycle_settlements
+                        WHERE reservation_id = NEW.reservation_id
+                   ) THEN
+                    RAISE EXCEPTION
+                        'invalid transition into flat_pending_settlement'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF OLD.state = 'flat_pending_settlement' THEN
+                IF NEW.state <> 'closed' THEN
+                    RAISE EXCEPTION
+                        'flat_pending_settlement may only advance to closed'
+                        USING ERRCODE = '23514';
+                END IF;
+                SELECT account_identity_sha256 INTO packet_identity
+                FROM adaptive_risk_decision_packets
+                WHERE decision_packet_sha256 = NEW.decision_packet_sha256;
+                SELECT * INTO settlement_row
+                FROM alpaca_paper_cycle_settlements
+                WHERE reservation_id = NEW.reservation_id;
+                SELECT * INTO head_row
+                FROM alpaca_paper_account_settlement_heads
+                WHERE account_scope = NEW.account_scope
+                  AND account_identity_sha256 = packet_identity;
+                IF settlement_row.settlement_sha256 IS NULL
+                   OR head_row.last_settlement_sha256 IS DISTINCT FROM
+                        settlement_row.settlement_sha256
+                   OR head_row.settled_cycle_sequence <
+                        settlement_row.terminal_sequence
+                   OR NEW.closed_at IS DISTINCT FROM
+                        settlement_row.closed_available_at
+                   OR NEW.last_broker_observed_at IS DISTINCT FROM
+                        settlement_row.closed_observed_at
+                   OR NEW.last_broker_available_at IS DISTINCT FROM
+                        settlement_row.closed_available_at
+                   OR NEW.last_source_event_content_sha256 IS DISTINCT FROM
+                        settlement_row.flat_evidence_sha256 THEN
+                    RAISE EXCEPTION
+                        'Alpaca reservation cannot close before exact settlement'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF NEW.state = 'closed' THEN
+                RAISE EXCEPTION
+                    'Alpaca reservation must pass flat_pending_settlement'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_alpaca_reservation_settlement_state
+        ON adaptive_risk_reservations
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_alpaca_reservation_settlement_state
+        BEFORE INSERT OR UPDATE ON adaptive_risk_reservations
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_guard_alpaca_reservation_settlement_state()
+    """))
+
+
+def _install_migration_354_contradiction_guards(conn) -> None:
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_guard_alpaca_post_settlement_fill_insert()
+        RETURNS trigger AS $$
+        DECLARE
+            reservation_row adaptive_risk_reservations%ROWTYPE;
+            packet_row adaptive_risk_decision_packets%ROWTYPE;
+            settlement_row alpaca_paper_cycle_settlements%ROWTYPE;
+            prior_row
+                alpaca_paper_post_settlement_fill_contradictions%ROWTYPE;
+            prior_order_row
+                alpaca_paper_post_settlement_fill_contradictions%ROWTYPE;
+            prior_projection_row
+                alpaca_paper_post_settlement_fill_contradictions%ROWTYPE;
+            owner_row adaptive_risk_reservation_events%ROWTYPE;
+            owner_details JSONB;
+            expected_order_prior NUMERIC(28, 10);
+            prior_batch_row_count BIGINT;
+            batch_delta NUMERIC(28, 10);
+            prior_net BIGINT;
+            projected_net BIGINT;
+            projected_open BIGINT;
+        BEGIN
+            IF NEW.contradiction_schema_version =
+                    'chili.alpaca-paper-post-settlement-fill-contradiction.v1'
+            THEN
+                RAISE EXCEPTION
+                    'fresh v1 post-settlement contradictions are retired'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF NEW.contradiction_schema_version <>
+                    'chili.alpaca-paper-post-settlement-fill-contradiction.v2'
+            THEN
+                RAISE EXCEPTION 'unknown post-settlement contradiction schema'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            SELECT * INTO reservation_row
+            FROM adaptive_risk_reservations
+            WHERE reservation_id = NEW.reservation_id
+            FOR UPDATE;
+            SELECT * INTO packet_row
+            FROM adaptive_risk_decision_packets
+            WHERE decision_packet_sha256 = NEW.decision_packet_sha256;
+            SELECT * INTO settlement_row
+            FROM alpaca_paper_cycle_settlements
+            WHERE settlement_sha256 = NEW.settlement_sha256;
+            IF reservation_row.reservation_id IS NULL
+               OR packet_row.decision_packet_sha256 IS NULL
+               OR settlement_row.settlement_sha256 IS NULL
+               OR reservation_row.state IS DISTINCT FROM NEW.source_state
+               OR reservation_row.state NOT IN ('closed', 'exposure_quarantined')
+               OR reservation_row.decision_packet_sha256 IS DISTINCT FROM
+                    NEW.decision_packet_sha256
+               OR settlement_row.reservation_id IS DISTINCT FROM
+                    NEW.reservation_id
+               OR settlement_row.decision_packet_sha256 IS DISTINCT FROM
+                    NEW.decision_packet_sha256
+               OR reservation_row.account_scope IS DISTINCT FROM
+                    NEW.account_scope
+               OR packet_row.account_scope IS DISTINCT FROM NEW.account_scope
+               OR settlement_row.account_scope IS DISTINCT FROM
+                    NEW.account_scope
+               OR packet_row.account_identity_sha256 IS DISTINCT FROM
+                    NEW.account_identity_sha256
+               OR settlement_row.account_identity_sha256 IS DISTINCT FROM
+                    NEW.account_identity_sha256
+               OR packet_row.broker_environment IS DISTINCT FROM
+                    NEW.broker_environment
+               OR packet_row.execution_family IS DISTINCT FROM
+                    NEW.execution_family
+               OR upper(packet_row.symbol) IS DISTINCT FROM upper(NEW.symbol)
+               OR packet_row.client_order_id IS DISTINCT FROM
+                    NEW.expected_client_order_id
+               OR reservation_row.broker_order_id IS DISTINCT FROM
+                    NEW.broker_order_id
+               OR (
+                    NEW.side = 'buy'
+                    AND (
+                        reservation_row.broker_connection_generation
+                            IS DISTINCT FROM NEW.broker_connection_generation
+                        OR settlement_row.broker_connection_generation
+                            IS DISTINCT FROM NEW.broker_connection_generation
+                    )
+               )
+               OR settlement_row.terminal_fill_event_sha256 IS DISTINCT FROM
+                    NEW.settlement_terminal_fill_event_sha256
+               OR settlement_row.source_fill_count IS DISTINCT FROM
+                    NEW.settlement_source_fill_count
+               OR settlement_row.entry_quantity IS DISTINCT FROM
+                    NEW.settlement_entry_quantity
+               OR settlement_row.exit_quantity IS DISTINCT FROM
+                    NEW.settlement_exit_quantity
+               OR settlement_row.net_realized_pnl_usd IS DISTINCT FROM
+                    NEW.settlement_net_realized_pnl_usd THEN
+                RAISE EXCEPTION
+                    'post-settlement v2 authority differs from settled cycle'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            SELECT * INTO prior_row
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            WHERE reservation_id = NEW.reservation_id
+            ORDER BY contradiction_sequence DESC
+            LIMIT 1;
+            IF NOT FOUND THEN
+                IF NEW.contradiction_sequence <> 1
+                   OR NEW.previous_contradiction_sha256 IS NOT NULL
+                   OR NEW.source_state <> 'closed' THEN
+                    RAISE EXCEPTION
+                        'first post-settlement v2 row is not bound'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSE
+                IF NEW.contradiction_sequence <>
+                        prior_row.contradiction_sequence + 1
+                   OR NEW.previous_contradiction_sha256 IS DISTINCT FROM
+                        prior_row.contradiction_sha256
+                   OR NEW.settlement_sha256 IS DISTINCT FROM
+                        prior_row.settlement_sha256
+                   OR NEW.provider_available_at < prior_row.provider_available_at
+                   OR NEW.query_available_at < prior_row.query_available_at THEN
+                    RAISE EXCEPTION
+                        'post-settlement global append/availability chain differs'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+
+            SELECT * INTO prior_order_row
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            WHERE reservation_id = NEW.reservation_id
+              AND provider_order_id = NEW.provider_order_id
+            ORDER BY contradiction_sequence DESC
+            LIMIT 1;
+            IF FOUND THEN
+                expected_order_prior :=
+                    prior_order_row.broker_observed_cumulative_quantity;
+            ELSIF NEW.side = 'buy' THEN
+                expected_order_prior := settlement_row.entry_quantity;
+            ELSE
+                SELECT fill_row.cumulative_quantity
+                INTO expected_order_prior
+                FROM alpaca_paper_fill_activities AS fill_row
+                WHERE fill_row.reservation_id = NEW.reservation_id
+                  AND fill_row.provider_order_id = NEW.provider_order_id
+                  AND fill_row.provider_client_order_id =
+                        NEW.provider_client_order_id
+                  AND fill_row.decision_packet_sha256 =
+                        NEW.decision_packet_sha256
+                  AND fill_row.account_scope = NEW.account_scope
+                  AND fill_row.account_identity_sha256 =
+                        NEW.account_identity_sha256
+                  AND upper(fill_row.symbol) = upper(NEW.symbol)
+                  AND fill_row.order_role = 'exit'
+                  AND fill_row.side = 'sell'
+                  AND fill_row.capture_schema_version =
+                        'chili.alpaca-paper-fill-activity.v2'
+                  AND fill_row.capture_authority_status = 'verified'
+                  AND fill_row.sequence <=
+                        settlement_row.terminal_fill_sequence
+                ORDER BY fill_row.sequence DESC
+                LIMIT 1;
+                IF NOT FOUND THEN
+                    expected_order_prior := 0;
+                END IF;
+            END IF;
+            IF NEW.prior_recorded_cumulative_quantity IS DISTINCT FROM
+                    expected_order_prior THEN
+                RAISE EXCEPTION
+                    'post-settlement order-local cumulative baseline differs'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            IF NEW.side = 'buy' THEN
+                IF NEW.provider_order_id IS DISTINCT FROM
+                        reservation_row.broker_order_id THEN
+                    RAISE EXCEPTION
+                        'late BUY is not bound to the entry order'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSE
+                SELECT * INTO owner_row
+                FROM adaptive_risk_reservation_events
+                WHERE event_sha256 = NEW.exit_owner_receipt_sha256
+                  AND reservation_id = NEW.reservation_id
+                  AND event_type IN (
+                    'alpaca_exit_owner_submitted',
+                    'alpaca_exit_owner_reconciled'
+                  );
+                IF NOT FOUND THEN
+                    RAISE EXCEPTION
+                        'late SELL lacks an OID-bearing exit-owner receipt'
+                        USING ERRCODE = '23503';
+                END IF;
+                owner_details := owner_row.payload_json -> 'details';
+                IF owner_details ->> 'decision_packet_sha256' IS DISTINCT FROM
+                        NEW.decision_packet_sha256
+                   OR owner_details ->> 'account_scope' IS DISTINCT FROM
+                        NEW.account_scope
+                   OR owner_details ->> 'account_identity_sha256' IS DISTINCT FROM
+                        NEW.account_identity_sha256
+                   OR upper(owner_details ->> 'symbol') IS DISTINCT FROM
+                        upper(NEW.symbol)
+                   OR owner_details ->> 'provider_order_id' IS DISTINCT FROM
+                        NEW.provider_order_id
+                   OR owner_details ->> 'provider_client_order_id'
+                        IS DISTINCT FROM NEW.provider_client_order_id
+                   OR owner_details ->> 'entry_client_order_id' IS DISTINCT FROM
+                        NEW.expected_client_order_id
+                   OR owner_details ->> 'exit_client_order_id' IS DISTINCT FROM
+                        NEW.provider_client_order_id
+                   OR owner_details ->> 'observer_connection_generation'
+                        IS DISTINCT FROM NEW.broker_connection_generation THEN
+                    RAISE EXCEPTION
+                        'late SELL differs from immutable exit-owner receipt'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+
+            SELECT count(*) INTO prior_batch_row_count
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            WHERE reservation_id = NEW.reservation_id
+              AND batch_content_sha256 = NEW.batch_content_sha256;
+            IF NEW.batch_activity_ordinal <> prior_batch_row_count THEN
+                RAISE EXCEPTION
+                    'post-settlement batch rows must append in ordinal order'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            IF NEW.is_projection_terminal THEN
+                SELECT coalesce(sum(positive_fill_delta), 0)
+                  INTO batch_delta
+                FROM alpaca_paper_post_settlement_fill_contradictions
+                WHERE reservation_id = NEW.reservation_id
+                  AND batch_content_sha256 = NEW.batch_content_sha256;
+                batch_delta := batch_delta + NEW.positive_fill_delta;
+                IF NEW.projection_positive_fill_delta IS DISTINCT FROM
+                        batch_delta
+                   OR NEW.projection_prior_cumulative_quantity IS DISTINCT FROM
+                        reservation_row.cumulative_filled_quantity_shares THEN
+                    RAISE EXCEPTION
+                        'terminal v2 batch projection delta is not exact'
+                        USING ERRCODE = '23514';
+                END IF;
+
+                IF reservation_row.post_settlement_net_position_quantity_shares
+                        IS NOT NULL THEN
+                    prior_net :=
+                        reservation_row.post_settlement_net_position_quantity_shares;
+                ELSE
+                    SELECT * INTO prior_projection_row
+                    FROM alpaca_paper_post_settlement_fill_contradictions
+                    WHERE reservation_id = NEW.reservation_id
+                      AND batch_content_sha256 <> NEW.batch_content_sha256
+                      AND is_projection_terminal
+                    ORDER BY contradiction_sequence DESC
+                    LIMIT 1;
+                    IF prior_projection_row.contradiction_sha256 IS NULL THEN
+                        IF reservation_row.state <> 'closed'
+                           OR reservation_row.open_quantity_shares <> 0 THEN
+                            RAISE EXCEPTION
+                                'zero signed baseline is not a flat closed cycle'
+                                USING ERRCODE = '23514';
+                        END IF;
+                        prior_net := 0;
+                    ELSIF prior_projection_row.contradiction_schema_version =
+                            'chili.alpaca-paper-post-settlement-fill-contradiction.v1'
+                          AND prior_projection_row.is_projection_terminal
+                          AND reservation_row.state = 'exposure_quarantined'
+                          AND reservation_row.open_quantity_shares =
+                                prior_projection_row.projected_open_quantity_shares
+                          AND reservation_row.open_structural_risk_usd
+                                IS NOT DISTINCT FROM
+                                prior_projection_row.projected_open_structural_risk_usd
+                          AND reservation_row.open_gross_notional_usd
+                                IS NOT DISTINCT FROM
+                                prior_projection_row.projected_open_gross_notional_usd
+                          AND reservation_row.open_buying_power_impact_usd
+                                IS NOT DISTINCT FROM
+                                prior_projection_row.projected_open_buying_power_impact_usd
+                          AND reservation_row.last_source_event_content_sha256
+                                IS NOT DISTINCT FROM
+                                    prior_projection_row.contradiction_sha256 THEN
+                        prior_net := reservation_row.open_quantity_shares;
+                    ELSE
+                        RAISE EXCEPTION
+                            'v1-to-v2 signed bridge lacks exact terminal authority'
+                            USING ERRCODE = '23514';
+                    END IF;
+                END IF;
+                IF NEW.projection_prior_net_position_quantity_shares
+                        IS DISTINCT FROM prior_net THEN
+                    RAISE EXCEPTION 'v2 prior signed net differs'
+                        USING ERRCODE = '23514';
+                END IF;
+                projected_net := prior_net + CASE
+                    WHEN NEW.side = 'buy' THEN batch_delta::bigint
+                    ELSE -batch_delta::bigint
+                END;
+                projected_open := abs(projected_net);
+                IF NEW.projected_net_position_quantity_shares IS DISTINCT FROM
+                        projected_net
+                   OR NEW.projected_open_quantity_shares IS DISTINCT FROM
+                        projected_open
+                   OR NEW.projected_open_structural_risk_usd IS DISTINCT FROM
+                        chili_round_half_even_10(
+                            reservation_row.planned_structural_risk_usd
+                            * projected_open
+                            / reservation_row.planned_quantity_shares
+                        )
+                   OR NEW.projected_open_gross_notional_usd IS DISTINCT FROM
+                        chili_round_half_even_10(
+                            reservation_row.planned_gross_notional_usd
+                            * projected_open
+                            / reservation_row.planned_quantity_shares
+                        )
+                   OR NEW.projected_open_buying_power_impact_usd IS DISTINCT FROM
+                        chili_round_half_even_10(
+                            reservation_row.planned_buying_power_impact_usd
+                            * projected_open
+                            / reservation_row.planned_quantity_shares
+                        ) THEN
+                    RAISE EXCEPTION
+                        'v2 signed exposure projection differs from exact net'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_require_alpaca_post_settlement_fill_projection()
+        RETURNS trigger AS $$
+        DECLARE
+            contradiction_row
+                alpaca_paper_post_settlement_fill_contradictions%ROWTYPE;
+            expected_cumulative BIGINT;
+        BEGIN
+            IF OLD.account_scope <> 'alpaca:paper'
+               OR NEW.state <> 'exposure_quarantined' THEN
+                RETURN NEW;
+            END IF;
+            IF OLD.state = 'exposure_quarantined'
+               AND NEW.cumulative_filled_quantity_shares =
+                    OLD.cumulative_filled_quantity_shares
+               AND NEW.open_quantity_shares = OLD.open_quantity_shares
+               AND NEW.post_settlement_net_position_quantity_shares
+                    IS NOT DISTINCT FROM
+                    OLD.post_settlement_net_position_quantity_shares
+               AND NEW.pending_structural_risk_usd =
+                    OLD.pending_structural_risk_usd
+               AND NEW.pending_gross_notional_usd =
+                    OLD.pending_gross_notional_usd
+               AND NEW.pending_buying_power_impact_usd =
+                    OLD.pending_buying_power_impact_usd
+               AND NEW.open_structural_risk_usd =
+                    OLD.open_structural_risk_usd
+               AND NEW.open_gross_notional_usd = OLD.open_gross_notional_usd
+               AND NEW.open_buying_power_impact_usd =
+                    OLD.open_buying_power_impact_usd
+               AND NEW.last_source_event_content_sha256 IS NOT DISTINCT FROM
+                    OLD.last_source_event_content_sha256
+               AND NEW.last_broker_observed_at IS NOT DISTINCT FROM
+                    OLD.last_broker_observed_at
+               AND NEW.last_broker_available_at IS NOT DISTINCT FROM
+                    OLD.last_broker_available_at THEN
+                RETURN NEW;
+            END IF;
+            SELECT * INTO contradiction_row
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            WHERE reservation_id = NEW.reservation_id
+            ORDER BY contradiction_sequence DESC
+            LIMIT 1;
+            IF contradiction_row.contradiction_sha256 IS NULL
+               OR NOT contradiction_row.is_projection_terminal THEN
+                RAISE EXCEPTION
+                    'quarantined exposure lacks a terminal contradiction row'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            IF contradiction_row.contradiction_schema_version =
+                    'chili.alpaca-paper-post-settlement-fill-contradiction.v1'
+            THEN
+                IF NEW.cumulative_filled_quantity_shares <=
+                        OLD.cumulative_filled_quantity_shares THEN
+                    RAISE EXCEPTION
+                        'legacy quarantine changed without a positive fill projection'
+                        USING ERRCODE = '23514';
+                END IF;
+                IF contradiction_row.source_state IS DISTINCT FROM OLD.state
+                   OR contradiction_row.projection_prior_cumulative_quantity
+                        IS DISTINCT FROM OLD.cumulative_filled_quantity_shares
+                   OR contradiction_row.broker_observed_cumulative_quantity
+                        IS DISTINCT FROM NEW.cumulative_filled_quantity_shares
+                   OR NEW.open_quantity_shares IS DISTINCT FROM
+                        contradiction_row.projected_open_quantity_shares
+                   OR NEW.open_structural_risk_usd IS DISTINCT FROM
+                        contradiction_row.projected_open_structural_risk_usd
+                   OR NEW.open_gross_notional_usd IS DISTINCT FROM
+                        contradiction_row.projected_open_gross_notional_usd
+                   OR NEW.open_buying_power_impact_usd IS DISTINCT FROM
+                        contradiction_row.projected_open_buying_power_impact_usd THEN
+                    RAISE EXCEPTION
+                        'legacy quarantined projection differs from v1 row'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSE
+                expected_cumulative := OLD.cumulative_filled_quantity_shares
+                    + CASE WHEN contradiction_row.side = 'buy'
+                           THEN contradiction_row.projection_positive_fill_delta::bigint
+                           ELSE 0 END;
+                IF contradiction_row.source_state IS DISTINCT FROM OLD.state
+                   OR contradiction_row.projection_prior_cumulative_quantity
+                        IS DISTINCT FROM OLD.cumulative_filled_quantity_shares
+                   OR NEW.cumulative_filled_quantity_shares <>
+                        expected_cumulative
+                   OR NEW.post_settlement_net_position_quantity_shares
+                        IS DISTINCT FROM
+                            contradiction_row.projected_net_position_quantity_shares
+                   OR NEW.open_quantity_shares IS DISTINCT FROM
+                        contradiction_row.projected_open_quantity_shares
+                   OR NEW.open_structural_risk_usd IS DISTINCT FROM
+                        contradiction_row.projected_open_structural_risk_usd
+                   OR NEW.open_gross_notional_usd IS DISTINCT FROM
+                        contradiction_row.projected_open_gross_notional_usd
+                   OR NEW.open_buying_power_impact_usd IS DISTINCT FROM
+                        contradiction_row.projected_open_buying_power_impact_usd THEN
+                    RAISE EXCEPTION
+                        'signed quarantined projection differs from v2 row'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+            IF NEW.pending_structural_risk_usd <> 0
+               OR NEW.pending_gross_notional_usd <> 0
+               OR NEW.pending_buying_power_impact_usd <> 0
+               OR NEW.last_source_event_content_sha256 IS DISTINCT FROM
+                    contradiction_row.contradiction_sha256
+               OR NEW.last_broker_observed_at IS DISTINCT FROM
+                    contradiction_row.provider_transaction_at
+               OR NEW.last_broker_available_at IS DISTINCT FROM
+                    contradiction_row.provider_available_at
+               OR (
+                    OLD.state = 'closed'
+                    AND (
+                        NEW.lifecycle_contradiction_source_state IS DISTINCT FROM
+                            'closed'
+                        OR NEW.lifecycle_contradiction_evidence_sha256
+                            IS DISTINCT FROM contradiction_row.contradiction_sha256
+                        OR NEW.lifecycle_contradiction_at IS DISTINCT FROM
+                            contradiction_row.provider_available_at
+                    )
+               ) THEN
+                RAISE EXCEPTION
+                    'quarantined exposure lacks exact post-settlement authority'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_require_alpaca_post_settlement_batch_complete()
+        RETURNS trigger AS $$
+        DECLARE
+            row_count BIGINT;
+            min_ordinal INTEGER;
+            max_ordinal INTEGER;
+            distinct_ordinals BIGINT;
+            terminal_count BIGINT;
+            invariant_count BIGINT;
+            batch_delta NUMERIC(28, 10);
+            expected_cumulative BIGINT;
+            expected_projected_net BIGINT;
+            terminal_row
+                alpaca_paper_post_settlement_fill_contradictions%ROWTYPE;
+            reservation_row adaptive_risk_reservations%ROWTYPE;
+        BEGIN
+            IF NEW.contradiction_schema_version <>
+                    'chili.alpaca-paper-post-settlement-fill-contradiction.v2'
+            THEN
+                RETURN NEW;
+            END IF;
+            SELECT count(*), min(batch_activity_ordinal),
+                   max(batch_activity_ordinal),
+                   count(DISTINCT batch_activity_ordinal),
+                   count(*) FILTER (WHERE is_projection_terminal),
+                   count(DISTINCT (
+                       contradiction_schema_version, authority_status,
+                       durability_kind, settlement_sha256,
+                       decision_packet_sha256, account_scope,
+                       account_identity_sha256, broker_environment,
+                       execution_family, upper(symbol),
+                       expected_client_order_id, broker_order_id,
+                       broker_connection_generation, source_state,
+                       settlement_terminal_fill_event_sha256,
+                       settlement_source_fill_count,
+                       settlement_entry_quantity, settlement_exit_quantity,
+                       settlement_net_realized_pnl_usd,
+                       batch_activity_count, batch_content_canonical_json,
+                       batch_content_sha256, observation_sha256,
+                       provider_order_payload_sha256, query_receipt_sha256,
+                       read_binding_sha256, adapter_connection_generation,
+                       adapter_build_sha256, capability_authority_status,
+                       capability_verified_at, query_after, query_until,
+                       query_received_at, query_available_at, query_expires_at,
+                       provider_order_id, provider_client_order_id,
+                       side, order_role, order_ownership_status,
+                       exit_owner_receipt_sha256
+                   ))
+              INTO row_count, min_ordinal, max_ordinal,
+                   distinct_ordinals, terminal_count, invariant_count
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            WHERE reservation_id = NEW.reservation_id
+              AND batch_content_sha256 = NEW.batch_content_sha256;
+            IF row_count <> NEW.batch_activity_count
+               OR min_ordinal <> 0
+               OR max_ordinal <> NEW.batch_activity_count - 1
+               OR distinct_ordinals <> NEW.batch_activity_count
+               OR terminal_count <> 1
+               OR invariant_count <> 1 THEN
+                RAISE EXCEPTION
+                    'post-settlement v2 batch is partial or internally inconsistent'
+                    USING ERRCODE = '23514';
+            END IF;
+            SELECT * INTO terminal_row
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            WHERE reservation_id = NEW.reservation_id
+              AND batch_content_sha256 = NEW.batch_content_sha256
+              AND is_projection_terminal;
+            SELECT coalesce(sum(positive_fill_delta), 0)
+              INTO batch_delta
+            FROM alpaca_paper_post_settlement_fill_contradictions
+            WHERE reservation_id = NEW.reservation_id
+              AND batch_content_sha256 = NEW.batch_content_sha256;
+            expected_cumulative :=
+                terminal_row.projection_prior_cumulative_quantity::bigint
+                + CASE WHEN terminal_row.side = 'buy'
+                       THEN batch_delta::bigint ELSE 0 END;
+            expected_projected_net :=
+                terminal_row.projection_prior_net_position_quantity_shares
+                + CASE WHEN terminal_row.side = 'buy'
+                       THEN batch_delta::bigint ELSE -batch_delta::bigint END;
+            IF terminal_row.projection_positive_fill_delta IS DISTINCT FROM
+                    batch_delta
+               OR terminal_row.projected_net_position_quantity_shares
+                    IS DISTINCT FROM expected_projected_net
+               OR terminal_row.projected_open_quantity_shares
+                    IS DISTINCT FROM abs(expected_projected_net) THEN
+                RAISE EXCEPTION
+                    'post-settlement terminal projection omits batch evidence'
+                    USING ERRCODE = '23514';
+            END IF;
+            SELECT * INTO reservation_row
+            FROM adaptive_risk_reservations
+            WHERE reservation_id = NEW.reservation_id;
+            IF reservation_row.state <> 'exposure_quarantined'
+               OR reservation_row.cumulative_filled_quantity_shares
+                    IS DISTINCT FROM expected_cumulative
+               OR reservation_row.post_settlement_net_position_quantity_shares
+                    IS DISTINCT FROM
+                        terminal_row.projected_net_position_quantity_shares
+               OR reservation_row.open_quantity_shares IS DISTINCT FROM
+                        terminal_row.projected_open_quantity_shares
+               OR reservation_row.pending_structural_risk_usd <> 0
+               OR reservation_row.pending_gross_notional_usd <> 0
+               OR reservation_row.pending_buying_power_impact_usd <> 0
+               OR reservation_row.open_structural_risk_usd IS DISTINCT FROM
+                        terminal_row.projected_open_structural_risk_usd
+               OR reservation_row.open_gross_notional_usd IS DISTINCT FROM
+                        terminal_row.projected_open_gross_notional_usd
+               OR reservation_row.open_buying_power_impact_usd IS DISTINCT FROM
+                        terminal_row.projected_open_buying_power_impact_usd
+               OR reservation_row.last_source_event_content_sha256
+                    IS DISTINCT FROM terminal_row.contradiction_sha256 THEN
+                RAISE EXCEPTION
+                    'post-settlement v2 batch and signed reservation did not commit atomically'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_alpaca_post_settlement_fill_validate
+        ON alpaca_paper_post_settlement_fill_contradictions
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_alpaca_post_settlement_fill_validate
+        BEFORE INSERT ON alpaca_paper_post_settlement_fill_contradictions
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_guard_alpaca_post_settlement_fill_insert()
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_alpaca_post_settlement_fill_projection
+        ON adaptive_risk_reservations
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_alpaca_post_settlement_fill_projection
+        BEFORE UPDATE ON adaptive_risk_reservations
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_require_alpaca_post_settlement_fill_projection()
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_alpaca_post_settlement_batch_complete
+        ON alpaca_paper_post_settlement_fill_contradictions
+    """))
+    conn.execute(text("""
+        CREATE CONSTRAINT TRIGGER
+            trg_alpaca_post_settlement_batch_complete
+        AFTER INSERT ON alpaca_paper_post_settlement_fill_contradictions
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_require_alpaca_post_settlement_batch_complete()
+    """))
+
+
+def _install_migration_354_contract(conn) -> None:
+    """Reinstall the exact 354 contract without committing or recursing."""
+
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    conn.execute(text("""
+        LOCK TABLE
+            adaptive_risk_reservations,
+            adaptive_risk_reservation_events,
+            alpaca_paper_fill_activities,
+            broker_symbol_action_claims,
+            alpaca_paper_post_settlement_fill_contradictions
+        IN ACCESS EXCLUSIVE MODE
+    """))
+    _install_migration_354_constraints(conn)
+    _install_migration_354_owner_event_guards(conn)
+    _install_migration_354_reservation_guard(conn)
+    _install_migration_354_contradiction_guards(conn)
+
+    # Reassert append-only protection too.  Migration 343 owns the original
+    # mutation rejector; 354 repeats that exact body because latest-ORM test
+    # bootstrap can expose the table before historical migration 343 runs.
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION
+            chili_reject_alpaca_post_settlement_fill_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION
+                'post-settlement Alpaca fill contradictions are append-only'
+                USING ERRCODE = '23514';
+        END;
+        $$ LANGUAGE plpgsql
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_alpaca_post_settlement_fill_immutable
+        ON alpaca_paper_post_settlement_fill_contradictions
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_alpaca_post_settlement_fill_immutable
+        BEFORE UPDATE OR DELETE
+        ON alpaca_paper_post_settlement_fill_contradictions
+        FOR EACH ROW EXECUTE FUNCTION
+            chili_reject_alpaca_post_settlement_fill_mutation()
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_alpaca_post_settlement_fill_no_truncate
+        ON alpaca_paper_post_settlement_fill_contradictions
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_alpaca_post_settlement_fill_no_truncate
+        BEFORE TRUNCATE
+        ON alpaca_paper_post_settlement_fill_contradictions
+        FOR EACH STATEMENT EXECUTE FUNCTION
+            chili_reject_alpaca_post_settlement_fill_mutation()
+    """))
+
+
+def _verify_migration_354_physical_contract(conn) -> None:
+    """Verify exact columns, FK/index, constraints, triggers, and functions."""
+
+    _migration_354_preflight_columns(conn, initial_install=False)
+    required_constraints = {
+        "ck_adaptive_risk_reservation_quantities": (
+            "adaptive_risk_reservations", "c"
+        ),
+        "ck_adaptive_risk_reservation_contradiction": (
+            "adaptive_risk_reservations", "c"
+        ),
+        "fk_alpaca_ps_fill_exit_owner_receipt": (
+            "alpaca_paper_post_settlement_fill_contradictions", "f"
+        ),
+        "uq_alpaca_ps_fill_batch_ordinal": (
+            "alpaca_paper_post_settlement_fill_contradictions", "u"
+        ),
+        "ck_alpaca_post_settlement_fill_schema": (
+            "alpaca_paper_post_settlement_fill_contradictions", "c"
+        ),
+        "ck_alpaca_post_settlement_fill_scope": (
+            "alpaca_paper_post_settlement_fill_contradictions", "c"
+        ),
+        "ck_alpaca_post_settlement_fill_lineage": (
+            "alpaca_paper_post_settlement_fill_contradictions", "c"
+        ),
+        "ck_alpaca_post_settlement_fill_values": (
+            "alpaca_paper_post_settlement_fill_contradictions", "c"
+        ),
+        "ck_alpaca_post_settlement_fill_clocks": (
+            "alpaca_paper_post_settlement_fill_contradictions", "c"
+        ),
+        "ck_alpaca_post_settlement_fill_fee": (
+            "alpaca_paper_post_settlement_fill_contradictions", "c"
+        ),
+        "ck_alpaca_post_settlement_fill_hashes": (
+            "alpaca_paper_post_settlement_fill_contradictions", "c"
+        ),
+    }
+    rows = conn.execute(
+        text("""
+            SELECT constraint_row.conname,
+                   table_row.relname,
+                   constraint_row.contype,
+                   constraint_row.convalidated,
+                   lower(pg_get_constraintdef(constraint_row.oid))
+            FROM pg_constraint AS constraint_row
+            JOIN pg_class AS table_row
+              ON table_row.oid = constraint_row.conrelid
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = table_row.relnamespace
+            WHERE namespace.nspname = current_schema()
+              AND constraint_row.conname = ANY(:names)
+        """),
+        {"names": list(required_constraints)},
+    ).fetchall()
+    actual_constraints = {
+        str(row[0]): (
+            str(row[1]), str(row[2]), bool(row[3]),
+            " ".join(str(row[4]).split()),
+        )
+        for row in rows
+    }
+    bad_constraints = {
+        name: actual_constraints.get(name)
+        for name, (table_name, kind) in required_constraints.items()
+        if actual_constraints.get(name, (None, None, None, None))[:3]
+            != (table_name, kind, True)
+    }
+    if bad_constraints:
+        raise RuntimeError(
+            "migration 354 constraints missing/misbound: "
+            f"{bad_constraints}"
+        )
+    constraint_tokens = {
+        "ck_adaptive_risk_reservation_quantities": (
+            "post_settlement_net_position_quantity_shares",
+            "abs(post_settlement_net_position_quantity_shares)",
+        ),
+        "ck_adaptive_risk_reservation_contradiction": (
+            "post_settlement_net_position_quantity_shares is null",
+            "'exposure_quarantined'",
+        ),
+        "fk_alpaca_ps_fill_exit_owner_receipt": (
+            "foreign key (exit_owner_receipt_sha256)",
+            "references adaptive_risk_reservation_events(event_sha256)",
+            "on delete restrict",
+        ),
+        "uq_alpaca_ps_fill_batch_ordinal": (
+            "unique (reservation_id, batch_content_sha256, "
+            "batch_activity_ordinal)",
+        ),
+        "ck_alpaca_post_settlement_fill_schema": (
+            "chili.alpaca-paper-post-settlement-fill-contradiction.v2",
+        ),
+        "ck_alpaca_post_settlement_fill_scope": (
+            "exit_owner_receipt_bound", "provider_client_order_id",
+        ),
+        "ck_alpaca_post_settlement_fill_values": (
+            "projection_prior_net_position_quantity_shares",
+            "projected_net_position_quantity_shares",
+        ),
+    }
+    for name, tokens in constraint_tokens.items():
+        definition = actual_constraints[name][3]
+        if any(token not in definition for token in tokens):
+            raise RuntimeError(
+                "migration 354 constraint definition differs: " + name
+            )
+
+    index_row = conn.execute(text("""
+        SELECT index_state.indisvalid, index_state.indisready,
+               index_state.indisunique,
+               lower(pg_get_indexdef(index_state.indexrelid))
+        FROM pg_class AS index_relation
+        JOIN pg_index AS index_state
+          ON index_state.indexrelid = index_relation.oid
+        JOIN pg_namespace AS namespace
+          ON namespace.oid = index_relation.relnamespace
+        WHERE namespace.nspname = current_schema()
+          AND index_relation.relname = 'ix_alpaca_ps_fill_order_sequence'
+    """)).fetchall()
+    if len(index_row) != 1:
+        raise RuntimeError("migration 354 order-sequence index is missing")
+    index_definition = " ".join(str(index_row[0][3]).split())
+    if (
+        not bool(index_row[0][0])
+        or not bool(index_row[0][1])
+        or bool(index_row[0][2])
+        or "(reservation_id, provider_order_id, contradiction_sequence)"
+            not in index_definition
+    ):
+        raise RuntimeError(
+            "migration 354 order-sequence index contract differs"
+        )
+
+    expected_triggers = {
+        "trg_adaptive_exit_owner_event_insert": (
+            "adaptive_risk_reservation_events",
+            "chili_guard_adaptive_exit_owner_event_insert", False, False,
+        ),
+        "trg_adaptive_exit_owner_event_head": (
+            "adaptive_risk_reservation_events",
+            "chili_require_adaptive_exit_owner_event_head", True, True,
+        ),
+        "trg_adaptive_reservation_event_head": (
+            "adaptive_risk_reservations",
+            "chili_require_adaptive_reservation_event_head", True, True,
+        ),
+        "trg_adaptive_risk_reservation_events_append_only": (
+            "adaptive_risk_reservation_events",
+            "chili_reject_adaptive_append_only_mutation", False, False,
+        ),
+        "trg_adaptive_risk_reservation_events_no_truncate": (
+            "adaptive_risk_reservation_events",
+            "chili_reject_adaptive_append_only_mutation", False, False,
+        ),
+        "trg_alpaca_reservation_settlement_state": (
+            "adaptive_risk_reservations",
+            "chili_guard_alpaca_reservation_settlement_state", False, False,
+        ),
+        "trg_alpaca_post_settlement_fill_validate": (
+            "alpaca_paper_post_settlement_fill_contradictions",
+            "chili_guard_alpaca_post_settlement_fill_insert", False, False,
+        ),
+        "trg_alpaca_post_settlement_fill_projection": (
+            "adaptive_risk_reservations",
+            "chili_require_alpaca_post_settlement_fill_projection", False, False,
+        ),
+        "trg_alpaca_post_settlement_batch_complete": (
+            "alpaca_paper_post_settlement_fill_contradictions",
+            "chili_require_alpaca_post_settlement_batch_complete", True, True,
+        ),
+        "trg_alpaca_post_settlement_fill_immutable": (
+            "alpaca_paper_post_settlement_fill_contradictions",
+            "chili_reject_alpaca_post_settlement_fill_mutation", False, False,
+        ),
+        "trg_alpaca_post_settlement_fill_no_truncate": (
+            "alpaca_paper_post_settlement_fill_contradictions",
+            "chili_reject_alpaca_post_settlement_fill_mutation", False, False,
+        ),
+    }
+    trigger_rows = conn.execute(
+        text("""
+            SELECT trigger_row.tgname, table_row.relname,
+                   function_row.proname, trigger_row.tgdeferrable,
+                   trigger_row.tginitdeferred, trigger_row.tgenabled,
+                   lower(pg_get_triggerdef(trigger_row.oid))
+            FROM pg_trigger AS trigger_row
+            JOIN pg_class AS table_row
+              ON table_row.oid = trigger_row.tgrelid
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = table_row.relnamespace
+            JOIN pg_proc AS function_row
+              ON function_row.oid = trigger_row.tgfoid
+            WHERE namespace.nspname = current_schema()
+              AND trigger_row.tgname = ANY(:names)
+              AND NOT trigger_row.tgisinternal
+        """),
+        {"names": list(expected_triggers)},
+    ).fetchall()
+    actual_triggers = {
+        str(row[0]): (
+            str(row[1]), str(row[2]), bool(row[3]), bool(row[4]), str(row[5])
+            , " ".join(str(row[6]).split())
+        )
+        for row in trigger_rows
+    }
+    bad_triggers = {
+        name: actual_triggers.get(name)
+        for name, expected in expected_triggers.items()
+        if actual_triggers.get(name, (None,) * 6)[:5] != (*expected, "O")
+    }
+    if bad_triggers:
+        raise RuntimeError(
+            f"migration 354 triggers missing/misbound: {bad_triggers}"
+        )
+    trigger_tokens = {
+        "trg_adaptive_exit_owner_event_insert": (
+            "before insert", "for each row",
+        ),
+        "trg_adaptive_exit_owner_event_head": (
+            "after insert", "deferrable initially deferred",
+        ),
+        "trg_adaptive_reservation_event_head": (
+            "after update of event_sequence, last_event_sha256",
+            "deferrable initially deferred",
+        ),
+        "trg_adaptive_risk_reservation_events_append_only": (
+            "before", "delete", "update", "for each row",
+        ),
+        "trg_adaptive_risk_reservation_events_no_truncate": (
+            "before truncate", "for each statement",
+        ),
+        "trg_alpaca_reservation_settlement_state": (
+            "before", "insert", "update", "for each row",
+        ),
+        "trg_alpaca_post_settlement_fill_validate": (
+            "before insert", "for each row",
+        ),
+        "trg_alpaca_post_settlement_fill_projection": (
+            "before update", "for each row",
+        ),
+        "trg_alpaca_post_settlement_batch_complete": (
+            "after insert", "deferrable initially deferred",
+        ),
+        "trg_alpaca_post_settlement_fill_immutable": (
+            "before", "delete", "update", "for each row",
+        ),
+        "trg_alpaca_post_settlement_fill_no_truncate": (
+            "before truncate", "for each statement",
+        ),
+    }
+    for name, tokens in trigger_tokens.items():
+        definition = actual_triggers[name][5]
+        if any(token not in definition for token in tokens):
+            raise RuntimeError(
+                "migration 354 trigger definition differs: " + name
+            )
+
+    required_function_tokens = {
+        "chili_reject_adaptive_append_only_mutation()": (
+            "is append-only", "tg_op",
+        ),
+        "chili_guard_adaptive_exit_owner_event_insert()": (
+            "chili.alpaca-exit-owner-receipt.v1",
+            "alpaca_exit_owner_transport_started",
+            "transport_claim_token",
+            "observer_claim_token",
+            "observer_session_id",
+            "observer_generation",
+            "observer_runtime_generation",
+            "observer_connection_generation",
+            "exit-owner outcome lacks exact observer authority",
+            "post-close exit-owner outcome lacks a pre-close ancestor",
+            "post_settlement_net_position_quantity_shares <= 0",
+            "unknown adaptive exit-owner event type",
+        ),
+        "chili_require_adaptive_exit_owner_event_head()": (
+            "reservation head are not atomic",
+            "post_settlement_fill_quarantine_projected",
+            "broker_symbol_action_claims",
+            "exit_owner_transport_started_event_sha256",
+            "exit_owner_last_event_sha256",
+            "observer_claim_token",
+            "observer_session_id",
+            "observer_generation",
+            "observer_runtime_generation",
+            "observer_connection_generation",
+            "'new'",
+            "partially_filled",
+            "'accepted'",
+            "pending_new",
+            "accepted_for_bidding",
+            "calculated",
+            "done_for_day",
+            "'held'",
+            "pending_cancel",
+            "pending_replace",
+            "pending_review",
+            "stopped",
+            "suspended",
+            "typed exit-owner event lacks exact action-claim binding",
+        ),
+        "chili_require_adaptive_reservation_event_head()": (
+            "typed exit-owner head/version/time update is not exact",
+            "post-settlement projection head lacks an economic transition",
+        ),
+        "chili_guard_alpaca_reservation_settlement_state()": (
+            "post_settlement_net_position_quantity_shares",
+            "terminal_head_only",
+        ),
+        "chili_guard_alpaca_post_settlement_fill_insert()": (
+            "fresh v1 post-settlement contradictions are retired",
+            "v1-to-v2 signed bridge",
+            "exit_owner_receipt_sha256",
+            "post-settlement batch rows must append in ordinal order",
+            "alpaca_paper_fill_activities",
+            "terminal_fill_sequence",
+        ),
+        "chili_require_alpaca_post_settlement_fill_projection()": (
+            "signed quarantined projection differs from v2 row",
+        ),
+        "chili_require_alpaca_post_settlement_batch_complete()": (
+            "batch is partial or internally inconsistent",
+            "sum(positive_fill_delta)",
+            "terminal projection omits batch evidence",
+            "expected_projected_net",
+        ),
+    }
+    for signature, tokens in required_function_tokens.items():
+        definition = conn.execute(
+            text("SELECT pg_get_functiondef(to_regprocedure(:signature))"),
+            {"signature": signature},
+        ).scalar_one_or_none()
+        normalized = str(definition or "").lower()
+        if not definition or any(token.lower() not in normalized for token in tokens):
+            raise RuntimeError(
+                "migration 354 function contract differs: " + signature
+            )
+
+
+def _install_and_verify_migration_354_contract(
+    conn,
+    *,
+    allow_registered_repair: bool,
+) -> None:
+    """Run the locked preflight/install/verify sequence without committing."""
+
+    conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+    conn.execute(text("""
+        LOCK TABLE
+            adaptive_risk_reservations,
+            adaptive_risk_reservation_events,
+            alpaca_paper_post_settlement_fill_contradictions
+        IN ACCESS EXCLUSIVE MODE
+    """))
+    full_columns = all(
+        set(expected) <= _columns(conn, table_name)
+        for table_name, expected in _MIGRATION_354_COLUMN_CONTRACT.items()
+    )
+    marker_present = _migration_354_has_install_marker(conn)
+    if not allow_registered_repair and full_columns and marker_present:
+        _migration_354_preflight_columns(conn, initial_install=False)
+        # A named trigger is not an install marker by itself.  Only the complete
+        # current physical contract may be accepted without the registry row.
+        _verify_migration_354_physical_contract(conn)
+        return
+    _migration_354_preflight_columns(
+        conn,
+        initial_install=not allow_registered_repair,
+    )
+    if not allow_registered_repair:
+        _migration_354_preflight_retained_v1(conn)
+    _migration_354_add_columns(conn)
+    _install_migration_354_contract(conn)
+    _verify_migration_354_physical_contract(conn)
+
+
+def _reassert_354_if_present(conn) -> None:
+    """Restore 354 after a historical 323/335/343 repair, without commit.
+
+    Static recording connections deliberately have no dialect and skip the
+    physical probe.  Runtime PostgreSQL reassertion never calls a full legacy
+    migration and therefore cannot recurse.
+    """
+
+    inspectable = getattr(conn, "raw", conn)
+    if not hasattr(inspectable, "dialect"):
+        return
+    required_tables = {
+        "adaptive_risk_decision_packets",
+        "adaptive_risk_reservations",
+        "adaptive_risk_reservation_events",
+        "alpaca_paper_fill_activities",
+        "broker_symbol_action_claims",
+        "alpaca_paper_cycle_settlements",
+        "alpaca_paper_account_settlement_heads",
+        "alpaca_paper_post_settlement_fill_contradictions",
+    }
+    if not required_tables <= _tables(inspectable):
+        return
+    full_columns = all(
+        set(expected) <= _columns(inspectable, table_name)
+        for table_name, expected in _MIGRATION_354_COLUMN_CONTRACT.items()
+    )
+    registered = _migration_354_schema_version_applied(conn)
+    # ``Base.metadata.create_all`` may expose the nullable ORM columns while a
+    # brand-new database is still replaying migrations 323/335/343.  Column
+    # presence is not migration authority: only a committed 354 registry row
+    # permits a historical repair to reinstall the 354-owned functions and
+    # triggers.  The real migration below remains the sole unregistered
+    # installer and performs its stricter OLD/PARTIAL retained-row preflight.
+    if not registered:
+        return
+    if not full_columns:
+        raise RuntimeError(
+            "registered migration 354 column contract is incomplete"
+        )
+    _install_and_verify_migration_354_contract(
+        conn,
+        allow_registered_repair=True,
+    )
+
+
+def _migration_354_alpaca_exit_owner_and_post_settlement_exit_v2(conn) -> None:
+    """Bind pre-I/O exit ownership and signed late BUY/SELL quarantine."""
+
+    _assert_migration_ids_unique()
+    registered = [
+        migrate_fn
+        for version_id, migrate_fn in MIGRATIONS
+        if version_id == _MIGRATION_354_ID
+    ]
+    if registered != [
+        _migration_354_alpaca_exit_owner_and_post_settlement_exit_v2
+    ]:
+        raise RuntimeError("migration 354 registry binding differs")
+    required_tables = {
+        "adaptive_risk_decision_packets",
+        "adaptive_risk_reservations",
+        "adaptive_risk_reservation_events",
+        "alpaca_paper_fill_activities",
+        "broker_symbol_action_claims",
+        "alpaca_paper_cycle_settlements",
+        "alpaca_paper_account_settlement_heads",
+        "alpaca_paper_post_settlement_fill_contradictions",
+    }
+    missing = required_tables - _tables(conn)
+    if missing:
+        raise RuntimeError(
+            "migration 354 prerequisites missing: " + ",".join(sorted(missing))
+        )
+    _install_and_verify_migration_354_contract(
+        conn,
+        allow_registered_repair=False,
+    )
+    conn.commit()
+    logger.info(
+        "[mig354] installed typed Alpaca exit-owner authority and signed "
+        "post-settlement BUY/SELL quarantine"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -29564,6 +32376,8 @@ MIGRATIONS = [
      _migration_352_captured_paper_variant_application_append_only),
     ("353_captured_paper_selection_route_state",
      _migration_353_captured_paper_selection_route_state),
+    ("354_alpaca_exit_owner_and_post_settlement_exit_v2",
+     _migration_354_alpaca_exit_owner_and_post_settlement_exit_v2),
 ]
 
 

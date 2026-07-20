@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path
 import threading
 import uuid
@@ -20,6 +21,7 @@ from app.models.trading import (
     AdaptiveRiskOpportunityEvent,
     AdaptiveRiskReservation,
     AdaptiveRiskReservationEvent,
+    AlpacaPaperAccountSettlementHead,
     MomentumStrategyVariant,
     TradingAutomationSession,
     TradingAutomationSimulatedFill,
@@ -31,6 +33,7 @@ from app.services.trading.momentum_neural.adaptive_risk_policy import (
     RiskInputEvidence,
 )
 from app.services.trading.momentum_neural.adaptive_risk_reservation import (
+    AdaptiveExitOwnerTransportBinding,
     AdaptiveReservationIdempotencyConflict,
     AdaptiveReservationStateConflict,
     AdaptiveRiskExposureQuarantined,
@@ -41,6 +44,15 @@ from app.services.trading.momentum_neural.adaptive_risk_reservation import (
     DurableSubmitAttemptEvidence,
     ImmutableAccountRiskSnapshot,
     load_adaptive_risk_reservation_request,
+)
+from app.services.trading.momentum_neural.alpaca_cycle_settlement import (
+    new_zero_settlement_head,
+)
+from app.services.trading.momentum_neural.alpaca_orphan_claims import (
+    acquire_action_claim,
+    advance_owner_transport,
+    lease_owner_transport,
+    read_action_claim,
 )
 
 
@@ -246,6 +258,224 @@ def _request(
             if setup_family == "first_dip_reclaim"
             else None
         ),
+    )
+
+
+def _exit_owner_binding(
+    request: AdaptiveRiskReservationRequest,
+    *,
+    reservation_id: uuid.UUID,
+    decision_packet_sha256: str,
+    exit_client_order_id: str | None = None,
+    transport_lease_id: str | None = None,
+    owner_generation: int = 1,
+    owner_session_id: int = 7001,
+    owner_kind: str = "ordinary_exit",
+) -> AdaptiveExitOwnerTransportBinding:
+    exit_cid = exit_client_order_id or (
+        f"exit-{request.client_order_id}-{owner_generation}"
+    )
+    account_id = "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f"
+    return AdaptiveExitOwnerTransportBinding(
+        reservation_id=reservation_id,
+        expected_account_id=account_id,
+        account_identity_sha256=request.inputs.account_identity_sha256,
+        decision_packet_sha256=decision_packet_sha256,
+        symbol=request.inputs.symbol,
+        entry_client_order_id=request.client_order_id,
+        exit_client_order_id=exit_cid,
+        order_request={
+            "account_scope": "alpaca:paper",
+            "alpaca_account_id": account_id,
+            "asset_class": "us_equity",
+            "base_size": 1.0,
+            "client_order_id": exit_cid,
+            "order_type": "market",
+            "position_intent": "sell_to_close",
+            "product_id": request.inputs.symbol,
+            "side": "sell",
+            "time_in_force": "day",
+        },
+        transport_claim_token=f"claim-{reservation_id}",
+        transport_owner_session_id=owner_session_id,
+        transport_owner_generation=owner_generation,
+        transport_owner_kind=owner_kind,
+        transport_lease_id=(
+            transport_lease_id or f"lease-{reservation_id}-{owner_generation}"
+        ),
+        transport_runtime_generation="paper-runtime-generation-501",
+        transport_connection_generation="alpaca-paper-connection-501",
+    )
+
+
+def _reserve_filled_exit_owner_fixture(
+    db,
+    *,
+    label: str,
+    account_identity_sha256: str | None = None,
+    surface: str = "db_paper",
+):
+    snapshot = _snapshot(account_scope="alpaca:paper")
+    if account_identity_sha256 is not None:
+        snapshot = replace(
+            snapshot,
+            account_identity_sha256=account_identity_sha256,
+        )
+    inputs = _inputs(
+        snapshot,
+        symbol=label[:4].upper(),
+        decision_id=f"{label}-decision",
+        cluster=f"equity:{label}",
+        surface=surface,
+    )
+    request = _request(
+        symbol=label[:4].upper(),
+        decision_id=f"{label}-decision",
+        client_order_id=f"{label}-entry-cid",
+        setup_family="gap_and_go",
+        cluster=f"equity:{label}",
+        snapshot=snapshot,
+        inputs=inputs,
+    )
+    if db.get(
+        AlpacaPaperAccountSettlementHead,
+        ("alpaca:paper", request.inputs.account_identity_sha256),
+    ) is None:
+        db.add(
+            new_zero_settlement_head(
+                account_identity_sha256=request.inputs.account_identity_sha256
+            )
+        )
+    db.commit()
+    store = AdaptiveRiskReservationStore(engine)
+    decision = store.reserve(request)
+    variant = MomentumStrategyVariant(
+        family="db_paper_exit_owner_fixture",
+        variant_key=uuid.uuid4().hex,
+        version=1,
+        label="DB paper exit-owner fixture",
+        params_json={},
+        execution_family="alpaca_spot",
+    )
+    db.add(variant)
+    db.flush()
+    automation_session = TradingAutomationSession(
+        venue="alpaca",
+        execution_family="alpaca_spot",
+        mode="paper",
+        symbol=request.inputs.symbol,
+        variant_id=variant.id,
+        state="entered",
+        risk_snapshot_json={},
+        allocation_decision_json={},
+    )
+    db.add(automation_session)
+    db.flush()
+    lifecycle_event_id = f"db-paper-owner-fill:{decision.reservation_id}"
+    connection_generation = f"db-paper-owner-generation:{label}"
+    fill = TradingAutomationSimulatedFill(
+        session_id=automation_session.id,
+        symbol=request.inputs.symbol,
+        lane="simulation",
+        side="long",
+        action="enter_long",
+        fill_type="entry",
+        quantity=float(decision.quantity_shares),
+        price=10.0,
+        position_state_before="flat",
+        position_state_after="long",
+        reason="entry_fill",
+        marker_json={
+            "adaptive_risk_reservation_id": str(decision.reservation_id),
+            "adaptive_risk_decision_packet_sha256": (
+                decision.decision_packet_sha256
+            ),
+            "adaptive_risk_client_order_id": request.client_order_id,
+            "adaptive_risk_account_scope": request.account_scope,
+            "adaptive_risk_cumulative_fill_quantity": (
+                decision.quantity_shares
+            ),
+            "adaptive_risk_lifecycle_event_id": lifecycle_event_id,
+            "adaptive_risk_connection_generation": connection_generation,
+        },
+    )
+    db.add(fill)
+    db.commit()
+    db.refresh(fill)
+    filled = store.apply_cumulative_fill(
+        decision.reservation_id,
+        evidence=_lifecycle_evidence(
+            request,
+            event_kind="cumulative_fill",
+            provider_event_id=lifecycle_event_id,
+            cumulative=decision.quantity_shares,
+            order_status="filled",
+            connection_generation=connection_generation,
+            durability_kind="committed_db_paper_fill",
+            broker_source="db_paper",
+            source_record_table="trading_automation_simulated_fills",
+            source_record_id=str(fill.id),
+            event_content_sha256=canonical_db_paper_fill_content_sha256(fill),
+        ),
+    )
+    assert filled.state == "filled"
+    return store, request, decision, _exit_owner_binding(
+        request,
+        reservation_id=decision.reservation_id,
+        decision_packet_sha256=decision.decision_packet_sha256,
+        owner_session_id=int(automation_session.id),
+    )
+
+
+def _acquire_exit_owner_claim(db, binding: AdaptiveExitOwnerTransportBinding):
+    acquired = acquire_action_claim(
+        db,
+        symbol=binding.symbol,
+        action="entry",
+        claim_token=binding.transport_claim_token,
+        owner_session_id=binding.transport_owner_session_id,
+        client_order_id=binding.entry_client_order_id,
+        metadata={
+            "alpaca_account_id": binding.expected_account_id,
+            "order_request": {
+                "alpaca_account_id": binding.expected_account_id,
+                "client_order_id": binding.entry_client_order_id,
+                "product_id": binding.symbol,
+                "side": "buy",
+            },
+        },
+        account_scope=binding.account_scope,
+    )
+    assert acquired["ok"] is True
+    db.commit()
+    return {
+        "symbol": binding.symbol,
+        "claim_token": binding.transport_claim_token,
+        "owner_session_id": binding.transport_owner_session_id,
+        "account_scope": binding.account_scope,
+        "alpaca_account_id": binding.expected_account_id,
+    }
+
+
+def _lease_exit_owner(
+    db,
+    store: AdaptiveRiskReservationStore,
+    binding: AdaptiveExitOwnerTransportBinding,
+    context: dict,
+    *,
+    event_at: datetime,
+):
+    return lease_owner_transport(
+        db,
+        **context,
+        transport_kind=binding.transport_owner_kind,
+        client_order_id=binding.exit_client_order_id,
+        order_request=dict(binding.order_request),
+        lease_token=binding.transport_lease_id,
+        exit_owner_store=store,
+        exit_owner_binding=binding,
+        exit_owner_effective_at=event_at,
+        exit_owner_available_at=event_at,
     )
 
 
@@ -1730,3 +1960,391 @@ def test_foundation_source_has_no_activation_only_dollar_or_symbol_caps() -> Non
         "$250",
     )
     assert not [token for token in forbidden if token in source]
+
+
+def test_exit_owner_transport_started_receipt_is_atomic_hash_bound_and_idempotent(
+    db,
+) -> None:
+    store, _request_value, decision, binding = (
+        _reserve_filled_exit_owner_fixture(db, label="OWNR")
+    )
+    context = _acquire_exit_owner_claim(db, binding)
+    event_at = datetime.now(UTC)
+    db.expire_all()
+    before = db.get(AdaptiveRiskReservation, decision.reservation_id)
+    before_sequence = int(before.event_sequence)
+    before_version = int(before.version)
+    db.commit()
+
+    oversized_binding = replace(
+        binding,
+        order_request={
+            **dict(binding.order_request),
+            "base_size": str(decision.quantity_shares + 1),
+        },
+    )
+    with pytest.raises(
+        AdaptiveReservationStateConflict,
+        match="exceeds locked positive long exposure",
+    ):
+        _lease_exit_owner(
+            db,
+            store,
+            oversized_binding,
+            context,
+            event_at=event_at,
+        )
+    db.rollback()
+    assert db.scalar(
+        select(func.count(AdaptiveRiskReservationEvent.id)).where(
+            AdaptiveRiskReservationEvent.reservation_id
+            == decision.reservation_id,
+            AdaptiveRiskReservationEvent.event_type
+            == "alpaca_exit_owner_transport_started",
+        )
+    ) == 0
+    db.commit()
+
+    with pytest.raises(RuntimeError, match="force owner receipt rollback"):
+        with db.begin():
+            leased = _lease_exit_owner(
+                db,
+                store,
+                binding,
+                context,
+                event_at=event_at,
+            )
+            assert leased["ok"] is True
+            raise RuntimeError("force owner receipt rollback")
+
+    db.expire_all()
+    assert db.scalar(
+        select(func.count(AdaptiveRiskReservationEvent.id)).where(
+            AdaptiveRiskReservationEvent.reservation_id
+            == decision.reservation_id,
+            AdaptiveRiskReservationEvent.event_type
+            == "alpaca_exit_owner_transport_started",
+        )
+    ) == 0
+    rolled_back = db.get(AdaptiveRiskReservation, decision.reservation_id)
+    assert rolled_back.event_sequence == before_sequence
+    assert rolled_back.version == before_version
+    readable, claim = read_action_claim(
+        db,
+        symbol=binding.symbol,
+        account_scope=binding.account_scope,
+    )
+    assert readable and claim is not None
+    assert "owner_transport" not in claim["metadata"]
+    db.commit()
+
+    leased = _lease_exit_owner(
+        db,
+        store,
+        binding,
+        context,
+        event_at=event_at,
+    )
+    assert leased["ok"] is True
+    receipt_sha = leased["exit_owner_transport_started_event_sha256"]
+    db.commit()
+    with pytest.raises(RuntimeError, match="owner_transport_reconcile_required"):
+        _lease_exit_owner(
+            db,
+            store,
+            binding,
+            context,
+            event_at=event_at,
+        )
+    db.rollback()
+    assert len(receipt_sha) == 64
+
+    db.expire_all()
+    receipt = db.scalar(
+        select(AdaptiveRiskReservationEvent).where(
+            AdaptiveRiskReservationEvent.event_sha256 == receipt_sha
+        )
+    )
+    reservation = db.get(AdaptiveRiskReservation, decision.reservation_id)
+    assert receipt.event_type == "alpaca_exit_owner_transport_started"
+    assert receipt.payload_json["details"]["request_sha256"] == (
+        binding.request_sha256
+    )
+    assert receipt.payload_json["details"]["entry_client_order_id"] == (
+        binding.entry_client_order_id
+    )
+    assert receipt.payload_json["details"]["exit_client_order_id"] == (
+        binding.exit_client_order_id
+    )
+    readable, claim = read_action_claim(
+        db,
+        symbol=binding.symbol,
+        account_scope=binding.account_scope,
+    )
+    assert readable and claim is not None
+    assert claim["metadata"]["owner_transport"][
+        "exit_owner_transport_started_event_sha256"
+    ] == receipt_sha
+    assert reservation.event_sequence == before_sequence + 1
+    assert reservation.last_event_sha256 == receipt_sha
+    assert reservation.version == before_version + 1
+    assert db.scalar(
+        select(func.count(AdaptiveRiskReservationEvent.id)).where(
+            AdaptiveRiskReservationEvent.event_sha256 == receipt_sha
+        )
+    ) == 1
+
+
+def test_exit_owner_oid_receipt_requires_exact_transport_started_ancestor(
+    db,
+) -> None:
+    store, _request_value, decision, binding = (
+        _reserve_filled_exit_owner_fixture(db, label="OIDR")
+    )
+    context = _acquire_exit_owner_claim(db, binding)
+    started_at = datetime.now(UTC)
+    leased = _lease_exit_owner(
+        db,
+        store,
+        binding,
+        context,
+        event_at=started_at,
+    )
+    assert leased["ok"] is True
+    started_sha = leased["exit_owner_transport_started_event_sha256"]
+    db.commit()
+    outcome_at = started_at + timedelta(milliseconds=10)
+    assert advance_owner_transport(
+        db,
+        **context,
+        client_order_id=binding.exit_client_order_id,
+        lease_token=binding.transport_lease_id,
+        phase="submitted",
+        broker_order_id="alpaca-exit-order-oidr",
+        metadata={"provider_status": "accepted"},
+        exit_owner_store=store,
+        exit_owner_effective_at=outcome_at,
+        exit_owner_available_at=outcome_at,
+        provider_status="accepted",
+        provider_cumulative_quantity=0,
+        observer_claim_token=binding.transport_claim_token,
+        observer_session_id=binding.transport_owner_session_id,
+        observer_generation=binding.transport_owner_generation,
+        observer_runtime_generation=binding.transport_runtime_generation,
+        observer_connection_generation=(
+            binding.transport_connection_generation
+        ),
+    )
+    db.commit()
+    readable, claim = read_action_claim(
+        db,
+        symbol=binding.symbol,
+        account_scope=binding.account_scope,
+    )
+    assert readable and claim is not None
+    submitted_sha = claim["metadata"]["owner_transport"][
+        "exit_owner_last_event_sha256"
+    ]
+    with pytest.raises(RuntimeError, match="exit_owner_marker_changed_before_advance"):
+        advance_owner_transport(
+            db,
+            **context,
+            client_order_id=binding.exit_client_order_id,
+            lease_token=binding.transport_lease_id,
+            phase="submitted",
+            broker_order_id="alpaca-exit-order-oidr",
+            metadata={"provider_status": "accepted"},
+            exit_owner_store=store,
+            exit_owner_effective_at=outcome_at,
+            exit_owner_available_at=outcome_at,
+            provider_status="accepted",
+            provider_cumulative_quantity=0,
+            observer_claim_token=binding.transport_claim_token,
+            observer_session_id=binding.transport_owner_session_id,
+            observer_generation=binding.transport_owner_generation,
+            observer_runtime_generation=binding.transport_runtime_generation,
+            observer_connection_generation=(
+                binding.transport_connection_generation
+            ),
+        )
+    db.rollback()
+
+    db.expire_all()
+    submitted = db.scalar(
+        select(AdaptiveRiskReservationEvent).where(
+            AdaptiveRiskReservationEvent.event_sha256 == submitted_sha
+        )
+    )
+    assert submitted.payload_json["details"][
+        "transport_started_event_sha256"
+    ] == started_sha
+    assert submitted.payload_json["details"]["provider_client_order_id"] == (
+        binding.exit_client_order_id
+    )
+    assert submitted.payload_json["details"]["provider_order_id"] == (
+        "alpaca-exit-order-oidr"
+    )
+    db.commit()
+
+    other_store, _other_request, _other_decision, other_binding = (
+        _reserve_filled_exit_owner_fixture(db, label="OIDX")
+    )
+    other_context = _acquire_exit_owner_claim(db, other_binding)
+    other_at = outcome_at + timedelta(milliseconds=10)
+    other_leased = _lease_exit_owner(
+        db,
+        other_store,
+        other_binding,
+        other_context,
+        event_at=other_at,
+    )
+    assert other_leased["ok"] is True
+    other_started_sha = other_leased[
+        "exit_owner_transport_started_event_sha256"
+    ]
+    db.commit()
+    with pytest.raises(
+        AdaptiveReservationStateConflict,
+        match="transport-started receipt is missing",
+    ):
+        store.append_exit_owner_transport_outcome(
+            binding,
+            event_type="alpaca_exit_owner_reconciled",
+            transport_started_event_sha256=other_started_sha,
+            effective_at=other_at + timedelta(milliseconds=10),
+            available_at=other_at + timedelta(milliseconds=10),
+            observer_claim_token="restart-observer-claim",
+            observer_session_id=8002,
+            observer_generation=2,
+            observer_runtime_generation="paper-runtime-generation-502",
+            observer_connection_generation="alpaca-paper-connection-502",
+            provider_order_id="alpaca-exit-order-oidr",
+            provider_status="filled",
+            provider_cumulative_quantity=1,
+        )
+
+
+def test_exit_owner_event_guard_rejects_headless_mutation_delete_and_truncate(
+    db,
+) -> None:
+    store, _request_value, decision, binding = (
+        _reserve_filled_exit_owner_fixture(db, label="GARD")
+    )
+    context = _acquire_exit_owner_claim(db, binding)
+    event_at = datetime.now(UTC)
+    leased = _lease_exit_owner(
+        db,
+        store,
+        binding,
+        context,
+        event_at=event_at,
+    )
+    assert leased["ok"] is True
+    started_sha = leased["exit_owner_transport_started_event_sha256"]
+    db.commit()
+    db.expire_all()
+    started = db.scalar(
+        select(AdaptiveRiskReservationEvent).where(
+            AdaptiveRiskReservationEvent.event_sha256 == started_sha
+        )
+    )
+    forged_payload = json.loads(json.dumps(started.payload_json))
+    next_effective = event_at + timedelta(milliseconds=10)
+    forged_payload.update(
+        {
+            "event_type": "alpaca_exit_owner_submit_indeterminate",
+            "sequence": int(started.sequence) + 1,
+            "effective_at": next_effective.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "previous_event_sha256": started_sha,
+            "broker_event_id": "headless-owner-event",
+        }
+    )
+    forged_payload["details"].update(
+        {
+            "available_at": next_effective.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "transport_started_event_sha256": started_sha,
+            "observer_claim_token": binding.transport_claim_token,
+            "observer_session_id": binding.transport_owner_session_id,
+            "observer_generation": binding.transport_owner_generation,
+            "observer_runtime_generation": (
+                binding.transport_runtime_generation
+            ),
+            "observer_connection_generation": (
+                binding.transport_connection_generation
+            ),
+        }
+    )
+    db.commit()
+
+    guarded_statements = (
+        (
+            "UPDATE adaptive_risk_reservation_events "
+            "SET payload_json = payload_json || CAST(:tamper AS jsonb) "
+            "WHERE event_sha256 = :sha",
+            {"sha": started_sha, "tamper": '{"tampered":true}'},
+        ),
+        (
+            "DELETE FROM adaptive_risk_reservation_events "
+            "WHERE event_sha256 = :sha",
+            {"sha": started_sha},
+        ),
+        (
+            "TRUNCATE adaptive_risk_reservation_events CASCADE",
+            {},
+        ),
+    )
+    for statement, params in guarded_statements:
+        with pytest.raises(DBAPIError):
+            with db.begin():
+                db.execute(text(statement), params)
+
+    with pytest.raises(DBAPIError):
+        with db.begin():
+            db.execute(
+                text(
+                    "UPDATE adaptive_risk_reservations SET "
+                    "event_sequence = event_sequence + 1, "
+                    "last_event_sha256 = :sha, version = version + 1, "
+                    "updated_at = :updated_at "
+                    "WHERE reservation_id = :reservation_id"
+                ),
+                {
+                    "sha": _hash("head-without-event"),
+                    "updated_at": next_effective,
+                    "reservation_id": decision.reservation_id,
+                },
+            )
+            db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+    with pytest.raises(DBAPIError):
+        with db.begin():
+            db.execute(
+                text(
+                    "INSERT INTO adaptive_risk_reservation_events ("
+                    "reservation_id, sequence, event_type, "
+                    "previous_event_sha256, event_sha256, broker_event_id, "
+                    "payload_json, effective_at) VALUES ("
+                    ":reservation_id, :sequence, :event_type, :previous_sha, "
+                    ":event_sha, :broker_event_id, CAST(:payload AS jsonb), "
+                    ":effective_at)"
+                ),
+                {
+                    "reservation_id": decision.reservation_id,
+                    "sequence": int(started.sequence) + 1,
+                    "event_type": "alpaca_exit_owner_submit_indeterminate",
+                    "previous_sha": started_sha,
+                    "event_sha": _hash("headless-event"),
+                    "broker_event_id": "headless-owner-event",
+                    "payload": json.dumps(
+                        forged_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    "effective_at": next_effective,
+                },
+            )
+            db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))

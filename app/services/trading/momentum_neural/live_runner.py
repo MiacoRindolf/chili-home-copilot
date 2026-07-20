@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import logging
@@ -21,7 +22,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterator, Literal, Optional, Protocol
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Protocol
 
 from sqlalchemy.orm import Session, object_session
 from sqlalchemy.orm.attributes import flag_modified
@@ -104,7 +105,13 @@ from .captured_paper_selection import (
     resolve_captured_paper_selection,
 )
 from .captured_paper_entry_intent import CapturedPaperPostCommitRequest
+from .captured_paper_fill_capture import (
+    CapturedPaperExitFillPostCommitRequest,
+    CapturedPaperExitTransportPostCommitRequest,
+)
 from .adaptive_risk_reservation import (
+    AdaptiveExitOwnerReceipt,
+    AdaptiveExitOwnerTransportBinding,
     AdaptiveReservationError,
     AdaptiveRiskExposureQuarantined,
     AdaptiveRiskReservationStore,
@@ -238,6 +245,76 @@ KEY_LIVE_EXEC = "momentum_live_execution"
 KEY_ADAPTIVE_RISK_RESERVATION_REQUEST = "adaptive_risk_reservation_request"
 KEY_ADAPTIVE_ALPACA_LIFECYCLE = "adaptive_risk_alpaca_lifecycle"
 _ADAPTIVE_ALPACA_LIFECYCLE_SCHEMA = "chili.adaptive-risk-alpaca-lifecycle.v1"
+_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY = (
+    "captured_paper_exit_transport_post_commit"
+)
+
+
+@dataclass(slots=True)
+class _CapturedPaperExitRuntimeAuthority:
+    """Process-private authority installed only by the captured PAPER loop."""
+
+    owner_generation: int
+    expected_account_id: str
+    runtime_generation: str
+    broker_connection_generation: str
+    staged_requests: dict[int, CapturedPaperExitFillPostCommitRequest] = field(
+        default_factory=dict
+    )
+    staged_transport_requests: dict[
+        int, CapturedPaperExitTransportPostCommitRequest
+    ] = field(default_factory=dict)
+
+
+_CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY: contextvars.ContextVar[
+    _CapturedPaperExitRuntimeAuthority | None
+] = contextvars.ContextVar(
+    "_chili_captured_paper_exit_runtime_authority",
+    default=None,
+)
+
+
+@contextlib.contextmanager
+def captured_paper_exit_runtime_authority(
+    *,
+    owner_generation: int,
+    expected_account_id: str,
+    runtime_generation: str,
+    broker_connection_generation: str,
+) -> Iterator[None]:
+    """Bind exact captured-PAPER exit authority around one loop dispatch."""
+
+    try:
+        normalized_account_id = str(uuid.UUID(str(expected_account_id)))
+        normalized_runtime_generation = str(uuid.UUID(str(runtime_generation)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit runtime identity is invalid"
+        ) from exc
+    if (
+        isinstance(owner_generation, bool)
+        or not isinstance(owner_generation, int)
+        or owner_generation <= 0
+        or normalized_account_id != str(expected_account_id)
+        or normalized_runtime_generation != str(runtime_generation)
+        or not isinstance(broker_connection_generation, str)
+        or broker_connection_generation != broker_connection_generation.strip()
+        or not broker_connection_generation
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit runtime authority is invalid"
+        )
+    authority = _CapturedPaperExitRuntimeAuthority(
+        owner_generation=owner_generation,
+        expected_account_id=normalized_account_id,
+        runtime_generation=normalized_runtime_generation,
+        broker_connection_generation=broker_connection_generation,
+    )
+    token = _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.set(authority)
+    try:
+        yield
+    finally:
+        _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.reset(token)
 
 
 class _FirstDipOwnedDecisionSkipAdditive(RuntimeError):
@@ -6672,6 +6749,673 @@ def _alpaca_owner_transport_context(
     }
 
 
+def _captured_paper_exit_runtime_for_session(
+    sess: TradingAutomationSession,
+) -> _CapturedPaperExitRuntimeAuthority | None:
+    authority = _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+    if authority is None:
+        return None
+    context = _alpaca_owner_transport_context(sess)
+    if not (
+        context is not None
+        and context["account_scope"] == "alpaca:paper"
+        and context["alpaca_account_id"] == authority.expected_account_id
+        and context["owner_session_id"] == int(getattr(sess, "id"))
+        and normalize_execution_family(getattr(sess, "execution_family", None))
+        == "alpaca_spot"
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit runtime does not match the locked session"
+        )
+    return authority
+
+
+def _captured_paper_exit_request_staged(
+    sess: TradingAutomationSession,
+) -> bool:
+    authority = _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+    return bool(
+        authority is not None
+        and int(getattr(sess, "id")) in authority.staged_requests
+    )
+
+
+def _captured_paper_exit_transport_request_matches_session(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    request: CapturedPaperExitTransportPostCommitRequest,
+) -> bool:
+    authority = _captured_paper_exit_runtime_for_session(sess)
+    context = _alpaca_owner_transport_context(sess)
+    payload = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    lifecycle = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    position = le.get("position")
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    session_owner = snapshot.get("captured_paper_session_owner")
+    if not (
+        authority is not None
+        and context is not None
+        and isinstance(payload, dict)
+        and isinstance(lifecycle, dict)
+        and isinstance(position, dict)
+        and isinstance(session_owner, dict)
+    ):
+        return False
+    try:
+        adaptive_request = load_adaptive_risk_reservation_request(payload)
+        reservation_id = uuid.UUID(str(lifecycle.get("reservation_id") or ""))
+        position_quantity = _fmt_base_size(float(position.get("quantity")))
+    except Exception:
+        return False
+    return bool(
+        request.verify()
+        and request.session_id == int(sess.id)
+        and request.reservation_id == reservation_id
+        and request.decision_packet_sha256
+        == str(lifecycle.get("decision_packet_sha256") or "")
+        and request.expected_account_id == authority.expected_account_id
+        == context["alpaca_account_id"]
+        and request.account_identity_sha256
+        == adaptive_request.inputs.account_identity_sha256
+        == str(lifecycle.get("account_identity_sha256") or "")
+        and request.session_owner_content_sha256
+        == str(session_owner.get("content_sha256") or "")
+        and request.runtime_generation == authority.runtime_generation
+        and request.broker_connection_generation
+        == authority.broker_connection_generation
+        and request.symbol == context["symbol"]
+        and request.entry_client_order_id == adaptive_request.client_order_id
+        == str(lifecycle.get("client_order_id") or "")
+        and request.transport_claim_token == context["claim_token"]
+        and request.transport_owner_generation == authority.owner_generation
+        and request.session_position_quantity == position_quantity
+    )
+
+
+def _stage_captured_paper_exit_transport_request(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    transport_kind: str,
+    lease_token: str,
+    order_request: dict[str, Any],
+    exit_reason: str,
+    attempt_no: int,
+    quote_independent_authority: bool,
+    bbo_required: bool,
+    bbo_max_age_seconds: float,
+) -> CapturedPaperExitTransportPostCommitRequest | None:
+    authority = _captured_paper_exit_runtime_for_session(sess)
+    if authority is None:
+        return None
+    context = _alpaca_owner_transport_context(sess)
+    payload = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    lifecycle = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    position = le.get("position")
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    session_owner = snapshot.get("captured_paper_session_owner")
+    if not (
+        context is not None
+        and isinstance(payload, dict)
+        and isinstance(lifecycle, dict)
+        and isinstance(position, dict)
+        and isinstance(session_owner, dict)
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit transport lacks durable session authority"
+        )
+    try:
+        adaptive_request = load_adaptive_risk_reservation_request(payload)
+        reservation_id = uuid.UUID(str(lifecycle.get("reservation_id") or ""))
+        position_quantity = _fmt_base_size(float(position.get("quantity")))
+    except Exception as exc:
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit transport session authority is malformed"
+        ) from exc
+    if not (
+        lifecycle.get("schema_version") == _ADAPTIVE_ALPACA_LIFECYCLE_SCHEMA
+        and lifecycle.get("request_sha256") == adaptive_request.request_sha256
+        and lifecycle.get("account_scope") == adaptive_request.account_scope
+        == context["account_scope"]
+        and lifecycle.get("account_identity_sha256")
+        == adaptive_request.inputs.account_identity_sha256
+        and lifecycle.get("client_order_id") == adaptive_request.client_order_id
+        and adaptive_request.inputs.execution_family == "alpaca_spot"
+        and adaptive_request.inputs.broker_environment == "paper"
+        and adaptive_request.inputs.symbol == context["symbol"]
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit transport adaptive authority changed"
+        )
+    request = CapturedPaperExitTransportPostCommitRequest.build(
+        session_id=int(sess.id),
+        reservation_id=reservation_id,
+        decision_packet_sha256=str(
+            lifecycle.get("decision_packet_sha256") or ""
+        ),
+        account_scope=context["account_scope"],
+        expected_account_id=authority.expected_account_id,
+        account_identity_sha256=adaptive_request.inputs.account_identity_sha256,
+        session_owner_content_sha256=str(
+            session_owner.get("content_sha256") or ""
+        ),
+        runtime_generation=authority.runtime_generation,
+        broker_connection_generation=authority.broker_connection_generation,
+        execution_family="alpaca_spot",
+        symbol=context["symbol"],
+        entry_client_order_id=adaptive_request.client_order_id,
+        exit_client_order_id=str(order_request.get("client_order_id") or ""),
+        transport_claim_token=context["claim_token"],
+        transport_owner_generation=authority.owner_generation,
+        transport_owner_kind=str(transport_kind or "").strip().lower(),
+        transport_lease_id=str(lease_token or "").strip(),
+        order_request=dict(order_request),
+        session_position_quantity=position_quantity,
+        exit_reason=str(exit_reason or "exit").strip(),
+        attempt_no=int(attempt_no),
+        quote_independent_authority=bool(quote_independent_authority),
+        bbo_required=bool(bbo_required),
+        bbo_max_age_seconds=str(
+            min(2.0, max(0.0, float(bbo_max_age_seconds)))
+        ),
+    )
+    retained = le.get(_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY)
+    if retained is not None:
+        retained_request = (
+            CapturedPaperExitTransportPostCommitRequest.from_marker(retained)
+        )
+        if retained_request != request:
+            raise AdaptiveRiskContractError(
+                "captured PAPER exit transport marker is immutable"
+            )
+        request = retained_request
+    else:
+        le[_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY] = request.marker()
+        _commit_le(sess, le)
+    prior = authority.staged_transport_requests.get(int(sess.id))
+    if prior is not None and prior != request:
+        raise AdaptiveRiskContractError(
+            "multiple captured PAPER exit transports staged in one tick"
+        )
+    authority.staged_transport_requests[int(sess.id)] = request
+    return request
+
+
+def _restage_captured_paper_exit_transport_request(
+    sess: TradingAutomationSession,
+) -> CapturedPaperExitTransportPostCommitRequest | None:
+    authority = _captured_paper_exit_runtime_for_session(sess)
+    if authority is None:
+        return None
+    snapshot = getattr(sess, "risk_snapshot_json", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    le = snapshot.get(KEY_LIVE_EXEC)
+    le = le if isinstance(le, dict) else {}
+    marker = le.get(_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY)
+    if marker is None:
+        return None
+    request = CapturedPaperExitTransportPostCommitRequest.from_marker(marker)
+    if not _captured_paper_exit_transport_request_matches_session(
+        sess,
+        le,
+        request,
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER retained exit transport authority changed"
+        )
+    authority.staged_transport_requests[int(sess.id)] = request
+    return request
+
+
+def _captured_paper_adapter_generation_matches(
+    sess: TradingAutomationSession,
+    adapter: Any,
+) -> bool:
+    authority = _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+    if authority is None:
+        return True
+    try:
+        reader = getattr(adapter, "get_paper_connection_generation_receipt")
+        receipt = reader()
+        canonical = str(receipt["receipt_canonical_json"])
+        payload = json.loads(canonical)
+    except Exception:
+        return False
+    return bool(
+        isinstance(receipt, dict)
+        and isinstance(payload, dict)
+        and hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        == str(receipt.get("receipt_sha256") or "")
+        and payload.get("broker_environment") == "paper"
+        and payload.get("asset_class") == "us_equity"
+        and payload.get("provider_account_id") == authority.expected_account_id
+        and payload.get("adapter_connection_generation")
+        == authority.broker_connection_generation
+        and receipt.get("provider_account_id") == authority.expected_account_id
+        and receipt.get("adapter_connection_generation")
+        == authority.broker_connection_generation
+        and _frozen_alpaca_account_id(sess) == authority.expected_account_id
+    )
+
+
+def _captured_paper_exit_binding_for_lease(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    *,
+    transport_kind: str,
+    client_order_id: str,
+    order_request: dict[str, Any],
+    lease_token: str,
+    store: AdaptiveRiskReservationStore | None = None,
+) -> tuple[AdaptiveRiskReservationStore, AdaptiveExitOwnerTransportBinding] | None:
+    authority = _captured_paper_exit_runtime_for_session(sess)
+    if authority is None:
+        return None
+    context = _alpaca_owner_transport_context(sess)
+    payload = le.get(KEY_ADAPTIVE_RISK_RESERVATION_REQUEST)
+    lifecycle = le.get(KEY_ADAPTIVE_ALPACA_LIFECYCLE)
+    if context is None or not isinstance(payload, dict) or not isinstance(
+        lifecycle, dict
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit lacks adaptive reservation authority"
+        )
+    request = load_adaptive_risk_reservation_request(payload)
+    store = store or _adaptive_risk_store_for_session(sess)
+    reservation_id = uuid.UUID(str(lifecycle.get("reservation_id") or ""))
+    state = store.read_state(reservation_id)
+    if not (
+        lifecycle.get("schema_version") == _ADAPTIVE_ALPACA_LIFECYCLE_SCHEMA
+        and lifecycle.get("request_sha256") == request.request_sha256
+        and lifecycle.get("decision_packet_sha256")
+        == state.decision_packet_sha256
+        and lifecycle.get("account_scope") == request.account_scope
+        == context["account_scope"]
+        and lifecycle.get("account_identity_sha256")
+        == request.inputs.account_identity_sha256
+        == alpaca_paper_account_identity_sha256(authority.expected_account_id)
+        and lifecycle.get("client_order_id") == request.client_order_id
+        and request.inputs.execution_family == "alpaca_spot"
+        and request.inputs.broker_environment == "paper"
+        and request.inputs.symbol == context["symbol"]
+        and state.state not in {"released", "closed"}
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit adaptive authority changed"
+        )
+    binding = AdaptiveExitOwnerTransportBinding(
+        reservation_id=reservation_id,
+        expected_account_id=authority.expected_account_id,
+        account_identity_sha256=request.inputs.account_identity_sha256,
+        decision_packet_sha256=state.decision_packet_sha256,
+        symbol=context["symbol"],
+        entry_client_order_id=request.client_order_id,
+        exit_client_order_id=str(client_order_id or "").strip(),
+        order_request=dict(order_request or {}),
+        transport_claim_token=context["claim_token"],
+        transport_owner_session_id=context["owner_session_id"],
+        transport_owner_generation=authority.owner_generation,
+        transport_owner_kind=transport_kind,
+        transport_lease_id=lease_token,
+        transport_runtime_generation=authority.runtime_generation,
+        transport_connection_generation=(
+            authority.broker_connection_generation
+        ),
+    )
+    return store, binding
+
+
+def _lease_owner_transport_for_runtime(
+    sess: TradingAutomationSession,
+    le: dict[str, Any],
+    adapter: Any,
+    *,
+    lease_committed: Callable[..., dict[str, Any]] = (
+        lease_owner_transport_committed
+    ),
+    binding_transport_kind: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Lease legacy exits unchanged; captured exits require an atomic receipt."""
+
+    if not _captured_paper_adapter_generation_matches(sess, adapter):
+        return {
+            "ok": False,
+            "reason": "captured_paper_adapter_generation_mismatch",
+        }
+    try:
+        typed = _captured_paper_exit_binding_for_lease(
+            sess,
+            le,
+            transport_kind=str(
+                binding_transport_kind or kwargs.get("transport_kind") or ""
+            ),
+            client_order_id=str(kwargs.get("client_order_id") or ""),
+            order_request=dict(kwargs.get("order_request") or {}),
+            lease_token=str(kwargs.get("lease_token") or ""),
+        )
+    except (AdaptiveRiskContractError, AdaptiveReservationError, ValueError):
+        return {
+            "ok": False,
+            "reason": "captured_paper_exit_owner_authority_unavailable",
+        }
+    if typed is None:
+        return lease_committed(**kwargs)
+    store, binding = typed
+    observed_at = _utcnow_aware()
+    leased = lease_committed(
+        **kwargs,
+        exit_owner_store=store,
+        exit_owner_binding=binding,
+        exit_owner_effective_at=observed_at,
+        exit_owner_available_at=observed_at,
+    )
+    if leased.get("ok") is True and not str(
+        leased.get("exit_owner_transport_started_event_sha256") or ""
+    ).strip():
+        return {
+            "ok": False,
+            "reason": "captured_paper_exit_owner_receipt_missing_after_lease",
+            "transport": leased.get("transport"),
+        }
+    return leased
+
+
+def _captured_paper_exit_outcome_kwargs(
+    sess: TradingAutomationSession,
+    *,
+    claim_token: str,
+    owner_session_id: int,
+) -> dict[str, Any] | None:
+    authority = _captured_paper_exit_runtime_for_session(sess)
+    if authority is None:
+        return None
+    context = _alpaca_owner_transport_context(sess)
+    if not (
+        context is not None
+        and str(claim_token or "").strip() == context["claim_token"]
+        and int(owner_session_id) == context["owner_session_id"]
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit outcome observer changed"
+        )
+    observed_at = _utcnow_aware()
+    return {
+        "exit_owner_store": _adaptive_risk_store_for_session(sess),
+        "exit_owner_effective_at": observed_at,
+        "exit_owner_available_at": observed_at,
+        "observer_claim_token": context["claim_token"],
+        "observer_session_id": context["owner_session_id"],
+        "observer_generation": authority.owner_generation,
+        "observer_runtime_generation": authority.runtime_generation,
+        "observer_connection_generation": (
+            authority.broker_connection_generation
+        ),
+    }
+
+
+def _whole_share_cumulative(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+        whole = int(numeric)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0.0 or numeric != whole:
+        return None
+    return whole
+
+
+def _exact_alpaca_order_observation(order: Any) -> tuple[str, int] | None:
+    raw = getattr(order, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    status = str(raw.get("alpaca_status") or "").strip().lower()
+    cumulative = _whole_share_cumulative(raw.get("filled_size"))
+    if not status or cumulative is None:
+        return None
+    return status, cumulative
+
+
+def _exact_alpaca_submit_observation(
+    result: dict[str, Any] | None,
+) -> tuple[str, int] | None:
+    payload = result if isinstance(result, dict) else {}
+    status = str(payload.get("broker_order_status_echo") or "").strip().lower()
+    cumulative = _whole_share_cumulative(
+        payload.get("broker_cumulative_filled_quantity")
+    )
+    if not status or cumulative is None:
+        return None
+    return status, cumulative
+
+
+def _exact_captured_paper_exit_submit_observation(
+    result: dict[str, Any] | None,
+    request: CapturedPaperExitTransportPostCommitRequest,
+) -> tuple[str, int] | None:
+    """Bind an Alpaca submit acknowledgement to the exact staged exit."""
+
+    observation = _exact_alpaca_submit_observation(result)
+    payload = result if isinstance(result, dict) else {}
+    order = request.order_request
+    if observation is None:
+        return None
+    try:
+        requested_quantity = Decimal(str(order.get("base_size")))
+        echoed_quantity = Decimal(str(payload.get("broker_quantity_echo")))
+        echoed_filled_quantity = Decimal(
+            str(payload.get("broker_filled_quantity_echo"))
+        )
+        requested_limit = (
+            None
+            if order.get("limit_price") is None
+            else Decimal(str(order.get("limit_price")))
+        )
+        echoed_limit = (
+            None
+            if payload.get("broker_limit_price_echo") is None
+            else Decimal(str(payload.get("broker_limit_price_echo")))
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    oid = str(payload.get("order_id") or "").strip()
+    return (
+        observation
+        if (
+            payload.get("ok") is True
+            and oid
+            and str(payload.get("broker_order_id_echo") or "").strip() == oid
+            and str(payload.get("broker_account_id_echo") or "").strip()
+            == request.expected_account_id
+            and str(payload.get("broker_client_order_id_echo") or "").strip()
+            == request.exit_client_order_id
+            and str(payload.get("client_order_id") or "").strip()
+            == request.exit_client_order_id
+            and str(payload.get("broker_symbol_echo") or "").strip().upper()
+            == request.symbol
+            and str(payload.get("broker_side_echo") or "").strip().lower()
+            == "sell"
+            and str(payload.get("broker_order_type_echo") or "").strip().lower()
+            == str(order.get("order_type") or "").strip().lower()
+            and requested_quantity.is_finite()
+            and echoed_quantity.is_finite()
+            and echoed_quantity == requested_quantity
+            and echoed_filled_quantity.is_finite()
+            and echoed_filled_quantity >= 0
+            and echoed_filled_quantity <= requested_quantity
+            and echoed_filled_quantity == echoed_filled_quantity.to_integral_value()
+            and int(echoed_filled_quantity) == observation[1]
+            and (
+                (requested_limit is None and echoed_limit is None)
+                or (
+                    requested_limit is not None
+                    and echoed_limit is not None
+                    and requested_limit.is_finite()
+                    and echoed_limit.is_finite()
+                    and echoed_limit == requested_limit
+                )
+            )
+            and str(
+                payload.get("broker_time_in_force_echo") or ""
+            ).strip().lower()
+            == str(order.get("time_in_force") or "").strip().lower()
+            and payload.get("broker_extended_hours_echo")
+            is order.get("extended_hours")
+            and str(
+                payload.get("broker_position_intent_echo") or ""
+            ).strip().lower()
+            == "sell_to_close"
+            and str(payload.get("broker_asset_class_echo") or "").strip().lower()
+            == "us_equity"
+        )
+        else None
+    )
+
+
+def _advance_owner_transport_for_runtime(
+    sess: TradingAutomationSession,
+    adapter: Any,
+    **kwargs: Any,
+) -> bool:
+    """Append typed submitted truth, or typed indeterminate when echoes lack proof."""
+
+    if not _captured_paper_adapter_generation_matches(sess, adapter):
+        return False
+    try:
+        typed = _captured_paper_exit_outcome_kwargs(
+            sess,
+            claim_token=str(kwargs.get("claim_token") or ""),
+            owner_session_id=int(kwargs.get("owner_session_id")),
+        )
+    except (AdaptiveRiskContractError, AdaptiveReservationError, TypeError, ValueError):
+        return False
+    if typed is None:
+        return bool(advance_owner_transport_committed(**kwargs))
+    requested_phase = str(kwargs.get("phase") or "")
+    provider_status = str(kwargs.pop("provider_status", None) or "").strip().lower()
+    provider_cumulative = _whole_share_cumulative(
+        kwargs.pop("provider_cumulative_quantity", None)
+    )
+    exact_submitted = bool(
+        requested_phase == "submitted"
+        and str(kwargs.get("broker_order_id") or "").strip()
+        and provider_status
+        and provider_cumulative is not None
+    )
+    kwargs["phase"] = "submitted" if exact_submitted else "submit_indeterminate"
+    if not exact_submitted:
+        kwargs["broker_order_id"] = None
+    return bool(
+        advance_owner_transport_committed(
+            **kwargs,
+            **typed,
+            provider_status=(provider_status if exact_submitted else None),
+            provider_cumulative_quantity=(
+                provider_cumulative if exact_submitted else None
+            ),
+        )
+    )
+
+
+def _resolve_owner_transport_for_runtime(
+    sess: TradingAutomationSession,
+    adapter: Any,
+    **kwargs: Any,
+) -> bool:
+    if not _captured_paper_adapter_generation_matches(sess, adapter):
+        return False
+    try:
+        typed = _captured_paper_exit_outcome_kwargs(
+            sess,
+            claim_token=str(kwargs.get("claim_token") or ""),
+            owner_session_id=int(kwargs.get("owner_session_id")),
+        )
+    except (AdaptiveRiskContractError, AdaptiveReservationError, TypeError, ValueError):
+        return False
+    if typed is None:
+        return bool(resolve_owner_transport_terminal_committed(**kwargs))
+    if not kwargs.get("pre_accept_rejected"):
+        status = str(kwargs.get("broker_order_status") or "").strip().lower()
+        cumulative = _whole_share_cumulative(kwargs.get("filled_size"))
+        if not status or cumulative is None:
+            return False
+    return bool(resolve_owner_transport_terminal_committed(**kwargs, **typed))
+
+
+def _stage_captured_paper_exit_post_commit_request(
+    sess: TradingAutomationSession,
+    *,
+    transport: dict[str, Any],
+    provider_order_id: str,
+    provider_cumulative_quantity: int,
+) -> CapturedPaperExitFillPostCommitRequest | None:
+    """Reload/re-hash the exact positive OID receipt and stage DB post-commit work."""
+
+    authority = _captured_paper_exit_runtime_for_session(sess)
+    if authority is None or provider_cumulative_quantity <= 0:
+        return None
+    context = _alpaca_owner_transport_context(sess)
+    cid = str(transport.get("client_order_id") or "").strip()
+    oid = str(provider_order_id or "").strip()
+    try:
+        reservation_id = uuid.UUID(str(transport.get("reservation_id") or ""))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit reservation identity is unavailable"
+        ) from exc
+    if context is None or not cid or not oid:
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit owner context is unavailable"
+        )
+    store = _adaptive_risk_store_for_session(sess)
+    receipt = store.load_latest_exit_owner_receipt_for_order(
+        reservation_id=reservation_id,
+        provider_order_id=oid,
+        provider_client_order_id=cid,
+        expected_account_id=authority.expected_account_id,
+        expected_observer_claim_token=context["claim_token"],
+        expected_observer_session_id=context["owner_session_id"],
+        expected_observer_generation=authority.owner_generation,
+        expected_observer_runtime_generation=authority.runtime_generation,
+        expected_observer_connection_generation=(
+            authority.broker_connection_generation
+        ),
+        expected_cumulative_quantity=provider_cumulative_quantity,
+    )
+    if receipt.event_type not in {
+        "alpaca_exit_owner_submitted",
+        "alpaca_exit_owner_reconciled",
+    }:
+        raise AdaptiveRiskContractError(
+            "captured PAPER positive exit receipt is unavailable"
+        )
+    binding = receipt.binding
+    request = CapturedPaperExitFillPostCommitRequest.build(
+        session_id=context["owner_session_id"],
+        reservation_id=receipt.reservation_id,
+        decision_packet_sha256=binding.decision_packet_sha256,
+        expected_account_id=binding.expected_account_id,
+        account_identity_sha256=binding.account_identity_sha256,
+        runtime_generation=authority.runtime_generation,
+        broker_connection_generation=authority.broker_connection_generation,
+        symbol=binding.symbol,
+        entry_client_order_id=binding.entry_client_order_id,
+        exit_client_order_id=binding.exit_client_order_id,
+        provider_order_id=receipt.provider_order_id,
+        exit_owner_receipt_sha256=receipt.receipt_sha256,
+    )
+    prior = authority.staged_requests.get(context["owner_session_id"])
+    if prior is not None and prior != request:
+        raise AdaptiveRiskContractError(
+            "multiple captured PAPER exit receipts staged in one tick"
+        )
+    authority.staged_requests[context["owner_session_id"]] = request
+    return request
+
+
 def _read_exact_alpaca_deadman_handoff(
     sess: TradingAutomationSession,
 ) -> tuple[
@@ -6964,6 +7708,7 @@ def _resolve_exact_owner_transport_terminal(
     transport: dict[str, Any],
     order: Any,
     *,
+    adapter: Any,
     remaining_quantity: float | None = None,
     broker_status_override: str | None = None,
 ) -> bool:
@@ -6972,11 +7717,26 @@ def _resolve_exact_owner_transport_terminal(
         return False
     cid = str(transport["client_order_id"])
     oid = str(getattr(order, "order_id", "") or "")
-    status = str(
-        broker_status_override
-        if broker_status_override is not None
-        else (getattr(order, "status", "") or "")
-    ).strip().lower()
+    captured_runtime = _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+    exact_observation = _exact_alpaca_order_observation(order)
+    if captured_runtime is not None:
+        if exact_observation is None:
+            return False
+        status, provider_cumulative = exact_observation
+        if (
+            broker_status_override is not None
+            and status != str(broker_status_override).strip().lower()
+        ):
+            return False
+    else:
+        status = str(
+            broker_status_override
+            if broker_status_override is not None
+            else (getattr(order, "status", "") or "")
+        ).strip().lower()
+        provider_cumulative = _whole_share_cumulative(
+            getattr(order, "filled_size", None)
+        )
     try:
         filled = float(getattr(order, "filled_size", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -7165,19 +7925,37 @@ def _resolve_exact_owner_transport_terminal(
     protective_ledger = metadata.get("protective_terminal_ledger")
     if isinstance(protective_ledger, list):
         candidates.extend(protective_ledger)
-    if any(_same_terminal_generation(candidate) for candidate in candidates):
+    if (
+        any(_same_terminal_generation(candidate) for candidate in candidates)
+        and captured_runtime is None
+    ):
         return True
 
-    return bool(
-        resolve_owner_transport_terminal_committed(
-            **context,
-            client_order_id=cid,
-            broker_order_id=oid,
-            broker_order_status=status,
-            filled_size=filled,
-            remaining_quantity=remaining_quantity,
-        )
+    resolved = _resolve_owner_transport_for_runtime(
+        sess,
+        adapter,
+        **context,
+        client_order_id=cid,
+        broker_order_id=oid,
+        broker_order_status=status,
+        filled_size=filled,
+        remaining_quantity=remaining_quantity,
     )
+    if not resolved:
+        return False
+    if captured_runtime is not None:
+        if provider_cumulative is None:
+            return False
+        try:
+            _stage_captured_paper_exit_post_commit_request(
+                sess,
+                transport=transport,
+                provider_order_id=oid,
+                provider_cumulative_quantity=provider_cumulative,
+            )
+        except (AdaptiveRiskContractError, AdaptiveReservationError):
+            return False
+    return True
 
 
 def _apply_replacement_attribution_quarantine(
@@ -7757,13 +8535,29 @@ def _dispatch_alpaca_replaced_deadman_successor(
         }
     if not durable_predecessor_oid:
         lease_token = str(predecessor_transport.get("lease_token") or "").strip()
-        if not lease_token or not advance_owner_transport_committed(
+        predecessor_observation = _exact_alpaca_order_observation(
+            predecessor_order
+        )
+        if not lease_token or not _advance_owner_transport_for_runtime(
+            sess,
+            adapter,
             **context,
             client_order_id=predecessor_cid,
             lease_token=lease_token,
             phase="submitted",
             broker_order_id=read_predecessor_oid,
             metadata={"replacement_predecessor_oid_bound_from_strict_cid": True},
+            provider_status=(
+                predecessor_observation[0]
+                if predecessor_observation is not None
+                else None
+            ),
+            provider_cumulative_quantity=(
+                predecessor_observation[1]
+                if predecessor_observation is not None
+                else None
+            ),
+            exit_owner_reconciled=True,
         ):
             return {
                 "ok": False,
@@ -9115,10 +9909,21 @@ def _ensure_alpaca_deadman_stop(
             sess,
             exact_transport,
             terminal_order,
+            adapter=adapter,
             remaining_quantity=remaining,
             broker_status_override=broker_status_override,
         ):
             return _queue_full_close("terminal_deadman_owner_resolution_failed")
+        if cumulative > 1e-12 and _captured_paper_exit_request_staged(sess):
+            # The independently committed typed receipt is the only economic
+            # authority. The loop runs its exact fill reader after this outer
+            # transaction commits; legacy session P&L must not race ahead.
+            return {
+                "ok": False,
+                "pending": True,
+                "error": "captured_paper_exit_fill_post_commit_required",
+                "legacy_pnl_blocked": True,
+            }
 
         pos = le.get("position")
         pos = dict(pos) if isinstance(pos, dict) else {}
@@ -9847,7 +10652,12 @@ def _ensure_alpaca_deadman_stop(
     if handoff_error is not None:
         return _queue_full_close(handoff_error)
     if active_handoff is not None:
-        leased = lease_deadman_handoff_replacement_committed(
+        leased = _lease_owner_transport_for_runtime(
+            sess,
+            le,
+            adapter,
+            lease_committed=lease_deadman_handoff_replacement_committed,
+            binding_transport_kind="deadman",
             **context,
             client_order_id=cid,
             order_request=request,
@@ -9860,7 +10670,10 @@ def _ensure_alpaca_deadman_stop(
             ),
         )
     else:
-        leased = lease_owner_transport_committed(
+        leased = _lease_owner_transport_for_runtime(
+            sess,
+            le,
+            adapter,
             **context,
             transport_kind="deadman",
             client_order_id=cid,
@@ -9995,7 +10808,12 @@ def _ensure_alpaca_deadman_stop(
         if handoff_error is not None:
             return {"ok": False, "pending": True, "error": handoff_error}
         if active_handoff is not None:
-            leased = lease_deadman_handoff_replacement_committed(
+            leased = _lease_owner_transport_for_runtime(
+                sess,
+                le,
+                adapter,
+                lease_committed=lease_deadman_handoff_replacement_committed,
+                binding_transport_kind="deadman",
                 **context,
                 client_order_id=cid,
                 order_request=request,
@@ -10009,7 +10827,10 @@ def _ensure_alpaca_deadman_stop(
                 strict_cid_absent_after_expiry=True,
             )
         else:
-            leased = lease_owner_transport_committed(
+            leased = _lease_owner_transport_for_runtime(
+                sess,
+                le,
+                adapter,
                 **context,
                 transport_kind="deadman",
                 client_order_id=cid,
@@ -10051,6 +10872,10 @@ def _ensure_alpaca_deadman_stop(
             str(literal_account.get("reason") or "alpaca_account_identity_blocked"),
             alpaca_account_identity=literal_account,
         )
+    if not _captured_paper_adapter_generation_matches(sess, adapter):
+        return _queue_full_close(
+            "captured_paper_adapter_generation_mismatch_pre_post"
+        )
 
     try:
         result = adapter.place_deadman_stop(
@@ -10064,7 +10889,9 @@ def _ensure_alpaca_deadman_stop(
     oid = str(result.get("order_id") or "").strip()
     submitted = bool(result.get("ok") and oid)
     if not submitted and result.get("submit_outcome") == "broker_rejected":
-        if resolve_owner_transport_terminal_committed(
+        if _resolve_owner_transport_for_runtime(
+            sess,
+            adapter,
             **context,
             client_order_id=cid,
             broker_order_id="",
@@ -10078,7 +10905,10 @@ def _ensure_alpaca_deadman_stop(
                 "alpaca_deadman_explicitly_rejected",
                 broker_error=result.get("error"),
             )
-    advanced = advance_owner_transport_committed(
+    submit_observation = _exact_alpaca_submit_observation(result)
+    advanced = _advance_owner_transport_for_runtime(
+        sess,
+        adapter,
         **context,
         client_order_id=cid,
         lease_token=lease_token,
@@ -10089,6 +10919,12 @@ def _ensure_alpaca_deadman_stop(
             "submit_error": result.get("error"),
             "exception_type": result.get("exception_type"),
         },
+        provider_status=(
+            submit_observation[0] if submit_observation is not None else None
+        ),
+        provider_cumulative_quantity=(
+            submit_observation[1] if submit_observation is not None else None
+        ),
     )
     if submitted:
         transport.update({"phase": "submitted", "broker_order_id": oid})
@@ -10132,13 +10968,27 @@ def _ensure_alpaca_deadman_stop(
     if strict_state == "found" and known is not None and _owner_transport_order_matches(known, transport):
         known_oid = str(getattr(known, "order_id", "") or "").strip()
         if known_oid:
-            advance_owner_transport_committed(
+            known_observation = _exact_alpaca_order_observation(known)
+            _advance_owner_transport_for_runtime(
+                sess,
+                adapter,
                 **context,
                 client_order_id=cid,
                 lease_token=lease_token,
                 phase="submitted",
                 broker_order_id=known_oid,
                 metadata={"recovered_after_submit_result": True},
+                provider_status=(
+                    known_observation[0]
+                    if known_observation is not None
+                    else None
+                ),
+                provider_cumulative_quantity=(
+                    known_observation[1]
+                    if known_observation is not None
+                    else None
+                ),
+                exit_owner_reconciled=True,
             )
             transport.update({"phase": "submitted", "broker_order_id": known_oid})
             le["deadman_stop"] = {
@@ -10739,7 +11589,28 @@ def _submit_live_market_exit(
 
         proposal = dict(request)
         lease_token = uuid.uuid4().hex
-        leased = lease_owner_transport_committed(
+        captured_authority = _captured_paper_exit_runtime_for_session(sess)
+        if captured_authority is not None:
+            if not _captured_paper_adapter_generation_matches(sess, adapter):
+                return _owner_transport_block(
+                    "captured_paper_adapter_generation_mismatch_pre_stage"
+                )
+            _owner_transport_post.clear()
+            _owner_transport_post.update({
+                **context,
+                "transport_kind": str(transport_kind or "").strip().lower(),
+                "client_order_id": str(
+                    proposal.get("client_order_id") or ""
+                ).strip(),
+                "lease_token": lease_token,
+                "order_request": proposal,
+                "transport": {},
+            })
+            return None
+        leased = _lease_owner_transport_for_runtime(
+            sess,
+            le,
+            adapter,
             **context,
             transport_kind=transport_kind,
             client_order_id=str(proposal.get("client_order_id") or ""),
@@ -10784,12 +11655,20 @@ def _submit_live_market_exit(
                     and known_filled is not None
                     and known_filled <= 1e-12
                 ):
-                    if not _resolve_exact_owner_transport_terminal(sess, current, known):
+                    if not _resolve_exact_owner_transport_terminal(
+                        sess,
+                        current,
+                        known,
+                        adapter=adapter,
+                    ):
                         return _owner_transport_block(
                             "alpaca_owner_transport_terminal_resolution_failed",
                             transport=current,
                         )
-                    leased = lease_owner_transport_committed(
+                    leased = _lease_owner_transport_for_runtime(
+                        sess,
+                        le,
+                        adapter,
                         **context,
                         transport_kind=transport_kind,
                         client_order_id=str(proposal.get("client_order_id") or ""),
@@ -10843,7 +11722,10 @@ def _submit_live_market_exit(
                 frozen = current.get("order_request")
                 frozen = dict(frozen) if isinstance(frozen, dict) else {}
                 lease_token = uuid.uuid4().hex
-                leased = lease_owner_transport_committed(
+                leased = _lease_owner_transport_for_runtime(
+                    sess,
+                    le,
+                    adapter,
                     **context,
                     transport_kind=str(current.get("transport_kind") or ""),
                     client_order_id=current_cid,
@@ -10929,7 +11811,9 @@ def _submit_live_market_exit(
             and isinstance(result, dict)
             and result.get("submit_outcome") == "broker_rejected"
         ):
-            resolved_reject = resolve_owner_transport_terminal_committed(
+            resolved_reject = _resolve_owner_transport_for_runtime(
+                sess,
+                adapter,
                 account_scope=_owner_transport_post["account_scope"],
                 alpaca_account_id=_owner_transport_post["alpaca_account_id"],
                 symbol=_owner_transport_post["symbol"],
@@ -10969,7 +11853,10 @@ def _submit_live_market_exit(
                 }
                 _owner_transport_post.clear()
                 return
-        advanced = advance_owner_transport_committed(
+        submit_observation = _exact_alpaca_submit_observation(result)
+        advanced = _advance_owner_transport_for_runtime(
+            sess,
+            adapter,
             account_scope=_owner_transport_post["account_scope"],
             alpaca_account_id=_owner_transport_post["alpaca_account_id"],
             symbol=_owner_transport_post["symbol"],
@@ -10984,6 +11871,16 @@ def _submit_live_market_exit(
                 "submit_error": (result or {}).get("error"),
                 "exception_type": exception_type,
             },
+            provider_status=(
+                submit_observation[0]
+                if submit_observation is not None
+                else None
+            ),
+            provider_cumulative_quantity=(
+                submit_observation[1]
+                if submit_observation is not None
+                else None
+            ),
         )
         if not advanced:
             le["alpaca_owner_transport_post_advance_pending"] = {
@@ -12938,7 +13835,16 @@ def _submit_live_market_exit(
         if str(frozen_request.get("order_type") or "").strip().lower() == str(
             expected_order_type
         ).strip().lower():
-            return None
+            if _captured_paper_adapter_generation_matches(sess, adapter):
+                return None
+            return _owner_transport_block(
+                "captured_paper_adapter_generation_mismatch_pre_post",
+                transport=(
+                    _owner_transport_post.get("transport")
+                    if isinstance(_owner_transport_post.get("transport"), dict)
+                    else None
+                ),
+            )
         return _owner_transport_block(
             "alpaca_owner_transport_literal_dispatch_mismatch",
             transport=(
@@ -12947,6 +13853,94 @@ def _submit_live_market_exit(
                 else None
             ),
         )
+
+    def _defer_captured_paper_exit_transport(
+        *,
+        order_kwargs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        authority = _captured_paper_exit_runtime_for_session(sess)
+        if authority is None:
+            return None
+        frozen = _owner_transport_post.get("order_request")
+        frozen = dict(frozen) if isinstance(frozen, dict) else {}
+        if not (
+            frozen
+            and frozen == {
+                "account_scope": "alpaca:paper",
+                "alpaca_account_id": str(
+                    _frozen_alpaca_account_id(sess) or ""
+                ),
+                "product_id": str(
+                    order_kwargs.get("product_id") or ""
+                ).strip().upper(),
+                "side": str(order_kwargs.get("side") or "").strip().lower(),
+                "base_size": str(order_kwargs.get("base_size") or ""),
+                "client_order_id": str(
+                    order_kwargs.get("client_order_id") or ""
+                ).strip(),
+                "position_intent": str(
+                    order_kwargs.get("position_intent") or ""
+                ).strip().lower(),
+                "order_type": str(
+                    frozen.get("order_type") or ""
+                ).strip().lower(),
+                "time_in_force": str(
+                    order_kwargs.get("time_in_force") or ""
+                ).strip().lower(),
+                "extended_hours": bool(
+                    order_kwargs.get("extended_hours", False)
+                ),
+                "limit_price": (
+                    str(order_kwargs.get("limit_price"))
+                    if order_kwargs.get("limit_price") is not None
+                    else None
+                ),
+            }
+        ):
+            return _owner_transport_block(
+                "captured_paper_exit_transport_literal_request_mismatch"
+            )
+        try:
+            request = _stage_captured_paper_exit_transport_request(
+                sess,
+                le,
+                transport_kind=str(
+                    _owner_transport_post.get("transport_kind") or ""
+                ),
+                lease_token=str(
+                    _owner_transport_post.get("lease_token") or ""
+                ),
+                order_request=frozen,
+                exit_reason=str(reason or "exit"),
+                attempt_no=attempts,
+                quote_independent_authority=bool(
+                    quote_independent_authority
+                ),
+                bbo_required=bool(
+                    not quote_independent_authority
+                    or alpaca_extended_bbo_required
+                ),
+                bbo_max_age_seconds=(
+                    2.0
+                    if exit_execution_bbo_max_age is None
+                    else float(exit_execution_bbo_max_age)
+                ),
+            )
+        except Exception:
+            return _owner_transport_block(
+                "captured_paper_exit_transport_stage_unavailable"
+            )
+        db.flush()
+        return {
+            "ok": False,
+            "deferred": True,
+            "pre_place_blocked": True,
+            "captured_paper_exit_transport_post_commit_required": True,
+            "client_order_id": request.exit_client_order_id,
+            "request_sha256": request.request_sha256,
+            "broker_calls": 0,
+            "order_posted": False,
+        }
 
     if _lim_px is not None and hasattr(adapter, "place_limit_order_gtc"):
         # TICK-VALID SELL PRICE (SMCX premarket stranded-position fix, 2026-06-22): an
@@ -13043,6 +14037,11 @@ def _submit_live_market_exit(
                 _dispatch_block,
                 reason_code="owner_transport_limit_dispatch_mismatch",
             )
+        _captured_deferred = _defer_captured_paper_exit_transport(
+            order_kwargs=_lim_kwargs,
+        )
+        if _captured_deferred is not None:
+            return _captured_deferred
         _literal_bbo_block = _final_literal_exit_bbo_refresh(
             order_kwargs=_lim_kwargs,
         )
@@ -13135,6 +14134,11 @@ def _submit_live_market_exit(
                 _dispatch_block,
                 reason_code="owner_transport_market_dispatch_mismatch",
             )
+        _captured_deferred = _defer_captured_paper_exit_transport(
+            order_kwargs=_mkt_kwargs,
+        )
+        if _captured_deferred is not None:
+            return _captured_deferred
         _literal_bbo_block = _final_literal_exit_bbo_refresh(
             order_kwargs=_mkt_kwargs,
         )
@@ -14539,6 +15543,7 @@ def _poll_live_exit_fill(
             sess,
             transport,
             no,
+            adapter=adapter,
             remaining_quantity=remaining,
         ):
             return False, remaining, "alpaca_exit_owner_transport_resolution_failed"
@@ -14608,6 +15613,14 @@ def _poll_live_exit_fill(
                 "pending": True,
                 "why": "alpaca_full_exit_broker_flat_unproven",
                 "order_status": no.status,
+            }
+        if _captured_paper_exit_request_staged(sess):
+            return {
+                "filled": False,
+                "pending": True,
+                "why": "captured_paper_exit_fill_post_commit_required",
+                "order_status": no.status,
+                "legacy_pnl_blocked": True,
             }
         if (
             alpaca_family
@@ -14705,6 +15718,14 @@ def _poll_live_exit_fill(
                 "pending": True,
                 "why": owner_error,
                 "order_status": no.status,
+            }
+        if _captured_paper_exit_request_staged(sess):
+            return {
+                "filled": False,
+                "pending": True,
+                "why": "captured_paper_exit_fill_post_commit_required",
+                "order_status": no.status,
+                "legacy_pnl_blocked": True,
             }
         if (
             alpaca_family
@@ -14890,6 +15911,16 @@ def _poll_live_exit_fill(
                     getattr(exact_after_cancel, "average_filled_price", None)
                 )
                 if post_filled > 1e-12:
+                    if _captured_paper_exit_request_staged(sess):
+                        return {
+                            "filled": False,
+                            "pending": True,
+                            "why": (
+                                "captured_paper_exit_fill_post_commit_required"
+                            ),
+                            "order_status": post_status,
+                            "legacy_pnl_blocked": True,
+                        }
                     if post_avg is None:
                         return {
                             "filled": False,
@@ -15025,6 +16056,13 @@ def _complete_confirmed_live_exit(
                 str(
                     adaptive_position.get("error")
                     or "adaptive Alpaca flat lifecycle failed"
+                )
+            )
+        if adaptive_position.get("accounting_ready") is not True:
+            raise AdaptiveRiskContractError(
+                str(
+                    adaptive_position.get("accounting_block_reason")
+                    or "alpaca_typed_settlement_projection_unavailable"
                 )
             )
     pnl_gross = (float(fill_price) - float(entry_price)) * float(quantity)
@@ -21248,6 +22286,1176 @@ class _NonAlpacaAccountFencedAdapter:
         return _fenced
 
 
+def take_captured_paper_exit_post_commit_request(
+    session_id: int,
+) -> CapturedPaperExitFillPostCommitRequest | None:
+    """Consume the exact typed exit request inside its dispatch authority."""
+
+    if (
+        isinstance(session_id, bool)
+        or not isinstance(session_id, int)
+        or session_id <= 0
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit session identity is invalid"
+        )
+    authority = _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+    if authority is None:
+        return None
+    request = authority.staged_requests.pop(session_id, None)
+    return request.verify() if request is not None else None
+
+
+def take_captured_paper_exit_transport_post_commit_request(
+    session_id: int,
+) -> CapturedPaperExitTransportPostCommitRequest | None:
+    """Consume one staged transport request inside its dispatch authority."""
+
+    if (
+        isinstance(session_id, bool)
+        or not isinstance(session_id, int)
+        or session_id <= 0
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit transport session identity is invalid"
+        )
+    authority = _CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+    if authority is None:
+        return None
+    request = authority.staged_transport_requests.pop(session_id, None)
+    return request.verify() if request is not None else None
+
+
+def build_captured_paper_exit_transport_post_commit_handler(
+    *,
+    adapter: Any,
+    expected_account_id: str,
+    runtime_generation: str,
+    broker_connection_generation: str,
+    assert_service_fence_held: Callable[[], Any],
+) -> Callable[[CapturedPaperExitTransportPostCommitRequest], dict[str, Any]]:
+    """Build the one PAPER-only exit transport capability used after DB commit."""
+
+    try:
+        account_id = str(uuid.UUID(str(expected_account_id)))
+        generation = str(uuid.UUID(str(runtime_generation)))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit handler identity is invalid"
+        ) from exc
+    if not (
+        account_id == str(expected_account_id)
+        and generation == str(runtime_generation)
+        and isinstance(broker_connection_generation, str)
+        and broker_connection_generation
+        == broker_connection_generation.strip()
+        and broker_connection_generation
+        and callable(assert_service_fence_held)
+        and getattr(settings, "chili_alpaca_paper", None) is True
+    ):
+        raise AdaptiveRiskContractError(
+            "captured PAPER exit handler authority is invalid"
+        )
+
+    def _load_request_session(
+        request: CapturedPaperExitTransportPostCommitRequest,
+    ) -> tuple[
+        TradingAutomationSession,
+        dict[str, Any],
+        AdaptiveRiskReservationStore,
+    ]:
+        from ....db import SessionLocal
+
+        db = SessionLocal()
+        try:
+            sess = (
+                db.query(TradingAutomationSession)
+                .populate_existing()
+                .filter(
+                    TradingAutomationSession.id == request.session_id,
+                    TradingAutomationSession.mode == "live",
+                )
+                .one_or_none()
+            )
+            if sess is None:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit session is unavailable"
+                )
+            store = _adaptive_risk_store_for_session(sess)
+            snapshot = getattr(sess, "risk_snapshot_json", None)
+            snapshot = deepcopy(snapshot) if isinstance(snapshot, dict) else {}
+            le = snapshot.get(KEY_LIVE_EXEC)
+            le = deepcopy(le) if isinstance(le, dict) else {}
+            sess.risk_snapshot_json = snapshot
+            db.expunge(sess)
+        finally:
+            db.close()
+        with captured_paper_exit_runtime_authority(
+            owner_generation=request.transport_owner_generation,
+            expected_account_id=account_id,
+            runtime_generation=generation,
+            broker_connection_generation=broker_connection_generation,
+        ):
+            if not _captured_paper_exit_transport_request_matches_session(
+                sess,
+                le,
+                request,
+            ):
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit session authority changed"
+                )
+        return sess, le, store
+
+    def _mirror_transport_result(
+        request: CapturedPaperExitTransportPostCommitRequest,
+        *,
+        outcome: str,
+        result: dict[str, Any],
+        owner_transport: Mapping[str, Any] | None = None,
+    ) -> None:
+        from ....db import SessionLocal
+
+        db = SessionLocal()
+        try:
+            sess = (
+                db.query(TradingAutomationSession)
+                .populate_existing()
+                .filter(
+                    TradingAutomationSession.id == request.session_id,
+                    TradingAutomationSession.mode == "live",
+                )
+                .with_for_update()
+                .one_or_none()
+            )
+            if sess is None:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit session disappeared after transport"
+                )
+            snapshot = getattr(sess, "risk_snapshot_json", None)
+            snapshot = snapshot if isinstance(snapshot, dict) else {}
+            from .captured_paper_dispatcher import (
+                validate_captured_paper_session_owner_inventory,
+            )
+
+            verified_owner = validate_captured_paper_session_owner_inventory(
+                sess,
+                expected_account_id=request.expected_account_id,
+                expected_runtime_generation=request.runtime_generation,
+                expected_execution_family=request.execution_family,
+            )
+            if (
+                verified_owner.get("content_sha256")
+                != request.session_owner_content_sha256
+            ):
+                raise AdaptiveRiskContractError(
+                    "captured PAPER session owner changed after transport"
+                )
+            le = snapshot.get(KEY_LIVE_EXEC)
+            le = dict(le) if isinstance(le, dict) else {}
+            if le.get(_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY) != request.marker():
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit marker changed after transport"
+                )
+            transport = (
+                dict(owner_transport)
+                if isinstance(owner_transport, Mapping)
+                else None
+            )
+            if outcome in {"submitted", "submit_indeterminate"} and not (
+                transport is not None
+                and str(transport.get("transport_kind") or "").strip().lower()
+                == request.transport_owner_kind
+                and str(transport.get("client_order_id") or "").strip()
+                == request.exit_client_order_id
+                and str(transport.get("lease_token") or "").strip()
+                == request.transport_lease_id
+                and transport.get("order_request") == request.order_request
+                and str(
+                    transport.get(
+                        "exit_owner_transport_started_event_sha256"
+                    )
+                    or ""
+                ).strip().lower()
+                and str(transport.get("reservation_id") or "")
+                == str(request.reservation_id)
+            ):
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit owner transport mirror is invalid"
+                )
+            if outcome == "submitted":
+                oid = str(result.get("order_id") or "").strip()
+                if not oid:
+                    raise AdaptiveRiskContractError(
+                        "captured PAPER submitted exit lacks broker OID"
+                    )
+                le["exit_order_id"] = oid
+                le["exit_client_order_id"] = request.exit_client_order_id
+                le["pending_exit_reason"] = request.exit_reason
+                le["pending_exit_quantity"] = float(
+                    request.order_request["base_size"]
+                )
+                le["pending_exit_submitted_at_utc"] = _utcnow().isoformat()
+                le["exit_order_type"] = str(
+                    request.order_request["order_type"]
+                )
+                if request.order_request["order_type"] == "limit":
+                    le["exit_limit_price"] = float(
+                        request.order_request["limit_price"]
+                    )
+                else:
+                    le.pop("exit_limit_price", None)
+                le["exit_place_result"] = {
+                    "ok": True,
+                    "error": result.get("error"),
+                }
+                le["alpaca_active_exit_owner_transport"] = transport
+                le.pop("alpaca_owner_transport_post_advance_pending", None)
+                le.pop(_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY, None)
+                emergency = le.get("emergency_exit_authority")
+                if isinstance(emergency, dict) and str(
+                    emergency.get("client_order_id") or ""
+                ).strip() == request.exit_client_order_id:
+                    emergency = dict(emergency)
+                    emergency["phase"] = "submitted"
+                    emergency["order_id"] = oid
+                    emergency["submitted_quantity"] = float(
+                        request.order_request["base_size"]
+                    )
+                    le["emergency_exit_authority"] = emergency
+            elif outcome == "proven_no_transport":
+                no_transport_status = str(
+                    result.get("broker_order_status") or "failed"
+                ).strip().lower()
+                no_transport_reason = str(
+                    result.get("reason") or "pre_accept_rejected"
+                ).strip()
+                history = le.get("exit_submit_transport_identities")
+                history = list(history) if isinstance(history, list) else []
+                for index, row in enumerate(history):
+                    if isinstance(row, dict) and str(
+                        row.get("client_order_id") or ""
+                    ).strip() == request.exit_client_order_id:
+                        history[index] = {
+                            **row,
+                            "proven_no_transport": True,
+                            "pre_accept_rejected": True,
+                            "broker_order_status": no_transport_status,
+                            "no_transport_reason": no_transport_reason,
+                            "resolved_at_utc": _utcnow().isoformat(),
+                        }
+                le["exit_submit_transport_identities"] = history
+                active = le.get("alpaca_active_exit_owner_transport")
+                if isinstance(active, dict) and str(
+                    active.get("client_order_id") or ""
+                ).strip() == request.exit_client_order_id:
+                    le.pop("alpaca_active_exit_owner_transport", None)
+                pending = le.get("alpaca_owner_transport_post_advance_pending")
+                if isinstance(pending, dict) and str(
+                    pending.get("client_order_id") or ""
+                ).strip() == request.exit_client_order_id:
+                    le.pop("alpaca_owner_transport_post_advance_pending", None)
+                le.pop(_CAPTURED_PAPER_EXIT_TRANSPORT_MARKER_KEY, None)
+            elif outcome == "submit_indeterminate":
+                le["alpaca_active_exit_owner_transport"] = transport
+                le["alpaca_owner_transport_post_advance_pending"] = {
+                    "client_order_id": request.exit_client_order_id,
+                    "broker_order_id": str(result.get("order_id") or "") or None,
+                    "recorded_at_utc": _utcnow().isoformat(),
+                }
+            else:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit mirror outcome is invalid"
+                )
+            snapshot[KEY_LIVE_EXEC] = le
+            sess.risk_snapshot_json = snapshot
+            flag_modified(sess, "risk_snapshot_json")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def _owner_transport_matches_request(
+        transport: Any,
+        request: CapturedPaperExitTransportPostCommitRequest,
+    ) -> bool:
+        row = dict(transport) if isinstance(transport, Mapping) else {}
+        return bool(
+            row.get("identity_contract") == "alpaca_owner_transport_v1"
+            and str(row.get("transport_kind") or "").strip().lower()
+            == request.transport_owner_kind
+            and str(row.get("client_order_id") or "").strip()
+            == request.exit_client_order_id
+            and str(row.get("lease_token") or "").strip()
+            == request.transport_lease_id
+            and row.get("order_request") == request.order_request
+            and str(row.get("reservation_id") or "")
+            == str(request.reservation_id)
+            and str(row.get("decision_packet_sha256") or "")
+            == request.decision_packet_sha256
+            and str(row.get("expected_account_id") or "")
+            == request.expected_account_id
+            and str(row.get("account_identity_sha256") or "")
+            == request.account_identity_sha256
+            and str(row.get("entry_client_order_id") or "")
+            == request.entry_client_order_id
+            and str(row.get("exit_client_order_id") or "")
+            == request.exit_client_order_id
+            and str(row.get("transport_claim_token") or "")
+            == request.transport_claim_token
+            and row.get("transport_owner_session_id") == request.session_id
+            and row.get("transport_owner_generation")
+            == request.transport_owner_generation
+            and str(row.get("transport_runtime_generation") or "")
+            == request.runtime_generation
+            and str(row.get("transport_connection_generation") or "")
+            == request.broker_connection_generation
+            and len(
+                str(
+                    row.get("exit_owner_transport_started_event_sha256")
+                    or ""
+                ).strip()
+            )
+            == 64
+            and all(
+                char in "0123456789abcdef"
+                for char in str(
+                    row.get("exit_owner_transport_started_event_sha256")
+                    or ""
+                ).strip()
+            )
+        )
+
+    def _verify_started_owner_receipt(
+        *,
+        store: AdaptiveRiskReservationStore,
+        binding: AdaptiveExitOwnerTransportBinding,
+        transport: Mapping[str, Any],
+    ) -> str:
+        def _aware_utc(value: Any, field: str) -> datetime:
+            try:
+                parsed = datetime.fromisoformat(
+                    str(value or "").strip().replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError) as exc:
+                raise AdaptiveRiskContractError(
+                    f"captured PAPER exit {field} is invalid"
+                ) from exc
+            if parsed.tzinfo is None:
+                raise AdaptiveRiskContractError(
+                    f"captured PAPER exit {field} lacks timezone"
+                )
+            return parsed.astimezone(timezone.utc)
+
+        started_sha = str(
+            transport.get("exit_owner_transport_started_event_sha256") or ""
+        ).strip().lower()
+        verified = store.append_exit_owner_transport_started(
+            binding,
+            effective_at=_aware_utc(
+                transport.get("effective_at"),
+                "transport effective_at",
+            ),
+            available_at=_aware_utc(
+                transport.get("available_at"),
+                "transport available_at",
+            ),
+        )
+        if verified != started_sha:
+            raise AdaptiveRiskContractError(
+                "captured PAPER exit started receipt changed"
+            )
+        return verified
+
+    def _verified_owner_receipt(
+        *,
+        store: AdaptiveRiskReservationStore,
+        binding: AdaptiveExitOwnerTransportBinding,
+        transport: Mapping[str, Any],
+        allowed_event_types: set[str],
+    ) -> AdaptiveExitOwnerReceipt:
+        event_sha = str(
+            transport.get("exit_owner_last_event_sha256") or ""
+        ).strip().lower()
+        receipt = store.load_exit_owner_receipt(
+            event_sha,
+            reservation_id=binding.reservation_id,
+        )
+        if not (
+            receipt.binding == binding
+            and receipt.event_type in allowed_event_types
+            and receipt.transport_started_event_sha256
+            == str(
+                transport.get("exit_owner_transport_started_event_sha256")
+                or ""
+            ).strip().lower()
+            and receipt.provider_client_order_id
+            == binding.exit_client_order_id
+        ):
+            raise AdaptiveRiskContractError(
+                "captured PAPER exit durable receipt changed"
+            )
+        return receipt
+
+    def _resume_durable_transport_without_post(
+        request: CapturedPaperExitTransportPostCommitRequest,
+        *,
+        adapter: Any,
+        store: AdaptiveRiskReservationStore,
+        binding: AdaptiveExitOwnerTransportBinding,
+    ) -> dict[str, Any] | None:
+        readable, claim = read_action_claim_committed(
+            symbol=request.symbol,
+            account_scope=request.account_scope,
+        )
+        if not readable or not isinstance(claim, dict):
+            return {
+                "ok": False,
+                "reason": "captured_paper_exit_claim_unreadable",
+                "broker_post_count": 0,
+                "request_sha256": request.request_sha256,
+            }
+        metadata = claim.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        entry_request = metadata.get("order_request")
+        entry_request = entry_request if isinstance(entry_request, dict) else {}
+        current = metadata.get("owner_transport")
+        if not isinstance(current, Mapping):
+            return None
+        current = dict(current)
+        if str(current.get("client_order_id") or "").strip() != (
+            request.exit_client_order_id
+        ):
+            return None
+        if not (
+            str(claim.get("account_scope") or "").strip().lower()
+            == request.account_scope
+            and str(claim.get("symbol") or "").strip().upper()
+            == request.symbol
+            and str(claim.get("action") or "").strip().lower() == "entry"
+            and str(claim.get("phase") or "").strip().lower() != "resolved"
+            and claim.get("claim_token") == request.transport_claim_token
+            and claim.get("owner_session_id") == request.session_id
+            and claim.get("client_order_id") == request.entry_client_order_id
+            and str(
+                metadata.get("alpaca_account_id")
+                or entry_request.get("alpaca_account_id")
+                or ""
+            ).strip()
+            == request.expected_account_id
+            and _owner_transport_matches_request(current, request)
+        ):
+            raise AdaptiveRiskContractError(
+                "captured PAPER retained exit authority changed"
+            )
+        phase = str(current.get("phase") or "").strip().lower()
+        _verify_started_owner_receipt(
+            store=store,
+            binding=binding,
+            transport=current,
+        )
+        if phase in {"submitting", "submit_indeterminate"}:
+            assert_service_fence_held()
+            cid_state, broker_order = _strict_client_order_id_truth(
+                adapter,
+                request.exit_client_order_id,
+            )
+            observation = (
+                _exact_alpaca_order_observation(broker_order)
+                if cid_state == "found"
+                and broker_order is not None
+                and _owner_transport_order_matches(broker_order, current)
+                else None
+            )
+            if observation is None:
+                return {
+                    "ok": False,
+                    "reason": "captured_paper_exit_same_cid_reconcile_required",
+                    "cid_state": cid_state,
+                    "broker_post_count": 0,
+                    "request_sha256": request.request_sha256,
+                }
+            oid = str(getattr(broker_order, "order_id", "") or "").strip()
+            reconciled_at = _utcnow_aware()
+            common = {
+                "symbol": request.symbol,
+                "claim_token": request.transport_claim_token,
+                "owner_session_id": request.session_id,
+                "client_order_id": request.exit_client_order_id,
+                "account_scope": request.account_scope,
+                "alpaca_account_id": request.expected_account_id,
+                "exit_owner_store": store,
+                "exit_owner_effective_at": reconciled_at,
+                "exit_owner_available_at": reconciled_at,
+                "observer_claim_token": request.transport_claim_token,
+                "observer_session_id": request.session_id,
+                "observer_generation": request.transport_owner_generation,
+                "observer_runtime_generation": request.runtime_generation,
+                "observer_connection_generation": (
+                    request.broker_connection_generation
+                ),
+            }
+            terminal = observation[0] in {
+                "filled",
+                "done",
+                "closed",
+                "canceled",
+                "cancelled",
+                "expired",
+                "rejected",
+                "failed",
+            }
+            if terminal:
+                requested_quantity = Decimal(
+                    str(request.order_request["base_size"])
+                )
+                remaining_quantity = requested_quantity - Decimal(
+                    observation[1]
+                )
+                reconciled = bool(
+                    remaining_quantity >= 0
+                    and resolve_owner_transport_terminal_committed(
+                        **common,
+                        broker_order_id=oid,
+                        broker_order_status=observation[0],
+                        filled_size=float(observation[1]),
+                        remaining_quantity=float(remaining_quantity),
+                        pre_accept_rejected=False,
+                    )
+                )
+            else:
+                reconciled = advance_owner_transport_committed(
+                    **common,
+                    lease_token=request.transport_lease_id,
+                    phase="submitted",
+                    broker_order_id=oid,
+                    metadata={"strict_cid_lookup": "found"},
+                    provider_status=observation[0],
+                    provider_cumulative_quantity=observation[1],
+                    exit_owner_reconciled=True,
+                )
+            if not reconciled:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit same-CID reconciliation failed"
+                )
+            return _resume_durable_transport_without_post(
+                request,
+                adapter=adapter,
+                store=store,
+                binding=binding,
+            )
+        if phase == "submitted":
+            receipt = _verified_owner_receipt(
+                store=store,
+                binding=binding,
+                transport=current,
+                allowed_event_types={
+                    "alpaca_exit_owner_submitted",
+                    "alpaca_exit_owner_reconciled",
+                },
+            )
+            oid = str(current.get("broker_order_id") or "").strip()
+            if not oid or receipt.provider_order_id != oid:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER submitted exit OID changed"
+                )
+            assert_service_fence_held()
+            _mirror_transport_result(
+                request,
+                outcome="submitted",
+                result={"order_id": oid, "error": None},
+                owner_transport=current,
+            )
+            return {
+                "ok": True,
+                "reason": "captured_paper_exit_durable_submit_recovered",
+                "broker_order_id": oid,
+                "broker_post_count": 0,
+                "request_sha256": request.request_sha256,
+            }
+        if phase == "resolved" and current.get("pre_accept_rejected") is True:
+            try:
+                filled_size = Decimal(str(current.get("filled_size")))
+                replay_count = int(current.get("same_cid_replay_count") or 0)
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER no-transport claim is malformed"
+                ) from exc
+            last_event_sha = str(
+                current.get("exit_owner_last_event_sha256") or ""
+            ).strip().lower()
+            if not (
+                not str(current.get("broker_order_id") or "").strip()
+                and str(current.get("broker_order_status") or "").strip().lower()
+                in {"rejected", "failed"}
+                and filled_size == 0
+                and replay_count == 0
+                and current.get("exit_owner_last_event_type")
+                == "alpaca_exit_owner_proven_no_transport"
+                and len(last_event_sha) == 64
+                and all(char in "0123456789abcdef" for char in last_event_sha)
+            ):
+                raise AdaptiveRiskContractError(
+                    "captured PAPER no-transport claim changed"
+                )
+            verified_no_transport_sha = (
+                store.verify_exit_owner_proven_no_transport_receipt(
+                    last_event_sha,
+                    binding=binding,
+                    transport_started_event_sha256=str(
+                        current.get(
+                            "exit_owner_transport_started_event_sha256"
+                        )
+                        or ""
+                    ),
+                    observer_claim_token=request.transport_claim_token,
+                    observer_session_id=request.session_id,
+                    observer_generation=request.transport_owner_generation,
+                    observer_runtime_generation=request.runtime_generation,
+                    observer_connection_generation=(
+                        request.broker_connection_generation
+                    ),
+                )
+            )
+            if verified_no_transport_sha != last_event_sha:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER no-transport receipt changed"
+                )
+            assert_service_fence_held()
+            _mirror_transport_result(
+                request,
+                outcome="proven_no_transport",
+                result={
+                    "broker_order_status": str(
+                        current.get("broker_order_status") or "failed"
+                    ),
+                    "reason": str(
+                        current.get("no_transport_reason")
+                        or "pre_accept_rejected"
+                    ),
+                },
+            )
+            return {
+                "ok": False,
+                "reason": "captured_paper_exit_proven_no_transport_recovered",
+                "broker_post_count": 0,
+                "request_sha256": request.request_sha256,
+            }
+        if phase == "resolved" and str(
+            current.get("broker_order_id") or ""
+        ).strip():
+            receipt = _verified_owner_receipt(
+                store=store,
+                binding=binding,
+                transport=current,
+                allowed_event_types={"alpaca_exit_owner_reconciled"},
+            )
+            oid = str(current.get("broker_order_id") or "").strip()
+            if receipt.provider_order_id != oid:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER terminal exit OID changed"
+                )
+            assert_service_fence_held()
+            _mirror_transport_result(
+                request,
+                outcome="submitted",
+                result={"order_id": oid, "error": None},
+                owner_transport=current,
+            )
+            return {
+                "ok": True,
+                "reason": "captured_paper_exit_terminal_owner_recovered",
+                "broker_order_id": oid,
+                "broker_post_count": 0,
+                "request_sha256": request.request_sha256,
+            }
+        raise AdaptiveRiskContractError(
+            "captured PAPER retained exit phase is unsupported"
+        )
+
+    def _literal_exit_bbo_failure(
+        request: CapturedPaperExitTransportPostCommitRequest,
+    ) -> str | None:
+        if not request.bbo_required:
+            return None
+        tick, evidence = _final_entry_bbo(
+            adapter,
+            request.symbol,
+            max_age_seconds=float(request.bbo_max_age_seconds),
+        )
+        if tick is None:
+            return str(
+                evidence.get("reason")
+                or "captured_paper_exit_bbo_unavailable"
+            )
+        if request.order_request["order_type"] != "limit":
+            return None
+        fresh_bid = _float_or_none(getattr(tick, "bid", None))
+        frozen_limit = _float_or_none(
+            request.order_request.get("limit_price")
+        )
+        if (
+            fresh_bid is None
+            or frozen_limit is None
+            or frozen_limit > fresh_bid + max(1e-9, fresh_bid * 1e-8)
+        ):
+            return "frozen_exit_limit_not_marketable_at_literal_post"
+        return None
+
+    def _resolve_pre_post_no_transport(
+        request: CapturedPaperExitTransportPostCommitRequest,
+        *,
+        store: AdaptiveRiskReservationStore,
+        binding: AdaptiveExitOwnerTransportBinding,
+        reason: str,
+    ) -> dict[str, Any]:
+        resolved_at = _utcnow_aware()
+        if not resolve_owner_transport_terminal_committed(
+            symbol=request.symbol,
+            claim_token=request.transport_claim_token,
+            owner_session_id=request.session_id,
+            client_order_id=request.exit_client_order_id,
+            broker_order_id="",
+            broker_order_status="failed",
+            filled_size=0.0,
+            pre_accept_rejected=True,
+            lease_token=request.transport_lease_id,
+            account_scope=request.account_scope,
+            alpaca_account_id=request.expected_account_id,
+            exit_owner_store=store,
+            exit_owner_effective_at=resolved_at,
+            exit_owner_available_at=resolved_at,
+            observer_claim_token=request.transport_claim_token,
+            observer_session_id=request.session_id,
+            observer_generation=request.transport_owner_generation,
+            observer_runtime_generation=request.runtime_generation,
+            observer_connection_generation=(
+                request.broker_connection_generation
+            ),
+        ):
+            return {
+                "ok": False,
+                "reason": "captured_paper_exit_no_transport_resolution_failed",
+                "failure_reason": reason,
+                "broker_post_count": 0,
+                "request_sha256": request.request_sha256,
+            }
+        recovered = _resume_durable_transport_without_post(
+            request,
+            adapter=adapter,
+            store=store,
+            binding=binding,
+        )
+        if recovered is None:
+            raise AdaptiveRiskContractError(
+                "captured PAPER no-transport resolution disappeared"
+            )
+        return {
+            **recovered,
+            "ok": False,
+            "reason": reason,
+            "broker_post_count": 0,
+        }
+
+    def _handle(
+        request: CapturedPaperExitTransportPostCommitRequest,
+    ) -> dict[str, Any]:
+        if type(request) is not CapturedPaperExitTransportPostCommitRequest:
+            raise AdaptiveRiskContractError(
+                "captured PAPER exit transport request type is invalid"
+            )
+        request.verify()
+        frozen_order = request.order_request
+        if frozen_order["order_type"] == "limit":
+            try:
+                canonical_limit = quantize_alpaca_equity_limit_price(
+                    frozen_order["limit_price"],
+                    "sell",
+                )
+            except ValueError as exc:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit limit is invalid"
+                ) from exc
+            if str(frozen_order["limit_price"]) != canonical_limit:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit limit is not canonical"
+                )
+        if not (
+            request.expected_account_id == account_id
+            and request.runtime_generation == generation
+            and request.broker_connection_generation
+            == broker_connection_generation
+            and request.account_scope == "alpaca:paper"
+            and request.execution_family == "alpaca_spot"
+            and getattr(settings, "chili_alpaca_paper", None) is True
+        ):
+            raise AdaptiveRiskContractError(
+                "captured PAPER exit transport scope changed"
+            )
+        assert_service_fence_held()
+        sess, le, store = _load_request_session(request)
+        with captured_paper_exit_runtime_authority(
+            owner_generation=request.transport_owner_generation,
+            expected_account_id=account_id,
+            runtime_generation=generation,
+            broker_connection_generation=broker_connection_generation,
+        ):
+            if not _captured_paper_adapter_generation_matches(sess, adapter):
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit adapter generation changed"
+                )
+            account_ok, account_receipt = _strict_alpaca_account_identity(
+                adapter,
+                sess,
+            )
+            if not account_ok:
+                return {
+                    "ok": False,
+                    "reason": str(
+                        account_receipt.get("reason")
+                        or "captured_paper_exit_account_identity_unavailable"
+                    ),
+                    "broker_post_count": 0,
+                    "request_sha256": request.request_sha256,
+                }
+            expected_binding = AdaptiveExitOwnerTransportBinding(
+                reservation_id=request.reservation_id,
+                expected_account_id=request.expected_account_id,
+                account_identity_sha256=request.account_identity_sha256,
+                decision_packet_sha256=request.decision_packet_sha256,
+                symbol=request.symbol,
+                entry_client_order_id=request.entry_client_order_id,
+                exit_client_order_id=request.exit_client_order_id,
+                order_request=request.order_request,
+                transport_claim_token=request.transport_claim_token,
+                transport_owner_session_id=request.session_id,
+                transport_owner_generation=request.transport_owner_generation,
+                transport_owner_kind=request.transport_owner_kind,
+                transport_lease_id=request.transport_lease_id,
+                transport_runtime_generation=request.runtime_generation,
+                transport_connection_generation=(
+                    request.broker_connection_generation
+                ),
+            )
+            resumed = _resume_durable_transport_without_post(
+                request,
+                adapter=adapter,
+                store=store,
+                binding=expected_binding,
+            )
+            if resumed is not None:
+                return resumed
+            try:
+                broker_quantity = float(
+                    adapter.get_position_quantity(request.symbol)
+                )
+                requested_quantity = float(
+                    request.order_request["base_size"]
+                )
+            except Exception:
+                broker_quantity = math.nan
+                requested_quantity = math.nan
+            if not (
+                math.isfinite(broker_quantity)
+                and math.isfinite(requested_quantity)
+                and broker_quantity > 0.0
+                and requested_quantity > 0.0
+                and requested_quantity
+                <= broker_quantity + max(1e-9, broker_quantity * 1e-8)
+            ):
+                return {
+                    "ok": False,
+                    "reason": "captured_paper_exit_position_authority_changed",
+                    "broker_post_count": 0,
+                    "request_sha256": request.request_sha256,
+                }
+            bbo_failure = _literal_exit_bbo_failure(request)
+            if bbo_failure is not None:
+                return {
+                    "ok": False,
+                    "reason": bbo_failure,
+                    "broker_post_count": 0,
+                    "request_sha256": request.request_sha256,
+                }
+            typed = _captured_paper_exit_binding_for_lease(
+                sess,
+                le,
+                transport_kind=request.transport_owner_kind,
+                client_order_id=request.exit_client_order_id,
+                order_request=request.order_request,
+                lease_token=request.transport_lease_id,
+                store=store,
+            )
+            if typed is None:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit adaptive authority is unavailable"
+                )
+            lease_store, binding = typed
+            if binding != expected_binding:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit binding changed before permit"
+                )
+            store = lease_store
+            observed_at = _utcnow_aware()
+            leased = lease_owner_transport_committed(
+                symbol=request.symbol,
+                claim_token=request.transport_claim_token,
+                owner_session_id=request.session_id,
+                transport_kind=request.transport_owner_kind,
+                client_order_id=request.exit_client_order_id,
+                order_request=request.order_request,
+                lease_token=request.transport_lease_id,
+                account_scope=request.account_scope,
+                alpaca_account_id=request.expected_account_id,
+                exit_owner_store=store,
+                exit_owner_binding=binding,
+                exit_owner_effective_at=observed_at,
+                exit_owner_available_at=observed_at,
+                captured_paper_exit_stage_request_sha256=(
+                    request.request_sha256
+                ),
+                captured_paper_exit_stage_marker=request.marker(),
+            )
+            started_sha = str(
+                leased.get("exit_owner_transport_started_event_sha256") or ""
+            ).strip().lower()
+            if not leased.get("ok") or not started_sha:
+                return {
+                    "ok": False,
+                    "reason": str(
+                        leased.get("reason")
+                        or "captured_paper_exit_permit_unavailable"
+                    ),
+                    "broker_post_count": 0,
+                    "request_sha256": request.request_sha256,
+                }
+            verified_started_sha = store.append_exit_owner_transport_started(
+                binding,
+                effective_at=observed_at,
+                available_at=observed_at,
+            )
+            if verified_started_sha != started_sha:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit durable permit is invalid"
+                )
+            owner_transport = leased.get("transport")
+            owner_transport = (
+                dict(owner_transport)
+                if isinstance(owner_transport, Mapping)
+                else None
+            )
+            if not (
+                owner_transport is not None
+                and str(
+                    owner_transport.get("transport_kind") or ""
+                ).strip().lower()
+                == request.transport_owner_kind
+                and str(
+                    owner_transport.get("client_order_id") or ""
+                ).strip()
+                == request.exit_client_order_id
+                and str(owner_transport.get("lease_token") or "").strip()
+                == request.transport_lease_id
+                and owner_transport.get("order_request")
+                == request.order_request
+                and str(
+                    owner_transport.get(
+                        "exit_owner_transport_started_event_sha256"
+                    )
+                    or ""
+                ).strip().lower()
+                == started_sha
+            ):
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit committed permit changed"
+                )
+            assert_service_fence_held()
+            if not _captured_paper_adapter_generation_matches(sess, adapter):
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit adapter changed before POST"
+                )
+            post_lease_bbo_failure = _literal_exit_bbo_failure(request)
+            if post_lease_bbo_failure is not None:
+                return _resolve_pre_post_no_transport(
+                    request,
+                    store=store,
+                    binding=binding,
+                    reason=post_lease_bbo_failure,
+                )
+            order = request.order_request
+            kwargs = {
+                key: order[key]
+                for key in (
+                    "product_id",
+                    "side",
+                    "base_size",
+                    "client_order_id",
+                    "position_intent",
+                    "time_in_force",
+                    "extended_hours",
+                )
+                if key in order
+            }
+            if order["order_type"] == "limit":
+                kwargs["limit_price"] = order["limit_price"]
+            try:
+                if order["order_type"] == "limit":
+                    result = adapter.place_limit_order_gtc(**kwargs) or {}
+                else:
+                    result = adapter.place_market_order(**kwargs) or {}
+            except Exception as exc:
+                outcome_at = _utcnow_aware()
+                advanced = advance_owner_transport_committed(
+                    symbol=request.symbol,
+                    claim_token=request.transport_claim_token,
+                    owner_session_id=request.session_id,
+                    client_order_id=request.exit_client_order_id,
+                    lease_token=request.transport_lease_id,
+                    phase="submit_indeterminate",
+                    broker_order_id=None,
+                    metadata={"exception_type": type(exc).__name__},
+                    account_scope=request.account_scope,
+                    alpaca_account_id=request.expected_account_id,
+                    exit_owner_store=store,
+                    exit_owner_effective_at=outcome_at,
+                    exit_owner_available_at=outcome_at,
+                    observer_claim_token=request.transport_claim_token,
+                    observer_session_id=request.session_id,
+                    observer_generation=request.transport_owner_generation,
+                    observer_runtime_generation=request.runtime_generation,
+                    observer_connection_generation=(
+                        request.broker_connection_generation
+                    ),
+                )
+                if not advanced:
+                    raise AdaptiveRiskContractError(
+                        "captured PAPER indeterminate outcome was not durable"
+                    ) from exc
+                _mirror_transport_result(
+                    request,
+                    outcome="submit_indeterminate",
+                    result={},
+                    owner_transport=owner_transport,
+                )
+                raise
+            result = dict(result) if isinstance(result, dict) else {}
+            if result.get("submit_outcome") == "broker_rejected":
+                outcome_at = _utcnow_aware()
+                resolved = resolve_owner_transport_terminal_committed(
+                    symbol=request.symbol,
+                    claim_token=request.transport_claim_token,
+                    owner_session_id=request.session_id,
+                    client_order_id=request.exit_client_order_id,
+                    broker_order_id="",
+                    broker_order_status="rejected",
+                    filled_size=0.0,
+                    pre_accept_rejected=True,
+                    lease_token=request.transport_lease_id,
+                    account_scope=request.account_scope,
+                    alpaca_account_id=request.expected_account_id,
+                    exit_owner_store=store,
+                    exit_owner_effective_at=outcome_at,
+                    exit_owner_available_at=outcome_at,
+                    observer_claim_token=request.transport_claim_token,
+                    observer_session_id=request.session_id,
+                    observer_generation=request.transport_owner_generation,
+                    observer_runtime_generation=request.runtime_generation,
+                    observer_connection_generation=(
+                        request.broker_connection_generation
+                    ),
+                )
+                if not resolved:
+                    raise AdaptiveRiskContractError(
+                        "captured PAPER broker rejection was not durable"
+                    )
+                recovered_rejection = _resume_durable_transport_without_post(
+                    request,
+                    adapter=adapter,
+                    store=store,
+                    binding=binding,
+                )
+                if recovered_rejection is None:
+                    raise AdaptiveRiskContractError(
+                        "captured PAPER broker rejection receipt disappeared"
+                    )
+                return {
+                    "ok": False,
+                    "reason": "broker_rejected",
+                    "broker_post_count": 1,
+                    "request_sha256": request.request_sha256,
+                }
+            oid = str(result.get("order_id") or "").strip()
+            observation = _exact_captured_paper_exit_submit_observation(
+                result,
+                request,
+            )
+            exact_submitted = observation is not None
+            outcome_at = _utcnow_aware()
+            advanced = advance_owner_transport_committed(
+                symbol=request.symbol,
+                claim_token=request.transport_claim_token,
+                owner_session_id=request.session_id,
+                client_order_id=request.exit_client_order_id,
+                lease_token=request.transport_lease_id,
+                phase=("submitted" if exact_submitted else "submit_indeterminate"),
+                broker_order_id=(oid if exact_submitted else None),
+                metadata={
+                    "submit_status": result.get("status"),
+                    "submit_error": result.get("error"),
+                    "transport_request_sha256": request.request_sha256,
+                },
+                account_scope=request.account_scope,
+                alpaca_account_id=request.expected_account_id,
+                exit_owner_store=store,
+                exit_owner_effective_at=outcome_at,
+                exit_owner_available_at=outcome_at,
+                provider_status=(observation[0] if exact_submitted else None),
+                provider_cumulative_quantity=(
+                    observation[1] if exact_submitted else None
+                ),
+                observer_claim_token=request.transport_claim_token,
+                observer_session_id=request.session_id,
+                observer_generation=request.transport_owner_generation,
+                observer_runtime_generation=request.runtime_generation,
+                observer_connection_generation=(
+                    request.broker_connection_generation
+                ),
+            )
+            if not advanced:
+                raise AdaptiveRiskContractError(
+                    "captured PAPER exit outcome was not durable"
+                )
+            outcome = "submitted" if exact_submitted else "submit_indeterminate"
+            if exact_submitted:
+                recovered_submission = _resume_durable_transport_without_post(
+                    request,
+                    adapter=adapter,
+                    store=store,
+                    binding=binding,
+                )
+                if recovered_submission is None:
+                    raise AdaptiveRiskContractError(
+                        "captured PAPER submitted receipt disappeared"
+                    )
+            else:
+                _mirror_transport_result(
+                    request,
+                    outcome=outcome,
+                    result=result,
+                    owner_transport=owner_transport,
+                )
+            return {
+                "ok": exact_submitted,
+                "reason": None if exact_submitted else "submit_indeterminate",
+                "broker_order_id": oid or None,
+                "broker_post_count": 1,
+                "request_sha256": request.request_sha256,
+            }
+
+    return _handle
+
+
 def tick_live_session(
     db: Session,
     session_id: int,
@@ -21292,6 +23500,19 @@ def tick_live_session(
             "reason": exc.reason,
             "broker_calls": 0,
             "session_mutations": 0,
+            "order_posted": False,
+        }
+    retained_exit_transport = _restage_captured_paper_exit_transport_request(
+        sess
+    )
+    if retained_exit_transport is not None:
+        return {
+            "ok": True,
+            "session_id": int(sess.id),
+            "state": sess.state,
+            "deferred": True,
+            "reason": "captured_paper_exit_transport_post_commit_required",
+            "broker_calls": 0,
             "order_posted": False,
         }
     _operator_paused = is_operator_paused(sess.risk_snapshot_json)
@@ -31111,7 +33332,14 @@ def tick_live_session(
                                 if str(
                                     current_transport.get("phase") or ""
                                 ).strip().lower() != "submitted" and active_replacement and handoff_error is None:
-                                    advanced = advance_owner_transport_committed(
+                                    replacement_observation = (
+                                        _exact_alpaca_order_observation(
+                                            replacement_order
+                                        )
+                                    )
+                                    advanced = _advance_owner_transport_for_runtime(
+                                        sess,
+                                        adapter,
                                         **owner_context,
                                         client_order_id=replacement_cid,
                                         lease_token=str(
@@ -31122,6 +33350,17 @@ def tick_live_session(
                                         metadata={
                                             "recovered_replacement_deadman": True
                                         },
+                                        provider_status=(
+                                            replacement_observation[0]
+                                            if replacement_observation is not None
+                                            else None
+                                        ),
+                                        provider_cumulative_quantity=(
+                                            replacement_observation[1]
+                                            if replacement_observation is not None
+                                            else None
+                                        ),
+                                        exit_owner_reconciled=True,
                                     )
                                     if not advanced:
                                         handoff_error = (

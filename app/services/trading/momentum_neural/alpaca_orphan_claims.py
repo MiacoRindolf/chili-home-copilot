@@ -25,6 +25,7 @@ from .adaptive_risk_policy import (
     resolve_adaptive_risk,
 )
 from .adaptive_risk_reservation import (
+    AdaptiveExitOwnerTransportBinding,
     AdaptiveRiskReservationStore,
     load_adaptive_risk_reservation_request,
 )
@@ -66,6 +67,278 @@ _ACTIVE_ALPACA_PROTECTIVE_LIFECYCLES = frozenset({
     "accepted_for_bidding",
     "stopped",
 })
+
+
+class _ExitOwnerClaimAtomicityAbort(RuntimeError):
+    """Roll back a typed owner event when its claim mutation cannot commit."""
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        super().__init__(str(result.get("reason") or "exit_owner_claim_atomicity_abort"))
+        self.result = dict(result)
+
+
+def _exit_owner_binding_matches_claim(
+    claim: dict[str, Any] | None,
+    binding: AdaptiveExitOwnerTransportBinding,
+) -> bool:
+    """Bind typed risk authority to the exact durable entry-owner row."""
+
+    if not isinstance(claim, dict):
+        return False
+    metadata = claim.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    entry_request = metadata.get("order_request")
+    entry_request = entry_request if isinstance(entry_request, dict) else {}
+    return bool(
+        str(claim.get("account_scope") or "").strip().lower()
+        == binding.account_scope
+        and str(claim.get("symbol") or "").strip().upper() == binding.symbol
+        and str(claim.get("claim_token") or "").strip()
+        == binding.transport_claim_token
+        and claim.get("owner_session_id") == binding.transport_owner_session_id
+        and str(claim.get("action") or "").strip().lower() == "entry"
+        and str(claim.get("phase") or "").strip().lower() != RESOLVED
+        and str(claim.get("client_order_id") or "").strip()
+        == binding.entry_client_order_id
+        and str(
+            metadata.get("alpaca_account_id")
+            or entry_request.get("alpaca_account_id")
+            or ""
+        ).strip()
+        == binding.expected_account_id
+    )
+
+
+def _exit_owner_started_marker(
+    binding: AdaptiveExitOwnerTransportBinding,
+    *,
+    effective_at: datetime,
+    available_at: datetime,
+    started_event_sha256: str,
+) -> dict[str, Any]:
+    """Canonical claim-side mirror of the immutable typed started event."""
+
+    details = binding.event_details(available_at=available_at)
+    return {
+        **details,
+        "reservation_id": str(binding.reservation_id),
+        "effective_at": effective_at.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "exit_owner_transport_started_event_sha256": str(
+            started_event_sha256
+        ).strip().lower(),
+    }
+
+
+def _binding_from_owner_transport_marker(
+    marker: dict[str, Any],
+) -> AdaptiveExitOwnerTransportBinding | None:
+    """Reconstruct later authority only from the durable claim marker."""
+
+    try:
+        started_sha = str(
+            marker.get("exit_owner_transport_started_event_sha256") or ""
+        ).strip().lower()
+        effective_at = _parse_utc(marker.get("effective_at"))
+        available_at = _parse_utc(marker.get("available_at"))
+        if not (
+            len(started_sha) == 64
+            and all(char in "0123456789abcdef" for char in started_sha)
+            and effective_at is not None
+            and available_at is not None
+            and available_at >= effective_at
+        ):
+            return None
+        canonical = str(marker.get("request_canonical_json") or "")
+        request = json.loads(canonical)
+        if not isinstance(request, dict):
+            return None
+        if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != str(
+            marker.get("request_sha256") or ""
+        ).strip().lower():
+            return None
+        binding = AdaptiveExitOwnerTransportBinding(
+            reservation_id=uuid.UUID(str(marker.get("reservation_id") or "")),
+            expected_account_id=str(marker.get("expected_account_id") or ""),
+            account_identity_sha256=str(
+                marker.get("account_identity_sha256") or ""
+            ),
+            decision_packet_sha256=str(
+                marker.get("decision_packet_sha256") or ""
+            ),
+            symbol=str(marker.get("symbol") or ""),
+            entry_client_order_id=str(marker.get("entry_client_order_id") or ""),
+            exit_client_order_id=str(marker.get("exit_client_order_id") or ""),
+            order_request=request,
+            transport_claim_token=str(marker.get("transport_claim_token") or ""),
+            transport_owner_session_id=marker.get("transport_owner_session_id"),
+            transport_owner_generation=marker.get("transport_owner_generation"),
+            transport_owner_kind=str(marker.get("transport_owner_kind") or ""),
+            transport_lease_id=str(marker.get("transport_lease_id") or ""),
+            transport_runtime_generation=str(
+                marker.get("transport_runtime_generation") or ""
+            ),
+            transport_connection_generation=str(
+                marker.get("transport_connection_generation") or ""
+            ),
+            account_scope=str(marker.get("account_scope") or ""),
+            broker_environment=str(marker.get("broker_environment") or ""),
+            execution_family=str(marker.get("execution_family") or ""),
+        )
+    except Exception:
+        return None
+    expected = _exit_owner_started_marker(
+        binding,
+        effective_at=effective_at,
+        available_at=available_at,
+        started_event_sha256=started_sha,
+    )
+    if not all(marker.get(key) == value for key, value in expected.items()):
+        return None
+    if not (
+        marker.get("order_request") == dict(binding.order_request)
+        and str(marker.get("client_order_id") or "")
+        == binding.exit_client_order_id
+        and str(marker.get("transport_kind") or "").strip().lower()
+        == binding.transport_owner_kind
+        and str(marker.get("lease_token") or "") == binding.transport_lease_id
+    ):
+        return None
+    return binding
+
+
+def _append_claim_bound_exit_owner_outcome(
+    db: Session,
+    *,
+    symbol: str,
+    account_scope: str,
+    alpaca_account_id: str,
+    claim_token: str,
+    owner_session_id: int,
+    client_order_id: str,
+    expected_lease_id: str | None,
+    store: AdaptiveRiskReservationStore | None,
+    event_type: str,
+    effective_at: datetime | None,
+    available_at: datetime | None,
+    provider_order_id: str | None,
+    provider_status: str | None,
+    provider_cumulative_quantity: int | None,
+    observer_claim_token: str | None,
+    observer_session_id: int | None,
+    observer_generation: int | None,
+    observer_runtime_generation: str | None,
+    observer_connection_generation: str | None,
+) -> tuple[
+    bool,
+    dict[str, Any] | None,
+    str | None,
+    dict[str, Any] | None,
+]:
+    """Append from the durable marker before taking the claim row lock."""
+
+    readable, claim = read_action_claim(
+        db,
+        symbol=symbol,
+        account_scope=account_scope,
+        for_update=False,
+    )
+    if not readable or claim is None:
+        return False, None, None, None
+    metadata = dict(claim.get("metadata") or {})
+    marker = metadata.get(_OWNER_TRANSPORT_METADATA_KEY)
+    marker = dict(marker) if isinstance(marker, dict) else None
+    typed_outcome_requested = any(
+        value is not None
+        for value in (
+            store,
+            effective_at,
+            available_at,
+            observer_claim_token,
+            observer_session_id,
+            observer_generation,
+            observer_runtime_generation,
+            observer_connection_generation,
+        )
+    )
+    if marker is None or marker.get(
+        "exit_owner_transport_started_event_sha256"
+    ) is None:
+        # Preserve the historical untyped branch only for callers that did not
+        # request typed authority at all.  Once any typed material is supplied,
+        # absence of the durable pre-I/O ancestor must fail closed rather than
+        # silently degrading the same call to legacy claim JSON.
+        return (False if typed_outcome_requested else True), None, None, None
+    binding = _binding_from_owner_transport_marker(marker)
+    observer_token = str(observer_claim_token or "").strip()
+    observer_runtime = str(observer_runtime_generation or "").strip()
+    observer_connection = str(observer_connection_generation or "").strip()
+    if not (
+        type(observer_session_id) is int
+        and observer_session_id > 0
+        and type(observer_generation) is int
+        and observer_generation > 0
+        and observer_token
+        and observer_runtime
+        and observer_connection
+        and observer_token == str(claim_token or "").strip()
+        and observer_session_id == int(owner_session_id)
+    ):
+        return False, None, None, None
+    observer_marker = {
+        "observer_claim_token": observer_token,
+        "observer_session_id": observer_session_id,
+        "observer_generation": observer_generation,
+        "observer_runtime_generation": observer_runtime,
+        "observer_connection_generation": observer_connection,
+    }
+    if not (
+        binding is not None
+        and isinstance(store, AdaptiveRiskReservationStore)
+        and isinstance(effective_at, datetime)
+        and isinstance(available_at, datetime)
+        and _exit_owner_binding_matches_claim(claim, binding)
+        and binding.account_scope == account_scope
+        and binding.expected_account_id == str(alpaca_account_id or "").strip()
+        and binding.transport_claim_token == str(claim_token or "").strip()
+        and binding.transport_owner_session_id == int(owner_session_id)
+        and binding.exit_client_order_id == str(client_order_id or "").strip()
+        and (
+            expected_lease_id is None
+            or binding.transport_lease_id == str(expected_lease_id or "").strip()
+        )
+    ):
+        return False, None, None, None
+    if event_type in {"alpaca_exit_owner_submitted", "alpaca_exit_owner_reconciled"} and (
+        not str(provider_order_id or "").strip()
+        or not str(provider_status or "").strip()
+        or provider_cumulative_quantity is None
+    ):
+        return False, None, None, None
+    event_sha = store.append_exit_owner_transport_outcome(
+        binding,
+        event_type=event_type,
+        transport_started_event_sha256=str(
+            marker["exit_owner_transport_started_event_sha256"]
+        ),
+        effective_at=effective_at,
+        available_at=available_at,
+        observer_claim_token=observer_marker["observer_claim_token"],
+        observer_session_id=observer_marker["observer_session_id"],
+        observer_generation=observer_marker["observer_generation"],
+        observer_runtime_generation=observer_marker[
+            "observer_runtime_generation"
+        ],
+        observer_connection_generation=observer_marker[
+            "observer_connection_generation"
+        ],
+        provider_order_id=provider_order_id,
+        provider_status=provider_status,
+        provider_cumulative_quantity=provider_cumulative_quantity,
+        session=db,
+    )
+    return True, marker, event_sha, observer_marker
 
 
 def _terminal_order_status_lifecycle_compatible(
@@ -991,6 +1264,10 @@ def lease_deadman_handoff_replacement(
     local_position_quantity: float,
     strict_cid_absent_after_expiry: bool = False,
     lease_seconds: int = _OWNER_TRANSPORT_LEASE_SECONDS,
+    exit_owner_store: AdaptiveRiskReservationStore | None = None,
+    exit_owner_binding: AdaptiveExitOwnerTransportBinding | None = None,
+    exit_owner_effective_at: datetime | None = None,
+    exit_owner_available_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Atomically install a replacement stop while retaining the close handoff.
 
@@ -1003,6 +1280,15 @@ def lease_deadman_handoff_replacement(
     cid = str(client_order_id or "").strip()
     worker_token = str(lease_token or "").strip()
     request = dict(order_request or {})
+    typed_owner_requested = any(
+        value is not None
+        for value in (
+            exit_owner_store,
+            exit_owner_binding,
+            exit_owner_effective_at,
+            exit_owner_available_at,
+        )
+    )
     try:
         broker_qty = float(broker_position_quantity)
         local_qty = float(local_position_quantity)
@@ -1031,6 +1317,66 @@ def lease_deadman_handoff_replacement(
         <= max(1e-9, abs(broker_qty) * 1e-8)
     ):
         return {"ok": False, "reason": "replacement_deadman_request_not_certified"}
+    if typed_owner_requested and not (
+        isinstance(exit_owner_store, AdaptiveRiskReservationStore)
+        and isinstance(exit_owner_binding, AdaptiveExitOwnerTransportBinding)
+        and isinstance(exit_owner_effective_at, datetime)
+        and isinstance(exit_owner_available_at, datetime)
+        and exit_owner_binding.account_scope == scope
+        and exit_owner_binding.expected_account_id == account_id
+        and exit_owner_binding.symbol == sym
+        and exit_owner_binding.transport_claim_token == str(claim_token)
+        and exit_owner_binding.transport_owner_session_id == int(owner_session_id)
+        and exit_owner_binding.transport_owner_kind == "deadman"
+        and exit_owner_binding.exit_client_order_id == cid
+        and exit_owner_binding.transport_lease_id == worker_token
+        and dict(exit_owner_binding.order_request) == request
+    ):
+        return {
+            "ok": False,
+            "reason": "replacement_deadman_exit_owner_binding_not_certified",
+        }
+
+    started_event_sha256: str | None = None
+    started_marker: dict[str, Any] | None = None
+    if typed_owner_requested:
+        assert exit_owner_binding is not None
+        assert exit_owner_store is not None
+        assert exit_owner_effective_at is not None
+        assert exit_owner_available_at is not None
+        readable, preflight_claim = read_action_claim(
+            db,
+            symbol=sym,
+            account_scope=scope,
+            for_update=False,
+        )
+        if not readable or not _exit_owner_binding_matches_claim(
+            preflight_claim,
+            exit_owner_binding,
+        ):
+            return {
+                "ok": False,
+                "reason": "replacement_deadman_exit_owner_claim_binding_mismatch",
+            }
+        started_event_sha256 = exit_owner_store.append_exit_owner_transport_started(
+            exit_owner_binding,
+            effective_at=exit_owner_effective_at,
+            available_at=exit_owner_available_at,
+            session=db,
+        )
+        started_marker = _exit_owner_started_marker(
+            exit_owner_binding,
+            effective_at=exit_owner_effective_at,
+            available_at=exit_owner_available_at,
+            started_event_sha256=started_event_sha256,
+        )
+
+    def _blocked(reason: str, **details: Any) -> dict[str, Any]:
+        result = {"ok": False, "reason": reason, **details}
+        if started_event_sha256 is not None:
+            raise _ExitOwnerClaimAtomicityAbort(result)
+        return result
+
     readable, claim = read_action_claim(
         db,
         symbol=sym,
@@ -1038,7 +1384,7 @@ def lease_deadman_handoff_replacement(
         for_update=True,
     )
     if not readable or claim is None:
-        return {"ok": False, "reason": "replacement_deadman_claim_unreadable"}
+        return _blocked("replacement_deadman_claim_unreadable")
     metadata = dict(claim.get("metadata") or {})
     entry_request = metadata.get("order_request")
     entry_request = entry_request if isinstance(entry_request, dict) else {}
@@ -1062,7 +1408,7 @@ def lease_deadman_handoff_replacement(
         and str(handoff.get("alpaca_account_id") or "").strip() == account_id
         and str(handoff.get("symbol") or "").strip().upper() == sym
     ):
-        return {"ok": False, "reason": "replacement_deadman_generation_mismatch"}
+        return _blocked("replacement_deadman_generation_mismatch")
 
     phase = str(handoff.get("phase") or "").strip().lower()
     current_kind = str(current.get("transport_kind") or "").strip().lower()
@@ -1101,54 +1447,15 @@ def lease_deadman_handoff_replacement(
         expiry = _parse_utc(current.get("lease_expires_at_utc"))
         now = datetime.now(timezone.utc)
         expired = bool(expiry is not None and expiry <= now)
-        if strict_cid_absent_after_expiry and expired:
-            lease_expires = now + timedelta(seconds=max(30, int(lease_seconds)))
-            current = {
-                **current,
-                "phase": "submitting",
-                "lease_token": worker_token,
-                "lease_expires_at_utc": lease_expires.isoformat(),
-                "updated_at_utc": now.isoformat(),
-                "same_cid_replay_count": int(
-                    current.get("same_cid_replay_count") or 0
-                )
-                + 1,
-            }
-            handoff = {
-                **handoff,
-                "phase": "replacement_deadman_leased",
-                "replacement_deadman_lease_token": worker_token,
-                "replacement_deadman_lease_expires_at_utc": lease_expires.isoformat(),
-                "replacement_deadman_released_at_utc": now.isoformat(),
-            }
-            metadata[_OWNER_TRANSPORT_METADATA_KEY] = current
-            metadata[_DEADMAN_CLOSE_HANDOFF_METADATA_KEY] = handoff
-            row = db.execute(text(
-                "UPDATE broker_symbol_action_claims SET metadata_json = CAST(:metadata AS jsonb),"
-                " updated_at = :now WHERE account_scope = :scope AND symbol = :symbol"
-                " AND claim_token = :token AND action = 'entry' AND phase <> 'resolved'"
-            ), {
-                "metadata": json.dumps(metadata, separators=(",", ":"), default=str),
-                "now": now,
-                "scope": scope,
-                "symbol": sym,
-                "token": str(claim_token),
-            })
-            if int(row.rowcount or 0) != 1:
-                return {"ok": False, "reason": "replacement_deadman_replay_write_failed"}
-            return {
-                "ok": True,
-                "transport": current,
-                "handoff": handoff,
-                "same_cid_replay": True,
-            }
-        return {
-            "ok": False,
-            "reason": "replacement_deadman_reconcile_required",
-            "transport": current,
-            "handoff": handoff,
-            "lease_expired": expired,
-        }
+        return _blocked(
+            "replacement_deadman_reconcile_required",
+            transport=current,
+            handoff=handoff,
+            lease_expired=expired,
+            strict_cid_absence_is_not_terminal=bool(
+                strict_cid_absent_after_expiry and expired
+            ),
+        )
 
     safe_inert_predecessor = False
     predecessor_outcome = None
@@ -1304,12 +1611,11 @@ def lease_deadman_handoff_replacement(
         predecessor_remaining = replacement_remaining
         predecessor_outcome = "replacement_deadman_retry"
     if not safe_inert_predecessor or current_phase != "resolved":
-        return {
-            "ok": False,
-            "reason": "replacement_deadman_predecessor_not_inert",
-            "transport": current,
-            "handoff": handoff,
-        }
+        return _blocked(
+            "replacement_deadman_predecessor_not_inert",
+            transport=current,
+            handoff=handoff,
+        )
     # Exact predecessor remainder, caller's locally-accounted quantity, fresh
     # broker quantity, and replacement request must agree before claim mutation.
     # If the outer accounting transaction later rolls back, retained protective
@@ -1325,12 +1631,11 @@ def lease_deadman_handoff_replacement(
         and abs(broker_qty - request_qty)
         <= max(1e-9, abs(request_qty) * 1e-8)
     ):
-        return {
-            "ok": False,
-            "reason": "replacement_deadman_quantity_generation_mismatch",
-            "transport": current,
-            "handoff": handoff,
-        }
+        return _blocked(
+            "replacement_deadman_quantity_generation_mismatch",
+            transport=current,
+            handoff=handoff,
+        )
     used_deadman_cids = {
         str(handoff.get("deadman_client_order_id") or "").strip(),
         successor_cid,
@@ -1361,7 +1666,7 @@ def lease_deadman_handoff_replacement(
                 str(candidate.get("client_order_id") or "").strip()
             )
     if cid in used_deadman_cids:
-        return {"ok": False, "reason": "replacement_deadman_cid_not_new"}
+        return _blocked("replacement_deadman_cid_not_new")
 
     generation = _deadman_client_order_generation(
         cid,
@@ -1376,11 +1681,10 @@ def lease_deadman_handoff_replacement(
     ) or (
         generation is not None and generation <= high_watermark
     ):
-        return {
-            "ok": False,
-            "reason": "replacement_deadman_generation_not_monotonic",
-            "deadman_generation_high_watermark": high_watermark,
-        }
+        return _blocked(
+            "replacement_deadman_generation_not_monotonic",
+            deadman_generation_high_watermark=high_watermark,
+        )
     if generation is not None:
         metadata[_DEADMAN_GENERATION_HIGH_WATERMARK_KEY] = generation
 
@@ -1399,6 +1703,8 @@ def lease_deadman_handoff_replacement(
         "created_at_utc": now.isoformat(),
         "updated_at_utc": now.isoformat(),
     }
+    if started_marker is not None:
+        replacement.update(started_marker)
     handoff = {
         **handoff,
         "phase": "replacement_deadman_leased",
@@ -1423,8 +1729,13 @@ def lease_deadman_handoff_replacement(
         "token": str(claim_token),
     })
     if int(row.rowcount or 0) != 1:
-        return {"ok": False, "reason": "replacement_deadman_lease_write_failed"}
-    return {"ok": True, "transport": replacement, "handoff": handoff}
+        return _blocked("replacement_deadman_lease_write_failed")
+    return {
+        "ok": True,
+        "transport": replacement,
+        "handoff": handoff,
+        "exit_owner_transport_started_event_sha256": started_event_sha256,
+    }
 
 
 def certify_deadman_handoff_reprotected(
@@ -2656,13 +2967,19 @@ def lease_owner_transport(
     alpaca_account_id: str,
     strict_cid_absent_after_expiry: bool = False,
     lease_seconds: int = _OWNER_TRANSPORT_LEASE_SECONDS,
+    exit_owner_store: AdaptiveRiskReservationStore | None = None,
+    exit_owner_binding: AdaptiveExitOwnerTransportBinding | None = None,
+    exit_owner_effective_at: datetime | None = None,
+    exit_owner_available_at: datetime | None = None,
+    captured_paper_exit_stage_request_sha256: str | None = None,
+    captured_paper_exit_stage_marker: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically freeze one owner close/protection POST on the retained entry claim.
 
-    A second process never receives permission for a different CID while a transport
-    is unresolved.  Once the lease expires, an explicit strict-CID 404 may only renew
-    the *same* immutable request/CID.  Thus a paused original worker and its recovery
-    worker can at worst replay one Alpaca-idempotent instruction, never two orders.
+    A second process never receives permission while a transport is unresolved.
+    Lease expiry and a strict-CID 404 are not global proof that Alpaca rejected
+    the original POST, so recovery retains the exact CID for reconciliation and
+    never grants a blind resend.
     """
     scope = str(account_scope or "").strip().lower()
     sym = _symbol(symbol)
@@ -2672,6 +2989,25 @@ def lease_owner_transport(
     kind = str(transport_kind or "").strip().lower()
     request = dict(order_request or {})
     account_id = str(alpaca_account_id or "").strip()
+    typed_owner_requested = any(
+        value is not None
+        for value in (
+            exit_owner_store,
+            exit_owner_binding,
+            exit_owner_effective_at,
+            exit_owner_available_at,
+            captured_paper_exit_stage_request_sha256,
+            captured_paper_exit_stage_marker,
+        )
+    )
+    staged_request_sha256 = str(
+        captured_paper_exit_stage_request_sha256 or ""
+    ).strip().lower()
+    staged_marker = (
+        dict(captured_paper_exit_stage_marker)
+        if isinstance(captured_paper_exit_stage_marker, dict)
+        else None
+    )
     if (
         scope != "alpaca:paper"
         or not bool(getattr(settings, "chili_alpaca_paper", True))
@@ -2686,8 +3022,87 @@ def lease_owner_transport(
         )
     ):
         return {"ok": False, "reason": "owner_transport_request_not_certified"}
+    if typed_owner_requested and not (
+        isinstance(exit_owner_store, AdaptiveRiskReservationStore)
+        and isinstance(exit_owner_binding, AdaptiveExitOwnerTransportBinding)
+        and isinstance(exit_owner_effective_at, datetime)
+        and isinstance(exit_owner_available_at, datetime)
+        and exit_owner_binding.account_scope == scope
+        and exit_owner_binding.expected_account_id == account_id
+        and exit_owner_binding.symbol == sym
+        and exit_owner_binding.transport_claim_token == token
+        and exit_owner_binding.transport_owner_session_id == int(owner_session_id)
+        and exit_owner_binding.transport_owner_kind == kind
+        and exit_owner_binding.exit_client_order_id == cid
+        and exit_owner_binding.transport_lease_id == worker_token
+        and dict(exit_owner_binding.order_request) == request
+    ):
+        return {"ok": False, "reason": "exit_owner_binding_not_certified"}
+    if (captured_paper_exit_stage_request_sha256 is not None) != (
+        captured_paper_exit_stage_marker is not None
+    ):
+        return {"ok": False, "reason": "captured_paper_exit_stage_incomplete"}
+    if staged_marker is not None:
+        supplied_sha = str(staged_marker.get("request_sha256") or "").strip().lower()
+        body = dict(staged_marker)
+        body.pop("request_sha256", None)
+        calculated_sha = hashlib.sha256(
+            json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if not (
+            typed_owner_requested
+            and len(staged_request_sha256) == 64
+            and supplied_sha == staged_request_sha256 == calculated_sha
+        ):
+            return {
+                "ok": False,
+                "reason": "captured_paper_exit_stage_hash_mismatch",
+            }
     now = datetime.now(timezone.utc)
     lease_expires = now + timedelta(seconds=max(30, int(lease_seconds)))
+    started_event_sha256: str | None = None
+    started_marker: dict[str, Any] | None = None
+    if typed_owner_requested:
+        assert exit_owner_binding is not None
+        assert exit_owner_store is not None
+        assert exit_owner_effective_at is not None
+        assert exit_owner_available_at is not None
+        readable, preflight_claim = read_action_claim(
+            db,
+            symbol=sym,
+            account_scope=scope,
+            for_update=False,
+        )
+        if not readable or not _exit_owner_binding_matches_claim(
+            preflight_claim,
+            exit_owner_binding,
+        ):
+            return {"ok": False, "reason": "exit_owner_claim_binding_mismatch"}
+        started_event_sha256 = exit_owner_store.append_exit_owner_transport_started(
+            exit_owner_binding,
+            effective_at=exit_owner_effective_at,
+            available_at=exit_owner_available_at,
+            session=db,
+        )
+        started_marker = _exit_owner_started_marker(
+            exit_owner_binding,
+            effective_at=exit_owner_effective_at,
+            available_at=exit_owner_available_at,
+            started_event_sha256=started_event_sha256,
+        )
+
+    def _blocked(reason: str, **details: Any) -> dict[str, Any]:
+        result = {"ok": False, "reason": reason, **details}
+        if started_event_sha256 is not None:
+            raise _ExitOwnerClaimAtomicityAbort(result)
+        return result
+
     readable, claim = read_action_claim(
         db,
         symbol=sym,
@@ -2695,14 +3110,19 @@ def lease_owner_transport(
         for_update=True,
     )
     if not readable or claim is None:
-        return {"ok": False, "reason": "owner_transport_claim_unreadable"}
+        return _blocked("owner_transport_claim_unreadable")
     if not (
         claim.get("phase") != RESOLVED
         and claim.get("action") == "entry"
         and claim.get("claim_token") == token
         and claim.get("owner_session_id") == int(owner_session_id)
     ):
-        return {"ok": False, "reason": "owner_transport_entry_owner_mismatch"}
+        return _blocked("owner_transport_entry_owner_mismatch")
+    if (
+        exit_owner_binding is not None
+        and not _exit_owner_binding_matches_claim(claim, exit_owner_binding)
+    ):
+        return _blocked("exit_owner_claim_changed_before_commit")
     metadata = dict(claim.get("metadata") or {})
     frozen_entry_request = metadata.get("order_request")
     frozen_entry_request = (
@@ -2717,19 +3137,116 @@ def lease_owner_transport(
         frozen_claim_account_id != account_id
         or str(request.get("alpaca_account_id") or "").strip() != account_id
     ):
-        return {"ok": False, "reason": "alpaca_account_generation_mismatch"}
+        return _blocked("alpaca_account_generation_mismatch")
+    if staged_marker is not None:
+        session_row = db.execute(
+            text(
+                "SELECT mode, execution_family, symbol, state, ended_at, "
+                "risk_snapshot_json FROM trading_automation_sessions "
+                "WHERE id = :session_id FOR UPDATE"
+            ),
+            {"session_id": int(owner_session_id)},
+        ).mappings().one_or_none()
+        snapshot = (
+            session_row.get("risk_snapshot_json")
+            if session_row is not None
+            and isinstance(session_row.get("risk_snapshot_json"), dict)
+            else {}
+        )
+        live = snapshot.get("momentum_live_execution")
+        live = live if isinstance(live, dict) else {}
+        retained_stage = live.get(
+            "captured_paper_exit_transport_post_commit"
+        )
+        session_owner = snapshot.get("captured_paper_session_owner")
+        session_owner = (
+            session_owner if isinstance(session_owner, dict) else {}
+        )
+        try:
+            from .captured_paper_dispatcher import (
+                _validated_session_owner_marker,
+            )
+
+            session_owner = _validated_session_owner_marker(session_owner)
+        except Exception:
+            return _blocked("captured_paper_session_owner_invalid")
+        lifecycle = live.get("adaptive_risk_alpaca_lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+        position = live.get("position")
+        position = position if isinstance(position, dict) else {}
+        try:
+            current_position = _format_base_size(float(position.get("quantity")))
+            canonical_request = str(
+                staged_marker.get("order_request_canonical_json") or ""
+            )
+            staged_order_request = json.loads(canonical_request)
+            order_request_sha256 = hashlib.sha256(
+                canonical_request.encode("utf-8")
+            ).hexdigest()
+        except Exception:
+            return _blocked("captured_paper_exit_stage_malformed")
+        if not (
+            session_row is not None
+            and session_row.get("mode") == "live"
+            and session_row.get("execution_family") == "alpaca_spot"
+            and str(session_row.get("symbol") or "").strip().upper() == sym
+            and session_row.get("ended_at") is None
+            and retained_stage == staged_marker
+            and snapshot.get("alpaca_account_scope") == scope
+            and str(snapshot.get("alpaca_account_id") or "").strip()
+            == account_id
+            and str(snapshot.get("alpaca_symbol_claim_token") or "").strip()
+            == token
+            and str(session_owner.get("content_sha256") or "").strip().lower()
+            == str(
+                staged_marker.get("session_owner_content_sha256") or ""
+            ).strip().lower()
+            and session_owner.get("session_id") == int(owner_session_id)
+            and session_owner.get("symbol") == sym
+            and session_owner.get("account_scope") == scope
+            and session_owner.get("expected_account_id") == account_id
+            and session_owner.get("runtime_generation")
+            == staged_marker.get("runtime_generation")
+            and session_owner.get("execution_family") == "alpaca_spot"
+            and str(staged_marker.get("session_id") or "")
+            == str(owner_session_id)
+            and str(staged_marker.get("reservation_id") or "")
+            == str(exit_owner_binding.reservation_id)
+            and str(staged_marker.get("decision_packet_sha256") or "")
+            == exit_owner_binding.decision_packet_sha256
+            and str(staged_marker.get("expected_account_id") or "")
+            == account_id
+            and str(staged_marker.get("account_identity_sha256") or "")
+            == exit_owner_binding.account_identity_sha256
+            and str(staged_marker.get("symbol") or "").strip().upper() == sym
+            and str(staged_marker.get("entry_client_order_id") or "")
+            == exit_owner_binding.entry_client_order_id
+            and str(staged_marker.get("exit_client_order_id") or "") == cid
+            and str(staged_marker.get("transport_claim_token") or "") == token
+            and staged_marker.get("transport_owner_generation")
+            == exit_owner_binding.transport_owner_generation
+            and str(staged_marker.get("transport_owner_kind") or "") == kind
+            and str(staged_marker.get("transport_lease_id") or "")
+            == worker_token
+            and staged_order_request == request
+            and str(staged_marker.get("order_request_sha256") or "")
+            == order_request_sha256
+            and str(staged_marker.get("session_position_quantity") or "")
+            == current_position
+            and str(lifecycle.get("reservation_id") or "")
+            == str(exit_owner_binding.reservation_id)
+            and str(lifecycle.get("decision_packet_sha256") or "")
+            == exit_owner_binding.decision_packet_sha256
+            and str(lifecycle.get("account_identity_sha256") or "")
+            == exit_owner_binding.account_identity_sha256
+        ):
+            return _blocked("captured_paper_exit_stage_authority_changed")
     current = metadata.get(_OWNER_TRANSPORT_METADATA_KEY)
     current = dict(current) if isinstance(current, dict) else None
     handoff = metadata.get(_DEADMAN_CLOSE_HANDOFF_METADATA_KEY)
     handoff = dict(handoff) if isinstance(handoff, dict) else None
-    if kind == "deadman" and (
-        current is None or str(current.get("phase") or "").strip().lower() == "resolved"
-    ):
-        # A resolved Alpaca CID is immutable broker history, never a reusable
-        # generation.  The runner's local counter may roll back after this claim
-        # commits; reject that stale ordinal at the durable permit as a second
-        # line of defense.
-        used_deadman_cids: set[str] = set()
+    if current is None or str(current.get("phase") or "").strip().lower() == "resolved":
+        used_cids: set[str] = set()
         owner_rows: list[Any] = [current]
         owner_history = metadata.get(_OWNER_TRANSPORT_HISTORY_KEY)
         if isinstance(owner_history, list):
@@ -2740,27 +3257,21 @@ def lease_owner_transport(
         for candidate in owner_rows:
             if not isinstance(candidate, dict):
                 continue
-            if str(candidate.get("transport_kind") or "").strip().lower() != "deadman":
-                continue
-            historical_cid = str(
-                candidate.get("client_order_id") or ""
-            ).strip()
+            historical_cid = str(candidate.get("client_order_id") or "").strip()
             if historical_cid:
-                used_deadman_cids.add(historical_cid)
-        if cid in used_deadman_cids:
-            return {
-                "ok": False,
-                "reason": "owner_transport_client_order_id_reused",
-                "transport": current,
-            }
+                used_cids.add(historical_cid)
+        if cid in used_cids:
+            return _blocked(
+                "owner_transport_client_order_id_reused",
+                transport=current,
+            )
     if handoff is not None:
         if kind == "deadman":
-            return {
-                "ok": False,
-                "reason": "deadman_close_handoff_requires_resolution",
-                "handoff": handoff,
-                "transport": current,
-            }
+            return _blocked(
+                "deadman_close_handoff_requires_resolution",
+                handoff=handoff,
+                transport=current,
+            )
         if not (
             handoff.get("identity_contract") == "alpaca_deadman_close_handoff_v1"
             and handoff.get("phase") in {
@@ -2774,12 +3285,11 @@ def lease_owner_transport(
             and str(handoff.get("successor_client_order_id") or "").strip() == cid
             and handoff.get("successor_order_request") == request
         ):
-            return {
-                "ok": False,
-                "reason": "deadman_close_handoff_successor_mismatch",
-                "handoff": handoff,
-                "transport": current,
-            }
+            return _blocked(
+                "deadman_close_handoff_successor_mismatch",
+                handoff=handoff,
+                transport=current,
+            )
         # Before the resolved old stop is replaced by its close successor, keep
         # its exact cumulative-fill lineage in the handoff.  A child POST may be
         # independently committed while local PnL rolls back; restart must replay
@@ -2793,32 +3303,18 @@ def lease_owner_transport(
         )
         expiry = _parse_utc(current.get("lease_expires_at_utc"))
         expired = bool(expiry is not None and expiry <= now)
-        if not (
-            same_identity
-            and strict_cid_absent_after_expiry
-            and expired
-        ):
-            return {
-                "ok": False,
-                "reason": (
-                    "owner_transport_reconcile_required"
-                    if same_identity or expired
-                    else "owner_transport_leased"
-                ),
-                "transport": current,
-                "lease_expired": expired,
-            }
-        # The strict lookup was an explicit 404 after the old lease expired. Keep
-        # the exact CID/request and only fence a same-CID replay under a new token.
-        current.update({
-            "phase": "submitting",
-            "lease_token": worker_token,
-            "lease_expires_at_utc": lease_expires.isoformat(),
-            "updated_at_utc": now.isoformat(),
-            "same_cid_replay_count": int(current.get("same_cid_replay_count") or 0) + 1,
-        })
-        metadata[_OWNER_TRANSPORT_METADATA_KEY] = current
-        replay = True
+        return _blocked(
+            (
+                "owner_transport_reconcile_required"
+                if same_identity or expired
+                else "owner_transport_leased"
+            ),
+            transport=current,
+            lease_expired=expired,
+            strict_cid_absence_is_not_terminal=bool(
+                strict_cid_absent_after_expiry and expired
+            ),
+        )
     else:
         if kind == "deadman":
             generation = _deadman_client_order_generation(
@@ -2835,11 +3331,10 @@ def lease_owner_transport(
             ) or (
                 generation is not None and generation <= high_watermark
             ):
-                return {
-                    "ok": False,
-                    "reason": "deadman_generation_not_monotonic",
-                    "deadman_generation_high_watermark": high_watermark,
-                }
+                return _blocked(
+                    "deadman_generation_not_monotonic",
+                    deadman_generation_high_watermark=high_watermark,
+                )
             if generation is not None:
                 metadata[_DEADMAN_GENERATION_HIGH_WATERMARK_KEY] = generation
         current = {
@@ -2853,8 +3348,9 @@ def lease_owner_transport(
             "created_at_utc": now.isoformat(),
             "updated_at_utc": now.isoformat(),
         }
+        if started_marker is not None:
+            current.update(started_marker)
         metadata[_OWNER_TRANSPORT_METADATA_KEY] = current
-        replay = False
     if handoff is not None:
         handoff.update({
             "phase": "successor_leased",
@@ -2877,8 +3373,13 @@ def lease_owner_transport(
         "token": token,
     })
     if int(row.rowcount or 0) != 1:
-        return {"ok": False, "reason": "owner_transport_lease_write_failed"}
-    return {"ok": True, "transport": current, "same_cid_replay": replay}
+        return _blocked("owner_transport_lease_write_failed")
+    return {
+        "ok": True,
+        "transport": current,
+        "same_cid_replay": False,
+        "exit_owner_transport_started_event_sha256": started_event_sha256,
+    }
 
 
 def advance_owner_transport(
@@ -2894,11 +3395,68 @@ def advance_owner_transport(
     metadata: dict[str, Any] | None = None,
     account_scope: str,
     alpaca_account_id: str,
+    exit_owner_store: AdaptiveRiskReservationStore | None = None,
+    exit_owner_effective_at: datetime | None = None,
+    exit_owner_available_at: datetime | None = None,
+    provider_status: str | None = None,
+    provider_cumulative_quantity: int | None = None,
+    exit_owner_reconciled: bool = False,
+    observer_claim_token: str | None = None,
+    observer_session_id: int | None = None,
+    observer_generation: int | None = None,
+    observer_runtime_generation: str | None = None,
+    observer_connection_generation: str | None = None,
 ) -> bool:
     """Advance only the exact fenced transport worker after the adapter seam."""
     if phase not in {"submitted", "submit_indeterminate"}:
         return False
     scope = str(account_scope or "").strip().lower()
+    event_type = (
+        (
+            "alpaca_exit_owner_reconciled"
+            if exit_owner_reconciled
+            else "alpaca_exit_owner_submitted"
+        )
+        if phase == "submitted"
+        else "alpaca_exit_owner_submit_indeterminate"
+    )
+    (
+        prepared,
+        preflight_current,
+        outcome_event_sha256,
+        outcome_observer,
+    ) = (
+        _append_claim_bound_exit_owner_outcome(
+            db,
+            symbol=symbol,
+            account_scope=scope,
+            alpaca_account_id=alpaca_account_id,
+            claim_token=claim_token,
+            owner_session_id=owner_session_id,
+            client_order_id=client_order_id,
+            expected_lease_id=lease_token,
+            store=exit_owner_store,
+            event_type=event_type,
+            effective_at=exit_owner_effective_at,
+            available_at=exit_owner_available_at,
+            provider_order_id=(
+                str(broker_order_id or "").strip()
+                if phase == "submitted"
+                else None
+            ),
+            provider_status=(provider_status if phase == "submitted" else None),
+            provider_cumulative_quantity=(
+                provider_cumulative_quantity if phase == "submitted" else None
+            ),
+            observer_claim_token=observer_claim_token,
+            observer_session_id=observer_session_id,
+            observer_generation=observer_generation,
+            observer_runtime_generation=observer_runtime_generation,
+            observer_connection_generation=observer_connection_generation,
+        )
+    )
+    if not prepared:
+        return False
     readable, claim = read_action_claim(
         db,
         symbol=symbol,
@@ -2911,6 +3469,10 @@ def advance_owner_transport(
         and claim.get("claim_token") == str(claim_token)
         and claim.get("owner_session_id") == int(owner_session_id)
     ):
+        if outcome_event_sha256 is not None:
+            raise _ExitOwnerClaimAtomicityAbort(
+                {"ok": False, "reason": "exit_owner_claim_changed_before_advance"}
+            )
         return False
     claim_meta = dict(claim.get("metadata") or {})
     current = claim_meta.get(_OWNER_TRANSPORT_METADATA_KEY)
@@ -2922,6 +3484,14 @@ def advance_owner_transport(
             and phase == "submitted"
             and bool(str(broker_order_id or "").strip())
         )
+        or (
+            current_phase == "submitted"
+            and phase == "submitted"
+            and exit_owner_reconciled
+            and bool(str(broker_order_id or "").strip())
+            and str(current.get("broker_order_id") or "").strip()
+            == str(broker_order_id or "").strip()
+        )
     )
     if not isinstance(current, dict) or not (
         str(current.get("client_order_id") or "") == str(client_order_id)
@@ -2929,7 +3499,15 @@ def advance_owner_transport(
         and phase_transition_ok
         and str((current.get("order_request") or {}).get("alpaca_account_id") or "").strip()
         == str(alpaca_account_id or "").strip()
+        and (
+            outcome_event_sha256 is None
+            or current == preflight_current
+        )
     ):
+        if outcome_event_sha256 is not None:
+            raise _ExitOwnerClaimAtomicityAbort(
+                {"ok": False, "reason": "exit_owner_marker_changed_before_advance"}
+            )
         return False
     current = {
         **dict(current),
@@ -2938,6 +3516,18 @@ def advance_owner_transport(
         "transport_result": dict(metadata or {}),
         "updated_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    if outcome_event_sha256 is not None:
+        current["exit_owner_last_event_sha256"] = outcome_event_sha256
+        current["exit_owner_last_event_type"] = (
+            event_type
+            if phase == "submitted"
+            else "alpaca_exit_owner_submit_indeterminate"
+        )
+        if outcome_observer is None:
+            raise _ExitOwnerClaimAtomicityAbort(
+                {"ok": False, "reason": "exit_owner_observer_marker_missing"}
+            )
+        current.update(outcome_observer)
     claim_meta[_OWNER_TRANSPORT_METADATA_KEY] = current
     handoff = claim_meta.get(_DEADMAN_CLOSE_HANDOFF_METADATA_KEY)
     if isinstance(handoff, dict) and (
@@ -2986,7 +3576,12 @@ def advance_owner_transport(
         "symbol": _symbol(symbol),
         "token": str(claim_token),
     })
-    return int(result.rowcount or 0) == 1
+    written = int(result.rowcount or 0) == 1
+    if not written and outcome_event_sha256 is not None:
+        raise _ExitOwnerClaimAtomicityAbort(
+            {"ok": False, "reason": "exit_owner_advance_write_failed"}
+        )
+    return written
 
 
 def resolve_owner_transport_terminal(
@@ -3004,6 +3599,14 @@ def resolve_owner_transport_terminal(
     remaining_quantity: float | None = None,
     pre_accept_rejected: bool = False,
     lease_token: str | None = None,
+    exit_owner_store: AdaptiveRiskReservationStore | None = None,
+    exit_owner_effective_at: datetime | None = None,
+    exit_owner_available_at: datetime | None = None,
+    observer_claim_token: str | None = None,
+    observer_session_id: int | None = None,
+    observer_generation: int | None = None,
+    observer_runtime_generation: str | None = None,
+    observer_connection_generation: str | None = None,
 ) -> bool:
     """Release only an exact terminal transport; never resolves entry ownership."""
     status = str(broker_order_status or "").strip().lower()
@@ -3027,6 +3630,46 @@ def resolve_owner_transport_terminal(
     ):
         return False
     scope = str(account_scope or "").strip().lower()
+    event_type = (
+        "alpaca_exit_owner_proven_no_transport"
+        if pre_accept_rejected
+        else "alpaca_exit_owner_reconciled"
+    )
+    (
+        prepared,
+        preflight_current,
+        outcome_event_sha256,
+        outcome_observer,
+    ) = (
+        _append_claim_bound_exit_owner_outcome(
+            db,
+            symbol=symbol,
+            account_scope=scope,
+            alpaca_account_id=alpaca_account_id,
+            claim_token=claim_token,
+            owner_session_id=owner_session_id,
+            client_order_id=client_order_id,
+            expected_lease_id=(lease_token if pre_accept_rejected else None),
+            store=exit_owner_store,
+            event_type=event_type,
+            effective_at=exit_owner_effective_at,
+            available_at=exit_owner_available_at,
+            provider_order_id=(oid if not pre_accept_rejected else None),
+            provider_status=(status if not pre_accept_rejected else None),
+            provider_cumulative_quantity=(
+                int(filled)
+                if not pre_accept_rejected and filled == int(filled)
+                else None
+            ),
+            observer_claim_token=observer_claim_token,
+            observer_session_id=observer_session_id,
+            observer_generation=observer_generation,
+            observer_runtime_generation=observer_runtime_generation,
+            observer_connection_generation=observer_connection_generation,
+        )
+    )
+    if not prepared:
+        return False
     readable, claim = read_action_claim(
         db,
         symbol=symbol,
@@ -3039,12 +3682,20 @@ def resolve_owner_transport_terminal(
         and claim.get("claim_token") == str(claim_token)
         and claim.get("owner_session_id") == int(owner_session_id)
     ):
+        if outcome_event_sha256 is not None:
+            raise _ExitOwnerClaimAtomicityAbort(
+                {"ok": False, "reason": "exit_owner_claim_changed_before_resolution"}
+            )
         return False
     claim_meta = dict(claim.get("metadata") or {})
     current = claim_meta.get(_OWNER_TRANSPORT_METADATA_KEY)
     try:
         replay_count = int((current or {}).get("same_cid_replay_count") or 0)
     except (TypeError, ValueError):
+        if outcome_event_sha256 is not None:
+            raise _ExitOwnerClaimAtomicityAbort(
+                {"ok": False, "reason": "exit_owner_replay_count_changed"}
+            )
         return False
     if not isinstance(current, dict) or not (
         str(current.get("client_order_id") or "").strip() == cid
@@ -3068,7 +3719,15 @@ def resolve_owner_transport_terminal(
                 and bool(str(lease_token or "").strip())
             )
         )
+        and (
+            outcome_event_sha256 is None
+            or current == preflight_current
+        )
     ):
+        if outcome_event_sha256 is not None:
+            raise _ExitOwnerClaimAtomicityAbort(
+                {"ok": False, "reason": "exit_owner_marker_changed_before_resolution"}
+            )
         return False
     resolved = {
         **dict(current),
@@ -3080,6 +3739,18 @@ def resolve_owner_transport_terminal(
         "pre_accept_rejected": bool(pre_accept_rejected),
         "resolved_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    if outcome_event_sha256 is not None:
+        resolved["exit_owner_last_event_sha256"] = outcome_event_sha256
+        resolved["exit_owner_last_event_type"] = (
+            "alpaca_exit_owner_proven_no_transport"
+            if pre_accept_rejected
+            else "alpaca_exit_owner_reconciled"
+        )
+        if outcome_observer is None:
+            raise _ExitOwnerClaimAtomicityAbort(
+                {"ok": False, "reason": "exit_owner_observer_marker_missing"}
+            )
+        resolved.update(outcome_observer)
     history = claim_meta.get(_OWNER_TRANSPORT_HISTORY_KEY)
     history = list(history) if isinstance(history, list) else []
     history.append(resolved)
@@ -3106,6 +3777,10 @@ def resolve_owner_transport_terminal(
             and str(row.get("broker_order_id") or "").strip() == oid
         ]
         if same_identity and not all(row == resolved for row in same_identity):
+            if outcome_event_sha256 is not None:
+                raise _ExitOwnerClaimAtomicityAbort(
+                    {"ok": False, "reason": "exit_owner_terminal_history_conflict"}
+                )
             return False
         if not same_identity:
             protective_ledger.append(dict(resolved))
@@ -3179,7 +3854,12 @@ def resolve_owner_transport_terminal(
         "symbol": _symbol(symbol),
         "token": str(claim_token),
     })
-    return int(result.rowcount or 0) == 1
+    written = int(result.rowcount or 0) == 1
+    if not written and outcome_event_sha256 is not None:
+        raise _ExitOwnerClaimAtomicityAbort(
+            {"ok": False, "reason": "exit_owner_resolution_write_failed"}
+        )
+    return written
 
 
 def release_owner_transport_pre_post(
@@ -3846,7 +4526,6 @@ def bind_orphan_close_request(
     }
     expiry = _parse_utc(claim_meta.get("close_transport_lease_expires_at_utc"))
     expired = bool(expiry is not None and expiry <= now)
-    same_cid_replay = False
     recycled_no_transport = False
 
     if isinstance(existing_request, dict):
@@ -3893,23 +4572,20 @@ def bind_orphan_close_request(
             # Rotating it fences a paused creator without needing broker proof.
             pass
         elif state in {"started", "submit_indeterminate"}:
-            if not (
-                expired
-                and strict_cid_absent_after_expiry
-                and not str(claim.get("broker_order_id") or "").strip()
-            ):
-                return {
-                    "ok": False,
-                    "reason": "orphan_close_transport_reconcile_required",
-                    "transport_started": True,
-                    "transport_state": state,
-                    "transport_generation": generation,
-                    "lease_expires_at_utc": (
-                        expiry.isoformat() if expiry is not None else None
-                    ),
-                    "lease_expired": expired,
-                }
-            same_cid_replay = True
+            return {
+                "ok": False,
+                "reason": "orphan_close_transport_reconcile_required",
+                "transport_started": True,
+                "transport_state": state,
+                "transport_generation": generation,
+                "lease_expires_at_utc": (
+                    expiry.isoformat() if expiry is not None else None
+                ),
+                "lease_expired": expired,
+                "strict_cid_absence_is_not_terminal": bool(
+                    expired and strict_cid_absent_after_expiry
+                ),
+            }
         else:
             return {
                 "ok": False,
@@ -3933,9 +4609,7 @@ def bind_orphan_close_request(
             ),
             "recycled_at_utc": now.isoformat(),
             "recycle_proof": (
-                "strict_cid_absent_after_expiry"
-                if same_cid_replay
-                else "proven_no_transport"
+                "proven_no_transport"
                 if recycled_no_transport
                 else "unstarted_lease_expired"
             ),
@@ -3985,7 +4659,7 @@ def bind_orphan_close_request(
         "lease_expires_at_utc": lease_expires.isoformat(),
         "claim_phase": claim.get("phase"),
         "alpaca_account_id": account_id,
-        "same_cid_replay": same_cid_replay,
+        "same_cid_replay": False,
         "recycled_no_transport": recycled_no_transport,
         "created": not isinstance(existing_request, dict),
     }
@@ -5861,6 +6535,8 @@ def lease_deadman_handoff_replacement_committed(
                 lambda db: lease_deadman_handoff_replacement(db, **kwargs)
             )
         )
+    except _ExitOwnerClaimAtomicityAbort as exc:
+        return dict(exc.result)
     except Exception:
         _log.warning("[alpaca_claim] replacement deadman lease failed", exc_info=True)
         return {"ok": False, "reason": "replacement_deadman_lease_commit_failed"}
@@ -6240,6 +6916,8 @@ def lease_owner_transport_committed(**kwargs: Any) -> dict[str, Any]:
     """Commit one retained-owner transport lease before broker HTTP."""
     try:
         return dict(_with_short_session(lambda db: lease_owner_transport(db, **kwargs)))
+    except _ExitOwnerClaimAtomicityAbort as exc:
+        return dict(exc.result)
     except Exception:
         _log.warning("[alpaca_claim] owner transport lease failed", exc_info=True)
         return {"ok": False, "reason": "owner_transport_lease_commit_failed"}
@@ -6248,6 +6926,8 @@ def lease_owner_transport_committed(**kwargs: Any) -> dict[str, Any]:
 def advance_owner_transport_committed(**kwargs: Any) -> bool:
     try:
         return bool(_with_short_session(lambda db: advance_owner_transport(db, **kwargs)))
+    except _ExitOwnerClaimAtomicityAbort:
+        return False
     except Exception:
         _log.warning("[alpaca_claim] owner transport advance failed", exc_info=True)
         return False
@@ -6258,6 +6938,8 @@ def resolve_owner_transport_terminal_committed(**kwargs: Any) -> bool:
         return bool(
             _with_short_session(lambda db: resolve_owner_transport_terminal(db, **kwargs))
         )
+    except _ExitOwnerClaimAtomicityAbort:
+        return False
     except Exception:
         _log.warning("[alpaca_claim] owner transport resolution failed", exc_info=True)
         return False

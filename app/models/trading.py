@@ -575,11 +575,15 @@ class AdaptiveRiskReservation(Base):
             " AND lifecycle_contradiction_at IS NOT NULL "
             " AND lifecycle_contradiction_evidence_sha256 IS NOT NULL "
             " AND char_length(lifecycle_contradiction_evidence_sha256) = 64 "
-            " AND cumulative_filled_quantity_shares > 0) OR "
+            " AND cumulative_filled_quantity_shares > 0 "
+            " AND (post_settlement_net_position_quantity_shares IS NULL "
+            "      OR open_quantity_shares = "
+            "         abs(post_settlement_net_position_quantity_shares))) OR "
             "(state <> 'exposure_quarantined' "
             " AND lifecycle_contradiction_source_state IS NULL "
             " AND lifecycle_contradiction_at IS NULL "
-            " AND lifecycle_contradiction_evidence_sha256 IS NULL)",
+            " AND lifecycle_contradiction_evidence_sha256 IS NULL "
+            " AND post_settlement_net_position_quantity_shares IS NULL)",
             name="ck_adaptive_risk_reservation_contradiction",
         ),
         CheckConstraint(
@@ -609,7 +613,12 @@ class AdaptiveRiskReservation(Base):
             "planned_quantity_shares > 0 "
             "AND cumulative_filled_quantity_shares >= 0 "
             "AND open_quantity_shares >= 0 "
-            "AND open_quantity_shares <= cumulative_filled_quantity_shares",
+            "AND ((post_settlement_net_position_quantity_shares IS NULL "
+            "      AND open_quantity_shares <= cumulative_filled_quantity_shares) "
+            " OR (post_settlement_net_position_quantity_shares IS NOT NULL "
+            "      AND state = 'exposure_quarantined' "
+            "      AND open_quantity_shares = "
+            "          abs(post_settlement_net_position_quantity_shares)))",
             name="ck_adaptive_risk_reservation_quantities",
         ),
         CheckConstraint(
@@ -667,6 +676,9 @@ class AdaptiveRiskReservation(Base):
     planned_quantity_shares: int = Column(BigInteger, nullable=False)
     cumulative_filled_quantity_shares: int = Column(BigInteger, nullable=False, default=0)
     open_quantity_shares: int = Column(BigInteger, nullable=False, default=0)
+    post_settlement_net_position_quantity_shares: Optional[int] = Column(
+        BigInteger, nullable=True
+    )
     planned_structural_risk_usd: float = Column(Numeric(28, 10), nullable=False)
     planned_gross_notional_usd: float = Column(Numeric(28, 10), nullable=False)
     planned_buying_power_impact_usd: float = Column(Numeric(28, 10), nullable=False)
@@ -1920,7 +1932,7 @@ class AlpacaPaperCycleSettlement(Base):
 
 
 class AlpacaPaperPostSettlementFillContradiction(Base):
-    """Append-only exact late-entry fill observed after cycle settlement.
+    """Append-only exact late fill observed after cycle settlement.
 
     This ledger is intentionally separate from the immutable settled fill
     chain.  Its rows can increase conservative exposure/buying-power heat, but
@@ -1944,9 +1956,16 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
             "immutable_fill_identity_sha256",
             name="uq_alpaca_post_settlement_fill_identity",
         ),
+        UniqueConstraint(
+            "reservation_id",
+            "batch_content_sha256",
+            "batch_activity_ordinal",
+            name="uq_alpaca_ps_fill_batch_ordinal",
+        ),
         CheckConstraint(
-            "contradiction_schema_version = "
-            "'chili.alpaca-paper-post-settlement-fill-contradiction.v1' "
+            "contradiction_schema_version IN ("
+            "'chili.alpaca-paper-post-settlement-fill-contradiction.v1', "
+            "'chili.alpaca-paper-post-settlement-fill-contradiction.v2') "
             "AND authority_status = 'verified' "
             "AND durability_kind = "
             "'committed_alpaca_post_settlement_fill_contradiction'",
@@ -1957,9 +1976,33 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
             "AND broker_environment = 'paper' "
             "AND execution_family = 'alpaca_spot' "
             "AND source_state IN ('closed', 'exposure_quarantined') "
-            "AND side = 'buy' AND order_role = 'entry' "
-            "AND order_ownership_status = 'reservation_bound' "
-            "AND provider_order_id = broker_order_id",
+            "AND capability_authority_status = "
+            "'process_private_hmac_verified_before_commit' "
+            "AND ((contradiction_schema_version = "
+            "      'chili.alpaca-paper-post-settlement-fill-contradiction.v1' "
+            "      AND side = 'buy' AND order_role = 'entry' "
+            "      AND order_ownership_status = 'reservation_bound' "
+            "      AND provider_order_id = broker_order_id "
+            "      AND exit_owner_receipt_sha256 IS NULL "
+            "      AND provider_client_order_id IS NULL "
+            "      AND projection_prior_net_position_quantity_shares IS NULL "
+            "      AND projected_net_position_quantity_shares IS NULL) "
+            " OR (contradiction_schema_version = "
+            "      'chili.alpaca-paper-post-settlement-fill-contradiction.v2' "
+            "      AND ((side = 'buy' AND order_role = 'entry' "
+            "            AND order_ownership_status = 'reservation_bound' "
+            "            AND provider_order_id = broker_order_id "
+            "            AND exit_owner_receipt_sha256 IS NULL "
+            "            AND provider_client_order_id IS NULL) "
+            "       OR (side = 'sell' AND order_role = 'exit' "
+            "            AND order_ownership_status = "
+            "                'exit_owner_receipt_bound' "
+            "            AND exit_owner_receipt_sha256 IS NOT NULL "
+            "            AND provider_client_order_id IS NOT NULL "
+            "            AND char_length(provider_client_order_id) > 0 "
+            "            AND provider_order_id <> broker_order_id "
+            "            AND provider_client_order_id <> "
+            "                expected_client_order_id))))",
             name="ck_alpaca_post_settlement_fill_scope",
         ),
         CheckConstraint(
@@ -1980,14 +2023,17 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
             "AND settlement_entry_quantity > 0 "
             "AND settlement_exit_quantity = settlement_entry_quantity "
             "AND quantity > 0 AND price > 0 AND leaves_quantity >= 0 "
-            "AND prior_recorded_cumulative_quantity >= "
-            "    settlement_entry_quantity "
             "AND positive_fill_delta = quantity "
             "AND quantity = trunc(quantity) "
             "AND broker_observed_cumulative_quantity = "
             "    trunc(broker_observed_cumulative_quantity) "
             "AND broker_observed_cumulative_quantity = "
             "    prior_recorded_cumulative_quantity + positive_fill_delta "
+            "AND ((side = 'buy' "
+            "      AND prior_recorded_cumulative_quantity >= "
+            "          settlement_entry_quantity) "
+            " OR (side = 'sell' "
+            "      AND prior_recorded_cumulative_quantity >= 0)) "
             "AND ((is_projection_terminal "
             "      AND projection_prior_cumulative_quantity IS NOT NULL "
             "      AND projection_positive_fill_delta IS NOT NULL "
@@ -1996,16 +2042,28 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
             "      AND projected_open_structural_risk_usd IS NOT NULL "
             "      AND projected_open_gross_notional_usd IS NOT NULL "
             "      AND projected_open_buying_power_impact_usd IS NOT NULL "
-            "      AND broker_observed_cumulative_quantity = "
-            "          projection_prior_cumulative_quantity + "
-            "          projection_positive_fill_delta) "
+            "      AND (side = 'sell' OR "
+            "           broker_observed_cumulative_quantity = "
+            "           projection_prior_cumulative_quantity + "
+            "           projection_positive_fill_delta) "
+            "      AND ((contradiction_schema_version = "
+            "            'chili.alpaca-paper-post-settlement-fill-contradiction.v1' "
+            "            AND projection_prior_net_position_quantity_shares IS NULL "
+            "            AND projected_net_position_quantity_shares IS NULL) "
+            "       OR (contradiction_schema_version = "
+            "            'chili.alpaca-paper-post-settlement-fill-contradiction.v2' "
+            "            AND projection_prior_net_position_quantity_shares "
+            "                IS NOT NULL "
+            "            AND projected_net_position_quantity_shares IS NOT NULL))) "
             " OR (NOT is_projection_terminal "
             "      AND projection_prior_cumulative_quantity IS NULL "
             "      AND projection_positive_fill_delta IS NULL "
             "      AND projected_open_quantity_shares IS NULL "
             "      AND projected_open_structural_risk_usd IS NULL "
             "      AND projected_open_gross_notional_usd IS NULL "
-            "      AND projected_open_buying_power_impact_usd IS NULL))",
+            "      AND projected_open_buying_power_impact_usd IS NULL "
+            "      AND projection_prior_net_position_quantity_shares IS NULL "
+            "      AND projected_net_position_quantity_shares IS NULL))",
             name="ck_alpaca_post_settlement_fill_values",
         ),
         CheckConstraint(
@@ -2040,6 +2098,8 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
             "AND char_length(immutable_fill_identity_sha256) = 64 "
             "AND char_length(provider_payload_sha256) = 64 "
             "AND char_length(fee_evidence_sha256) = 64 "
+            "AND (exit_owner_receipt_sha256 IS NULL "
+            " OR char_length(exit_owner_receipt_sha256) = 64) "
             "AND char_length(contradiction_content_canonical_json) > 1 "
             "AND (previous_contradiction_sha256 IS NULL "
             " OR char_length(previous_contradiction_sha256) = 64)",
@@ -2050,6 +2110,12 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
             "account_identity_sha256",
             "broker_order_id",
             "provider_transaction_at",
+        ),
+        Index(
+            "ix_alpaca_ps_fill_order_sequence",
+            "reservation_id",
+            "provider_order_id",
+            "contradiction_sequence",
         ),
     )
 
@@ -2082,8 +2148,18 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
     symbol: str = Column(String(36), nullable=False)
     expected_client_order_id: str = Column(String(160), nullable=False)
     broker_order_id: str = Column(String(160), nullable=False)
+    provider_client_order_id: Optional[str] = Column(String(160), nullable=True)
     broker_connection_generation: str = Column(String(160), nullable=False)
     source_state: str = Column(String(32), nullable=False)
+    exit_owner_receipt_sha256: Optional[str] = Column(
+        String(64),
+        ForeignKey(
+            "adaptive_risk_reservation_events.event_sha256",
+            ondelete="RESTRICT",
+            name="fk_alpaca_ps_fill_exit_owner_receipt",
+        ),
+        nullable=True,
+    )
 
     settlement_terminal_fill_event_sha256: str = Column(String(64), nullable=False)
     settlement_source_fill_count: int = Column(BigInteger, nullable=False)
@@ -2137,6 +2213,12 @@ class AlpacaPaperPostSettlementFillContradiction(Base):
     )
     projection_positive_fill_delta: Optional[float] = Column(
         Numeric(28, 10), nullable=True
+    )
+    projection_prior_net_position_quantity_shares: Optional[int] = Column(
+        BigInteger, nullable=True
+    )
+    projected_net_position_quantity_shares: Optional[int] = Column(
+        BigInteger, nullable=True
     )
     projected_open_quantity_shares: Optional[int] = Column(
         BigInteger, nullable=True

@@ -49,6 +49,12 @@ from .captured_paper_dispatcher import (
     validate_captured_paper_session_owner_inventory,
 )
 from .captured_paper_entry_intent import CapturedPaperPostCommitRequest
+from .captured_paper_fill_capture import (
+    CAPTURED_PAPER_EXIT_FILL_POST_COMMIT_KEY,
+    CAPTURED_PAPER_EXIT_TRANSPORT_POST_COMMIT_KEY,
+    CapturedPaperExitFillPostCommitRequest,
+    CapturedPaperExitTransportPostCommitRequest,
+)
 from .captured_paper_pending_owner import (
     validate_captured_paper_pending_owner_inventory,
 )
@@ -152,6 +158,7 @@ class CapturedPaperLiveRunnerScope:
 
     expected_account_id: str
     runtime_generation: str
+    broker_connection_generation: str
     execution_family: str = EXECUTION_FAMILY_ALPACA_SPOT
     account_scope: str = "alpaca:paper"
 
@@ -161,9 +168,15 @@ class CapturedPaperLiveRunnerScope:
             generation = str(uuid.UUID(str(self.runtime_generation or "")))
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError("captured PAPER live-loop scope UUID is invalid") from exc
+        connection_generation = str(
+            self.broker_connection_generation or ""
+        ).strip()
         if (
             account_id != str(self.expected_account_id or "").strip().lower()
             or generation != str(self.runtime_generation or "").strip().lower()
+            or not connection_generation
+            or len(connection_generation) > 160
+            or any(ord(char) < 32 for char in connection_generation)
             or self.account_scope != "alpaca:paper"
             or normalize_execution_family(self.execution_family)
             != EXECUTION_FAMILY_ALPACA_SPOT
@@ -171,6 +184,11 @@ class CapturedPaperLiveRunnerScope:
             raise ValueError("captured PAPER live-loop scope is not exact")
         object.__setattr__(self, "expected_account_id", account_id)
         object.__setattr__(self, "runtime_generation", generation)
+        object.__setattr__(
+            self,
+            "broker_connection_generation",
+            connection_generation,
+        )
         object.__setattr__(self, "execution_family", EXECUTION_FAMILY_ALPACA_SPOT)
 
     def assert_session(self, sess) -> None:
@@ -342,6 +360,12 @@ class LiveRunnerLoop:
         captured_paper_symbol_admitter: (
             Callable[..., Mapping[str, Any]] | None
         ) = None,
+        captured_paper_exit_completion_handler: (
+            Callable[[CapturedPaperExitFillPostCommitRequest], Any] | None
+        ) = None,
+        captured_paper_exit_transport_handler: (
+            Callable[[CapturedPaperExitTransportPostCommitRequest], Any] | None
+        ) = None,
     ) -> None:
         if (
             captured_paper_scope is not None
@@ -352,8 +376,38 @@ class LiveRunnerLoop:
             raise ValueError(
                 "ordinary live loop cannot install captured PAPER admission"
             )
+        if (
+            captured_paper_scope is None
+            and captured_paper_exit_completion_handler is not None
+        ):
+            raise ValueError(
+                "ordinary live loop cannot install captured PAPER exit completion"
+            )
+        if (
+            captured_paper_exit_completion_handler is not None
+            and not callable(captured_paper_exit_completion_handler)
+        ):
+            raise ValueError("captured PAPER exit completion handler is invalid")
+        if (
+            captured_paper_scope is None
+            and captured_paper_exit_transport_handler is not None
+        ):
+            raise ValueError(
+                "ordinary live loop cannot install captured PAPER exit transport"
+            )
+        if (
+            captured_paper_exit_transport_handler is not None
+            and not callable(captured_paper_exit_transport_handler)
+        ):
+            raise ValueError("captured PAPER exit transport handler is invalid")
         self._captured_paper_scope = captured_paper_scope
         self._captured_paper_symbol_admitter = captured_paper_symbol_admitter
+        self._captured_paper_exit_completion_handler = (
+            captured_paper_exit_completion_handler
+        )
+        self._captured_paper_exit_transport_handler = (
+            captured_paper_exit_transport_handler
+        )
         self._tracker = _LiveSessionTracker(captured_paper_scope)
         self._running = False
         self._generation = 0
@@ -425,6 +479,18 @@ class LiveRunnerLoop:
     @property
     def captured_paper_symbol_admitter(self) -> Callable[..., Mapping[str, Any]] | None:
         return self._captured_paper_symbol_admitter
+
+    @property
+    def captured_paper_exit_completion_handler(
+        self,
+    ) -> Callable[[CapturedPaperExitFillPostCommitRequest], Any] | None:
+        return self._captured_paper_exit_completion_handler
+
+    @property
+    def captured_paper_exit_transport_handler(
+        self,
+    ) -> Callable[[CapturedPaperExitTransportPostCommitRequest], Any] | None:
+        return self._captured_paper_exit_transport_handler
 
     def is_running_owner(self) -> bool:
         """True only while this process has one active, initialized generation."""
@@ -1935,34 +2001,194 @@ class LiveRunnerLoop:
 
     def _tick_session(self, session_id: int) -> None:
         db = SessionLocal()
+        db_closed = False
         phase_one_committed = False
         completion_request: CapturedPaperPostCommitRequest | None = None
+        exit_completion_request: CapturedPaperExitFillPostCommitRequest | None = None
+        exit_transport_request: (
+            CapturedPaperExitTransportPostCommitRequest | None
+        ) = None
+        exit_completion_handler: (
+            Callable[[CapturedPaperExitFillPostCommitRequest], Any] | None
+        ) = None
+        exit_transport_handler: (
+            Callable[[CapturedPaperExitTransportPostCommitRequest], Any] | None
+        ) = None
         refresh_session_inventory = False
         try:
             if self._captured_paper_scope is None:
                 result = dispatch_live_runner_tick(db, session_id)
             else:
-                result = dispatch_captured_paper_live_runner_tick(
-                    db,
-                    session_id,
+                from .live_runner import (
+                    captured_paper_exit_runtime_authority,
+                    take_captured_paper_exit_post_commit_request,
+                    take_captured_paper_exit_transport_post_commit_request,
+                )
+
+                owner_generation = getattr(
+                    self._worker_context,
+                    "generation",
+                    None,
+                )
+                if (
+                    isinstance(owner_generation, bool)
+                    or not isinstance(owner_generation, int)
+                    or owner_generation <= 0
+                ):
+                    raise ValueError(
+                        "captured PAPER loop owner generation is unavailable"
+                    )
+                with captured_paper_exit_runtime_authority(
+                    owner_generation=owner_generation,
                     expected_account_id=(
                         self._captured_paper_scope.expected_account_id
                     ),
-                    expected_runtime_generation=(
+                    runtime_generation=(
                         self._captured_paper_scope.runtime_generation
                     ),
-                    expected_execution_family=(
-                        self._captured_paper_scope.execution_family
+                    broker_connection_generation=(
+                        self._captured_paper_scope.broker_connection_generation
                     ),
-                )
+                ):
+                    result = dispatch_captured_paper_live_runner_tick(
+                        db,
+                        session_id,
+                        expected_account_id=(
+                            self._captured_paper_scope.expected_account_id
+                        ),
+                        expected_runtime_generation=(
+                            self._captured_paper_scope.runtime_generation
+                        ),
+                        expected_execution_family=(
+                            self._captured_paper_scope.execution_family
+                        ),
+                    )
+                    staged_exit_request = (
+                        take_captured_paper_exit_post_commit_request(
+                            int(session_id)
+                        )
+                    )
+                    staged_exit_transport_request = (
+                        take_captured_paper_exit_transport_post_commit_request(
+                            int(session_id)
+                        )
+                    )
+                    if staged_exit_request is not None:
+                        if not isinstance(result, Mapping):
+                            raise ValueError(
+                                "captured PAPER tick staged conflicting "
+                                "post-commit requests"
+                            )
+                        prior = result.get(
+                            CAPTURED_PAPER_EXIT_FILL_POST_COMMIT_KEY
+                        )
+                        if prior is not None and prior != staged_exit_request:
+                            raise ValueError(
+                                "captured PAPER tick returned a different "
+                                "exit completion request"
+                            )
+                        result = {
+                            **dict(result),
+                            CAPTURED_PAPER_EXIT_FILL_POST_COMMIT_KEY: (
+                                staged_exit_request
+                            ),
+                        }
+                    if staged_exit_transport_request is not None:
+                        if not isinstance(result, Mapping):
+                            raise ValueError(
+                                "captured PAPER tick staged conflicting "
+                                "transport requests"
+                            )
+                        prior = result.get(
+                            CAPTURED_PAPER_EXIT_TRANSPORT_POST_COMMIT_KEY
+                        )
+                        if (
+                            prior is not None
+                            and prior != staged_exit_transport_request
+                        ):
+                            raise ValueError(
+                                "captured PAPER tick returned a different "
+                                "exit transport request"
+                            )
+                        result = {
+                            **dict(result),
+                            CAPTURED_PAPER_EXIT_TRANSPORT_POST_COMMIT_KEY: (
+                                staged_exit_transport_request
+                            ),
+                        }
             if type(result) is CapturedPaperPostCommitRequest:
                 completion_request = result
             elif isinstance(result, Mapping):
+                if CAPTURED_PAPER_EXIT_FILL_POST_COMMIT_KEY in result:
+                    candidate = result[CAPTURED_PAPER_EXIT_FILL_POST_COMMIT_KEY]
+                    if type(candidate) is not CapturedPaperExitFillPostCommitRequest:
+                        raise ValueError(
+                            "captured PAPER exit completion request type is invalid"
+                        )
+                    exit_completion_request = candidate.verify()
+                if CAPTURED_PAPER_EXIT_TRANSPORT_POST_COMMIT_KEY in result:
+                    candidate = result[
+                        CAPTURED_PAPER_EXIT_TRANSPORT_POST_COMMIT_KEY
+                    ]
+                    if (
+                        type(candidate)
+                        is not CapturedPaperExitTransportPostCommitRequest
+                    ):
+                        raise ValueError(
+                            "captured PAPER exit transport request type is invalid"
+                        )
+                    exit_transport_request = candidate.verify()
                 refresh_session_inventory = (
                     result.get("refresh_session_inventory") is True
                 )
+            if exit_completion_request is not None:
+                scope = self._captured_paper_scope
+                exit_completion_handler = (
+                    self._captured_paper_exit_completion_handler
+                )
+                if not (
+                    scope is not None
+                    and callable(exit_completion_handler)
+                    and exit_completion_request.session_id == int(session_id)
+                    and exit_completion_request.account_scope == "alpaca:paper"
+                    and exit_completion_request.expected_account_id
+                    == scope.expected_account_id
+                    and exit_completion_request.runtime_generation
+                    == scope.runtime_generation
+                    and exit_completion_request.broker_connection_generation
+                    == scope.broker_connection_generation
+                    and exit_completion_request.execution_family
+                    == scope.execution_family
+                ):
+                    raise ValueError(
+                        "captured PAPER exit completion authority mismatch"
+                    )
+            if exit_transport_request is not None:
+                scope = self._captured_paper_scope
+                exit_transport_handler = (
+                    self._captured_paper_exit_transport_handler
+                )
+                if not (
+                    scope is not None
+                    and callable(exit_transport_handler)
+                    and exit_transport_request.session_id == int(session_id)
+                    and exit_transport_request.account_scope == "alpaca:paper"
+                    and exit_transport_request.expected_account_id
+                    == scope.expected_account_id
+                    and exit_transport_request.runtime_generation
+                    == scope.runtime_generation
+                    and exit_transport_request.broker_connection_generation
+                    == scope.broker_connection_generation
+                    and exit_transport_request.execution_family
+                    == scope.execution_family
+                ):
+                    raise ValueError(
+                        "captured PAPER exit transport authority mismatch"
+                    )
             db.commit()
             phase_one_committed = True
+            db.close()
+            db_closed = True
         except Exception as e:
             _log.debug("[live_loop] event tick session %d failed: %s", session_id, e)
             try:
@@ -1991,15 +2217,42 @@ class LiveRunnerLoop:
                         "session=%d phase_one_committed=true retry_required=true",
                         session_id,
                     )
+            if exit_transport_request is not None:
+                try:
+                    if not callable(exit_transport_handler):
+                        raise RuntimeError(
+                            "captured PAPER exit transport handler unavailable"
+                        )
+                    exit_transport_handler(exit_transport_request)
+                except Exception:
+                    _log.exception(
+                        "[live_loop] captured PAPER exit transport failed "
+                        "session=%d phase_one_committed=true retry_required=true",
+                        session_id,
+                    )
+            if exit_completion_request is not None:
+                try:
+                    if not callable(exit_completion_handler):
+                        raise RuntimeError(
+                            "captured PAPER exit completion handler unavailable"
+                        )
+                    exit_completion_handler(exit_completion_request)
+                except Exception:
+                    _log.exception(
+                        "[live_loop] captured PAPER exit completion failed "
+                        "session=%d phase_one_committed=true retry_required=true",
+                        session_id,
+                    )
         finally:
             # Preserve the ordinary cleanup path while making it impossible to
             # imply that a committed captured phase-one write was rolled back.
-            if not phase_one_committed or completion_request is None:
+            if not phase_one_committed:
                 try:
                     db.rollback()
                 except Exception:
                     pass
-            db.close()
+            if not db_closed:
+                db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2050,8 +2303,15 @@ def start_captured_paper_live_runner_loop(
     *,
     expected_account_id: str,
     runtime_generation: str,
+    broker_connection_generation: str,
     execution_family: str = EXECUTION_FAMILY_ALPACA_SPOT,
     captured_paper_symbol_admitter: Callable[..., Mapping[str, Any]] | None = None,
+    captured_paper_exit_completion_handler: (
+        Callable[[CapturedPaperExitFillPostCommitRequest], Any] | None
+    ) = None,
+    captured_paper_exit_transport_handler: (
+        Callable[[CapturedPaperExitTransportPostCommitRequest], Any] | None
+    ) = None,
 ) -> bool:
     """Start one strict account/generation/family PAPER-only loop.
 
@@ -2080,10 +2340,21 @@ def start_captured_paper_live_runner_loop(
             "[live_loop] captured PAPER sealed symbol admission is unavailable"
         )
         return False
+    if not callable(captured_paper_exit_completion_handler):
+        _log.critical(
+            "[live_loop] captured PAPER exit completion is unavailable"
+        )
+        return False
+    if not callable(captured_paper_exit_transport_handler):
+        _log.critical(
+            "[live_loop] captured PAPER exit transport is unavailable"
+        )
+        return False
     try:
         scope = CapturedPaperLiveRunnerScope(
             expected_account_id=expected_account_id,
             runtime_generation=runtime_generation,
+            broker_connection_generation=broker_connection_generation,
             execution_family=execution_family,
         )
     except ValueError:
@@ -2099,6 +2370,12 @@ def start_captured_paper_live_runner_loop(
                     captured_paper_symbol_admitter=(
                         captured_paper_symbol_admitter
                     ),
+                    captured_paper_exit_completion_handler=(
+                        captured_paper_exit_completion_handler
+                    ),
+                    captured_paper_exit_transport_handler=(
+                        captured_paper_exit_transport_handler
+                    ),
                 )
             except ValueError:
                 _log.critical(
@@ -2110,6 +2387,10 @@ def start_captured_paper_live_runner_loop(
             _loop.captured_paper_scope != scope
             or _loop.captured_paper_symbol_admitter
             is not captured_paper_symbol_admitter
+            or _loop.captured_paper_exit_completion_handler
+            is not captured_paper_exit_completion_handler
+            or _loop.captured_paper_exit_transport_handler
+            is not captured_paper_exit_transport_handler
         ):
             _log.critical(
                 "[live_loop] refusing captured PAPER start through foreign scope/admission"
@@ -2139,7 +2420,14 @@ def is_captured_paper_live_runner_loop_admission_ready(
     *,
     expected_account_id: str,
     runtime_generation: str,
+    broker_connection_generation: str,
     execution_family: str = EXECUTION_FAMILY_ALPACA_SPOT,
+    captured_paper_exit_completion_handler: (
+        Callable[[CapturedPaperExitFillPostCommitRequest], Any] | None
+    ) = None,
+    captured_paper_exit_transport_handler: (
+        Callable[[CapturedPaperExitTransportPostCommitRequest], Any] | None
+    ) = None,
 ) -> bool:
     """Return health only for the exact dedicated fake-money owner."""
 
@@ -2147,6 +2435,7 @@ def is_captured_paper_live_runner_loop_admission_ready(
         expected = CapturedPaperLiveRunnerScope(
             expected_account_id=expected_account_id,
             runtime_generation=runtime_generation,
+            broker_connection_generation=broker_connection_generation,
             execution_family=execution_family,
         )
     except ValueError:
@@ -2154,6 +2443,12 @@ def is_captured_paper_live_runner_loop_admission_ready(
     return bool(
         _loop is not None
         and _loop.captured_paper_scope == expected
+        and callable(captured_paper_exit_completion_handler)
+        and _loop.captured_paper_exit_completion_handler
+        is captured_paper_exit_completion_handler
+        and callable(captured_paper_exit_transport_handler)
+        and _loop.captured_paper_exit_transport_handler
+        is captured_paper_exit_transport_handler
         and _loop.admission_owner_ready()
     )
 

@@ -1,17 +1,33 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 from types import SimpleNamespace
+import threading
 import uuid
 
 import pytest
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import sessionmaker
 
 from app import migrations
-from app.models.trading import AlpacaPaperFillActivity
+from app.db import engine
+from app.models.trading import (
+    AdaptiveRiskReservation,
+    AdaptiveRiskReservationEvent,
+    AlpacaPaperCycleSettlement,
+    AlpacaPaperFillActivity,
+    AlpacaPaperPostSettlementFillContradiction,
+)
 from app.services.trading.momentum_neural import alpaca_cycle_settlement
 from app.services.trading.momentum_neural import alpaca_fill_activity
 from app.services.trading.momentum_neural import live_runner
+from app.services.trading.momentum_neural.adaptive_risk_reservation import (
+    AdaptiveReservationStateConflict,
+    AdaptiveRiskReservationStore,
+)
 from app.services.trading.momentum_neural.adaptive_risk_account_lock import (
     CanonicalAccountRiskRowLockGuard,
 )
@@ -29,6 +45,14 @@ from app.services.trading.venue.alpaca_spot import AlpacaSpotAdapter
 from app.services.trading.momentum_neural.alpaca_paper_identity import (
     alpaca_paper_account_identity_sha256,
 )
+from app.services.trading.momentum_neural.alpaca_orphan_claims import (
+    advance_owner_transport,
+)
+from app.services.trading.momentum_neural.captured_paper_fill_capture import (
+    CapturedPaperExitFillPostCommitRequest,
+    SqlAlchemyCapturedPaperFillCapture,
+)
+from tests import test_alpaca_fill_activity_capture as fill_capture_support
 
 
 UTC = timezone.utc
@@ -653,3 +677,442 @@ def test_flat_settlement_retries_every_retained_exact_exit_owner(monkeypatch) ->
         ("exit-oid-1", "exit-cid-1"),
         ("exit-oid-2", "exit-cid-2"),
     ]
+def test_flat_settlement_discovers_durable_owner_receipts_not_bounded_claim_metadata(
+    db,
+    monkeypatch,
+) -> None:
+    """A settled cycle resolves an exact owner from the append-only event hash."""
+
+    frozen = fill_capture_support._prepare_settled_partial_cycle_with_owner(
+        db,
+        monkeypatch,
+        include_replacement_owner=True,
+    )
+    receipt = frozen["owner_receipt"]
+    replacement_receipt = frozen["replacement_receipt"]
+    assert replacement_receipt is not None
+    binding = receipt.binding
+
+    # The operational claim mirror is deliberately bounded and may be replaced
+    # after later generations.  It cannot be the authority for historical fill
+    # settlement.  Remove both rolling mirrors while leaving the immutable
+    # reservation event chain and settlement untouched.
+    with db.begin():
+        updated = db.execute(
+            text(
+                "UPDATE broker_symbol_action_claims "
+                "SET metadata_json = metadata_json "
+                "  - 'owner_transport' - 'owner_transport_history' "
+                "WHERE account_scope = :scope AND symbol = :symbol "
+                "  AND claim_token = :claim_token"
+            ),
+            {
+                "scope": binding.account_scope,
+                "symbol": binding.symbol,
+                "claim_token": binding.transport_claim_token,
+            },
+        )
+        assert int(updated.rowcount or 0) == 1
+        claim_metadata = db.execute(
+            text(
+                "SELECT metadata_json FROM broker_symbol_action_claims "
+                "WHERE account_scope = :scope AND symbol = :symbol"
+            ),
+            {"scope": binding.account_scope, "symbol": binding.symbol},
+        ).scalar_one()
+        assert receipt.receipt_sha256 not in str(claim_metadata)
+
+    store = AdaptiveRiskReservationStore(engine)
+    with db.begin():
+        discovered = store.load_exit_owner_receipt(
+            receipt.receipt_sha256,
+            reservation_id=frozen["cycle"].reservation_id,
+            for_projection=True,
+            session=db,
+        )
+        settlement = db.get(
+            AlpacaPaperCycleSettlement,
+            frozen["settlement_sha256"],
+        )
+
+    assert discovered == receipt
+    assert settlement is not None
+    assert settlement.reservation_id == frozen["cycle"].reservation_id
+    assert settlement.settlement_sha256 == frozen["settlement_sha256"]
+
+    # A restart deliberately receives a new process-private runtime/adapter
+    # generation.  Exact historical query evidence is already bound to this
+    # owner/OID/CID, so it must be re-verified and skipped without broker I/O;
+    # resolved history must not consume the bounded pending-owner capacity.
+    terminal_zero_batch = fill_capture_support._verified_raw_batch(
+        order_id=replacement_receipt.provider_order_id,
+        client_order_id=replacement_receipt.provider_client_order_id,
+    )
+    terminal_zero_batch["activities"] = []
+    terminal_zero_batch["provider_order"].update(
+        {
+            "side": "sell",
+            "qty": "3.0000000000",
+            "filled_qty": "0.0000000000",
+            "status": "canceled",
+        }
+    )
+    adapter, broker_reads = fill_capture_support._verified_adapter(
+        terminal_zero_batch,
+        monkeypatch,
+    )
+    adapter_generation = (
+        AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+            adapter,
+            alpaca_spot._clients["trading:paper"],
+        )
+    )
+    restart_runtime = str(uuid.uuid4())
+    capture = SqlAlchemyCapturedPaperFillCapture(
+        bind=engine,
+        adapter=adapter,
+        max_pending_reads=1,
+    )
+    historical_request = CapturedPaperExitFillPostCommitRequest.build(
+        session_id=receipt.observer_session_id,
+        reservation_id=receipt.reservation_id,
+        decision_packet_sha256=receipt.binding.decision_packet_sha256,
+        expected_account_id=receipt.binding.expected_account_id,
+        account_identity_sha256=receipt.binding.account_identity_sha256,
+        runtime_generation=restart_runtime,
+        broker_connection_generation=adapter_generation,
+        symbol=receipt.binding.symbol,
+        entry_client_order_id=receipt.binding.entry_client_order_id,
+        exit_client_order_id=receipt.binding.exit_client_order_id,
+        provider_order_id=receipt.provider_order_id,
+        exit_owner_receipt_sha256=receipt.receipt_sha256,
+    )
+    assert capture.project_committed_exit_fill_chain_if_present(
+        historical_request,
+        owner_receipt=receipt,
+    ) is True
+    assert broker_reads == []
+    recovery = capture.recover_exit_owner_inventory_bounded(
+        expected_account_id=binding.expected_account_id,
+        runtime_generation=restart_runtime,
+        broker_connection_generation=adapter_generation,
+        execution_family="alpaca_spot",
+        limit=1,
+    )
+    assert recovery["exit_owner_inventory_resolved"] is True
+    assert recovery["exit_owner_recovery_bounded"] is True
+    assert recovery["exit_owner_recovery_exhausted"] is False
+    assert recovery["broker_read_count"] == 0
+    assert recovery["attempted_request_sha256s"] == []
+    assert recovery["remaining_request_sha256s"] == []
+    assert recovery["unavailable_error_types"] == []
+    assert broker_reads == []
+
+def test_owner_reconcile_and_late_fill_writer_share_lock_order_without_deadlock(
+    db,
+    monkeypatch,
+) -> None:
+    """Owner reconciliation and late-fill projection serialize without inversion."""
+
+    frozen = fill_capture_support._prepare_settled_partial_cycle_with_owner(
+        db,
+        monkeypatch,
+    )
+    late_batch = fill_capture_support._verified_exit_batch(
+        monkeypatch,
+        frozen["owner_receipt"],
+        quantities=(2, 2),
+        order_quantity=4,
+    )
+    factory = sessionmaker(
+        bind=engine,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    start = threading.Barrier(2)
+    external_calls: list[str] = []
+    owner = frozen["replacement_receipt"]
+    assert owner is not None
+    binding = owner.binding
+
+    def _publish() -> tuple[tuple[str, ...], str]:
+        session = factory()
+        try:
+            with session.begin():
+                session.execute(text("SET LOCAL lock_timeout = '8s'"))
+                session.execute(text("SET LOCAL statement_timeout = '12s'"))
+                start.wait(timeout=5)
+                result = (
+                    fill_capture_support
+                    .publish_prepared_alpaca_paper_post_settlement_fill_batch(
+                        session,
+                        late_batch,
+                    )
+                )
+                return (
+                    tuple(result.contradiction_sha256s),
+                    str(result.reservation_state.state),
+                )
+        finally:
+            session.close()
+
+    def _reconcile_owner() -> bool:
+        session = factory()
+        try:
+            with session.begin():
+                session.execute(text("SET LOCAL lock_timeout = '8s'"))
+                session.execute(text("SET LOCAL statement_timeout = '12s'"))
+                start.wait(timeout=5)
+                observed_at = datetime.now(UTC)
+                return advance_owner_transport(
+                    session,
+                    symbol=binding.symbol,
+                    claim_token=binding.transport_claim_token,
+                    owner_session_id=binding.transport_owner_session_id,
+                    client_order_id=binding.exit_client_order_id,
+                    lease_token=binding.transport_lease_id,
+                    phase="submitted",
+                    broker_order_id=owner.provider_order_id,
+                    metadata={"strict_cid_lookup": "found"},
+                    account_scope=binding.account_scope,
+                    alpaca_account_id=binding.expected_account_id,
+                    exit_owner_store=AdaptiveRiskReservationStore(engine),
+                    exit_owner_effective_at=observed_at,
+                    exit_owner_available_at=observed_at,
+                    provider_status="partially_filled",
+                    provider_cumulative_quantity=2,
+                    exit_owner_reconciled=True,
+                    observer_claim_token=binding.transport_claim_token,
+                    observer_session_id=binding.transport_owner_session_id,
+                    observer_generation=binding.transport_owner_generation + 1,
+                    observer_runtime_generation=str(uuid.uuid4()),
+                    observer_connection_generation=(
+                        f"reconcile-{uuid.uuid4()}"
+                    ),
+                )
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        live = pool.submit(_publish)
+        reconcile = pool.submit(_reconcile_owner)
+        published = live.result(timeout=20)
+        assert reconcile.result(timeout=20) is True
+
+    assert len(published[0]) == 1
+    assert published[1] == "exposure_quarantined"
+    assert external_calls == []
+
+    db.expire_all()
+    assert db.scalar(
+        select(func.count()).select_from(
+            AlpacaPaperPostSettlementFillContradiction
+        )
+    ) == 1
+    assert db.scalar(
+        select(func.count())
+        .select_from(AdaptiveRiskReservationEvent)
+        .where(
+            AdaptiveRiskReservationEvent.reservation_id
+            == frozen["cycle"].reservation_id,
+            AdaptiveRiskReservationEvent.event_type
+            == "alpaca_exit_owner_reconciled",
+        )
+    ) == 2
+    reservation = db.get(
+        AdaptiveRiskReservation,
+        frozen["cycle"].reservation_id,
+    )
+    assert reservation is not None
+    assert reservation.state == "exposure_quarantined"
+    assert reservation.post_settlement_net_position_quantity_shares == -2
+    db.rollback()
+
+    # Restart replay is the stale/idempotent loser and cannot append another
+    # contradiction or revisit any transport seam.
+    with db.begin():
+        replayed = (
+            fill_capture_support
+            .publish_prepared_alpaca_paper_post_settlement_fill_batch(
+                db,
+                late_batch,
+            )
+        )
+        assert replayed.contradiction_sha256s == ()
+    assert external_calls == []
+
+
+@pytest.mark.parametrize("failure_kind", ("owner", "projection"))
+def test_late_sell_owner_or_projection_failure_never_authorizes_legacy_outcome(
+    db,
+    monkeypatch,
+    failure_kind: str,
+) -> None:
+    """A failed typed append/projection is retryable and cannot emit legacy P&L."""
+
+    frozen = fill_capture_support._prepare_settled_partial_cycle_with_owner(
+        db,
+        monkeypatch,
+    )
+    late_batch = fill_capture_support._verified_exit_batch(
+        monkeypatch,
+        frozen["owner_receipt"],
+        quantities=(2, 2),
+        order_quantity=4,
+    )
+    settlement_before = db.get(
+        AlpacaPaperCycleSettlement,
+        frozen["settlement_sha256"],
+    )
+    assert settlement_before is not None
+    frozen_settlement = (
+        settlement_before.settlement_sha256,
+        Decimal(settlement_before.gross_realized_pnl_usd),
+        Decimal(settlement_before.fee_usd),
+        Decimal(settlement_before.net_realized_pnl_usd),
+    )
+    db.rollback()
+
+    if failure_kind == "owner":
+        original = AdaptiveRiskReservationStore.load_exit_owner_receipt
+
+        def _fail_owner(*_args, **_kwargs):
+            raise AdaptiveReservationStateConflict(
+                "injected exact owner receipt failure"
+            )
+
+        monkeypatch.setattr(
+            AdaptiveRiskReservationStore,
+            "load_exit_owner_receipt",
+            _fail_owner,
+        )
+        failure_pattern = "injected exact owner receipt failure"
+    else:
+        original = (
+            AdaptiveRiskReservationStore
+            .apply_post_settlement_fill_contradiction
+        )
+
+        def _fail_projection(*_args, **_kwargs):
+            raise AdaptiveReservationStateConflict(
+                "injected signed projection failure"
+            )
+
+        monkeypatch.setattr(
+            AdaptiveRiskReservationStore,
+            "apply_post_settlement_fill_contradiction",
+            _fail_projection,
+        )
+        failure_pattern = "injected signed projection failure"
+
+    with pytest.raises(AdaptiveReservationStateConflict, match=failure_pattern):
+        with db.begin():
+            fill_capture_support.publish_prepared_alpaca_paper_post_settlement_fill_batch(
+                db,
+                late_batch,
+            )
+
+    assert db.scalar(
+        select(func.count()).select_from(
+            AlpacaPaperPostSettlementFillContradiction
+        )
+    ) == 0
+
+    legacy_calls: list[str] = []
+    sess = SimpleNamespace(
+        id=13351,
+        symbol=frozen["cycle"].symbol,
+        execution_family="alpaca_spot",
+    )
+    original_position = {"quantity": 4.0, "avg_entry_price": 2.5}
+    le = {
+        live_runner.KEY_ADAPTIVE_RISK_RESERVATION_REQUEST: {"sealed": True},
+        live_runner.KEY_ADAPTIVE_ALPACA_LIFECYCLE: {
+            "reservation_id": str(frozen["cycle"].reservation_id),
+        },
+        "position": dict(original_position),
+        "realized_pnl_usd": 0.0,
+    }
+    monkeypatch.setattr(
+        live_runner,
+        "_sync_adaptive_alpaca_position_lifecycle",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "accounting_ready": False,
+            "accounting_block_reason": (
+                "alpaca_typed_settlement_projection_unavailable"
+            ),
+        },
+    )
+    for name in (
+        "_record_live_exit_ledger_safe",
+        "_record_fill_outcome_safe",
+        "_finalize_live_decision_after_exit",
+        "_commit_le",
+        "_safe_transition",
+        "_emit",
+    ):
+        monkeypatch.setattr(
+            live_runner,
+            name,
+            lambda *_args, _name=name, **_kwargs: legacy_calls.append(_name),
+        )
+    with pytest.raises(
+        live_runner.AdaptiveRiskContractError,
+        match="alpaca_typed_settlement_projection_unavailable",
+    ):
+        live_runner._complete_confirmed_live_exit(
+            db,
+            sess,
+            le=le,
+            quantity=4.0,
+            entry_price=2.5,
+            fill_price=3.0,
+            reason="captured_full",
+            slip_bps=0.0,
+            adapter=object(),
+        )
+    assert legacy_calls == []
+    assert le["position"] == original_position
+    assert le["realized_pnl_usd"] == 0.0
+    db.rollback()
+
+    monkeypatch.setattr(
+        AdaptiveRiskReservationStore,
+        (
+            "load_exit_owner_receipt"
+            if failure_kind == "owner"
+            else "apply_post_settlement_fill_contradiction"
+        ),
+        original,
+    )
+    with db.begin():
+        published = fill_capture_support.publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            late_batch,
+        )
+        assert len(published.contradiction_sha256s) == 1
+    with db.begin():
+        replayed = fill_capture_support.publish_prepared_alpaca_paper_post_settlement_fill_batch(
+            db,
+            late_batch,
+        )
+        assert replayed.contradiction_sha256s == ()
+
+    settlement_after = db.get(
+        AlpacaPaperCycleSettlement,
+        frozen["settlement_sha256"],
+    )
+    assert settlement_after is not None
+    assert (
+        settlement_after.settlement_sha256,
+        Decimal(settlement_after.gross_realized_pnl_usd),
+        Decimal(settlement_after.fee_usd),
+        Decimal(settlement_after.net_realized_pnl_usd),
+    ) == frozen_settlement
+    assert db.scalar(
+        select(func.count()).select_from(
+            AlpacaPaperPostSettlementFillContradiction
+        )
+    ) == 1

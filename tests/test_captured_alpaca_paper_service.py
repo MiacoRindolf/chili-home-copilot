@@ -2936,13 +2936,40 @@ def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
     assert "worker_started" not in events
 
 
-def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -> None:
+def test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: dict[str, list[tuple[tuple, dict]]] = {}
     instances: dict[str, list[object]] = {}
     code_body = {"schema_version": "test-code-build.v1", "files": []}
     code_sha = sha256_json(code_body)
     policy_snapshot = {"policy_version": "test-adaptive-policy.v1"}
     policy_sha = sha256_json(policy_snapshot)
+    fenced_body = {
+        "schema_version": "chili.captured-paper-fenced-prestart.v1",
+        "verdict": "CAPTURED_ALPACA_PAPER_FENCED_PRESTART_REVALIDATED",
+        "account_scope": "alpaca:paper",
+        "expected_account_id": ACCOUNT,
+        "runtime_generation": GENERATION,
+        "baseline_restart_gate_receipt_sha256": SHA_A,
+        "restart_gate_receipt_sha256": SHA_B,
+        "admission_inventory_sha256": SHA_C,
+        "initial_recovery_count": 0,
+        "initial_recovery_inventory_sha256": SHA_A,
+        "durable_admission_drift": False,
+        "broker_inventory_flat": True,
+        "paper_execution_only": True,
+        "live_cash_authorized": False,
+        "real_money_authorized": False,
+    }
+    monkeypatch.setattr(
+        service_module,
+        "_build_fenced_prestart_revalidation_receipt",
+        lambda **_kwargs: {
+            **fenced_body,
+            "receipt_sha256": sha256_json(fenced_body),
+        },
+    )
 
     def recording_type(name: str, *, runtime: bool = False):
         class _Recorded:
@@ -2978,7 +3005,22 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
     transport_worker_type = recording_type("transport_worker")
     post_commit_worker_type = recording_type("post_commit_worker")
     acceptance_type = recording_type("acceptance")
-    fill_capture_type = recording_type("fill_capture")
+    class fill_capture_type(recording_type("fill_capture")):
+        def complete_exit_post_commit(self, _request):
+            return {"ok": True}
+
+        def recover_exit_owner_inventory_bounded(self, **_kwargs):
+            body = {
+                "exit_owner_inventory_resolved": True,
+                "exit_owner_recovery_bounded": True,
+                "exit_owner_recovery_exhausted": False,
+                "paper_order_submission_authorized": False,
+                "live_cash_authorized": False,
+                "real_money_authorized": False,
+            }
+            return {**body, "receipt_sha256": sha256_json(body)}
+
+    exit_owner_worker_type = recording_type("exit_owner_worker")
     financial_breaker_type = recording_type("financial_breaker")
     initial_candidate_reader_type = recording_type("initial_candidate_reader")
     deferred_reader_type = recording_type("deferred_candidate_reader")
@@ -3038,6 +3080,12 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
     def healthy(**kwargs):
         health_calls.append(dict(kwargs))
         return True
+    exit_transport_handler = lambda _request: {"ok": True}
+
+    def build_exit_transport_handler(**kwargs):
+        calls.setdefault("exit_transport_handler", []).append(((), kwargs))
+        return exit_transport_handler
+
     runtime_modules = {
         "iqfeed_capture_host": SimpleNamespace(
             IqfeedCapturedPaperRuntimeOwner=runtime_owner_type
@@ -3057,7 +3105,8 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
             SqlAlchemyCapturedPaperPositiveAcceptanceRecorder=acceptance_type
         ),
         "captured_paper_fill_capture": SimpleNamespace(
-            SqlAlchemyCapturedPaperFillCapture=fill_capture_type
+            SqlAlchemyCapturedPaperFillCapture=fill_capture_type,
+            CapturedPaperExitOwnerWorker=exit_owner_worker_type,
         ),
         "captured_paper_financial_breaker": SimpleNamespace(
             SqlAlchemyCapturedPaperFinancialBreakerIssuer=(
@@ -3116,6 +3165,12 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
         ),
         "captured_paper_service_fence": SimpleNamespace(
             CapturedPaperServiceFence=service_fence_type,
+        ),
+        "captured_paper_restart_inventory": SimpleNamespace(),
+        "live_runner": SimpleNamespace(
+            build_captured_paper_exit_transport_post_commit_handler=(
+                build_exit_transport_handler
+            )
         ),
         "live_runner_loop": SimpleNamespace(
             start_captured_paper_live_runner_loop=start,
@@ -3260,6 +3315,7 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
         "post_commit",
         "transport",
         "later_fill",
+        "exit_owner",
         "selection",
     ]
     selection_kwargs = calls["selection_worker"][0][1]
@@ -3271,6 +3327,27 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
         "service_fence"
     ][0]
     supervisor_kwargs = calls["supervisor"][0][1]
+    fenced_prestart = supervisor_kwargs["fenced_prestart_revalidate"]()
+    fenced_body = dict(fenced_prestart)
+    supplied_fenced_sha = fenced_body.pop("receipt_sha256")
+    assert set(fenced_body) == {
+        "schema_version",
+        "verdict",
+        "account_scope",
+        "expected_account_id",
+        "runtime_generation",
+        "baseline_restart_gate_receipt_sha256",
+        "restart_gate_receipt_sha256",
+        "admission_inventory_sha256",
+        "initial_recovery_count",
+        "initial_recovery_inventory_sha256",
+        "durable_admission_drift",
+        "broker_inventory_flat",
+        "paper_execution_only",
+        "live_cash_authorized",
+        "real_money_authorized",
+    }
+    assert sha256_json(fenced_body) == supplied_fenced_sha
     assert [
         item.name for item in supervisor_kwargs["active_pre_authority_workers"]
     ] == ["selection"]
@@ -3299,9 +3376,130 @@ def test_composition_uses_measured_capacity_and_one_exact_adapter_generation() -
     assert start_calls[0]["captured_paper_symbol_admitter"].__self__ is instances[
         "initial_controller"
     ][0]
-    assert health_calls == [expected_scope]
+    assert len(health_calls) == 1
+    assert {
+        key: health_calls[0][key] for key in expected_scope
+    } == expected_scope
+    assert health_calls[0]["broker_connection_generation"] == (
+        "alpaca-paper-rest:" + "d" * 64
+    )
+    assert health_calls[0]["captured_paper_exit_completion_handler"] is (
+        start_calls[0]["captured_paper_exit_completion_handler"]
+    )
+    assert start_calls[0]["captured_paper_exit_transport_handler"] is (
+        exit_transport_handler
+    )
+    assert health_calls[0]["captured_paper_exit_transport_handler"] is (
+        exit_transport_handler
+    )
     assert composition.shared_capture_store is store
     assert composition.adapter is adapter
+
+
+def test_service_composition_wires_one_exit_owner_store_into_runner_reconciler_and_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One service-owned exit capability must back every completion path."""
+
+    original_assemble = _assemble_service_composition
+    observed: dict[str, object] = {
+        "captures": [],
+        "workers": [],
+        "managed": [],
+        "starts": [],
+        "health": [],
+    }
+
+    def instrumented_assemble(*args, **kwargs):
+        runtime_modules = kwargs["runtime_modules"]
+        fill_module = runtime_modules["captured_paper_fill_capture"]
+        original_capture_type = fill_module.SqlAlchemyCapturedPaperFillCapture
+        original_managed_type = runtime_modules[
+            "captured_paper_service_supervisor"
+        ].CapturedPaperManagedWorker
+        original_start = runtime_modules[
+            "live_runner_loop"
+        ].start_captured_paper_live_runner_loop
+        original_health = runtime_modules[
+            "live_runner_loop"
+        ].is_captured_paper_live_runner_loop_admission_ready
+
+        class _InstrumentedFillCapture(original_capture_type):
+            def __init__(self, *capture_args, **capture_kwargs):
+                super().__init__(*capture_args, **capture_kwargs)
+                observed["captures"].append(self)
+
+            def complete_exit_post_commit(self, _request):
+                return {"ok": True}
+
+        class _ExitOwnerWorker:
+            def __init__(self, *worker_args, **worker_kwargs):
+                observed["workers"].append((worker_args, worker_kwargs, self))
+
+        def managed_worker(*managed_args, **managed_kwargs):
+            item = original_managed_type(*managed_args, **managed_kwargs)
+            observed["managed"].append(item)
+            return item
+
+        def start_probe(**start_kwargs):
+            observed["starts"].append(dict(start_kwargs))
+            return original_start(**start_kwargs)
+
+        def health_probe(**health_kwargs):
+            observed["health"].append(dict(health_kwargs))
+            return original_health(**health_kwargs)
+
+        fill_module.SqlAlchemyCapturedPaperFillCapture = _InstrumentedFillCapture
+        fill_module.CapturedPaperExitOwnerWorker = _ExitOwnerWorker
+        runtime_modules[
+            "captured_paper_service_supervisor"
+        ].CapturedPaperManagedWorker = managed_worker
+        runtime_modules[
+            "live_runner_loop"
+        ].start_captured_paper_live_runner_loop = start_probe
+        runtime_modules[
+            "live_runner_loop"
+        ].is_captured_paper_live_runner_loop_admission_ready = health_probe
+        return original_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_assemble_service_composition",
+        instrumented_assemble,
+    )
+    test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
+        monkeypatch
+    )
+
+    captures = observed["captures"]
+    workers = observed["workers"]
+    starts = observed["starts"]
+    health = observed["health"]
+    managed = observed["managed"]
+    assert len(captures) == 1
+    assert len(workers) == 1
+    assert len(starts) == 1
+    assert len(health) == 1
+    worker_kwargs = workers[0][1]
+    start_handler = starts[0]["captured_paper_exit_completion_handler"]
+    health_handler = health[0]["captured_paper_exit_completion_handler"]
+    start_transport_handler = starts[0][
+        "captured_paper_exit_transport_handler"
+    ]
+    health_transport_handler = health[0][
+        "captured_paper_exit_transport_handler"
+    ]
+    assert start_handler is health_handler
+    assert start_handler.__self__ is captures[0]
+    assert worker_kwargs["fill_capture"] is captures[0]
+    assert worker_kwargs["expected_account_id"] == ACCOUNT
+    assert worker_kwargs["runtime_generation"] == GENERATION
+    assert worker_kwargs["execution_family"] == "alpaca_spot"
+    assert start_transport_handler is health_transport_handler
+    assert any(
+        item.name == "exit_owner" and item.worker is workers[0][2]
+        for item in managed
+    )
 
 
 def test_service_builder_owns_callback_free_factory_and_cleans_failed_prepare(
@@ -3544,6 +3742,48 @@ def test_service_builder_stops_owned_restart_before_worker_assembly(
     assert events == ["host_close", "store_close"]
 
 
+def test_service_start_blocks_on_missing_migration_354_or_owner_inventory_unresolved_after_bounded_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nominally-flat broker receipt cannot hide unresolved durable exits."""
+
+    original_assemble = _assemble_service_composition
+
+    def unresolved_owner_inventory_assemble(*args, **kwargs):
+        fill_module = kwargs["runtime_modules"]["captured_paper_fill_capture"]
+        original_capture_type = fill_module.SqlAlchemyCapturedPaperFillCapture
+
+        class _UnresolvedFillCapture(original_capture_type):
+            def recover_exit_owner_inventory_bounded(self, **_kwargs):
+                body = {
+                    "exit_owner_inventory_resolved": False,
+                    "exit_owner_recovery_bounded": True,
+                    "exit_owner_recovery_exhausted": True,
+                    "paper_order_submission_authorized": False,
+                    "live_cash_authorized": False,
+                    "real_money_authorized": False,
+                }
+                return {**body, "receipt_sha256": sha256_json(body)}
+
+        fill_module.SqlAlchemyCapturedPaperFillCapture = (
+            _UnresolvedFillCapture
+        )
+        return original_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_assemble_service_composition",
+        unresolved_owner_inventory_assemble,
+    )
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="exit-owner inventory",
+    ):
+        test_composition_uses_measured_capacity_and_one_exact_adapter_generation(
+            monkeypatch
+        )
+
+
 def test_database_schema_fence_rejects_future_unknown_migration() -> None:
     required_tables = (
         "captured_paper_post_commit_outbox",
@@ -3602,6 +3842,7 @@ def test_database_schema_fence_rejects_future_unknown_migration() -> None:
     migrations = SimpleNamespace(
         MIGRATIONS=(("001", object()), ("002", object())),
         text=lambda value: value,
+        _verify_migration_354_physical_contract=lambda _connection: None,
     )
     result = _verify_database_schema(
         _Engine(("001", "002")), migrations_module=migrations

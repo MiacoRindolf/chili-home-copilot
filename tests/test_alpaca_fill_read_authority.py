@@ -23,6 +23,17 @@ from app.services.trading.momentum_neural.alpaca_fill_read_capability import (
     AlpacaFillReadCapabilityError,
     issue_alpaca_fill_read_capability,
 )
+from app.services.trading.momentum_neural.adaptive_risk_reservation import (
+    AdaptiveExitOwnerReceipt,
+    AdaptiveExitOwnerTransportBinding,
+)
+from app.services.trading.momentum_neural.captured_paper_fill_capture import (
+    CapturedPaperExitFillPostCommitRequest,
+    SqlAlchemyCapturedPaperFillCapture,
+)
+from app.services.trading.momentum_neural.captured_paper_transport_coordinator import (
+    CapturedPaperTransportUnavailable,
+)
 from app.services.trading.momentum_neural.alpaca_paper_identity import (
     alpaca_paper_account_identity_sha256,
 )
@@ -32,6 +43,7 @@ from app.services.trading.venue.alpaca_spot import AlpacaSpotAdapter
 
 UTC = timezone.utc
 ACCOUNT_ID = "ae7b7443-9a5f-4db2-8e58-9b872f5015cf"
+RUNTIME_GENERATION = "bd0775e8-21ff-4bb1-b109-21d6ad8af70f"
 
 
 def _sha(label: str) -> str:
@@ -56,6 +68,75 @@ def _cycle() -> AlpacaPaperFillCycleBinding:
     )
 
 
+def _exit_authorities(
+    cycle: AlpacaPaperFillCycleBinding,
+) -> tuple[AdaptiveExitOwnerReceipt, CapturedPaperExitFillPostCommitRequest]:
+    exit_cid = "chili-paper-exit-veee-41"
+    exit_oid = "68baa224-02ff-4d9f-82ff-2f20289fd1ae"
+    observer_generation = "alpaca-exit-observer:generation-7"
+    binding = AdaptiveExitOwnerTransportBinding(
+        reservation_id=cycle.reservation_id,
+        expected_account_id=ACCOUNT_ID,
+        account_identity_sha256=cycle.account_identity_sha256,
+        decision_packet_sha256=cycle.decision_packet_sha256,
+        symbol=cycle.symbol,
+        entry_client_order_id=cycle.cycle_client_order_id,
+        exit_client_order_id=exit_cid,
+        order_request={
+            "account_scope": "alpaca:paper",
+            "alpaca_account_id": ACCOUNT_ID,
+            "product_id": cycle.symbol,
+            "client_order_id": exit_cid,
+            "side": "sell",
+            "position_intent": "sell_to_close",
+            "base_size": "10",
+        },
+        transport_claim_token="exit-owner-claim-token",
+        transport_owner_session_id=41,
+        transport_owner_generation=7,
+        transport_owner_kind="ordinary_exit",
+        transport_lease_id="exit-owner-lease-7",
+        transport_runtime_generation=RUNTIME_GENERATION,
+        transport_connection_generation="alpaca-exit-transport:generation-7",
+    )
+    receipt_sha256 = _sha("genuine-db-exit-owner-receipt")
+    observed_at = datetime(2026, 7, 19, 16, 30, tzinfo=UTC)
+    receipt = AdaptiveExitOwnerReceipt(
+        receipt_sha256=receipt_sha256,
+        event_type="alpaca_exit_owner_submitted",
+        reservation_id=cycle.reservation_id,
+        sequence=18,
+        transport_started_event_sha256=_sha("exit-transport-started"),
+        binding=binding,
+        provider_order_id=exit_oid,
+        provider_client_order_id=exit_cid,
+        provider_status="filled",
+        provider_cumulative_quantity=10,
+        observer_claim_token="exit-observer-claim-token",
+        observer_session_id=41,
+        observer_generation=7,
+        observer_runtime_generation=RUNTIME_GENERATION,
+        observer_connection_generation=observer_generation,
+        effective_at=observed_at,
+        available_at=observed_at,
+    )
+    request = CapturedPaperExitFillPostCommitRequest.build(
+        session_id=41,
+        reservation_id=cycle.reservation_id,
+        decision_packet_sha256=cycle.decision_packet_sha256,
+        expected_account_id=ACCOUNT_ID,
+        account_identity_sha256=cycle.account_identity_sha256,
+        runtime_generation=RUNTIME_GENERATION,
+        broker_connection_generation=observer_generation,
+        symbol=cycle.symbol,
+        entry_client_order_id=cycle.cycle_client_order_id,
+        exit_client_order_id=exit_cid,
+        provider_order_id=exit_oid,
+        exit_owner_receipt_sha256=receipt_sha256,
+    )
+    return receipt, request
+
+
 def _read_binding(cycle: AlpacaPaperFillCycleBinding) -> dict[str, object]:
     return {
         "schema_version": FILL_READ_BINDING_SCHEMA_VERSION,
@@ -71,6 +152,7 @@ def _activity(
     activity_id: str = "fill-1",
     order_id: str = "entry-oid",
     order_status: str = "filled",
+    side: str = "buy",
     observed_at: datetime,
 ) -> dict:
     return {
@@ -81,7 +163,7 @@ def _activity(
         "type": "fill",
         "price": "2.5000000000",
         "qty": "10.0000000000",
-        "side": "buy",
+        "side": side,
         "symbol": "VEEE",
         "leaves_qty": "0.0000000000",
         "order_id": order_id,
@@ -99,17 +181,32 @@ def _install_reader(
     asset_class: str = "us_equity",
     order_quantity: str = "10.0000000000",
     filled_quantity: str = "10.0000000000",
+    provider_order_id: str | None = None,
+    provider_client_order_id: str | None = None,
+    provider_order_payload_id: str | None = None,
+    side: str = "buy",
     observed_at: datetime | None = None,
 ) -> tuple[AlpacaSpotAdapter, list[dict]]:
     observed_at = observed_at or datetime.now(UTC)
-    pages = pages or [[_activity(observed_at=observed_at, order_status=order_status)]]
+    provider_order_id = provider_order_id or cycle.entry_provider_order_id
+    provider_client_order_id = (
+        provider_client_order_id or cycle.cycle_client_order_id
+    )
+    pages = pages or [[
+        _activity(
+            order_id=provider_order_id,
+            order_status=order_status,
+            side=side,
+            observed_at=observed_at,
+        )
+    ]]
     calls: list[dict] = []
     order = {
-        "id": cycle.entry_provider_order_id,
-        "client_order_id": cycle.cycle_client_order_id,
+        "id": provider_order_payload_id or provider_order_id,
+        "client_order_id": provider_client_order_id,
         "account_id": ACCOUNT_ID,
         "symbol": cycle.symbol,
-        "side": "buy",
+        "side": side,
         "status": order_status,
         "qty": order_quantity,
         "filled_qty": filled_quantity,
@@ -402,7 +499,7 @@ def test_exit_caller_cid_and_legacy_combined_wrapper_are_fail_closed(
 ) -> None:
     cycle = _cycle()
     adapter, calls = _install_reader(monkeypatch, cycle=cycle)
-    with pytest.raises(AlpacaFillActivityError, match="sealed durable exit-order"):
+    with pytest.raises(AlpacaFillActivityError, match="immutable cycle order"):
         read_verified_alpaca_paper_fill_batch(
             adapter,
             cycle=cycle,
@@ -420,6 +517,100 @@ def test_exit_caller_cid_and_legacy_combined_wrapper_are_fail_closed(
         )
     assert calls == []
 
+
+def test_exact_exit_reader_binds_oid_cid_pages_with_stage_exact_io_counts(
+    monkeypatch,
+) -> None:
+    cycle = _cycle()
+    owner_receipt, request = _exit_authorities(cycle)
+    assert request.verify() is request
+    observed_at = datetime.now(UTC)
+    first_page = [
+        _activity(
+            activity_id=f"other-exit-{index:03d}",
+            order_id=f"other-order-{index:03d}",
+            side="sell",
+            observed_at=observed_at,
+        )
+        for index in range(100)
+    ]
+    second_page = [
+        _activity(
+            activity_id="exact-exit-fill-1",
+            order_id=owner_receipt.provider_order_id,
+            side="sell",
+            observed_at=observed_at,
+        )
+    ]
+
+    drift_adapter, drift_calls = _install_reader(
+        monkeypatch,
+        cycle=cycle,
+        provider_order_id=owner_receipt.provider_order_id,
+        provider_client_order_id=owner_receipt.provider_client_order_id,
+        side="sell",
+        pages=[first_page, second_page],
+        observed_at=observed_at,
+    )
+    capture = object.__new__(SqlAlchemyCapturedPaperFillCapture)
+    capture._adapter = drift_adapter
+    with pytest.raises(
+        CapturedPaperTransportUnavailable,
+        match="exit_post_commit_durable_owner_mismatch",
+    ):
+        capture.read_exact_exit_order_fills(
+            request,
+            owner_receipt=replace(
+                owner_receipt,
+                receipt_sha256=_sha("local-receipt-drift"),
+            ),
+            cycle=cycle,
+        )
+    assert drift_calls == []
+
+    provider_drift_adapter, provider_drift_calls = _install_reader(
+        monkeypatch,
+        cycle=cycle,
+        provider_order_id=owner_receipt.provider_order_id,
+        provider_client_order_id=owner_receipt.provider_client_order_id,
+        provider_order_payload_id="provider-returned-another-oid",
+        side="sell",
+        pages=[first_page, second_page],
+        observed_at=observed_at,
+    )
+    capture._adapter = provider_drift_adapter
+    with pytest.raises(
+        AlpacaFillActivityError,
+        match="incomplete or unreadable",
+    ):
+        capture.read_exact_exit_order_fills(
+            request,
+            owner_receipt=owner_receipt,
+            cycle=cycle,
+        )
+    assert [call["kind"] for call in provider_drift_calls] == ["order"]
+
+    adapter, calls = _install_reader(
+        monkeypatch,
+        cycle=cycle,
+        provider_order_id=owner_receipt.provider_order_id,
+        provider_client_order_id=owner_receipt.provider_client_order_id,
+        side="sell",
+        pages=[first_page, second_page],
+        observed_at=observed_at,
+    )
+    capture._adapter = adapter
+    batch = capture.read_exact_exit_order_fills(
+        request,
+        owner_receipt=owner_receipt,
+        cycle=cycle,
+    )
+    assert batch.order_role == "exit"
+    assert batch.provider_order_id == owner_receipt.provider_order_id
+    assert batch.expected_client_order_id == owner_receipt.provider_client_order_id
+    assert batch.exit_owner_receipt_sha256 == owner_receipt.receipt_sha256
+    assert len(batch.activities) == 1
+    assert [call["kind"] for call in calls] == ["order", "page", "page"]
 
 def test_exact_zero_fee_authority_rejects_non_us_equity_before_capability(
     monkeypatch,

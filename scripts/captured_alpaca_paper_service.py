@@ -5373,6 +5373,16 @@ def _verify_database_schema(
         raise CapturedAlpacaPaperServiceError(
             "MIGRATION_ROSTER_INVALID", "application migration roster is duplicated"
         )
+    migration_354_verifier = getattr(
+        migrations_module,
+        "_verify_migration_354_physical_contract",
+        None,
+    )
+    if not callable(migration_354_verifier):
+        raise CapturedAlpacaPaperServiceError(
+            "MIGRATION_354_VERIFIER_UNAVAILABLE",
+            "PAPER database lacks the exact migration 354 physical verifier",
+        )
     try:
         with engine.connect() as connection:
             rows = connection.execute(
@@ -5397,6 +5407,7 @@ def _verify_database_schema(
                     ") AS required(name)"
                 )
             ).fetchall()
+            migration_354_verifier(connection)
     except Exception as exc:
         raise CapturedAlpacaPaperServiceError(
             "DATABASE_SCHEMA_UNREADABLE", "PAPER database schema read failed"
@@ -5414,6 +5425,7 @@ def _verify_database_schema(
         "latest_migration": expected_ids[-1],
         "migration_count": len(expected_ids),
         "required_tables_present": True,
+        "migration_354_physical_contract_verified": True,
     }
 
 
@@ -5789,6 +5801,7 @@ def _assemble_service_composition(
     supervisor_module = runtime_modules["captured_paper_service_supervisor"]
     service_fence_module = runtime_modules["captured_paper_service_fence"]
     live_loop_module = runtime_modules["live_runner_loop"]
+    live_runner_module = runtime_modules["live_runner"]
     # One issuer instance backs both post-admission materialization and the
     # final transport fence.  Constructing a second issuer would split the
     # observation clock/session provenance across two order-affecting paths.
@@ -6346,6 +6359,66 @@ def _assemble_service_composition(
         adapter=prepared.adapter,
         max_pending_reads=capacity,
     )
+
+    def require_exit_owner_inventory_resolved() -> Mapping[str, Any]:
+        receipt = dict(
+            fill_capture.recover_exit_owner_inventory_bounded(
+                expected_account_id=verified.expected_account_id,
+                runtime_generation=verified.activation_generation,
+                broker_connection_generation=prepared.broker_snapshot[
+                    "connection_generation"
+                ],
+                execution_family="alpaca_spot",
+                limit=capacity,
+            )
+        )
+        supplied_sha256 = receipt.pop("receipt_sha256", None)
+        if not (
+            supplied_sha256 == activation_contract.sha256_json(receipt)
+            and receipt.get("exit_owner_inventory_resolved") is True
+            and receipt.get("exit_owner_recovery_bounded") is True
+            and receipt.get("exit_owner_recovery_exhausted") is False
+            and receipt.get("paper_order_submission_authorized") is False
+            and receipt.get("live_cash_authorized") is False
+            and receipt.get("real_money_authorized") is False
+        ):
+            raise CapturedAlpacaPaperServiceError(
+                "EXIT_OWNER_INVENTORY_UNRESOLVED",
+                "captured PAPER exit-owner inventory did not reach a bounded fixed point",
+            )
+        return {**receipt, "receipt_sha256": supplied_sha256}
+
+    require_exit_owner_inventory_resolved()
+    # Bound methods are recreated on attribute access.  Freeze the exact
+    # completion capability once so loop start and health prove ownership by
+    # object identity across the same adapter/store generation.
+    exit_completion_handler = fill_capture.complete_exit_post_commit
+    exit_transport_handler = (
+        live_runner_module
+        .build_captured_paper_exit_transport_post_commit_handler(
+            adapter=prepared.adapter,
+            expected_account_id=verified.expected_account_id,
+            runtime_generation=verified.activation_generation,
+            broker_connection_generation=prepared.broker_snapshot[
+                "connection_generation"
+            ],
+            assert_service_fence_held=service_fence.assert_held,
+        )
+    )
+    exit_owner_worker = fill_capture_module.CapturedPaperExitOwnerWorker(
+        fill_capture=fill_capture,
+        expected_account_id=verified.expected_account_id,
+        runtime_generation=verified.activation_generation,
+        broker_connection_generation=prepared.broker_snapshot[
+            "connection_generation"
+        ],
+        execution_family="alpaca_spot",
+        max_items_per_cycle=capacity,
+        idle_poll_seconds=(
+            settings.chili_momentum_captured_paper_worker_idle_poll_seconds
+        ),
+        observation_clock=wall_clock,
+    )
     transport_coordinator = transport_module.CapturedPaperTransportCoordinator(
         store=transport_store,
         broker_transport=broker_transport,
@@ -6412,6 +6485,9 @@ def _assemble_service_composition(
         ),
         supervisor_module.CapturedPaperManagedWorker(
             name="later_fill", worker=fill_watch_worker
+        ),
+        supervisor_module.CapturedPaperManagedWorker(
+            name="exit_owner", worker=exit_owner_worker
         ),
     )
     selection_pre_authority_workers = (
@@ -6505,19 +6581,38 @@ def _assemble_service_composition(
         return live_loop_module.start_captured_paper_live_runner_loop(
             expected_account_id=verified.expected_account_id,
             runtime_generation=verified.activation_generation,
+            broker_connection_generation=prepared.broker_snapshot[
+                "connection_generation"
+            ],
             execution_family="alpaca_spot",
             captured_paper_symbol_admitter=initial_symbol_admitter,
+            captured_paper_exit_completion_handler=(
+                exit_completion_handler
+            ),
+            captured_paper_exit_transport_handler=(
+                exit_transport_handler
+            ),
         )
 
     def dedicated_live_loop_healthy() -> bool:
         return live_loop_module.is_captured_paper_live_runner_loop_admission_ready(
             expected_account_id=verified.expected_account_id,
             runtime_generation=verified.activation_generation,
+            broker_connection_generation=prepared.broker_snapshot[
+                "connection_generation"
+            ],
             execution_family="alpaca_spot",
+            captured_paper_exit_completion_handler=(
+                exit_completion_handler
+            ),
+            captured_paper_exit_transport_handler=(
+                exit_transport_handler
+            ),
         )
 
     def fenced_prestart_revalidate() -> Mapping[str, Any]:
-        return _build_fenced_prestart_revalidation_receipt(
+        require_exit_owner_inventory_resolved()
+        fenced = dict(_build_fenced_prestart_revalidation_receipt(
             verified=verified,
             prepared=prepared,
             database_engine=database_engine,
@@ -6539,7 +6634,20 @@ def _assemble_service_composition(
                 assert_service_fence_held=service_fence.assert_held,
             ),
             wall_clock=wall_clock,
-        )
+        ))
+        fenced_sha256 = fenced.get("receipt_sha256")
+        fenced_body = dict(fenced)
+        fenced_body.pop("receipt_sha256", None)
+        if fenced_sha256 != activation_contract.sha256_json(fenced_body):
+            raise CapturedAlpacaPaperServiceError(
+                "FENCED_PRESTART_RECEIPT_INVALID",
+                "captured PAPER fenced prestart receipt hash changed",
+            )
+        # The recovery call above is the in-fence gate.  Preserve the exact
+        # fenced-prestart schema consumed by CapturedPaperServiceSupervisor;
+        # adding locally invented fields would make the real supervisor reject
+        # startup even though a recording test double accepted them.
+        return fenced
 
     supervisor = supervisor_module.CapturedPaperServiceSupervisor(
         host=prepared.host,
@@ -6675,6 +6783,24 @@ def _build_service_composition(
                 wall_clock=wall_clock,
             )
         )
+        owner_recovery_fields = {
+            key: restart_inventory_receipt.get(key)
+            for key in (
+                "exit_owner_inventory_resolved",
+                "exit_owner_recovery_bounded",
+                "exit_owner_recovery_exhausted",
+            )
+            if key in restart_inventory_receipt
+        }
+        if owner_recovery_fields and owner_recovery_fields != {
+            "exit_owner_inventory_resolved": True,
+            "exit_owner_recovery_bounded": True,
+            "exit_owner_recovery_exhausted": False,
+        }:
+            raise CapturedAlpacaPaperServiceError(
+                "EXIT_OWNER_INVENTORY_UNRESOLVED",
+                "captured PAPER exit-owner inventory remains unresolved",
+            )
         if not (
             restart_inventory_receipt.get("disposition")
             == "strict_flat_first_cutover"
