@@ -622,6 +622,15 @@ class FakeExecutor:
 
 @pytest.fixture(autouse=True)
 def _protected_runtime_without_host_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The focused readiness shard runs inside the real activation runner, which
+    # already owns the production host-wide mutex.  Unit invocations must use
+    # their own namespace; the dedicated contention test below still proves
+    # that two owners of the same mutex fail closed.
+    monkeypatch.setattr(
+        runner,
+        "_HOST_WIDE_ACTIVATION_MUTEX_NAME",
+        "Local\\CHILI-Captured-PAPER-Activation-Test-" + uuid.uuid4().hex,
+    )
     monkeypatch.setattr(runner, "_assert_isolated_interpreter", lambda: None)
     monkeypatch.setattr(runner, "_sanitize_python_control_environment", lambda: None)
     monkeypatch.setattr(runner, "_install_sealed_dependency_root", lambda _request: None)
