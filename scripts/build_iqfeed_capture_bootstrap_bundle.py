@@ -44,13 +44,13 @@ _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_REQUEST_AGE_SECONDS = 60.0
 _MAX_ACCOUNT_SNAPSHOT_AGE_SECONDS = 30.0
 # Startup evidence is a process-instance/bundle-identity record, not broker
-# truth: the operator flow stages dependencies and runs its long-TTL probe
-# authorities (focused shard, rollback baseline, lifecycle) for several
-# minutes before the capture smoke consumes this bundle, so reusing the 30s
-# account-snapshot window made every real end-to-end run fail closed with
-# STALE_EVIDENCE. Account freshness at order time is enforced separately by
-# the 30s broker_account probe and the transport-boundary re-reads.
-_MAX_STARTUP_EVIDENCE_AGE_SECONDS = 900.0
+# truth.  The operator chain has an exact 30-minute timeout and deliberately
+# completes preselection plus its fixed regression/migration/lifecycle gates
+# before the capture smoke consumes this bundle.  Bound startup identity to
+# that same outer timeout so a valid chain cannot outlive it, while the fresh
+# broker-account probe and transport-boundary re-reads continue to own account
+# and order-time freshness.
+_MAX_STARTUP_EVIDENCE_AGE_SECONDS = 30 * 60.0
 _MAX_FUTURE_SKEW_SECONDS = 5.0
 _MAX_PROJECTION_DEPTH = 16
 _MAX_PROJECTION_ITEMS = 10_000

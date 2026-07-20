@@ -552,6 +552,39 @@ def test_real_end_to_end_build_publishes_commit_last_and_reloads_preflight(
     assert not list((tmp_path / "write" / "artifacts" / ".staging").glob("*"))
 
 
+def test_startup_identity_freshness_matches_the_bounded_operator_chain(
+    tmp_path: Path,
+) -> None:
+    built = _build_valid(tmp_path)
+    manifest = json.loads(built.manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["freshness_policy"]["startup_evidence_max_age_seconds"] == (
+        30 * 60.0
+    )
+    accepted = preflight.load_iqfeed_capture_bootstrap_preflight(
+        built.manifest_path,
+        expected_manifest_sha256=built.manifest_sha256,
+        allowed_read_roots=(REPO.parent, tmp_path),
+        allowed_write_roots=(tmp_path / "write",),
+        wall_clock=lambda: FIXED_NOW + timedelta(seconds=30 * 60 - 1),
+        host_fingerprint_provider=lambda: HOST_FINGERPRINT,
+        local_drive_check=lambda _path: True,
+    )
+    assert accepted.manifest_sha256 == built.manifest_sha256
+
+    with pytest.raises(preflight.BootstrapPreflightError) as caught:
+        preflight.load_iqfeed_capture_bootstrap_preflight(
+            built.manifest_path,
+            expected_manifest_sha256=built.manifest_sha256,
+            allowed_read_roots=(REPO.parent, tmp_path),
+            allowed_write_roots=(tmp_path / "write",),
+            wall_clock=lambda: FIXED_NOW + timedelta(seconds=30 * 60 + 1),
+            host_fingerprint_provider=lambda: HOST_FINGERPRINT,
+            local_drive_check=lambda _path: True,
+        )
+    assert caught.value.code == "STALE_EVIDENCE"
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
