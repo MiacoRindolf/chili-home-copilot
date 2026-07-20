@@ -536,7 +536,13 @@ def _capture_candidate_exact_print_preselection(
             raise CapturedPaperOperatorChainError(
                 "CAPTURE_ROOT_MISMATCH", "candidate preselection changed capture root"
             )
-        pressure = operator_flow._measure_capture_pressure(preflight=preflight)
+        wall_clock = lambda: datetime.now(UTC)
+        monotonic_clock = time.monotonic
+        pressure = operator_flow._measure_capture_pressure(
+            preflight=preflight,
+            wall_clock=wall_clock,
+            monotonic_clock=monotonic_clock,
+        )
         # The first seed already has verified real-time Delay status.  Keep
         # this preselection lane to
         # one symbol bounds provider and depth work; the final selection still
@@ -549,14 +555,19 @@ def _capture_candidate_exact_print_preselection(
                 capture_health_authority=IngressCaptureOnlyHealthAuthority(
                     preflight=preflight,
                     certification_symbol=certification_seed,
+                    wall_clock=wall_clock,
                 ),
                 trade_forced_symbols=(certification_seed,),
                 depth_forced_symbols=(),
                 l1_only_exact_print_preselection=True,
                 pressure_sampler=lambda: operator_flow._measure_capture_pressure(
-                    preflight=preflight
+                    preflight=preflight,
+                    wall_clock=wall_clock,
+                    monotonic_clock=monotonic_clock,
                 ),
-            )
+            ),
+            wall_clock=wall_clock,
+            monotonic_clock=monotonic_clock,
         )
         if type(evidence) is not CaptureOnlySmokeEvidence:
             raise CapturedPaperOperatorChainError(

@@ -734,12 +734,26 @@ def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
         "load_iqfeed_capture_bootstrap_preflight",
         lambda *_a, **_k: preflight,
     )
+    observed: dict[str, Any] = {}
+
+    def fake_measure(
+        *,
+        preflight: object,
+        wall_clock: Any,
+        monotonic_clock: Any,
+    ) -> object:
+        observed["measure"] = {
+            "preflight": preflight,
+            "wall_clock": wall_clock,
+            "monotonic_clock": monotonic_clock,
+        }
+        return object()
+
     monkeypatch.setattr(
         chain.operator_flow,
         "_measure_capture_pressure",
-        lambda **_k: object(),
+        fake_measure,
     )
-    observed: dict[str, Any] = {}
 
     class FakeConfig:
         def __init__(self, **kwargs: Any) -> None:
@@ -802,7 +816,8 @@ def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
     monkeypatch.setattr(
         smoke_module,
         "run_capture_only_preactivation_smoke",
-        lambda _configuration: evidence,
+        lambda _configuration, **kwargs: observed.update(smoke_clocks=kwargs)
+        or evidence,
     )
 
     receipt = chain._capture_candidate_exact_print_preselection(
@@ -817,6 +832,14 @@ def test_candidate_preselection_publishes_only_closed_zero_order_evidence(
     assert observed["trade_forced_symbols"] == ("VIVS",)
     assert observed["depth_forced_symbols"] == ()
     assert observed["l1_only_exact_print_preselection"] is True
+    assert observed["measure"]["preflight"] is preflight
+    assert callable(observed["measure"]["wall_clock"])
+    assert callable(observed["measure"]["monotonic_clock"])
+    assert observed["authority"]["wall_clock"] is observed["measure"]["wall_clock"]
+    assert observed["smoke_clocks"] == {
+        "wall_clock": observed["measure"]["wall_clock"],
+        "monotonic_clock": observed["measure"]["monotonic_clock"],
+    }
     assert receipt.bridge_run_id == iqfeed_trade_bridge.BRIDGE_RUN_ID
     assert receipt.bridge_source_sha256 == iqfeed_trade_bridge.BRIDGE_SOURCE_SHA256
     assert receipt.evidence_path.read_bytes() == _canonical(evidence_document)
@@ -902,7 +925,7 @@ def test_candidate_preselection_rejects_execution_surface_attestation(
     monkeypatch.setattr(
         smoke_module,
         "run_capture_only_preactivation_smoke",
-        lambda _configuration: FakeEvidence(),
+        lambda _configuration, **_kwargs: FakeEvidence(),
     )
 
     with pytest.raises(
