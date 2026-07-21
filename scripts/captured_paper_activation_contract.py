@@ -59,7 +59,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPARSE_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
-_MAX_MANIFEST_AGE_SECONDS = 15 * 60
+_MAX_MANIFEST_AGE_SECONDS = 20 * 60
 _MAX_FUTURE_SKEW_SECONDS = 5
 _DEPENDENCY_ROLE_PREFIX = "local_dependency:"
 
@@ -488,7 +488,7 @@ _RECEIPT_MAX_AGE_SECONDS: Mapping[str, int] = MappingProxyType(
         "focused_regressions": 60 * 60,
         "lifecycle_preflight": 10 * 60,
         "kill_switch": 10 * 60,
-        "no_order_smoke": 10 * 60,
+        "no_order_smoke": 20 * 60,
         "rollback_snapshot": 60 * 60,
     }
 )

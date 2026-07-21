@@ -50,10 +50,10 @@ _MAX_DEPENDENCY_CLOSURE_BYTES = 512 * 1024 * 1024
 # in the service), and the final manifest may not outlive this envelope
 # (contract chronology check), so smoke duration ate most of the receipt
 # window and finalize -> cutover -> ActivatePaper could not fit in what was
-# left.  12 minutes keeps the 10-minute receipt class fully usable through
-# the tail and stays under the contract's 15-minute
-# _MAX_MANIFEST_AGE_SECONDS cap with slack for clock skew.
-_MANIFEST_TTL = timedelta(minutes=12)
+# left.  Twenty minutes covers the measured sealed-service startup on this
+# host.  Broker identity and the durable kill switch are still refreshed
+# immediately before the host permit is consumed.
+_MANIFEST_TTL = timedelta(minutes=20)
 _DEPENDENCY_CLOSURE_SCHEMA_VERSION = "chili.captured-paper-dependency-closure.v1"
 
 _RUNTIME_SECRET_KEYS = frozenset(
@@ -1627,8 +1627,8 @@ def build_captured_paper_preactivation_offline(
         # capture_host_smoke receipt left a 41s window that ended 4s BEFORE
         # the manifest file hit disk — structurally unusable).  A receipt
         # already expired at build time still rejects the build below; the
-        # envelope itself is governed by _MANIFEST_TTL (contract-capped at
-        # 15 minutes), which bounds the smoke -> finalize handoff.
+        # envelope itself is governed by _MANIFEST_TTL, which bounds the
+        # smoke -> finalize -> host-cutover handoff.
         if expires_at <= now:
             raise CapturedPaperPreactivationBuildError(
                 "EVIDENCE_STALE", f"{kind} receipt is already expired"

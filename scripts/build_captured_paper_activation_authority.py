@@ -119,7 +119,7 @@ _DEFAULT_TIMEOUTS: Mapping[str, int] = {
     "no_order_smoke": 600,
     "finalize": 600,
     "validate_only": 600,
-    "apply": 600,
+    "apply": 900,
     "rollback": 600,
     "task_query": 60,
 }

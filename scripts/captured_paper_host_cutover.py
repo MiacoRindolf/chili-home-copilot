@@ -6944,11 +6944,11 @@ class CapturedPaperHostCutoverExecutor:
                     # point — the sealed ActivatePaper boot (env verification,
                     # capture host + IQFeed bring-up, DB binds) was alive and
                     # mid-protocol (dispatch lock written ~90s in) but not yet
-                    # PREPARED.  300s covers the observed boot class and still
-                    # fits inside the 10-minute receipt window measured from
-                    # the smoke; a dead service aborts the wait early either
-                    # way, and rollback is proven live (ROLLED_BACK_EXACT).
-                    timeout_seconds=300.0,
+                    # PREPARED.  A28 then proved that 300s still killed this
+                    # host's healthy sealed composition.  600s remains bounded
+                    # by the activation envelope; a dead service still aborts
+                    # early and exact rollback remains mandatory.
+                    timeout_seconds=600.0,
                 )
                 prepared_sha, challenge, prepared_valid_until, dispatch_lock_identity = (
                     _validate_prepared_receipt(
