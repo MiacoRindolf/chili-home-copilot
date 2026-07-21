@@ -7491,7 +7491,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The host cutover observes a bounded startup receipt, so surface the
     # first blocked frame before any outer timeout can terminate the task.
     # One shot avoids an unbounded diagnostic log after healthy startup.
-    faulthandler.dump_traceback_later(30.0, repeat=False, file=sys.stderr)
+    # 2026-07-21: the ActivatePaper start_active bring-up dies within seconds
+    # (well before the old 30s one-shot fired), so lower the timer to surface
+    # the active/blocked frame before a fast self-termination.
+    faulthandler.dump_traceback_later(3.0, repeat=False, file=sys.stderr)
     external_runtime_boundary_entered = False
     provider_start_may_have_been_attempted = False
     active_order_boundary_entered = False
@@ -7572,7 +7575,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     host_activation_handshake=host_activation_handshake,
                 )
         exit_code = 0
-    except Exception as exc:
+    except BaseException as exc:
         code = getattr(exc, "code", "CAPTURED_PAPER_STARTUP_REJECTED")
         report = {
             "schema_version": SERVICE_REPORT_SCHEMA_VERSION,
@@ -7608,10 +7611,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             "real_money_authorized": False,
         }
         exit_code = 2
+        # 2026-07-21 observability: a BaseException (e.g. SystemExit) escaping
+        # the ActivatePaper start_active bring-up left 0-byte stdout+stderr and
+        # was invisible until the cutover's startup-receipt timeout. Persist an
+        # fsync'd crash file next to the host-ready receipt so the real
+        # error_code + traceback survive block-buffered stdout and a hard kill.
+        try:
+            _hrr = getattr(args, "host_ready_receipt", None)
+            if _hrr:
+                _fd = os.open(
+                    str(_hrr) + ".service-crash.json",
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                os.write(_fd, _canonical_json_bytes(report) + b"\n")
+                os.fsync(_fd)
+                os.close(_fd)
+        except Exception:
+            pass
     finally:
         if service_singleton is not None:
             service_singleton.close()
     sys.stdout.buffer.write(_canonical_json_bytes(report) + b"\n")
+    sys.stdout.buffer.flush()
     return exit_code
 
 
