@@ -720,7 +720,33 @@ def test_discovery_rows_are_only_seeds_and_require_delay_zero(
     assert parameters == {
         "tail_rows": chain._PRESELECTION_SEED_TAIL_ROWS,
         "limit": chain._PRESELECTION_SEED_LIMIT,
+        "allow_stale_address_only": False,
     }
+
+
+def test_closed_session_may_use_old_row_only_as_current_iqfeed_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlalchemy
+
+    engine = _Engine([("AAPL", 1)])
+    checked: list[str] = []
+    monkeypatch.setenv("DATABASE_URL", "postgresql://protected-authority")
+    monkeypatch.setattr(sqlalchemy, "create_engine", lambda *_a, **_k: engine)
+    monkeypatch.setattr(sqlalchemy, "text", lambda value: value)
+    monkeypatch.setattr(
+        chain,
+        "_activation_preselection_is_eligible",
+        lambda symbol: checked.append(symbol) is None and symbol == "AAPL",
+    )
+
+    assert chain._discover_capture_seed_symbols(
+        allow_stale_address_only=True
+    ) == ("AAPL",)
+    assert checked == ["AAPL"]
+    query, parameters = engine.executions[-1]
+    assert ":allow_stale_address_only" in query
+    assert parameters["allow_stale_address_only"] is True
 
 
 def test_live_certification_symbol_fails_closed_when_no_delay_zero_symbol(
@@ -1066,10 +1092,14 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
         "build_iqfeed_capture_bootstrap_bundle_from_request",
         fake_bootstrap,
     )
+
+    def fake_discover_seed(**kwargs: Any) -> tuple[str, ...]:
+        calls.append("discover-seed-read-only")
+        assert kwargs == {"allow_stale_address_only": False}
+        return ("VIVS",)
+
     monkeypatch.setattr(
-        chain,
-        "_discover_capture_seed_symbols",
-        lambda: calls.append("discover-seed-read-only") or ("VIVS",),
+        chain, "_discover_capture_seed_symbols", fake_discover_seed
     )
     preselection_evidence = activation.artifact_root / "candidate-preselection.json"
     preselection_sha = _write(

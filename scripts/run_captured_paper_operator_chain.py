@@ -534,7 +534,9 @@ def _activation_preselection_is_eligible(
     return True
 
 
-def _discover_capture_seed_symbols() -> tuple[str, ...]:
+def _discover_capture_seed_symbols(
+    *, allow_stale_address_only: bool = False
+) -> tuple[str, ...]:
     """Find live symbol names only; these rows are never treated as evidence.
 
     A legacy bridge may supply this bounded discovery roster.  The roster is
@@ -562,12 +564,16 @@ def _discover_capture_seed_symbols() -> tuple[str, ...]:
                         "ORDER BY id DESC LIMIT :tail_rows"
                         ") SELECT symbol, count(*) AS n "
                         "FROM recent_tail "
-                        "WHERE observed_at > now() - interval '15 minutes' "
+                        "WHERE (:allow_stale_address_only "
+                        "OR observed_at > now() - interval '15 minutes') "
                         "GROUP BY symbol ORDER BY n DESC, symbol ASC LIMIT :limit"
                     ),
                     {
                         "tail_rows": _PRESELECTION_SEED_TAIL_ROWS,
                         "limit": _PRESELECTION_SEED_LIMIT,
+                        "allow_stale_address_only": bool(
+                            allow_stale_address_only
+                        ),
                     },
                 ).fetchall()
         finally:
@@ -1013,7 +1019,9 @@ def run_operator_chain(
     )
 
     extended_session_open = _equity_extended_session_is_open()
-    seed_symbols = _discover_capture_seed_symbols()
+    seed_symbols = _discover_capture_seed_symbols(
+        allow_stale_address_only=not extended_session_open
+    )
     preselection = _capture_candidate_exact_print_preselection(
         bootstrap_manifest_path=built.manifest_path,
         bootstrap_manifest_sha256=built.manifest_sha256,
