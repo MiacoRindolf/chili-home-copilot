@@ -1224,6 +1224,13 @@ def _admit_and_execute(argv: Sequence[str]) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # The sealed dependency inventory runs before the target service can
+    # install its own diagnostics.  Emit one bounded all-thread snapshot if
+    # that admission phase itself stalls; successful targets replace this
+    # one-shot timer when their main function starts.
+    import faulthandler
+
+    faulthandler.dump_traceback_later(30.0, repeat=False, file=sys.stderr)
     try:
         return _admit_and_execute(tuple(sys.argv[1:] if argv is None else argv))
     except IsolatedStage0Error as exc:

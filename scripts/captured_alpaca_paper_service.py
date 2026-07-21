@@ -7488,7 +7488,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # process.
     import faulthandler
 
-    faulthandler.dump_traceback_later(150.0, repeat=True, file=sys.stderr)
+    # The host cutover observes a bounded startup receipt, so surface the
+    # first blocked frame before any outer timeout can terminate the task.
+    # One shot avoids an unbounded diagnostic log after healthy startup.
+    faulthandler.dump_traceback_later(30.0, repeat=False, file=sys.stderr)
     external_runtime_boundary_entered = False
     provider_start_may_have_been_attempted = False
     active_order_boundary_entered = False
