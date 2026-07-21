@@ -325,6 +325,72 @@ def _preactivation(tmp_path: Path) -> VerifiedCapturedPaperPreactivation:
     )
 
 
+def test_runtime_import_path_authority_removes_only_pinned_candidate_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    loaded_source = candidate / "loaded.py"
+    loaded_source.write_text("VALUE = 1\n", encoding="utf-8")
+    dependency = tmp_path / "dependencies" / ("d" * 64) / "site-packages"
+    dependency.mkdir(parents=True)
+    unrelated = tmp_path / "stdlib"
+    unrelated.mkdir()
+    role = "loaded_source"
+    verified = SimpleNamespace(
+        candidate_root=candidate,
+        source_paths={role: loaded_source},
+        source_hashes={role: hashlib.sha256(loaded_source.read_bytes()).hexdigest()},
+        manifest={"cutover": {"python_dependency_root": str(dependency)}},
+    )
+    module_name = "_captured_paper_test_loaded_source"
+    monkeypatch.setitem(
+        sys.modules,
+        module_name,
+        SimpleNamespace(__file__=str(loaded_source)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "path",
+        [str(unrelated), str(candidate), str(dependency), str(dependency)],
+    )
+
+    service_module._restore_runtime_import_path_authority(verified)
+
+    assert sys.path == [str(unrelated), str(dependency)]
+
+
+def test_runtime_import_path_authority_rejects_unpinned_loaded_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    unpinned = candidate / "unreviewed.py"
+    unpinned.write_text("VALUE = 2\n", encoding="utf-8")
+    dependency = tmp_path / "dependencies" / ("e" * 64) / "site-packages"
+    dependency.mkdir(parents=True)
+    verified = SimpleNamespace(
+        candidate_root=candidate,
+        source_paths={},
+        source_hashes={},
+        manifest={"cutover": {"python_dependency_root": str(dependency)}},
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "_captured_paper_test_unpinned_source",
+        SimpleNamespace(__file__=str(unpinned)),
+    )
+    monkeypatch.setattr(sys, "path", [str(dependency), str(candidate)])
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="loaded candidate module is absent from the sealed source roster",
+    ):
+        service_module._restore_runtime_import_path_authority(verified)
+
+
 def _started_health() -> dict:
     return {
         "state": "no_order_smoke",

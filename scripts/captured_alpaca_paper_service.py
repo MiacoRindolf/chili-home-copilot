@@ -1264,6 +1264,85 @@ def _verify_loaded_sources(
         )
 
 
+def _restore_runtime_import_path_authority(
+    verified: activation_contract.VerifiedCapturedPaperActivation,
+) -> None:
+    """Restore the sealed stage0 path after pinned application imports.
+
+    Some legacy package initializers append the application root to
+    ``sys.path`` while the captured service composition is imported.  The
+    stage0 meta-path finders still deny unsealed imports, but the final
+    activation fence correctly rejects the residual mutable path.  Before
+    removing it, prove that every already-loaded module beneath the candidate
+    root is one of the manifest-pinned source files with unchanged bytes.
+    Then remove only candidate-root entries and duplicate copies of the exact
+    sealed dependency root; the ordinary strict verifier runs immediately
+    afterwards.
+    """
+
+    cutover = verified.manifest.get("cutover")
+    if not isinstance(cutover, Mapping):
+        raise CapturedAlpacaPaperServiceError(
+            "LOADED_SOURCE_PATH_MISMATCH",
+            "activation manifest lacks the sealed cutover entrypoints",
+        )
+    candidate_root = verified.candidate_root.resolve(strict=True)
+    dependency_root = Path(
+        str(cutover.get("python_dependency_root") or "")
+    ).resolve(strict=True)
+
+    pinned_by_path: dict[Path, str] = {}
+    for role, raw_path in verified.source_paths.items():
+        path = Path(raw_path).resolve(strict=True)
+        digest = _require_sha256(
+            verified.source_hashes.get(role),
+            f"runtime source {role}",
+        )
+        pinned_by_path[path] = digest
+
+    for module in tuple(sys.modules.values()):
+        raw_path = getattr(module, "__file__", None)
+        if not raw_path:
+            continue
+        try:
+            loaded_path = Path(str(raw_path)).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not _inside_local_roots(loaded_path, (candidate_root,)):
+            continue
+        digest = pinned_by_path.get(loaded_path)
+        if digest is None or _sha256_file(loaded_path) != digest:
+            raise CapturedAlpacaPaperServiceError(
+                "LOADED_RUNTIME_SOURCE_UNPINNED",
+                "a loaded candidate module is absent from the sealed source roster",
+            )
+
+    restored: list[str] = []
+    dependency_seen = False
+    for raw_path in sys.path:
+        if not raw_path:
+            restored.append(raw_path)
+            continue
+        try:
+            resolved = Path(raw_path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            restored.append(raw_path)
+            continue
+        if _inside_local_roots(resolved, (candidate_root,)):
+            continue
+        if resolved == dependency_root:
+            if dependency_seen:
+                continue
+            dependency_seen = True
+        restored.append(raw_path)
+    if not dependency_seen:
+        raise CapturedAlpacaPaperServiceError(
+            "PYTHON_IMPORT_ROOT_MISMATCH",
+            "sealed dependency root disappeared during runtime composition",
+        )
+    sys.path[:] = restored
+
+
 def _assert_content_addressed_activation_entrypoints(
     verified: activation_contract.VerifiedCapturedPaperActivation,
 ) -> None:
@@ -1587,6 +1666,7 @@ def _reload_final_activation_authority(
             "FINAL_ACTIVATION_IDENTITY_DRIFT",
             "reloaded activation differs from the composed PAPER generation",
         )
+    _restore_runtime_import_path_authority(refreshed)
     _verify_loaded_sources(refreshed)
     return refreshed
 
