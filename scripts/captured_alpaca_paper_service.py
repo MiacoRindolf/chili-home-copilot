@@ -7182,8 +7182,15 @@ def _execute_active_service(
                 wall_clock=wall_clock,
             )
             consumed = launcher_attestation.consume(wall_clock=wall_clock)
+            _emit_startup_breadcrumb("6a publish_prepared")
             host_activation_handshake.publish_prepared()
+            _emit_startup_breadcrumb(
+                "BEGIN 6b await_and_consume_permit (host round-trip)"
+            )
             permit = host_activation_handshake.await_and_consume_permit()
+            _emit_startup_breadcrumb(
+                "END 6b permit / BEGIN 6c broker_quiet_fixed_point"
+            )
             broker_fixed_point = _paper_broker_quiet_fixed_point(
                 composition.adapter,
                 verified=refreshed,
@@ -7193,6 +7200,7 @@ def _execute_active_service(
                 monotonic_clock=monotonic_clock,
                 wait=wait,
             )
+            _emit_startup_breadcrumb("END 6c broker_quiet_fixed_point")
             # The broker reads above can consume most or all of the short host
             # permit window.  Re-read every sealed activation byte and query
             # the durable kill switch after those reads, then validate the
@@ -7289,9 +7297,11 @@ def _execute_active_service(
             assert_current=assert_final_start_current,
         )
         supervisor_started = True
+        _emit_startup_breadcrumb("BEGIN 6 supervisor.start_active")
         start_health = composition.supervisor.start_active(
             start_authority=start_authority
         )
+        _emit_startup_breadcrumb("END 6 supervisor.start_active returned")
         assert_final_start_current()
         start_health = composition.supervisor.assert_healthy()
         if consumed_active_authority is None:
@@ -7299,13 +7309,18 @@ def _execute_active_service(
                 "ACTIVE_START_AUTHORITY_MISSING",
                 "supervisor did not consume the durable PAPER start evidence",
             )
+        _emit_startup_breadcrumb("6d publish_started")
         host_activation_handshake.publish_started(
             health=start_health,
             active_start_authority=consumed_active_authority,
         )
+        _emit_startup_breadcrumb(
+            "BEGIN 6e await_apply_completed (host round-trip)"
+        )
         apply_commit = (
             host_activation_handshake.await_and_consume_apply_completed_authority()
         )
+        _emit_startup_breadcrumb("END 6e apply_completed / STARTED next")
         started_report = {
             "schema_version": SERVICE_REPORT_SCHEMA_VERSION,
             "verdict": "CAPTURED_ALPACA_PAPER_STARTED",
@@ -7328,6 +7343,7 @@ def _execute_active_service(
         }
         sys.stdout.buffer.write(_canonical_json_bytes(started_report) + b"\n")
         sys.stdout.buffer.flush()
+        _emit_startup_breadcrumb("6f STARTED published / enter health loop")
         while not shutdown.wait(_SERVICE_HEALTH_POLL_SECONDS):
             # The short permit is a one-shot startup authority.  Once STARTED
             # is durably acknowledged, continuing operation is governed by the
@@ -7478,8 +7494,54 @@ def _validate_mode_arguments(args: argparse.Namespace) -> None:
         )
 
 
+_STARTUP_BREADCRUMB_PATH: str | None = None
+_FAULT_LOG_FP = None  # module anchor: never GC the faulthandler file handle
+
+
+def _set_startup_breadcrumb_path(receipt_path: object) -> None:
+    global _STARTUP_BREADCRUMB_PATH
+    base = str(receipt_path or "").strip()
+    _STARTUP_BREADCRUMB_PATH = (
+        base + ".service-breadcrumbs.log"
+        if base
+        else os.path.join(
+            tempfile.gettempdir(),
+            "captured_alpaca_paper_service.service-breadcrumbs.log",
+        )
+    )
+
+
+def _emit_startup_breadcrumb(step: str) -> None:
+    """Append an fsync'd '<iso-ts> pid=<n> <step>' marker.  Pure syscalls:
+    survives block-buffered stdout/stderr, os._exit, an external TerminateProcess,
+    and a hang (the last line on disk names the dying/blocked step)."""
+    try:
+        path = _STARTUP_BREADCRUMB_PATH or os.path.join(
+            tempfile.gettempdir(),
+            "captured_alpaca_paper_service.service-breadcrumbs.log",
+        )
+        line = (
+            datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            + " pid="
+            + str(os.getpid())
+            + " "
+            + step
+            + "\n"
+        ).encode("utf-8", "replace")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
+    _set_startup_breadcrumb_path(getattr(args, "host_ready_receipt", None))
+    _emit_startup_breadcrumb("BEGIN main mode=" + str(getattr(args, "mode", "?")))
     # 2026-07-17: two consecutive live PREPARED-phase stalls were invisible
     # (only the dispatch lock appeared, then silence until the cutover's
     # timeout killed the run).  Periodic all-thread stack dumps to stderr —
@@ -7490,11 +7552,46 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # The host cutover observes a bounded startup receipt, so surface the
     # first blocked frame before any outer timeout can terminate the task.
-    # One shot avoids an unbounded diagnostic log after healthy startup.
-    # 2026-07-21: the ActivatePaper start_active bring-up dies within seconds
-    # (well before the old 30s one-shot fired), so lower the timer to surface
-    # the active/blocked frame before a fast self-termination.
-    faulthandler.dump_traceback_later(3.0, repeat=False, file=sys.stderr)
+    # 2026-07-21: the previous one-shot at 3.0s pointed at the launcher-redirected
+    # stderr and was lost on the cutover's hard TerminateProcess (0-byte stderr).
+    # Own a real file, keep the handle for the process lifetime, install the
+    # fatal-fault handlers, and repeat every 1s so a PREPARED-phase stall leaves
+    # the blocked all-thread frame on disk before the 900s kill.
+    global _FAULT_LOG_FP
+    _fault_base = str(getattr(args, "host_ready_receipt", None) or "").strip()
+    _fault_log_path = (
+        _fault_base + ".service-faulthandler.log"
+        if _fault_base
+        else os.path.join(
+            tempfile.gettempdir(),
+            "captured_alpaca_paper_service.service-faulthandler.log",
+        )
+    )
+    try:
+        _FAULT_LOG_FP = open(_fault_log_path, "a", buffering=1, encoding="utf-8")
+        faulthandler.enable(file=_FAULT_LOG_FP, all_threads=True)
+        faulthandler.dump_traceback_later(1.0, repeat=True, file=_FAULT_LOG_FP)
+    except Exception:
+        faulthandler.dump_traceback_later(3.0, repeat=False, file=sys.stderr)
+
+    # A worker-thread crash otherwise prints to block-buffered stderr and
+    # vanishes on the kill; land it (flattened) in the fsync'd breadcrumb log.
+    def _thread_crash_breadcrumb(_a: Any) -> None:
+        try:
+            _emit_startup_breadcrumb(
+                "THREAD-CRASH thread="
+                + str(getattr(_a.thread, "name", "?"))
+                + " || "
+                + "".join(
+                    traceback.format_exception(
+                        _a.exc_type, _a.exc_value, _a.exc_traceback
+                    )
+                ).replace("\n", " | ")
+            )
+        except Exception:
+            pass
+
+    threading.excepthook = _thread_crash_breadcrumb
     external_runtime_boundary_entered = False
     provider_start_may_have_been_attempted = False
     active_order_boundary_entered = False
@@ -7567,6 +7664,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 provider_start_may_have_been_attempted = True
                 active_order_boundary_entered = True
+                _emit_startup_breadcrumb("BEGIN active _execute_active_service")
                 report = _execute_active_service(
                     verified=verified,
                     composition=composition,
