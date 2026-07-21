@@ -1313,10 +1313,21 @@ def _capture_observations(
     provider_observed = _fresh(
         provider.get("observed_at"), now, seconds=60, field="provider health"
     )
+    from scripts.iqfeed_capture_only_smoke import (
+        equity_extended_session_is_open,
+    )
+
+    closed_session_activation_only = bool(
+        provider.get("activation_only_closed_session_without_exact_print") is True
+        and not equity_extended_session_is_open(now)
+    )
     if (
         health.get("capture_store_writable") is not True
         or provider.get("socket_readable") is not True
-        or provider.get("exact_print_clock_observed") is not True
+        or (
+            provider.get("exact_print_clock_observed") is not True
+            and not closed_session_activation_only
+        )
     ):
         raise CapturedPaperPreactivationProbeError(
             "CAPTURE_HEALTH_UNAVAILABLE", "capture/provider health is not executable"

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timezone
 import hashlib
 import json
 import math
@@ -28,6 +28,7 @@ import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
 import uuid
+from zoneinfo import ZoneInfo
 
 # Direct ``python scripts/...`` execution otherwise exposes only ``scripts/``.
 # Add this file's fixed repository root; no caller-selected import path is used.
@@ -36,6 +37,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 UTC = timezone.utc
+_EQUITY_SESSION_TIMEZONE = ZoneInfo("America/New_York")
 CAPTURE_ONLY_SMOKE_SCHEMA_VERSION = "chili.iqfeed-capture-only-smoke.v1"
 L1_EXACT_PRINT_PRESELECTION_SMOKE_SCHEMA_VERSION = (
     "chili.iqfeed-l1-exact-print-preselection-smoke.v1"
@@ -72,6 +74,18 @@ def _utc(value: datetime, field: str) -> datetime:
 
 def _iso(value: datetime) -> str:
     return _utc(value, "timestamp").isoformat()
+
+
+def equity_extended_session_is_open(value: datetime) -> bool:
+    """Return whether US-equity premarket/regular/after-hours tape is open."""
+
+    eastern = _utc(value, "equity session clock").astimezone(
+        _EQUITY_SESSION_TIMEZONE
+    )
+    return (
+        eastern.weekday() < 5
+        and datetime_time(4, 0) <= eastern.time() < datetime_time(20, 0)
+    )
 
 
 def _sha(value: Any, field: str) -> str:
@@ -409,6 +423,7 @@ class CaptureOnlySmokeConfiguration:
     trade_forced_symbols: tuple[str, ...]
     depth_forced_symbols: tuple[str, ...]
     l1_only_exact_print_preselection: bool = False
+    activation_only_allow_closed_session_without_exact_print: bool = False
     readiness_timeout_seconds: float = 15.0
     observation_timeout_seconds: float = 30.0
     join_timeout_seconds: float = 20.0
@@ -454,6 +469,13 @@ class CaptureOnlySmokeConfiguration:
         if type(self.l1_only_exact_print_preselection) is not bool:
             raise CaptureOnlySmokeError(
                 "BRIDGE_ROSTER_INVALID", "L1-only preselection mode is malformed"
+            )
+        if type(
+            self.activation_only_allow_closed_session_without_exact_print
+        ) is not bool:
+            raise CaptureOnlySmokeError(
+                "BRIDGE_ROSTER_INVALID",
+                "closed-session activation-only mode is malformed",
             )
         if self.l1_only_exact_print_preselection:
             if tuple(self.depth_forced_symbols):
@@ -985,10 +1007,20 @@ def _validated_capture_observation(
     exact_count = _count(value.exact_print_event_count, "exact print events")
     _sha(value.capture_store_probe_sha256, "capture store probe")
     _sha(value.exact_print_inventory_sha256, "exact print inventory")
-    if exact_count <= 0 or exact_at is None or not started_at <= exact_at <= observed_at:
+    closed_session_activation_only = bool(
+        configuration.activation_only_allow_closed_session_without_exact_print
+        and not equity_extended_session_is_open(observed_now)
+    )
+    if exact_count <= 0:
+        if exact_at is not None or not closed_session_activation_only:
+            raise CaptureOnlySmokeError(
+                "EXACT_PRINT_UNAVAILABLE",
+                "current smoke lacks a provider-clocked exact print accepted during its window",
+            )
+    elif exact_at is None or not started_at <= exact_at <= observed_at:
         raise CaptureOnlySmokeError(
             "EXACT_PRINT_UNAVAILABLE",
-            "current smoke lacks a provider-clocked exact print accepted during its window",
+            "current smoke exact-print clock is unavailable or outside its window",
         )
     if (
         Path(value.capture_store_root).resolve()
@@ -1266,13 +1298,20 @@ def run_capture_only_preactivation_smoke(
             {
                 "observed_at": _iso(captured.observed_at),
                 "socket_readable": True,
-                "exact_print_clock_observed": True,
+                "exact_print_clock_observed": captured.exact_print_event_count > 0,
                 "exact_print_event_count": captured.exact_print_event_count,
                 "exact_print_inventory_sha256": (
                     captured.exact_print_inventory_sha256
                 ),
-                "last_exact_print_available_at": _iso(
-                    captured.last_exact_print_available_at
+                "last_exact_print_available_at": (
+                    None
+                    if captured.last_exact_print_available_at is None
+                    else _iso(captured.last_exact_print_available_at)
+                ),
+                "activation_only_closed_session_without_exact_print": bool(
+                    captured.exact_print_event_count == 0
+                    and configuration.activation_only_allow_closed_session_without_exact_print
+                    and not equity_extended_session_is_open(completed_at)
                 ),
                 **({"depth_provider_started": False} if l1_only else {}),
             }

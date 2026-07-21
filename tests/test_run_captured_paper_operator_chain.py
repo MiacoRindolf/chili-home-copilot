@@ -512,7 +512,7 @@ def test_iqfeed_realtime_delay_is_required_and_unsubscribes(
             b"S,SERVER CONNECTED\r\n"
             b"S,CUST,real_time,127.0.0.1,5009\r\n"
             b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
-            b"Q,AAPL,201.25,15,\r\n"
+            b"P,AAPL,201.25,15,\r\n"
         ],
         [
             b"S,SERVER CONNECTED\r\n"
@@ -562,6 +562,53 @@ def test_iqfeed_realtime_delay_fails_closed_without_exact_authority(
     assert chain._delay_is_zero("AAPL") is False
     assert b"rAAPL\r\n" in connection.sent
     assert connection.closed is True
+
+
+def test_closed_session_realtime_reference_allows_activation_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeIqfeedSocket(
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            b"P,AAPL,201.25,15,\r\n"
+        ]
+    )
+    monkeypatch.setattr(
+        chain.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: connection,
+    )
+
+    assert chain._activation_preselection_is_eligible(
+        "AAPL",
+        as_of=datetime(2026, 7, 21, 0, 30, tzinfo=UTC),
+    ) is True
+    assert connection.closed is True
+
+
+def test_open_session_positive_delay_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeIqfeedSocket(
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            b"Q,AAPL,201.25,15,\r\n"
+        ]
+    )
+    monkeypatch.setattr(
+        chain.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: connection,
+    )
+
+    assert chain._activation_preselection_is_eligible(
+        "AAPL",
+        as_of=datetime(2026, 7, 20, 14, 30, tzinfo=UTC),
+    ) is False
 
 
 class _Rows:
@@ -614,7 +661,7 @@ def test_live_certification_symbol_uses_current_exact_prints_and_delay_zero(
     monkeypatch.setattr(sqlalchemy, "text", lambda value: value)
     monkeypatch.setattr(
         chain,
-        "_delay_is_zero",
+        "_activation_preselection_is_eligible",
         lambda symbol: checked.append(symbol) is None and symbol == "VIVS",
     )
 
@@ -660,7 +707,7 @@ def test_discovery_rows_are_only_seeds_and_require_delay_zero(
     monkeypatch.setattr(sqlalchemy, "text", lambda value: value)
     monkeypatch.setattr(
         chain,
-        "_delay_is_zero",
+        "_activation_preselection_is_eligible",
         lambda symbol: checked.append(symbol) is None and symbol == "VIVS",
     )
 
@@ -686,7 +733,9 @@ def test_live_certification_symbol_fails_closed_when_no_delay_zero_symbol(
     monkeypatch.setenv("DATABASE_URL", "postgresql://protected-authority")
     monkeypatch.setattr(sqlalchemy, "create_engine", lambda *_a, **_k: engine)
     monkeypatch.setattr(sqlalchemy, "text", lambda value: value)
-    monkeypatch.setattr(chain, "_delay_is_zero", lambda _symbol: False)
+    monkeypatch.setattr(
+        chain, "_activation_preselection_is_eligible", lambda _symbol: False
+    )
 
     evidence = tmp_path / "evidence.json"
     _write(evidence, b"candidate evidence")
@@ -975,6 +1024,9 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     monkeypatch: pytest.MonkeyPatch,
     chain_fixture: ChainFixture,
 ) -> None:
+    monkeypatch.setattr(
+        chain, "_equity_extended_session_is_open", lambda **_kwargs: True
+    )
     activation, _path, _digest = chain_fixture.publish()
     monkeypatch.delitem(chain.sys.modules, "app.config", raising=False)
     calls: list[str] = []
@@ -1165,6 +1217,13 @@ def test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash
     ] is False
     assert selection_document["l2_decision_coverage_policy"] == (
         "decision_local_fail_closed"
+    )
+    assert selection_document["iqfeed_customer_realtime_required"] is True
+    assert selection_document["decision_event_freshness_policy"] == (
+        "decision_local_fail_closed"
+    )
+    assert selection_document["delay_zero_required_for_activation"] == (
+        selection_document["equity_extended_session_open"]
     )
     assert result["activation_runner_request_sha256"] == activation.request_sha256
     assert result["operator_chain_request_sha256"] == activation.chain_request_sha256

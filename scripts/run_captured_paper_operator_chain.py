@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time as datetime_time
 from decimal import Decimal, InvalidOperation
 import getpass
 import hashlib
@@ -29,6 +29,7 @@ import sys
 import time
 from typing import Any, Mapping, Sequence
 import uuid
+from zoneinfo import ZoneInfo
 
 from scripts import build_iqfeed_capture_bootstrap_bundle as bootstrap
 from scripts import captured_paper_activation_runner as activation_runner
@@ -50,6 +51,7 @@ _MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_BENCHMARK_BYTES = 64 * 1024 * 1024
 _PRESELECTION_SEED_LIMIT = 8
 _PRESELECTION_SEED_TAIL_ROWS = 100_000
+_EQUITY_SESSION_TIMEZONE = ZoneInfo("America/New_York")
 _CHAIN_KEYS = frozenset(
     {
         "schema_version",
@@ -87,6 +89,21 @@ class ExactPrintPreselectionReceipt:
     bridge_run_id: str
     timestamp_basis: str
     bridge_source_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class IqfeedRealtimeProbe:
+    """Exact IQFeed L1 entitlement and reference-delay observation."""
+
+    customer_realtime: bool
+    exact_fields_selected: bool
+    quote_received: bool
+    delay_minutes: int | None
+    message_type: str | None
+
+    @property
+    def delay_zero(self) -> bool:
+        return self.delay_minutes == 0
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -378,11 +395,13 @@ def _read_exact_paper_account(
     return posture, query, requested_at, available_at
 
 
-def _delay_is_zero(symbol: str, *, timeout_seconds: float = 4.0) -> bool:
+def _probe_iqfeed_realtime_symbol(
+    symbol: str, *, timeout_seconds: float = 4.0
+) -> IqfeedRealtimeProbe:
     try:
         connection = socket.create_connection(("127.0.0.1", 5009), timeout=timeout_seconds)
     except OSError:
-        return False
+        return IqfeedRealtimeProbe(False, False, False, None, None)
     try:
         connection.settimeout(timeout_seconds)
         connection.sendall(b"S,SET PROTOCOL,6.2\r\n")
@@ -416,23 +435,103 @@ def _delay_is_zero(symbol: str, *, timeout_seconds: float = 4.0) -> bool:
                         "Most Recent Trade",
                         "Delay",
                     )
-                elif len(parts) >= 4 and parts[0] == "Q" and parts[1] == symbol:
+                elif (
+                    len(parts) >= 4
+                    and parts[0] in {"Q", "P"}
+                    and parts[1] == symbol
+                ):
                     if not (
                         server_connected
                         and customer_realtime
                         and delay_field_selected
                     ):
                         continue
-                    # IQFeed 6.2 emits an empty Delay field for real-time
-                    # symbols and a positive minute count for delayed symbols.
-                    return (parts[3] or "").strip() in {"", "0"}
-        return False
+                    # The Delay value is the age, in minutes, of the most
+                    # recent trade reference.  It can increase after the
+                    # extended session closes even for a real-time customer.
+                    delay_raw = (parts[3] or "").strip()
+                    if not delay_raw:
+                        delay_minutes = 0
+                    else:
+                        try:
+                            delay_minutes = int(delay_raw)
+                        except ValueError:
+                            return IqfeedRealtimeProbe(
+                                True, True, True, None, parts[0]
+                            )
+                        if delay_minutes < 0:
+                            return IqfeedRealtimeProbe(
+                                True, True, True, None, parts[0]
+                            )
+                    return IqfeedRealtimeProbe(
+                        True,
+                        True,
+                        True,
+                        delay_minutes,
+                        parts[0],
+                    )
+        return IqfeedRealtimeProbe(
+            customer_realtime,
+            delay_field_selected,
+            False,
+            None,
+            None,
+        )
     finally:
         try:
             connection.sendall(f"r{symbol}\r\n".encode("ascii"))
         except OSError:
             pass
         connection.close()
+
+
+def _delay_is_zero(symbol: str, *, timeout_seconds: float = 4.0) -> bool:
+    """Strict intraday authority check retained for actual live tape."""
+
+    probe = _probe_iqfeed_realtime_symbol(
+        symbol,
+        timeout_seconds=timeout_seconds,
+    )
+    return probe.message_type == "Q" and probe.delay_zero
+
+
+def _equity_extended_session_is_open(*, as_of: datetime | None = None) -> bool:
+    observed = as_of or datetime.now(UTC)
+    if observed.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    eastern = observed.astimezone(_EQUITY_SESSION_TIMEZONE)
+    return (
+        eastern.weekday() < 5
+        and datetime_time(4, 0) <= eastern.time() < datetime_time(20, 0)
+    )
+
+
+def _activation_preselection_is_eligible(
+    symbol: str,
+    *,
+    timeout_seconds: float = 4.0,
+    as_of: datetime | None = None,
+) -> bool:
+    """Allow service composition after close without weakening decisions.
+
+    During the equity extended session, an exact zero-delay reference remains
+    mandatory.  Outside that session, a real-time customer entitlement plus
+    an exact selected-field Q/P reference is sufficient only to compose/start PAPER; the trading
+    FSM still applies its event-local freshness and coverage gates before any
+    opportunity, risk reservation, or broker transport.
+    """
+
+    probe = _probe_iqfeed_realtime_symbol(symbol, timeout_seconds=timeout_seconds)
+    if not (
+        probe.customer_realtime
+        and probe.exact_fields_selected
+        and probe.quote_received
+        and probe.delay_minutes is not None
+    ):
+        return False
+    if _equity_extended_session_is_open(as_of=as_of):
+        return probe.message_type == "Q" and probe.delay_zero
+    return True
 
 
 def _discover_capture_seed_symbols() -> tuple[str, ...]:
@@ -484,7 +583,7 @@ def _discover_capture_seed_symbols() -> tuple[str, ...]:
         if (
             _SYMBOL_RE.fullmatch(symbol)
             and symbol not in seeds
-            and _delay_is_zero(symbol)
+            and _activation_preselection_is_eligible(symbol)
         ):
             seeds.append(symbol)
     if not seeds:
@@ -503,6 +602,7 @@ def _capture_candidate_exact_print_preselection(
     artifact_root: Path,
     allowed_read_roots: Sequence[str],
     seed_symbols: Sequence[str],
+    allow_closed_session_activation_only: bool = False,
 ) -> ExactPrintPreselectionReceipt:
     """Run one bounded capture-only producer and publish its zero-order proof."""
 
@@ -560,6 +660,9 @@ def _capture_candidate_exact_print_preselection(
                 trade_forced_symbols=(certification_seed,),
                 depth_forced_symbols=(),
                 l1_only_exact_print_preselection=True,
+                activation_only_allow_closed_session_without_exact_print=(
+                    allow_closed_session_activation_only
+                ),
                 pressure_sampler=lambda: operator_flow._measure_capture_pressure(
                     preflight=preflight,
                     wall_clock=wall_clock,
@@ -583,6 +686,19 @@ def _capture_candidate_exact_print_preselection(
         embedded_evidence_sha256 = str(document.get("evidence_sha256") or "")
         embedded_payload = dict(document)
         embedded_payload.pop("evidence_sha256", None)
+        exact_print_observed = bool(
+            isinstance(provider_health, Mapping)
+            and provider_health.get("exact_print_clock_observed") is True
+            and int(provider_health.get("exact_print_event_count") or 0) > 0
+        )
+        closed_session_activation_only = bool(
+            allow_closed_session_activation_only
+            and isinstance(provider_health, Mapping)
+            and provider_health.get(
+                "activation_only_closed_session_without_exact_print"
+            )
+            is True
+        )
         if (
             document.get("schema_version")
             != "chili.iqfeed-l1-exact-print-preselection-smoke.v1"
@@ -613,8 +729,7 @@ def _capture_candidate_exact_print_preselection(
             or capture_health.get("overflow_count") != 0
             or capture_health.get("unreported_gap_count") != 0
             or not isinstance(provider_health, Mapping)
-            or provider_health.get("exact_print_clock_observed") is not True
-            or int(provider_health.get("exact_print_event_count") or 0) <= 0
+            or not (exact_print_observed or closed_session_activation_only)
             or provider_health.get("depth_provider_started") is not False
         ):
             raise CapturedPaperOperatorChainError(
@@ -754,7 +869,7 @@ def _select_live_certification_symbol(
         ) from exc
     for raw_symbol, _count in rows:
         symbol = str(raw_symbol or "").strip().upper()
-        if _SYMBOL_RE.fullmatch(symbol) and _delay_is_zero(symbol):
+        if _SYMBOL_RE.fullmatch(symbol) and _activation_preselection_is_eligible(symbol):
             return symbol
     raise CapturedPaperOperatorChainError(
         "LIVE_TAPE_REALTIME_SYMBOL_UNAVAILABLE",
@@ -897,6 +1012,7 @@ def run_operator_chain(
         allowed_write_roots=(artifact_root,),
     )
 
+    extended_session_open = _equity_extended_session_is_open()
     seed_symbols = _discover_capture_seed_symbols()
     preselection = _capture_candidate_exact_print_preselection(
         bootstrap_manifest_path=built.manifest_path,
@@ -905,9 +1021,12 @@ def run_operator_chain(
         artifact_root=artifact_root,
         allowed_read_roots=activation_request.allowed_read_roots,
         seed_symbols=seed_symbols,
+        allow_closed_session_activation_only=not extended_session_open,
     )
-    certification_symbol = _select_live_certification_symbol(
-        preselection=preselection
+    certification_symbol = (
+        _select_live_certification_symbol(preselection=preselection)
+        if extended_session_open
+        else seed_symbols[0]
     )
     selection_document = {
         "schema_version": "chili.captured-paper-exact-print-selection.v1",
@@ -922,10 +1041,18 @@ def run_operator_chain(
         "timestamp_basis": preselection.timestamp_basis,
         "candidate_capture_started_at": _iso(preselection.started_at),
         "candidate_capture_completed_at": _iso(preselection.completed_at),
-        "preselection_provider_scope": "l1_exact_print_preselection",
+        "preselection_provider_scope": (
+            "l1_exact_print_preselection"
+            if extended_session_open
+            else "l1_closed_session_activation_connectivity"
+        ),
         "l2_snapshot_completion_required_for_preselection": False,
         "l2_decision_coverage_policy": "decision_local_fail_closed",
-        "delay_zero_rechecked": True,
+        "iqfeed_customer_realtime_required": True,
+        "equity_extended_session_open": extended_session_open,
+        "delay_zero_required_for_activation": extended_session_open,
+        "closed_session_reference_allowed_for_activation": not extended_session_open,
+        "decision_event_freshness_policy": "decision_local_fail_closed",
         "legacy_rows_accepted_as_evidence": False,
         "broker_adapter_constructed": False,
         "order_transport_constructed": False,

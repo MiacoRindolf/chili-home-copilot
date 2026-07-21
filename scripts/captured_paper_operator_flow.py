@@ -994,6 +994,7 @@ def build_live_operator_composition(
         from scripts.iqfeed_capture_only_smoke import (
             CaptureOnlySmokeConfiguration,
             IngressCaptureOnlyHealthAuthority,
+            equity_extended_session_is_open,
             run_capture_only_preactivation_smoke,
         )
 
@@ -1024,6 +1025,9 @@ def build_live_operator_composition(
             capture_health_authority=health,
             trade_forced_symbols=(config.capture_certification_symbol,),
             depth_forced_symbols=(config.capture_certification_symbol,),
+            activation_only_allow_closed_session_without_exact_print=(
+                not equity_extended_session_is_open(wall_clock())
+            ),
             pressure_sampler=lambda: _measure_capture_pressure(
                 preflight=preflight,
                 wall_clock=wall_clock,
