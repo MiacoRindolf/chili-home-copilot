@@ -665,16 +665,33 @@ def _normalized_cutover_evidence(value: Mapping[str, Any]) -> Mapping[str, Any]:
             lane_document
         ),
     }
+    # Keep the singleton boundary fail-closed, but identify the exact local
+    # authority class that prevented startup.  The former aggregate reason
+    # made a clean 30-second cutover horizon indistinguishable from a bridge
+    # process that appeared later, forcing another full activation merely to
+    # diagnose which already-enforced predicate failed.
     if not (
         normalized["candidate_task_name"] == "CHILI-Captured-Alpaca-PAPER"
         and normalized["candidate_task_enabled"] is True
-        and all(value is False for value in normalized["legacy_task_enabled"].values())
-        and normalized["legacy_bridge_processes"] == []
-        and normalized["legacy_recreator_processes"] == []
     ):
         raise CapturedAlpacaPaperServiceError(
-            "HOST_CUTOVER_INCOMPLETE",
-            "candidate task is not sole owner or legacy capture remains runnable",
+            "HOST_CUTOVER_INCOMPLETE_CANDIDATE_TASK",
+            "candidate task is absent, disabled, or has the wrong identity",
+        )
+    if any(normalized["legacy_task_enabled"].values()):
+        raise CapturedAlpacaPaperServiceError(
+            "HOST_CUTOVER_INCOMPLETE_LEGACY_TASK",
+            "a legacy IQFeed scheduled task remains enabled",
+        )
+    if normalized["legacy_bridge_processes"]:
+        raise CapturedAlpacaPaperServiceError(
+            "HOST_CUTOVER_INCOMPLETE_LEGACY_BRIDGE",
+            "an IQFeed bridge process remains present",
+        )
+    if normalized["legacy_recreator_processes"]:
+        raise CapturedAlpacaPaperServiceError(
+            "HOST_CUTOVER_INCOMPLETE_RECREATOR_PROCESS",
+            "an external execution-lane recreator process remains present",
         )
     return normalized
 

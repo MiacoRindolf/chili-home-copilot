@@ -2643,6 +2643,27 @@ def test_launcher_cutover_attestation_rejects_recreator_descendant(
         )
 
 
+def test_launcher_cutover_attestation_identifies_late_bridge_process(
+    monkeypatch,
+) -> None:
+    verified, args, evidence = _launcher_attestation_fixture(monkeypatch)
+    evidence["cutover"]["legacy_bridge_processes"] = [
+        "1234:iqfeed_trade_bridge.py"
+    ]
+
+    with pytest.raises(
+        CapturedAlpacaPaperServiceError,
+        match="HOST_CUTOVER_INCOMPLETE_LEGACY_BRIDGE",
+    ):
+        service_module._issue_launcher_cutover_attestation(
+            verified=verified,
+            args=args,
+            process_probe=lambda: evidence,
+            cutover_probe=lambda: evidence["cutover"],
+            wall_clock=lambda: NOW,
+        )
+
+
 def test_launcher_cutover_attestation_rejects_direct_or_drifted_parent(
     monkeypatch,
 ):
