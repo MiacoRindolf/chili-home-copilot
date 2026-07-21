@@ -2384,7 +2384,7 @@ def _reserialized_candidate_xml(raw: bytes) -> bytes:
     ET.SubElement(
         settings, f"{{{NS}}}DisallowStartOnRemoteAppSession"
     ).text = "false"
-    ET.SubElement(settings, f"{{{NS}}}UseUnifiedSchedulingEngine").text = "false"
+    ET.SubElement(settings, f"{{{NS}}}UseUnifiedSchedulingEngine").text = "true"
     idle = settings.find(f"{{{NS}}}IdleSettings")
     assert idle is not None
     ET.SubElement(idle, f"{{{NS}}}Duration").text = "PT10M"

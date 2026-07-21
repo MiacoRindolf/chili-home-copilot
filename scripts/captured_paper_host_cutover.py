@@ -2702,7 +2702,10 @@ def _candidate_task_scheduler_projection_from_xml(raw: bytes) -> Mapping[str, An
         "WakeToRun": "false",
         "Priority": "7",
         "DisallowStartOnRemoteAppSession": "false",
-        "UseUnifiedSchedulingEngine": "false",
+        # Current Windows Task Scheduler materializes this as true on the
+        # readback of the sealed on-demand/no-trigger task even when the
+        # authored XML omits the schema-default field.
+        "UseUnifiedSchedulingEngine": "true",
         "Volatile": "false",
     }
     if not (
