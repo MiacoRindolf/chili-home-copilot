@@ -412,6 +412,7 @@ def _probe_iqfeed_realtime_symbol(
         server_connected = False
         customer_realtime = False
         delay_field_selected = False
+        snapshot_fallback: IqfeedRealtimeProbe | None = None
         while time.monotonic() < deadline:
             try:
                 chunk = connection.recv(4096)
@@ -463,14 +464,23 @@ def _probe_iqfeed_realtime_symbol(
                             return IqfeedRealtimeProbe(
                                 True, True, True, None, parts[0]
                             )
-                    return IqfeedRealtimeProbe(
+                    observation = IqfeedRealtimeProbe(
                         True,
                         True,
                         True,
                         delay_minutes,
                         parts[0],
                     )
-        return IqfeedRealtimeProbe(
+                    # IQFeed normally emits one P snapshot immediately after
+                    # subscription, followed by Q updates.  Returning on P
+                    # made the intraday caller's Q-only live-event requirement
+                    # impossible to satisfy even when a Q was already queued.
+                    # Preserve P for closed-session connectivity, but keep
+                    # reading for the authoritative live Q until the bound.
+                    if parts[0] == "Q":
+                        return observation
+                    snapshot_fallback = observation
+        return snapshot_fallback or IqfeedRealtimeProbe(
             customer_realtime,
             delay_field_selected,
             False,

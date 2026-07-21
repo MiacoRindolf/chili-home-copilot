@@ -505,6 +505,32 @@ def test_iqfeed_realtime_delay_is_required_and_unsubscribes(
     assert connection.closed is True
 
 
+def test_iqfeed_realtime_probe_waits_past_snapshot_for_live_q(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeIqfeedSocket(
+        [
+            b"S,SERVER CONNECTED\r\n"
+            b"S,CUST,real_time,127.0.0.1,5009\r\n"
+            b"S,CURRENT UPDATE FIELDNAMES,Symbol,Most Recent Trade,Delay\r\n"
+            b"P,AAPL,201.25,0,\r\n",
+            b"Q,AAPL,201.26,0,\r\n",
+        ]
+    )
+    monkeypatch.setattr(
+        chain.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: connection,
+    )
+
+    probe = chain._probe_iqfeed_realtime_symbol("AAPL")
+
+    assert probe.message_type == "Q"
+    assert probe.delay_zero is True
+    assert b"rAAPL\r\n" in connection.sent
+    assert connection.closed is True
+
+
 @pytest.mark.parametrize(
     "frames",
     [
