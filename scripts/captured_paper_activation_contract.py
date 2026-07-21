@@ -478,15 +478,17 @@ _RECEIPT_MAX_AGE_SECONDS: Mapping[str, int] = MappingProxyType(
         # re-checks the kill switch at its own boot.  The class must cover
         # receipt capture (mid-probe-battery) through the LAST consumer
         # (launcher ValidateOnly / ActivatePaper re-walk the full roster):
-        # measured ~8-10 minutes end-to-end, so 5 minutes still starved the
-        # tail.  10 minutes covers it; unbounded operator waits are meant to
-        # fail closed — receipt staleness IS the fence.
-        "runtime_settings": 10 * 60,
+        # measured ~8-12 minutes from the shared preactivation capture clock
+        # through service startup.  A34 proved that 10 minutes starves both
+        # lifecycle_preflight and runtime_settings, which share observed_at.
+        # Their bounded 20-minute windows match database/capture.  Unbounded
+        # operator waits still fail closed — receipt staleness IS the fence.
+        "runtime_settings": 20 * 60,
         "broker_account": 10 * 60,
         "database_schema": 20 * 60,
         "capture_host_smoke": 20 * 60,
         "focused_regressions": 60 * 60,
-        "lifecycle_preflight": 10 * 60,
+        "lifecycle_preflight": 20 * 60,
         "kill_switch": 10 * 60,
         "no_order_smoke": 20 * 60,
         "rollback_snapshot": 60 * 60,

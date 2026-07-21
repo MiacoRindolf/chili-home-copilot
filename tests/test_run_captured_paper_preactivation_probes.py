@@ -33,6 +33,8 @@ def test_operational_receipt_windows_match_activation_contract() -> None:
         for kind in probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND
     }
     assert probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND["database_schema"] == 20 * 60
+    assert probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND["lifecycle_preflight"] == 20 * 60
+    assert probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND["runtime_settings"] == 20 * 60
 
 
 def h(value: str) -> str:

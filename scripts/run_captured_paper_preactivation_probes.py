@@ -145,12 +145,12 @@ OPERATIONAL_MAX_AGE_SECONDS_BY_KIND: Mapping[str, int] = MappingProxyType(
         # consumer (finalize, cutover, launcher, ActivatePaper) re-walks the
         # roster against the contract table, so the two tables must agree
         # per kind.  See the contract table for the full sizing rationale.
-        "runtime_settings": 10 * 60,
+        "runtime_settings": 20 * 60,
         "broker_account": 10 * 60,
         "database_schema": 20 * 60,
         "capture_host_smoke": 20 * 60,
         "focused_regressions": 60 * 60,
-        "lifecycle_preflight": 10 * 60,
+        "lifecycle_preflight": 20 * 60,
         "kill_switch": 10 * 60,
         "rollback_snapshot": 60 * 60,
     }
