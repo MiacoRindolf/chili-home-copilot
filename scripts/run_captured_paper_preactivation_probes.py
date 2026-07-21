@@ -148,7 +148,7 @@ OPERATIONAL_MAX_AGE_SECONDS_BY_KIND: Mapping[str, int] = MappingProxyType(
         "runtime_settings": 10 * 60,
         "broker_account": 10 * 60,
         "database_schema": 10 * 60,
-        "capture_host_smoke": 10 * 60,
+        "capture_host_smoke": 20 * 60,
         "focused_regressions": 60 * 60,
         "lifecycle_preflight": 10 * 60,
         "kill_switch": 10 * 60,

@@ -12,6 +12,7 @@ from types import MappingProxyType
 import pytest
 
 from scripts import captured_paper_readiness_evidence as readiness
+from scripts import captured_paper_activation_contract as activation_contract
 from scripts import captured_paper_host_cutover as host_cutover
 from scripts import run_captured_paper_preactivation_probes as probes
 from scripts.captured_paper_runtime_env import (
@@ -24,6 +25,13 @@ UTC = timezone.utc
 NOW = datetime(2026, 7, 16, 18, 0, tzinfo=UTC)
 ACCOUNT = "11111111-2222-4333-8444-555555555555"
 GENERATION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def test_operational_receipt_windows_match_activation_contract() -> None:
+    assert probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND == {
+        kind: activation_contract._RECEIPT_MAX_AGE_SECONDS[kind]
+        for kind in probes.OPERATIONAL_MAX_AGE_SECONDS_BY_KIND
+    }
 
 
 def h(value: str) -> str:
