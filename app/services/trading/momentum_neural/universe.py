@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -614,15 +615,44 @@ def build_equity_universe(
     if profile.asset_class != "equity":
         return []
     if snapshot is None:
-        try:
-            from ...massive_client import get_full_market_snapshot
+        # 2026-07-21: get_full_market_snapshot() reads Massive's full-market
+        # chunked HTTP body with only a per-read socket timeout (15s), NOT a
+        # total wall-clock deadline. A slow-drip/large body blocks the native
+        # ssl.recv indefinitely (faulthandler-proven: the captured-PAPER
+        # provider lane parked here until the host cutover's ~900s kill —
+        # 0-byte logs, no crash event, STARTUP_RECEIPT_UNAVAILABLE). Bound the
+        # total time in a daemon thread and fail-open to [] — behaviorally
+        # identical to the existing "fetch failed → []" fallback, so the happy
+        # path and no-regression contract are unchanged; only an unbounded hang
+        # is converted into the same default-universe fallback.
+        _snap_box: dict = {}
 
-            snapshot = get_full_market_snapshot(
-                max_age_seconds=profile.snapshot_max_age_seconds
-            ) or []
-        except Exception:
-            logger.debug("[universe] snapshot fetch failed", exc_info=True)
+        def _fetch_snapshot() -> None:
+            try:
+                from ...massive_client import get_full_market_snapshot
+
+                _snap_box["value"] = get_full_market_snapshot(
+                    max_age_seconds=profile.snapshot_max_age_seconds
+                )
+            except Exception:
+                _snap_box["error"] = True
+
+        _fetch_thread = threading.Thread(
+            target=_fetch_snapshot, name="universe-massive-fetch", daemon=True
+        )
+        _fetch_thread.start()
+        _fetch_thread.join(timeout=30.0)
+        if (
+            _fetch_thread.is_alive()
+            or _snap_box.get("error")
+            or not _snap_box.get("value")
+        ):
+            logger.debug(
+                "[universe] snapshot fetch slow/failed; fail-open to []",
+                exc_info=bool(_snap_box.get("error")),
+            )
             return []
+        snapshot = _snap_box["value"] or []
 
     # HOT-MOVER RE-CATCH config (read ONCE, lazily, so tests/callers can flip the
     # flag without a re-import — and so no later block re-imports `settings` under a
