@@ -1016,12 +1016,47 @@ def streak_risk_multiplier(db, *, execution_family: str | None = None) -> tuple[
         # entries; the verified deepest real entry within the non-null set sits well
         # inside this cap. Bounded + indexed (mode, terminal_at desc).
         raw = q.order_by(MomentumAutomationOutcome.terminal_at.desc()).limit(40).all()
-        pnls = [float(p) for (p, oc) in raw if is_real_entry_outcome(oc)][:10]
-        if len(pnls) < 5:
-            return 1.0, {"streak_mult": 1.0, "reason": "insufficient_history", "n": len(pnls)}
-        win_rate = sum(1 for p in pnls if p > 0) / len(pnls)
+        pairs = [
+            (float(p), str(oc or "").strip().lower())
+            for (p, oc) in raw
+            if is_real_entry_outcome(oc)
+        ][:10]
+        if len(pairs) < 5:
+            return 1.0, {"streak_mult": 1.0, "reason": "insufficient_history", "n": len(pairs)}
+        # GAP-C (2026-07-21, VALIDATE-FIRST, default-OFF): a near-breakeven
+        # bailout/timed_exit is Ross DISCIPLINE (cut fast at ~scratch), NOT a
+        # real loss. Counting it as a loss (p<=0) pins this dial to its 0.5 floor
+        # after a few early scratches and locks the whole day out while the
+        # leader still runs (the CLRO 07-07 death-spiral: 6 bailouts -> exp_mult
+        # 0.5 -> afternoon budget-blocked while CLRO ran to 16.50). When enabled,
+        # classify such scratches as NEUTRAL: excluded from BOTH win_rate and the
+        # consecutive-loss run. One documented band knob. Default-off keeps the
+        # computation byte-identical until an FSM-replay of CLRO 07-07 proves it
+        # net-positive (no over-sizing of bailout-prone names). Real stops
+        # (stop_loss) and larger bailouts still count as losses.
+        _scratch_on = bool(
+            getattr(settings, "chili_momentum_streak_scratch_exclusion_enabled", False)
+        )
+        _scratch_band = abs(
+            float(getattr(settings, "chili_momentum_streak_scratch_band_usd", 3.0) or 0.0)
+        )
+        _scratch_classes = {"bailout", "timed_exit"}
+
+        def _is_scratch(pnl: float, oc: str) -> bool:
+            return _scratch_on and oc in _scratch_classes and abs(pnl) <= _scratch_band
+
+        graded = [(p, oc) for (p, oc) in pairs if not _is_scratch(p, oc)]
+        n_scratch = len(pairs) - len(graded)
+        if len(graded) < 5:
+            return 1.0, {
+                "streak_mult": 1.0,
+                "reason": "insufficient_history_ex_scratch",
+                "n": len(graded),
+                "scratches_excluded": n_scratch,
+            }
+        win_rate = sum(1 for (p, _oc) in graded if p > 0) / len(graded)
         consec_losses = 0
-        for p in pnls:  # newest first
+        for (p, _oc) in graded:  # newest first
             if p <= 0:
                 consec_losses += 1
             else:
@@ -1031,7 +1066,8 @@ def streak_risk_multiplier(db, *, execution_family: str | None = None) -> tuple[
             mult = 0.5
         return mult, {
             "streak_mult": round(mult, 2), "win_rate": round(win_rate, 2),
-            "consecutive_losses": consec_losses, "n": len(pnls),
+            "consecutive_losses": consec_losses, "n": len(graded),
+            "scratches_excluded": n_scratch,
         }
     except Exception:
         return 1.0, {"streak_mult": 1.0, "reason": "error_fail_neutral"}
