@@ -1870,6 +1870,34 @@ class _BoundedOneShotStore(Generic[_T]):
             )
 
 
+def _emit_capture_host_breadcrumb(step: str) -> None:
+    """Fsync one capture-host boundary marker to the shared service breadcrumb
+    file. Pure syscalls in a bare try/except so it survives a hard native crash
+    or os._exit -- the LAST line on disk names the exact sub-step that died
+    (a60 proved the service dies silently inside start_provider_loops with no
+    Python exception, no crash json, empty stderr)."""
+    try:
+        path = os.environ.get("CHILI_CAPTURED_PAPER_BREADCRUMB_PATH")
+        if not path:
+            import tempfile
+
+            path = os.path.join(
+                tempfile.gettempdir(),
+                "captured_alpaca_paper_service.service-breadcrumbs.log",
+            )
+        line = f"{time.time()} pid={os.getpid()} capture_host {step}\n".encode(
+            "utf-8", "replace"
+        )
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
 class IqfeedCaptureHost:
     """Own exact bridge bindings and hot L2 activation without launching I/O."""
 
@@ -1951,11 +1979,15 @@ class IqfeedCaptureHost:
             if self._state is not IqfeedCaptureHostState.PREPARED:
                 raise CaptureContractError("IQFeed host binding is one-shot")
             try:
+                _emit_capture_host_breadcrumb("bind: BEGIN start_ingress")
                 self.composition.start_ingress()
+                _emit_capture_host_breadcrumb("bind: END start_ingress; BEGIN trade_handoff")
                 self.trade_bridge.bind_capture_handoff(self.composition.l1_handoff)
                 self._trade_bound = True
+                _emit_capture_host_breadcrumb("bind: END trade_handoff; BEGIN depth_handoff")
                 self.depth_bridge.bind_capture_handoff(self.composition.l2_handoff)
                 self._depth_bound = True
+                _emit_capture_host_breadcrumb("bind: END depth_handoff")
                 bound_at = _utc(self._wall_clock(), "IQFeed host binding clock")
                 receipt = IqfeedCaptureHostBindingReceipt(
                     process_id=os.getpid(),
@@ -2512,7 +2544,9 @@ class IqfeedCaptureHost:
                     "IQFeed provider-loop supervision is one-shot"
                 )
             if self._state is IqfeedCaptureHostState.PREPARED:
+                _emit_capture_host_breadcrumb("start_provider_loops: BEGIN bind")
                 receipt = self.bind()
+                _emit_capture_host_breadcrumb("start_provider_loops: END bind")
             elif self._state is IqfeedCaptureHostState.BOUND:
                 if self._receipt is None:
                     raise CaptureContractError(
@@ -2526,6 +2560,7 @@ class IqfeedCaptureHost:
             self._provider_supervisor = supervisor
             self._provider_join_timeout_seconds = float(join_timeout_seconds)
             try:
+                _emit_capture_host_breadcrumb("start_provider_loops: BEGIN supervisor.start")
                 provider_health = supervisor.start(
                     readiness_timeout_seconds=readiness_timeout_seconds,
                     join_timeout_seconds=join_timeout_seconds,
@@ -2533,6 +2568,7 @@ class IqfeedCaptureHost:
                     trade_forced_symbols=trade_forced_symbols,
                     depth_forced_symbols=depth_forced_symbols,
                 )
+                _emit_capture_host_breadcrumb("start_provider_loops: END supervisor.start")
             except BaseException as exc:
                 cleanup_failures: list[BaseException] = []
                 try:
