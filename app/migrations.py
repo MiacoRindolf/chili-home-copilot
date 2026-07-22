@@ -28591,6 +28591,15 @@ def _migration_351_captured_paper_variant_application_receipts(conn) -> None:
         raise RuntimeError(
             "captured PAPER variant application event schema incomplete"
         )
+    # Take both tables' locks up front so a concurrent autovacuum ANALYZE cannot
+    # race the trigger DDL below on the shared pg_class catalog row (Postgres
+    # raises 'tuple concurrently updated' otherwise). ACCESS EXCLUSIVE cancels /
+    # blocks the autovacuum worker on these tables for this transaction, making
+    # the idempotent re-run deterministic under load (e.g. the activation gate).
+    conn.execute(text(
+        "LOCK TABLE captured_paper_variant_application_receipts, "
+        "captured_paper_variant_application_events IN ACCESS EXCLUSIVE MODE"
+    ))
     conn.execute(text("""
         CREATE OR REPLACE FUNCTION reject_captured_paper_variant_application_mutation()
         RETURNS trigger AS $$
@@ -28684,6 +28693,11 @@ def _migration_352_captured_paper_variant_application_append_only(conn) -> None:
             raise RuntimeError(
                 "legacy captured PAPER application rows require explicit sealed migration"
             )
+        # Same autovacuum/DDL catalog-race guard as migration 351 (see there).
+        conn.execute(text(
+            "LOCK TABLE captured_paper_variant_application_receipts "
+            "IN ACCESS EXCLUSIVE MODE"
+        ))
         conn.execute(text("""
             DROP TRIGGER IF EXISTS trg_captured_paper_variant_application_guard
             ON captured_paper_variant_application_receipts
