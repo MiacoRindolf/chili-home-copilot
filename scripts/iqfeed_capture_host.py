@@ -232,6 +232,7 @@ class IqfeedProviderLoopSupervisor:
         reconnect_wait_seconds: float,
     ) -> None:
         bridge = self._bridges[lane]
+        _emit_capture_host_breadcrumb(f"provider_lane[{lane}]: thread body entered; BEGIN run_supervised")
         try:
             bridge.run_supervised(
                 stop_event=self._stop_event,
@@ -307,11 +308,13 @@ class IqfeedProviderLoopSupervisor:
                     daemon=False,
                     name=f"chili-iqfeed-{lane}-provider-loop",
                 )
+            _emit_capture_host_breadcrumb("supervisor.start: threads created; BEGIN thread.start")
             started: list[threading.Thread] = []
             try:
                 for lane in ("trade", "depth"):
                     thread = self._threads[lane]
                     thread.start()
+                    _emit_capture_host_breadcrumb(f"supervisor.start: {lane} thread.start returned")
                     started.append(thread)
             except BaseException as exc:
                 self._record_failure("supervisor_start", exc)
@@ -323,6 +326,7 @@ class IqfeedProviderLoopSupervisor:
                 "IQFeed provider-loop thread start failed"
             )
 
+        _emit_capture_host_breadcrumb("supervisor.start: BEGIN readiness wait loop")
         deadline = time.monotonic() + readiness_timeout
         while True:
             with self._lock:
