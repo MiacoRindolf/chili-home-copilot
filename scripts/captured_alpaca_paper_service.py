@@ -7509,6 +7509,10 @@ def _set_startup_breadcrumb_path(receipt_path: object) -> None:
             "captured_alpaca_paper_service.service-breadcrumbs.log",
         )
     )
+    # Bridge the same breadcrumb file into the supervisor module (imported app
+    # code) so its start_active boundary markers interleave with these in call
+    # order — the last line names the exact dying step across both layers.
+    os.environ["CHILI_CAPTURED_PAPER_BREADCRUMB_PATH"] = _STARTUP_BREADCRUMB_PATH
 
 
 def _emit_startup_breadcrumb(step: str) -> None:

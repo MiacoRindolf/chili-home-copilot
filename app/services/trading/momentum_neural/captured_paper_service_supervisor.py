@@ -21,7 +21,9 @@ from enum import Enum
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -32,6 +34,32 @@ from .captured_paper_dispatcher import (
     CapturedPaperRuntimeUnavailableError,
     register_captured_paper_runtime,
 )
+
+
+def _emit_supervisor_breadcrumb(step: str) -> None:
+    """Fsync one start_active boundary marker to disk. Pure syscalls in a bare
+    try/except: survives block-buffered stdout, os._exit, an external
+    TerminateProcess, and a hang (the last line on disk names the blocked
+    boundary). NO faulthandler/SEH — earlier faulthandler-based instruments
+    crashed the run. Shares the service's breadcrumb file via
+    CHILI_CAPTURED_PAPER_BREADCRUMB_PATH so supervisor lines interleave with the
+    service's own BEGIN-6 breadcrumbs in call order."""
+    try:
+        path = os.environ.get("CHILI_CAPTURED_PAPER_BREADCRUMB_PATH") or os.path.join(
+            tempfile.gettempdir(),
+            "captured_alpaca_paper_service.service-breadcrumbs.log",
+        )
+        line = f"{time.time()} pid={os.getpid()} supervisor {step}\n".encode(
+            "utf-8", "replace"
+        )
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
 
 
 class CapturedPaperServiceSupervisorError(RuntimeError):
@@ -376,9 +404,11 @@ class CapturedPaperServiceSupervisor:
             )
         self._fenced_prestart_receipt = dict(fenced_prestart)
         self._service_fence.assert_held()
+        _emit_supervisor_breadcrumb("BEGIN start_provider_loops")
         receipt = self._host.start_provider_loops(
             **self._provider_options(provider_options)
         )
+        _emit_supervisor_breadcrumb("END start_provider_loops")
         if not isinstance(receipt, Mapping):
             raise CapturedPaperServiceSupervisorError(
                 "captured_paper_provider_start_receipt_invalid"
@@ -456,7 +486,9 @@ class CapturedPaperServiceSupervisor:
             # exceed that authority window; none of these workers can POST.
             for managed in self._pre_authority_workers:
                 self._service_fence.assert_held()
+                _emit_supervisor_breadcrumb("BEGIN pre_auth_worker.start " + managed.name)
                 managed.worker.start()
+                _emit_supervisor_breadcrumb("END pre_auth_worker.start " + managed.name)
                 self._started_pre_authority_workers.append(managed)
                 worker_health = _health_mapping(managed.worker.health())
                 if (
@@ -604,7 +636,9 @@ class CapturedPaperServiceSupervisor:
             for managed in self._workers:
                 start_authority.assert_current()
                 self._service_fence.assert_held()
+                _emit_supervisor_breadcrumb("BEGIN worker.start " + managed.name)
                 managed.worker.start()
+                _emit_supervisor_breadcrumb("END worker.start " + managed.name)
                 self._started_workers.append(managed)
                 worker_health = _health_mapping(managed.worker.health())
                 if (
@@ -617,10 +651,12 @@ class CapturedPaperServiceSupervisor:
                 start_authority.assert_current()
             start_authority.assert_current()
             self._service_fence.assert_held()
+            _emit_supervisor_breadcrumb("BEGIN live_loop_start")
             if self._live_loop_start() is not True:
                 raise CapturedPaperServiceSupervisorError(
                     "captured_paper_live_loop_start_unconfirmed"
                 )
+            _emit_supervisor_breadcrumb("END live_loop_start")
             self._live_loop_started = True
             if self._live_loop_health() is not True:
                 raise CapturedPaperServiceSupervisorError(
