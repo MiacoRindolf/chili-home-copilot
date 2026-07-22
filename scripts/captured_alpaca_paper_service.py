@@ -7567,19 +7567,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             "captured_alpaca_paper_service.service-faulthandler.log",
         )
     )
-    # NOTE 2026-07-21: faulthandler.enable() was tried here and REMOVED — on
-    # Windows it intercepts a benign first-chance access violation raised by
-    # ntpath.realpath / pathlib.Path.resolve() during the shared
-    # discover_captured_paper_local_dependency_closure() walk (CPython handles
-    # it internally) and turns it FATAL, which regressed the previously-green
-    # no-order-smoke into a 0xC0000005. Use only the timer-based dumper, which
-    # observes without installing a SEH handler, so a genuine start_active
-    # stall still lands its blocked frame on disk without corrupting the run.
+    # NOTE 2026-07-21: BOTH faulthandler.enable() AND a repeating
+    # dump_traceback_later() were tried here and REMOVED. On Windows they
+    # corrupt the previously-green run: enable() turns a benign first-chance
+    # ntpath.realpath access violation FATAL, and a repeat timer walking all
+    # thread stacks WHILE a native .pyd is being imported during
+    # validate_offline_startup crashes the process (0xC0000005). The fsync'd
+    # breadcrumbs below are the safe, sufficient instrument — they never touch
+    # the faulthandler/SEH machinery. Keep only a single, late one-shot dump to
+    # stderr as a last-resort hang witness, matching the long-green a49 build.
+    _ = _fault_log_path  # retained for path derivation; no file handler installed
     try:
-        _FAULT_LOG_FP = open(_fault_log_path, "a", buffering=1, encoding="utf-8")
-        faulthandler.dump_traceback_later(2.0, repeat=True, file=_FAULT_LOG_FP)
+        faulthandler.dump_traceback_later(120.0, repeat=False, file=sys.stderr)
     except Exception:
-        faulthandler.dump_traceback_later(3.0, repeat=False, file=sys.stderr)
+        pass
 
     # A worker-thread crash otherwise prints to block-buffered stderr and
     # vanishes on the kill; land it (flattened) in the fsync'd breadcrumb log.
