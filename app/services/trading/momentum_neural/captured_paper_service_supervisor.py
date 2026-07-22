@@ -25,6 +25,9 @@ import os
 import re
 import tempfile
 import time
+import sys
+import threading
+import traceback
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -55,6 +58,38 @@ def _emit_supervisor_breadcrumb(step: str) -> None:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             os.write(fd, line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
+def _dump_all_thread_stacks(reason: str) -> None:
+    """Append every live thread's stack to the breadcrumb file (fsync'd).
+
+    Diagnostic ONLY, for a hung provider-loop start: pure syscalls + stdlib
+    ``sys._current_frames``/``traceback`` — deliberately NOT faulthandler (its
+    SEH handler turned a benign first-chance ntpath AV fatal in earlier runs).
+    Runs on a watchdog thread while the main thread is blocked, so the last
+    lines on disk name exactly where every thread is parked."""
+    try:
+        path = os.environ.get("CHILI_CAPTURED_PAPER_BREADCRUMB_PATH") or os.path.join(
+            tempfile.gettempdir(),
+            "captured_alpaca_paper_service.service-breadcrumbs.log",
+        )
+        names = {t.ident: t.name for t in threading.enumerate()}
+        parts = [f"{time.time()} pid={os.getpid()} THREADDUMP {reason}\n"]
+        for ident, frame in sys._current_frames().items():
+            parts.append(f"  --- thread {names.get(ident, '?')} ({ident}) ---\n")
+            for fn, lineno, func, text in traceback.extract_stack(frame):
+                parts.append(f"    {fn}:{lineno} {func}\n")
+                if text:
+                    parts.append(f"      {text.strip()}\n")
+        blob = "".join(parts).encode("utf-8", "replace")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, blob)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -405,9 +440,35 @@ class CapturedPaperServiceSupervisor:
         self._fenced_prestart_receipt = dict(fenced_prestart)
         self._service_fence.assert_held()
         _emit_supervisor_breadcrumb("BEGIN start_provider_loops")
-        receipt = self._host.start_provider_loops(
-            **self._provider_options(provider_options)
+        # Watchdog: provider-loop start MUST be quick (bind is local, socket
+        # readiness is bounded at 15s). If it silently blocks (the a57
+        # start_provider_loops hang → STARTUP_RECEIPT_UNAVAILABLE), dump every
+        # thread's stack to the breadcrumb file so the parked call is named
+        # exactly. Cancelled instantly on normal return → zero behaviour change.
+        _provider_start_done = threading.Event()
+
+        def _provider_start_watchdog() -> None:
+            dumps = 0
+            while not _provider_start_done.wait(45.0):
+                dumps += 1
+                _dump_all_thread_stacks(
+                    f"start_provider_loops still running after {45 * dumps}s (dump #{dumps})"
+                )
+                if dumps >= 4:
+                    break
+
+        _watchdog = threading.Thread(
+            target=_provider_start_watchdog,
+            name="chili-provider-loop-start-watchdog",
+            daemon=True,
         )
+        _watchdog.start()
+        try:
+            receipt = self._host.start_provider_loops(
+                **self._provider_options(provider_options)
+            )
+        finally:
+            _provider_start_done.set()
         _emit_supervisor_breadcrumb("END start_provider_loops")
         if not isinstance(receipt, Mapping):
             raise CapturedPaperServiceSupervisorError(
