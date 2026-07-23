@@ -751,9 +751,19 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     or {int(r.variant_id) for r in group} != required_variants
                 ):
                     continue
+                # 2026-07-23 (a81 finding): the writer is incremental at the
+                # (symbol x variant) level -- measured live, one symbol's
+                # variant rows span 3-8 DIFFERENT ticks (distinct freshness)
+                # even at full market cadence, so same-freshness /
+                # same-regime-sha within a symbol never holds; and viability
+                # writes land AFTER the hub tick they belong to (measured:
+                # rows 25s newer than the hub's last_tick), so a
+                # rows-not-after-hub-tick pin excludes everything too.  The
+                # build loop already consumes each row's OWN regime snapshot
+                # (_context_from_snapshot per row), so the true per-row
+                # invariants are: bounded age, never from the future of the
+                # READ (ag < 0 below), and the hub's correlation/source-node.
                 try:
-                    group_freshness: datetime | None = None
-                    group_regime_sha: str | None = None
                     coherent = True
                     for r in group:
                         fr = _utc(
@@ -761,16 +771,9 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                             "derived_source_viability_freshness",
                         )
                         ag = (read_at - fr).total_seconds()
-                        rs = sha256_json(dict(r.regime_snapshot_json or {}))
-                        if group_freshness is None:
-                            group_freshness = fr
-                            group_regime_sha = rs
                         if (
                             ag < 0.0
                             or ag > self.context_max_age_seconds
-                            or fr > tick_at
-                            or fr != group_freshness
-                            or rs != group_regime_sha
                             or str(r.correlation_id or "")
                             != str(hub["correlation_id"])
                             or str(r.source_node_id or "") != HUB_NODE_ID
