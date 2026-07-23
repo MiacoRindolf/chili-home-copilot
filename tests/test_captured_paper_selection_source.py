@@ -343,6 +343,10 @@ def test_source_captures_full_four_stream_envelope_and_scores_without_fallback(
 
 
 def test_source_fails_closed_when_symbol_family_universe_is_partial(db) -> None:
+    # 2026-07-23: the production viability writer is incremental/sparse, so a
+    # partial universe is the NORMAL live state.  Symbols with incomplete
+    # routes are now excluded from the cycle (fail-soft) instead of failing
+    # the whole read; a fully-empty eligible set still fails closed.
     material = _seed_source(
         db,
         symbols=("ACTU", "MISS"),
@@ -353,9 +357,23 @@ def test_source_fails_closed_when_symbol_family_universe_is_partial(db) -> None:
         fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
     )
 
+    snapshots = source.read_snapshot()
+    assert {item.symbol for item in snapshots} == {"ACTU"}
+
+
+def test_source_fails_closed_when_no_symbol_survives_eligibility(db) -> None:
+    material = _seed_source(
+        db,
+        symbols=("NONE",),
+        row_symbols=(),
+    )
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+    )
     with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
         source.read_snapshot()
-    assert rejected.value.reason == "derived_source_family_universe_incomplete"
+    assert rejected.value.reason == "derived_source_current_snapshot_empty"
 
 
 def test_source_rejects_hub_generation_drift_during_provider_query(db) -> None:
