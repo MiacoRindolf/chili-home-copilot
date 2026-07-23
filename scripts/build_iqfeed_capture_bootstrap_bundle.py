@@ -50,7 +50,15 @@ _MAX_ACCOUNT_SNAPSHOT_AGE_SECONDS = 30.0
 # that same outer timeout so a valid chain cannot outlive it, while the fresh
 # broker-account probe and transport-boundary re-reads continue to own account
 # and order-time freshness.
-_MAX_STARTUP_EVIDENCE_AGE_SECONDS = 30 * 60.0
+# 2026-07-23 (a77 finding): the full ActivatePaper chain (61-test roster +
+# rehearsal + smoke + finalize + cutover to service boot) measures 21-32 min
+# live depending on host load, so the prior 30-min window made slow-but-valid
+# chains fail STALE_EVIDENCE at the service's bootstrap preflight by ~1 min
+# (a74=21min passed, a76=29min passed, a77=31min rejected).  This evidence is
+# infrastructure startup proof, not market data -- account/order freshness is
+# owned by the fresh broker probes and the tape gates.  60 min = ~2x the
+# worst observed chain duration.
+_MAX_STARTUP_EVIDENCE_AGE_SECONDS = 60 * 60.0
 _MAX_FUTURE_SKEW_SECONDS = 5.0
 _MAX_PROJECTION_DEPTH = 16
 _MAX_PROJECTION_ITEMS = 10_000

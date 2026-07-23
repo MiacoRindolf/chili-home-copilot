@@ -558,15 +558,17 @@ def test_startup_identity_freshness_matches_the_bounded_operator_chain(
     built = _build_valid(tmp_path)
     manifest = json.loads(built.manifest_path.read_text(encoding="utf-8"))
 
+    # 2026-07-23: widened 30->60 min after live ActivatePaper chains measured
+    # 21-32 min to service boot (a77 rejected STALE_EVIDENCE at ~31 min).
     assert manifest["freshness_policy"]["startup_evidence_max_age_seconds"] == (
-        30 * 60.0
+        60 * 60.0
     )
     accepted = preflight.load_iqfeed_capture_bootstrap_preflight(
         built.manifest_path,
         expected_manifest_sha256=built.manifest_sha256,
         allowed_read_roots=(REPO.parent, tmp_path),
         allowed_write_roots=(tmp_path / "write",),
-        wall_clock=lambda: FIXED_NOW + timedelta(seconds=30 * 60 - 1),
+        wall_clock=lambda: FIXED_NOW + timedelta(seconds=60 * 60 - 1),
         host_fingerprint_provider=lambda: HOST_FINGERPRINT,
         local_drive_check=lambda _path: True,
     )
@@ -578,7 +580,7 @@ def test_startup_identity_freshness_matches_the_bounded_operator_chain(
             expected_manifest_sha256=built.manifest_sha256,
             allowed_read_roots=(REPO.parent, tmp_path),
             allowed_write_roots=(tmp_path / "write",),
-            wall_clock=lambda: FIXED_NOW + timedelta(seconds=30 * 60 + 1),
+            wall_clock=lambda: FIXED_NOW + timedelta(seconds=60 * 60 + 1),
             host_fingerprint_provider=lambda: HOST_FINGERPRINT,
             local_drive_check=lambda _path: True,
         )
