@@ -2736,7 +2736,7 @@ def test_final_manifest_or_kill_expiry_after_provider_start_blocks_workers(
     events = []
 
     class _Supervisor:
-        def start_active(self, *, start_authority):
+        def start_active(self, *, start_authority, provider_options=None):
             events.append("provider_and_runtime_started")
             start_authority.consume()
             events.append("worker_started")
@@ -2841,7 +2841,7 @@ def test_host_permit_is_consumed_before_any_worker_and_started_ack(
     )
 
     class _Supervisor:
-        def start_active(self, *, start_authority):
+        def start_active(self, *, start_authority, provider_options=None):
             events.append("provider_runtime_ready")
             receipt = start_authority.consume()
             assert receipt["host_activation_permit_consumed"] is True
@@ -2946,7 +2946,7 @@ def test_post_permit_terminal_order_blocks_every_worker(monkeypatch) -> None:
     handshake._quiet_horizon_event_sha256 = SHA_B
 
     class _Supervisor:
-        def start_active(self, *, start_authority):
+        def start_active(self, *, start_authority, provider_options=None):
             events.append("provider_runtime_ready")
             start_authority.consume()
             events.append("worker_started")

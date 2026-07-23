@@ -7309,7 +7309,15 @@ def _execute_active_service(
         supervisor_started = True
         _emit_startup_breadcrumb("BEGIN 6 supervisor.start_active")
         start_health = composition.supervisor.start_active(
-            start_authority=start_authority
+            start_authority=start_authority,
+            # 2026-07-22: widen provider-lane readiness from the 15s default.
+            # "Ready" needs an IQConnect connect + selected-field-roster ACK;
+            # a single transient miss burns a full reconnect_wait (10s) of a
+            # 15s budget -- especially during the post-cutover IQConnect->DTN
+            # re-login -- which would raise inside start_active and get the
+            # healthy service rolled back/killed.  60s absorbs a reconnect
+            # cycle and still fits inside the 180s PREPARED->STARTED window.
+            provider_options={"readiness_timeout_seconds": 60.0},
         )
         _emit_startup_breadcrumb("END 6 supervisor.start_active returned")
         assert_final_start_current()

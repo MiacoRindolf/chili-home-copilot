@@ -6992,12 +6992,20 @@ class CapturedPaperHostCutoverExecutor:
                     self.prepared.invocation,
                     service,
                     phase="started",
-                    # 2026-07-22: 15s expired mid-`start_active` (broker-quiet
-                    # + sealed reload + provider-lane readiness ~40-50s live),
-                    # so Apply rolled back and TerminateProcess'd a healthy
-                    # service -- a silent external kill with no fault trace.
-                    # Matched to the widened host permit-age (180s).
-                    timeout_seconds=150.0,
+                    # 2026-07-22: read STARTED until the EXACT permit expiry
+                    # (prepared_valid_until = prepared_at + STARTUP_HANDSHAKE_
+                    # MAX_AGE_SECONDS = 180s) that the apply_completed guard
+                    # below already enforces.  A fixed duration anchored at
+                    # permit-issue (was 15s, then 150s) expires ~30s BEFORE the
+                    # permit the service is still honoring, so a valid STARTED
+                    # published in that tail would be missed -> rollback kill of
+                    # a healthy, still-authorized service.  The apply_completed_at
+                    # < prepared_valid_until check still rejects a truly-expired
+                    # STARTED, so this only removes the anchoring asymmetry.
+                    timeout_seconds=max(
+                        0.0,
+                        (prepared_valid_until - self.clock()).total_seconds(),
+                    ),
                 )
                 started_sha = _validate_started_receipt(
                     started_receipt,
