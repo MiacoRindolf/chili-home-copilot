@@ -449,9 +449,16 @@ def _safe_account_risk_snapshot(value: Any) -> Mapping[str, Any]:
             raise IqfeedCaptureBootstrapBundleError(
                 f"account_risk_snapshot.{field} is not finite"
             )
-        if field in {"equity", "last_equity"} and parsed <= 0:
+        if field == "equity" and parsed <= 0:
             raise IqfeedCaptureBootstrapBundleError(
                 f"account_risk_snapshot.{field} must be positive"
+            )
+        # 2026-07-23: Alpaca resets paper `last_equity` to 0 at the trading-day
+        # boundary, so zero is a valid healthy state (informational prior-close
+        # equity, not a safety gate) -- matched with the operator-chain posture.
+        if field == "last_equity" and parsed < 0:
+            raise IqfeedCaptureBootstrapBundleError(
+                "account_risk_snapshot.last_equity must be nonnegative"
             )
         if field == "buying_power" and parsed < 0:
             raise IqfeedCaptureBootstrapBundleError(

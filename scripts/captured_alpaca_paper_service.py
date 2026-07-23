@@ -1814,7 +1814,13 @@ def _paper_broker_snapshot(
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(float(value))
-            or float(value) <= 0.0
+            # 2026-07-23: Alpaca resets paper `last_equity` to 0 at the
+            # trading-day boundary; zero is a valid healthy state for that
+            # informational field (matched with the operator-chain posture and
+            # the bootstrap-bundle snapshot check).  equity/buying_power stay
+            # strictly positive.
+            or (field == "last_equity" and float(value) < 0.0)
+            or (field != "last_equity" and float(value) <= 0.0)
         ):
             raise CapturedAlpacaPaperServiceError(
                 "BROKER_ACCOUNT_ECONOMICS_UNAVAILABLE",
