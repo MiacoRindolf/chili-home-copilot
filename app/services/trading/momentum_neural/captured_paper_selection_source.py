@@ -725,56 +725,77 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 )
                 .all()
             )
-            expected_routes = {
-                (symbol, source_id)
-                for symbol in symbols
-                for source_id in self.source_variant_ids
-            }
-            routes = {
-                (str(row.symbol or ""), int(row.variant_id)) for row in rows
-            }
-            if routes != expected_routes or len(rows) != len(expected_routes):
-                _reject("derived_source_family_universe_incomplete")
+            # 2026-07-23 (a80 finding; supersedes the a75/a76 per-row notes):
+            # the production viability writer is INCREMENTAL and sparse -- a
+            # tick rewrites rows only for the routes it evaluated (measured
+            # live: 220 rows at the current tick, 210 at prior ticks, plus
+            # per-route leftovers untouched for WEEKS).  A complete
+            # single-generation (symbol x variant) snapshot has never existed
+            # in production, so the all-routes completeness gate and any
+            # cross-row generation equality reject every real activation by
+            # construction.  Fail-soft per SYMBOL instead: a symbol enters
+            # this cycle's selection universe only when ALL its variant
+            # routes are present, fresh (bounded age), never from the future,
+            # and internally coherent (one freshness + one regime sha within
+            # the symbol) with the hub's correlation/source-node; symbols
+            # that fail are EXCLUDED from the cycle (simply not traded), and
+            # at least one symbol must survive.
+            rows_by_symbol: dict[str, list[Any]] = {}
+            for row in rows:
+                rows_by_symbol.setdefault(str(row.symbol or ""), []).append(row)
+            required_variants = set(self.source_variant_ids)
+            eligible_symbols: set[str] = set()
+            for symbol_key, group in rows_by_symbol.items():
+                if (
+                    len(group) != len(required_variants)
+                    or {int(r.variant_id) for r in group} != required_variants
+                ):
+                    continue
+                try:
+                    group_freshness: datetime | None = None
+                    group_regime_sha: str | None = None
+                    coherent = True
+                    for r in group:
+                        fr = _utc(
+                            r.freshness_ts,
+                            "derived_source_viability_freshness",
+                        )
+                        ag = (read_at - fr).total_seconds()
+                        rs = sha256_json(dict(r.regime_snapshot_json or {}))
+                        if group_freshness is None:
+                            group_freshness = fr
+                            group_regime_sha = rs
+                        if (
+                            ag < 0.0
+                            or ag > self.context_max_age_seconds
+                            or fr > tick_at
+                            or fr != group_freshness
+                            or rs != group_regime_sha
+                            or str(r.correlation_id or "")
+                            != str(hub["correlation_id"])
+                            or str(r.source_node_id or "") != HUB_NODE_ID
+                        ):
+                            coherent = False
+                            break
+                    if coherent:
+                        eligible_symbols.add(symbol_key)
+                except CapturedPaperSelectionSourceUnavailable:
+                    continue
+            rows = [
+                row
+                for row in rows
+                if str(row.symbol or "") in eligible_symbols
+            ]
+            if not rows:
+                _reject("derived_source_current_snapshot_empty")
             snapshots: list[CapturedDerivedViabilitySnapshot] = []
-            generation_freshness: datetime | None = None
-            generation_regime_sha: str | None = None
             for viability in rows:
                 symbol = str(viability.symbol or "").strip().upper()
                 if symbol not in symbols or _SYMBOL_RE.fullmatch(symbol) is None:
                     _reject("derived_source_row_symbol_invalid")
-                freshness = _utc(
-                    viability.freshness_ts,
-                    "derived_source_viability_freshness",
-                )
-                age = (read_at - freshness).total_seconds()
-                if age < 0.0 or age > self.context_max_age_seconds:
-                    _reject("derived_source_viability_stale")
-                # 2026-07-23 (a75 finding): the LIVE hub bumps last_tick_utc on
-                # EVERY tick, but a tick does not always rewrite every
-                # viability row (measured live: rows 27s older than the hub
-                # tick), and the regime json embeds a per-tick `utc_iso`, so
-                # BOTH the exact `freshness != tick_at` equality AND the
-                # row-vs-hub regime-sha pin rejected every real activation.
-                # The generation semantics that matter: rows may lag the hub
-                # within the bounded age (checked above) but must be one
-                # SELF-CONSISTENT generation -- identical freshness and
-                # identical regime sha ACROSS ROWS, never from the future,
-                # same correlation and source node as the hub.
-                row_regime_sha = sha256_json(
-                    dict(viability.regime_snapshot_json or {})
-                )
-                if generation_freshness is None:
-                    generation_freshness = freshness
-                    generation_regime_sha = row_regime_sha
-                if (
-                    freshness > tick_at
-                    or freshness != generation_freshness
-                    or row_regime_sha != generation_regime_sha
-                    or str(viability.correlation_id or "")
-                    != str(hub["correlation_id"])
-                    or str(viability.source_node_id or "") != HUB_NODE_ID
-                ):
-                    _reject("derived_source_viability_generation_mismatch")
+                # Freshness / coherence / correlation / source-node were
+                # validated per-symbol in the eligibility pre-pass above;
+                # only eligible symbols' rows reach this loop.
                 source_variant = by_id[int(viability.variant_id)]
                 target_id, family_id, source_variant_sha = self._source_to_target[
                     int(source_variant.id)
