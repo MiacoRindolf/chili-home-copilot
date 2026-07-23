@@ -505,11 +505,19 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         regime = state.get("regime")
         correlation = str(state.get("correlation_id") or "").strip()
         tick_raw = state.get("last_tick_utc")
+        # 2026-07-23 (a74 finding): the LIVE hub writer (live_runner ->
+        # run_momentum_neural_tick) does not pass correlation_id, so the
+        # production hub row ALWAYS carries an empty one -- only the
+        # event-driven maybe_run_momentum_neural_tick path stamps it.
+        # Requiring non-empty here rejected every real activation with
+        # derived_source_hub_snapshot_invalid.  Empty is safe end to end: the
+        # viability generation check compares equality (empty == empty), and
+        # the per-row reader below already synthesizes a non-empty
+        # `captured:<fingerprint>` correlation for the published events.
         if (
             row is None
             or not isinstance(symbols_raw, list)
             or not isinstance(regime, Mapping)
-            or not correlation
             or len(correlation) > 64
             or not isinstance(tick_raw, str)
         ):
