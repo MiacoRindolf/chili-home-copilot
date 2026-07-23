@@ -7570,6 +7570,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     _set_startup_breadcrumb_path(getattr(args, "host_ready_receipt", None))
     _emit_startup_breadcrumb("BEGIN main mode=" + str(getattr(args, "mode", "?")))
+    # 2026-07-23 (a71 freeze root cause, part 1): under the candidate task the
+    # launcher's `1>/2>` are PowerShell 5.1 ANONYMOUS PIPES, not files.  Any
+    # write to a full 4KB pipe whose pipeline thread is wedged BLOCKS forever
+    # (logging lastResort, prints, native writes).  dup2 the OS-level fds onto
+    # real O_APPEND files immediately so no thread can ever block on fd 1/2.
+    # Bare try/except: losing the redirect must never break startup.
+    try:
+        _std_base = str(getattr(args, "host_ready_receipt", None) or "").strip()
+        if not _std_base:
+            _std_base = os.path.join(
+                tempfile.gettempdir(), "captured_alpaca_paper_service"
+            )
+        for _fd, _suffix in ((1, ".service-stdout-dup.log"), (2, ".service-stderr-dup.log")):
+            _dup_fd = os.open(
+                _std_base + _suffix,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            os.dup2(_dup_fd, _fd)
+            os.close(_dup_fd)
+        _emit_startup_breadcrumb("std fds dup2'd to real files (pipe severed)")
+    except Exception:
+        pass
     # 2026-07-17: two consecutive live PREPARED-phase stalls were invisible
     # (only the dispatch lock appeared, then silence until the cutover's
     # timeout killed the run).  Periodic all-thread stack dumps to stderr —
@@ -7605,10 +7628,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the faulthandler/SEH machinery. Keep only a single, late one-shot dump to
     # stderr as a last-resort hang witness, matching the long-green a49 build.
     _ = _fault_log_path  # retained for path derivation; no file handler installed
-    try:
-        faulthandler.dump_traceback_later(120.0, repeat=False, file=sys.stderr)
-    except Exception:
-        pass
+    # 2026-07-23 (a71 freeze root cause, part 2): the retained one-shot
+    # dump_traceback_later(120.0, file=sys.stderr) IS the freezer.  The sealed
+    # startup reliably consumes ~2 minutes (double 1042-file ast parse +
+    # broker reads), so the timer expired EXACTLY during provider-lane
+    # bring-up: its GIL-less C watchdog walks every tstate/frame with no lock
+    # while threads are spawning and market-rate L2 flows, and writes to what
+    # was then a PowerShell anonymous pipe -- producing a total-process
+    # suspension (every thread frozen 10+ min, no crash artifact) that the
+    # cutover then TerminateProcess'd.  Same hazard class as the enable() and
+    # repeat-timer variants removed on 07-21 (see NOTE above).  REMOVED
+    # entirely: the fsync'd flight-recorder breadcrumbs (service + capture
+    # host + both bridge lanes) are the hang witness now, and they proved
+    # superior in a69-a71 forensics.
 
     # A worker-thread crash otherwise prints to block-buffered stderr and
     # vanishes on the kill; land it (flattened) in the fsync'd breadcrumb log.
