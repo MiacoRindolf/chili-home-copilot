@@ -331,12 +331,26 @@ class IqfeedProviderLoopSupervisor:
         while True:
             with self._lock:
                 if self._failures:
+                    _emit_capture_host_breadcrumb(
+                        "supervisor.start: readiness loop observed failure"
+                    )
                     break
                 if all(event.is_set() for event in self._ready.values()):
                     self._state = IqfeedProviderLoopSupervisorState.RUNNING
+                    _emit_capture_host_breadcrumb(
+                        "supervisor.start: ALL READY -> RUNNING"
+                    )
                     return self.health()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                _emit_capture_host_breadcrumb(
+                    "supervisor.start: readiness DEADLINE EXPIRED after "
+                    + f"{readiness_timeout:.1f}s; ready="
+                    + repr({
+                        lane: event.is_set()
+                        for lane, event in self._ready.items()
+                    })
+                )
                 self._record_failure(
                     "readiness",
                     TimeoutError(
@@ -348,7 +362,13 @@ class IqfeedProviderLoopSupervisor:
             self._state_changed.clear()
 
         self._stop_event.set()
+        _emit_capture_host_breadcrumb(
+            "supervisor.start: fail path; BEGIN join_threads"
+        )
         self._join_threads(join_timeout)
+        _emit_capture_host_breadcrumb(
+            "supervisor.start: END join_threads; raising fail-closed"
+        )
         failure = self.health()["failures"]
         raise CaptureContractError(
             "IQFeed provider-loop startup failed closed: "

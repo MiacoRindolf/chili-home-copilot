@@ -98,6 +98,30 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` host invocation
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("iqfeed_trade_bridge")
 
+
+def _capture_bc(step: str) -> None:
+    """Fsync a supervised-lane flight-recorder line to the captured-paper
+    breadcrumb file. STRICTLY env-gated: a no-op in the standalone production
+    bridge (env absent). Bare try/except + pure syscalls so it survives any
+    lane death; the LAST line on disk names the exact sub-step reached
+    (a69: service stderr was 0 bytes and readiness never completed, with no
+    surviving evidence of where the lanes actually got to)."""
+    try:
+        path = os.environ.get("CHILI_CAPTURED_PAPER_BREADCRUMB_PATH")
+        if not path:
+            return
+        line = f"{time.time()} pid={os.getpid()} lane[trade] {step}\n".encode(
+            "utf-8", "replace"
+        )
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
 HOST, PORT = "127.0.0.1", 5009          # IQConnect Level-1 STREAMING port (:9100=lookup, :9200=L2 depth)
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
 # One latest quote row per symbol per flush bounds tape growth while still keeping
@@ -2187,6 +2211,7 @@ def _run_connection(
             connection_generation=connection_generation,
             active=True,
         )
+        _capture_bc("socket connected; boundary recorded (real handoff)")
         connection_socket.settimeout(2.0)
         watched.clear()
         _last_trade.clear()
@@ -2210,15 +2235,18 @@ def _run_connection(
             name=f"iqfeed-trade-reader-g{connection_generation}",
         )
         reader_thread.start()
+        _capture_bc("reader started; BEGIN field-ack wait")
         if not _wait_for_selected_fields_ack(
             connection_generation,
             stop_event,
         ):
+            _capture_bc("field-ack FAILED (roster not acknowledged)")
             raise RuntimeError(
                 "IQFeed exact selected-field roster was not acknowledged"
             )
         if supervisor_stop_event is not None and supervisor_stop_event.is_set():
             return
+        _capture_bc("field ack ok; READY")
         if ready_event is not None:
             ready_event.set()
         writer(
@@ -2305,7 +2333,9 @@ def run_supervised(
     if stop_event.is_set():
         return
     _require_supervised_capture_posture()
+    _capture_bc("posture ok; BEGIN schema gate")
     _verify_bridge_schema()
+    _capture_bc("schema gate ok")
     if schema_ready_event is not None:
         schema_ready_event.set()
     try:
@@ -2321,15 +2351,21 @@ def run_supervised(
             except _ReaderQuiescenceError:
                 raise
             except SubscriptionConnectionIndeterminate as exc:
+                _capture_bc(
+                    "exc SubscriptionConnectionIndeterminate: "
+                    + str(exc)[:140]
+                )
                 _log_subscription_gaps("iqfeed_l1", (exc.gap,))
                 log.warning(
                     "supervised IQFeed L1 subscription state indeterminate; "
                     "reconnecting"
                 )
             except Exception as exc:
+                _capture_bc(f"exc {type(exc).__name__}: {str(exc)[:140]}")
                 log.warning("supervised IQFeed L1 bridge error: %s", exc)
             if stop_event.is_set():
                 break
+            _capture_bc(f"reconnecting in {reconnect_wait:.1f}s")
             log.info(
                 "supervised IQFeed L1 reconnecting in %.3fs",
                 reconnect_wait,
