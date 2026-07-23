@@ -347,7 +347,16 @@ def _read_exact_paper_account(
     posture: dict[str, Any] = {
         "equity": _positive_decimal(getattr(account, "equity", None), field="equity"),
         "last_equity": _positive_decimal(
-            getattr(account, "last_equity", None), field="last_equity"
+            getattr(account, "last_equity", None),
+            field="last_equity",
+            # 2026-07-23: Alpaca resets paper `last_equity` to 0 at the
+            # trading-day boundary (overnight/pre-market), so it is a valid
+            # healthy state -- exactly like `buying_power`/`cash` below, which
+            # already allow zero.  `last_equity` is informational (prior-close
+            # equity for daily P&L), not a safety gate; requiring >0 blocked
+            # every pre-market activation on a fully-healthy account (ACTIVE,
+            # positive equity/buying_power/cash, zero positions/orders).
+            allow_zero=True,
         ),
         "buying_power": _positive_decimal(
             getattr(account, "buying_power", None),
