@@ -102,7 +102,13 @@ FUNDAMENTALS_QUERY_SCHEMA_VERSION = (
     "chili.captured-paper-fundamentals-query.v1"
 )
 
-_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,35}$")
+# 2026-07-23 (a79 finding): the hub is the CRYPTO intel node and its
+# symbols_evaluated intermittently contains crypto pairs like BTC-USD -- which
+# this module itself expects (equity_symbols filters `endswith("-USD")` right
+# after per-symbol validation).  The old charset forbade "-", so any tick with
+# a crypto symbol present rejected derived_source_hub_symbol_invalid before
+# the split could run.  Allow hyphens, matching the reader's own design.
+_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,35}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _READ_ONLY_TRANSACTION_SQL = (
     "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
