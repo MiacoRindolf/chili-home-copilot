@@ -730,6 +730,8 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             if routes != expected_routes or len(rows) != len(expected_routes):
                 _reject("derived_source_family_universe_incomplete")
             snapshots: list[CapturedDerivedViabilitySnapshot] = []
+            generation_freshness: datetime | None = None
+            generation_regime_sha: str | None = None
             for viability in rows:
                 symbol = str(viability.symbol or "").strip().upper()
                 if symbol not in symbols or _SYMBOL_RE.fullmatch(symbol) is None:
@@ -741,13 +743,30 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 age = (read_at - freshness).total_seconds()
                 if age < 0.0 or age > self.context_max_age_seconds:
                     _reject("derived_source_viability_stale")
+                # 2026-07-23 (a75 finding): the LIVE hub bumps last_tick_utc on
+                # EVERY tick, but a tick does not always rewrite every
+                # viability row (measured live: rows 27s older than the hub
+                # tick), and the regime json embeds a per-tick `utc_iso`, so
+                # BOTH the exact `freshness != tick_at` equality AND the
+                # row-vs-hub regime-sha pin rejected every real activation.
+                # The generation semantics that matter: rows may lag the hub
+                # within the bounded age (checked above) but must be one
+                # SELF-CONSISTENT generation -- identical freshness and
+                # identical regime sha ACROSS ROWS, never from the future,
+                # same correlation and source node as the hub.
+                row_regime_sha = sha256_json(
+                    dict(viability.regime_snapshot_json or {})
+                )
+                if generation_freshness is None:
+                    generation_freshness = freshness
+                    generation_regime_sha = row_regime_sha
                 if (
-                    freshness != tick_at
+                    freshness > tick_at
+                    or freshness != generation_freshness
+                    or row_regime_sha != generation_regime_sha
                     or str(viability.correlation_id or "")
                     != str(hub["correlation_id"])
                     or str(viability.source_node_id or "") != HUB_NODE_ID
-                    or sha256_json(dict(viability.regime_snapshot_json or {}))
-                    != sha256_json(dict(hub["regime"]))
                 ):
                     _reject("derived_source_viability_generation_mismatch")
                 source_variant = by_id[int(viability.variant_id)]
