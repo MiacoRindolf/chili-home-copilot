@@ -82,8 +82,18 @@ _HOST_CUTOVER_JOURNAL_EVENT_SCHEMA_VERSION = (
     "chili.captured-paper-host-cutover-journal-event.v1"
 )
 _HOST_CUTOVER_APPLY_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
-_HOST_ACTIVATION_MAX_AGE_SECONDS = 30.0
-_HOST_ACTIVATION_WAIT_SECONDS = 30.0
+# 2026-07-22: the PREPARED->STARTED window must cover the FULL active
+# bring-up measured on this host: broker_quiet_fixed_point (Alpaca reads) +
+# a repeat sealed-authority ast reload + provider-lane readiness (~11s), i.e.
+# ~40-50s live.  The prior 30s made STARTED impossible by construction --
+# this permit-age AND the cutover's started-receipt read (host_cutover.py,
+# was 15s) both expired mid-`start_active`, so Apply rolled back and the host
+# TerminateProcess'd a still-healthy service.  That external kill left NO
+# fault trace (no WER dump, no .service-crash.json, no THREAD-CRASH), which is
+# exactly why ~60 activation generations mis-read it as a native crash.
+# 180s stays well under the 10-min receipt / 15-min manifest windows.
+_HOST_ACTIVATION_MAX_AGE_SECONDS = 180.0
+_HOST_ACTIVATION_WAIT_SECONDS = 180.0
 _ACTIVE_START_EVIDENCE_MAX_BYTES = 512 * 1024
 _LEGACY_PAPER_BROKER_QUIET_HORIZON_SECONDS = 30.0
 _LEGACY_PAPER_BROKER_QUIET_HORIZON_POLICY = (

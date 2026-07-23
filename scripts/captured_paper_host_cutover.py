@@ -219,7 +219,16 @@ PREACTIVATION_ROLLBACK_BASELINE_SCHEMA = (
     "chili.captured-paper-host-preactivation-rollback-baseline.v1"
 )
 PREACTIVATION_ROLLBACK_BASELINE_MODE = "PREACTIVATION_ROLLBACK_BASELINE"
-STARTUP_HANDSHAKE_MAX_AGE_SECONDS = 30.0
+# 2026-07-22: this is the cutover-side twin of the service's
+# _HOST_ACTIVATION_MAX_AGE_SECONDS and MUST equal it -- each side validates
+# the other's receipt/permit window, and line ~7448 caps the issued permit at
+# `issued_at + this`, which becomes `prepared_valid_until` (the Apply kill
+# check).  At 30s the permit expired mid-`start_active` (the active bring-up
+# is ~40-50s live: broker-quiet + sealed reload + provider-lane readiness),
+# so Apply rolled back and TerminateProcess'd a healthy service with no fault
+# trace.  Widened to match the service (180s); stays under the 10-min receipt
+# / 15-min manifest windows.
+STARTUP_HANDSHAKE_MAX_AGE_SECONDS = 180.0
 STARTUP_DISPATCH_LOCK_WAIT_SECONDS = 30.0
 STARTUP_DISPATCH_LOCK_BYTE = b"0"
 STARTUP_DISPATCH_LOCK_BYTE_SHA256 = hashlib.sha256(
@@ -6983,7 +6992,12 @@ class CapturedPaperHostCutoverExecutor:
                     self.prepared.invocation,
                     service,
                     phase="started",
-                    timeout_seconds=15.0,
+                    # 2026-07-22: 15s expired mid-`start_active` (broker-quiet
+                    # + sealed reload + provider-lane readiness ~40-50s live),
+                    # so Apply rolled back and TerminateProcess'd a healthy
+                    # service -- a silent external kill with no fault trace.
+                    # Matched to the widened host permit-age (180s).
+                    timeout_seconds=150.0,
                 )
                 started_sha = _validate_started_receipt(
                     started_receipt,
