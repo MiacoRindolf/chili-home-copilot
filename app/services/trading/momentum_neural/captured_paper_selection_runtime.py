@@ -130,6 +130,21 @@ def _positive_seconds(value: Any, field_name: str) -> float:
     return resolved
 
 
+def _nonnegative_seconds(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _reject("CONTRACT_INVALID", f"{field_name} must be finite and non-negative")
+    resolved = float(value)
+    if not math.isfinite(resolved) or resolved < 0.0:
+        _reject("CONTRACT_INVALID", f"{field_name} must be finite and non-negative")
+    return resolved
+
+
+# Re-check cadence while warming up the initial selection snapshot.  read_snapshot
+# is a database read, so this is deliberately coarse (a documented floor, not a
+# busy-wait like the durable/producer frontier loops).
+_INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS = 2.0
+
+
 def _health_mapping(value: Any, field_name: str) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
@@ -559,6 +574,7 @@ class CapturedPaperSelectionLifecycleWorker:
         poll_interval_seconds: float = 0.25,
         durable_timeout_seconds: float = 15.0,
         producer_timeout_seconds: float = 15.0,
+        initial_snapshot_warmup_seconds: float = 0.0,
         monotonic_clock: Callable[[], float] = time.monotonic,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
     ) -> None:
@@ -591,6 +607,16 @@ class CapturedPaperSelectionLifecycleWorker:
         self.producer_timeout_seconds = _positive_seconds(
             producer_timeout_seconds, "producer_timeout_seconds"
         )
+        # Bounded warmup for the fenced-start's FIRST selection cycle.  During a
+        # host cutover the legacy capture lanes are stopped and the candidate
+        # lanes need a few seconds to re-establish watches and refill the derived
+        # viability, so the very first read can transiently observe an empty
+        # source.  A positive value tolerates ONLY that transient (an empty
+        # source) for this long before failing closed; 0.0 preserves the strict
+        # fail-on-first-empty behaviour (used by unit tests).
+        self.initial_snapshot_warmup_seconds = _nonnegative_seconds(
+            initial_snapshot_warmup_seconds, "initial_snapshot_warmup_seconds"
+        )
         self.monotonic_clock = monotonic_clock
         self.thread_factory = thread_factory
 
@@ -612,6 +638,7 @@ class CapturedPaperSelectionLifecycleWorker:
         self._rollback_receipt: CapturedPaperSelectionRollbackReceipt | None = None
         self._cycles_completed = 0
         self._source_unavailable_cycles = 0
+        self._initial_warmup_retries = 0
         self._snapshot_batches_read = 0
         self._occurrences_published = 0
         self._producer_batches_applied = 0
@@ -996,6 +1023,45 @@ class CapturedPaperSelectionLifecycleWorker:
                 )
             self._stop_event.wait(min(0.01, max(0.0, deadline - now)))
 
+    def _run_initial_cycle_with_warmup(self) -> None:
+        """Run the fenced-start's first cycle, tolerating a transiently empty source.
+
+        The only retryable condition is ``CapturedPaperSelectionSourceUnavailable``
+        raised by ``read_snapshot`` — that escapes ``_capture_source_once`` BEFORE
+        any occurrence is published (the batch loop runs strictly after the read),
+        so re-running the whole cycle cannot double-publish.  Every other failure
+        (fence violation, contract error, an empty durable frontier AFTER a
+        non-empty read, shutdown) stays fail-closed and is raised immediately.
+        The wait is interruptible by the stop event and bounded by
+        ``initial_snapshot_warmup_seconds`` (0.0 => strict, no retry).
+        """
+        if self.initial_snapshot_warmup_seconds <= 0.0:
+            self._run_cycle(initial=True)
+            return
+        deadline = (
+            float(self.monotonic_clock()) + self.initial_snapshot_warmup_seconds
+        )
+        while True:
+            try:
+                self._run_cycle(initial=True)
+                return
+            except CapturedPaperSelectionSourceUnavailable:
+                now = float(self.monotonic_clock())
+                if (
+                    self._stop_event.is_set()
+                    or not math.isfinite(now)
+                    or now >= deadline
+                ):
+                    raise
+                with self._state_lock:
+                    self._initial_warmup_retries += 1
+                self._stop_event.wait(
+                    min(
+                        _INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS,
+                        max(0.0, deadline - now),
+                    )
+                )
+
     def _run_cycle(self, *, initial: bool) -> None:
         self._assert_fence()
         published = self._capture_source_once(require_snapshot=initial)
@@ -1213,7 +1279,7 @@ class CapturedPaperSelectionLifecycleWorker:
                 self._assert_fence()
                 components.writer.start()
                 self._writer_started = True
-                self._run_cycle(initial=True)
+                self._run_initial_cycle_with_warmup()
                 self._assert_fence()
                 self.deferred_reader.install(
                     components.initial_reader,
@@ -1524,6 +1590,7 @@ class CapturedPaperSelectionLifecycleWorker:
                 "thread_alive": bool(thread is not None and thread.is_alive()),
                 "cycles_completed": self._cycles_completed,
                 "source_unavailable_cycles": self._source_unavailable_cycles,
+                "initial_warmup_retries": self._initial_warmup_retries,
                 "snapshot_batches_read": self._snapshot_batches_read,
                 "occurrences_published": self._occurrences_published,
                 "producer_batches_applied": self._producer_batches_applied,

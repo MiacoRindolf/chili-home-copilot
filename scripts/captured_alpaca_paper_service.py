@@ -6406,6 +6406,14 @@ def _assemble_service_composition(
             ),
             durable_timeout_seconds=handoff_ttl_seconds,
             producer_timeout_seconds=handoff_ttl_seconds,
+            # A host cutover stops the legacy capture lanes, so the candidate
+            # lanes need a few seconds to re-establish watches and refill the
+            # derived viability before the FIRST selection cycle can observe a
+            # non-empty source.  Tolerate that transient rather than failing the
+            # fenced start on the very first (still-warming) read.  MUST stay
+            # under the cutover STARTED-handshake window (180s) with margin, so
+            # the startup receipt is still written before the host gives up.
+            initial_snapshot_warmup_seconds=120.0,
             monotonic_clock=monotonic_clock,
         )
     )

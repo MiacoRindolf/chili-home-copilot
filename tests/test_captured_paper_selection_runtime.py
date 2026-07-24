@@ -375,13 +375,21 @@ class _FakeSource:
         self.read_count = 0
         self.raise_unavailable_after_prime = False
         self.recovery_snapshot_pending = False
+        # First N reads raise a transiently-empty source (the fenced-start warmup
+        # case); the (N+1)th read primes.  Default 0 => prime on the first read.
+        self.unavailable_before_prime_reads = 0
 
     def read_snapshot(self) -> tuple[object, ...]:
         self.log.append("source_read")
         self.read_count += 1
-        if self.read_count > 1 and self.raise_unavailable_after_prime:
+        if self.read_count <= self.unavailable_before_prime_reads:
+            raise CapturedPaperSelectionSourceUnavailable(
+                "derived_source_current_snapshot_empty"
+            )
+        prime_read = self.unavailable_before_prime_reads + 1
+        if self.read_count > prime_read and self.raise_unavailable_after_prime:
             raise CapturedPaperSelectionSourceUnavailable("provider_unavailable")
-        if self.read_count == 1 or self.recovery_snapshot_pending:
+        if self.read_count == prime_read or self.recovery_snapshot_pending:
             self.recovery_snapshot_pending = False
             return (object(),)
         return ()
@@ -440,6 +448,8 @@ class _Harness:
         source_generation: int = 2,
         monotonic_clock=time.monotonic,
         poll_interval_seconds: float = 60.0,
+        initial_snapshot_warmup_seconds: float = 0.0,
+        source_unavailable_before_prime_reads: int = 0,
     ) -> None:
         self.setup = _application_setup()
         self.runtime = _FakeSharedRuntime(
@@ -459,6 +469,9 @@ class _Harness:
         self.writer: _FakeWriter | None = None
         self.auto_durable = auto_durable
         self.source_generation = source_generation
+        self.source_unavailable_before_prime_reads = (
+            source_unavailable_before_prime_reads
+        )
 
         def assert_fence() -> None:
             self.fence_calls += 1
@@ -497,6 +510,9 @@ class _Harness:
                 setup,
                 generation=self.source_generation,
                 log=self.log,
+            )
+            source.unavailable_before_prime_reads = (
+                self.source_unavailable_before_prime_reads
             )
             input_port = _FakeInputPort(self.runtime, publisher, setup.authority)
             producer = _FakeProducer(
@@ -562,6 +578,7 @@ class _Harness:
             poll_interval_seconds=poll_interval_seconds,
             durable_timeout_seconds=0.1,
             producer_timeout_seconds=0.1,
+            initial_snapshot_warmup_seconds=initial_snapshot_warmup_seconds,
             monotonic_clock=monotonic_clock,
         )
 
@@ -680,6 +697,74 @@ def test_constructor_is_fully_inert_then_prime_precedes_reader_install(
     assert harness.log.index("source_build") < harness.log.index("producer_tick")
     assert harness.reader.health()["installed"] is True
     harness.worker.close(join_timeout_seconds=1.0)
+
+
+_WARMUP_POLL_TARGET = (
+    "app.services.trading.momentum_neural.captured_paper_selection_runtime."
+    "_INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS"
+)
+
+
+def test_initial_snapshot_warmup_retries_transient_empty_then_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A host cutover leaves the FIRST fenced-start read transiently empty while
+    # the candidate capture lanes re-establish watches and the derived viability
+    # refills.  With a warmup window the start tolerates that transient and
+    # succeeds once the source primes -- without double-publishing the frontier.
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.01)
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=30.0,
+        source_unavailable_before_prime_reads=2,
+    )
+    harness.worker.start()
+    health = harness.worker.health()
+    assert health["running"] is True
+    assert health["ready"] is True
+    assert health["fatal"] is False
+    assert health["initial_warmup_retries"] == 2
+    # exactly one prime publish despite the two retried empty reads (the read
+    # raises before any occurrence is built, so re-running cannot double-publish)
+    assert harness.log.count("source_build") == 1
+    harness.worker.close(join_timeout_seconds=1.0)
+
+
+def test_initial_snapshot_warmup_fails_closed_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Warmup tolerates a transient, it does NOT mask a persistently empty source:
+    # once the bounded deadline elapses the fenced start still fails closed.
+    monkeypatch.setattr(_WARMUP_POLL_TARGET, 0.01)
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=0.05,
+        source_unavailable_before_prime_reads=10**9,
+    )
+    with pytest.raises(CapturedPaperSelectionRuntimeError) as failure:
+        harness.worker.start()
+    assert failure.value.code == "START_FAILED"
+    health = harness.worker.health()
+    assert health["fatal"] is True
+    assert health["running"] is False
+    assert health["initial_warmup_retries"] >= 1
+    # an empty source never publishes an occurrence
+    assert "source_build" not in harness.log
+
+
+def test_initial_snapshot_warmup_zero_is_strict_no_retry(tmp_path: Path) -> None:
+    # warmup=0.0 preserves the strict fail-on-first-empty fenced-start contract
+    # (the default for callers/tests that must not tolerate any empty read).
+    harness = _Harness(
+        tmp_path,
+        initial_snapshot_warmup_seconds=0.0,
+        source_unavailable_before_prime_reads=1,
+    )
+    with pytest.raises(CapturedPaperSelectionRuntimeError):
+        harness.worker.start()
+    assert harness.worker.health()["initial_warmup_retries"] == 0
 
 
 def test_hash_bound_not_applied_outcome_never_builds_runtime_or_calls_rollback(
