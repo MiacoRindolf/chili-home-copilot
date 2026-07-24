@@ -125,6 +125,27 @@ def _reject(reason: str) -> None:
     raise CapturedPaperSelectionSourceUnavailable(reason)
 
 
+def _finite_json(value: Any) -> Any:
+    """Map non-finite floats (NaN/Infinity) to None, recursively.
+
+    2026-07-24 (a86-0948): provider fundamentals data (yfinance-shaped) can
+    legitimately carry NaN/Infinity floats for missing fields.  Canonical JSON
+    cannot represent them at all -- ``canonical_json_bytes`` raises ValueError
+    ("Out of range float values are not JSON compliant"), which killed the
+    whole fenced start on the first symbol whose fundamentals held a NaN.
+    None is the honest JSON encoding of "provider had no finite value here";
+    the receipt still hashes deterministically and downstream consumers treat
+    missing and non-finite identically.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _finite_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_json(item) for item in value]
+    return value
+
+
 def _utc(value: Any, field_name: str) -> datetime:
     if not isinstance(value, datetime):
         _reject(f"{field_name}_invalid")
@@ -621,8 +642,8 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     cache_ttl_seconds=1.0,
                     reason="typed_fundamentals_receipt_from_future",
                 )
-            typed_receipt = copy.deepcopy(raw.to_dict())
-            result = copy.deepcopy(dict(raw.data or {}))
+            typed_receipt = _finite_json(copy.deepcopy(raw.to_dict()))
+            result = _finite_json(copy.deepcopy(dict(raw.data or {})))
             result_sha256 = sha256_json(result)
             short_name = result.get("short_name")
             if short_name is not None and not isinstance(short_name, str):
@@ -784,8 +805,20 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                             "derived_source_viability_freshness",
                         )
                         ag = (read_at - fr).total_seconds()
+                        # 2026-07-24 (a86-0948): viability_score is a float8
+                        # column, so the producer CAN persist NaN/Infinity
+                        # (JSONB fields cannot).  A non-finite score survives
+                        # projection into the occurrence payload and then
+                        # canonical_json_bytes raises ValueError ("Out of range
+                        # float values are not JSON compliant") -- killing the
+                        # whole fenced start for one poisoned row.  Exclude the
+                        # symbol fail-soft instead, like every other
+                        # per-symbol eligibility failure.
+                        score = r.viability_score
                         if (
-                            ag < 0.0
+                            score is None
+                            or not math.isfinite(float(score))
+                            or ag < 0.0
                             or ag > self.context_max_age_seconds
                             or str(r.correlation_id or "")
                             != str(hub["correlation_id"])
@@ -795,7 +828,11 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                             break
                     if coherent:
                         eligible_symbols.add(symbol_key)
-                except CapturedPaperSelectionSourceUnavailable:
+                except (
+                    CapturedPaperSelectionSourceUnavailable,
+                    TypeError,
+                    ValueError,
+                ):
                     continue
             rows = [
                 row

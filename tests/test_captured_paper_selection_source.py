@@ -361,6 +361,36 @@ def test_source_fails_closed_when_symbol_family_universe_is_partial(db) -> None:
     assert {item.symbol for item in snapshots} == {"ACTU"}
 
 
+def test_source_survives_nonfinite_floats_in_fundamentals(db) -> None:
+    # 2026-07-24 (a86-0948): provider fundamentals (yfinance-shaped) can carry
+    # NaN/Infinity for missing fields.  Canonical JSON cannot represent them,
+    # so an unsanitized receipt raised ValueError inside sha256_json and killed
+    # the whole fenced start.  Non-finite floats must map to None (missing) and
+    # the read must succeed.
+    material = _seed_source(db)
+
+    def nan_fundamentals(symbol: str) -> FundamentalsReceipt:
+        return FundamentalsReceipt(
+            symbol=symbol,
+            status=FundamentalsReceiptStatus.FRESH_DATA,
+            provider_state=FundamentalsProviderState.AVAILABLE,
+            origin=FundamentalsReceiptOrigin.NETWORK,
+            observed_at=datetime.now(UTC),
+            data={
+                "short_name": symbol,
+                "market_cap": float("nan"),
+                "float_shares": float("inf"),
+                "nested": {"ratio": float("-inf"), "ok": 1.5},
+            },
+            cache_ttl_seconds=86_400.0,
+        )
+
+    source = _source(material, fundamentals_reader=nan_fundamentals)
+    snapshots = source.read_snapshot()
+    assert len(snapshots) == 1
+    receipt = snapshots[0].source_payload  # smoke: payload built + hashable
+
+
 def test_source_fails_closed_when_no_symbol_survives_eligibility(db) -> None:
     material = _seed_source(
         db,
