@@ -361,6 +361,27 @@ def test_source_fails_closed_when_symbol_family_universe_is_partial(db) -> None:
     assert {item.symbol for item in snapshots} == {"ACTU"}
 
 
+def test_source_admits_complete_fresh_symbol_outside_hub_tick_universe(db) -> None:
+    # 2026-07-24 (a86-1306): the hub's symbols_evaluated is per-tick — a
+    # tape-delta tick overwrites it with ONE symbol — so pinning the admission
+    # universe to the last hub tick emptied the eligible set whenever that
+    # tick's symbols lacked complete fresh routes (measured live: hub held
+    # ["ARHS","S"] while 98 other symbols had complete fresh route-sets).  A
+    # symbol with a complete fresh viability route-set must be admitted even
+    # when the last hub tick did not evaluate it.
+    material = _seed_source(
+        db,
+        symbols=("HUBONLY",),
+        row_symbols=("ACTU",),
+    )
+    source = _source(
+        material,
+        fundamentals_reader=lambda symbol: _fresh_fundamentals(symbol),
+    )
+    snapshots = source.read_snapshot()
+    assert {item.symbol for item in snapshots} == {"ACTU"}
+
+
 def test_source_survives_nonfinite_floats_in_fundamentals(db) -> None:
     # 2026-07-24 (a86-0948): provider fundamentals (yfinance-shaped) can carry
     # NaN/Infinity for missing fields.  Canonical JSON cannot represent them,

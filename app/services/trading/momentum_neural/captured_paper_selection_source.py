@@ -20,10 +20,10 @@ import math
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -110,6 +110,10 @@ FUNDAMENTALS_QUERY_SCHEMA_VERSION = (
 # the split could run.  Allow hyphens, matching the reader's own design.
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,35}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# Bound on the viability-driven admission-universe probe (fundamentals are
+# fetched per admitted symbol, ~1 network call each, so the union must stay
+# small).  Newest-complete symbols win.
+_VIABILITY_UNIVERSE_CAP = 24
 _READ_ONLY_TRANSACTION_SQL = (
     "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 )
@@ -594,6 +598,73 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
             finally:
                 db.close()
 
+    def _viability_universe_probe(self) -> tuple[str, ...]:
+        """Symbols whose viability route-set is ALREADY complete and fresh.
+
+        2026-07-24 (a86-1306): the hub's ``symbols_evaluated`` is per-tick — a
+        tape-delta tick overwrites it with ONE symbol, so pinning the admission
+        universe to the last hub tick made the eligible set flicker empty
+        whenever that tick's symbols lacked complete fresh routes (the normal
+        post-cutover state; measured: hub=["ARHS","S"] while 98 symbols held
+        complete fresh route-sets).  Probe the viability table itself for
+        complete+fresh symbols and admit the UNION with the hub universe; the
+        per-symbol admission inside the read-only transaction still re-validates
+        every row against read_at, the hub correlation, and the source node
+        before anything is published, so this probe only WIDENS the candidate
+        pool — it never bypasses a gate.
+        """
+        probe_at = _utc(
+            self.wall_clock(), "derived_source_universe_probe_at"
+        )
+        cutoff = (
+            probe_at.astimezone(timezone.utc)
+            - timedelta(seconds=self.context_max_age_seconds)
+        ).replace(tzinfo=None)
+        db = Session(bind=self._bind, expire_on_commit=False)
+        try:
+            db.execute(text(_READ_ONLY_TRANSACTION_SQL))
+            grouped = (
+                db.query(
+                    MomentumSymbolViability.symbol,
+                    func.count(
+                        func.distinct(MomentumSymbolViability.variant_id)
+                    ),
+                    func.max(MomentumSymbolViability.freshness_ts),
+                )
+                .filter(
+                    MomentumSymbolViability.scope == "symbol",
+                    MomentumSymbolViability.variant_id.in_(
+                        self.source_variant_ids
+                    ),
+                    MomentumSymbolViability.source_node_id == HUB_NODE_ID,
+                    MomentumSymbolViability.freshness_ts >= cutoff,
+                )
+                .group_by(MomentumSymbolViability.symbol)
+                .all()
+            )
+        finally:
+            try:
+                db.rollback()
+            finally:
+                db.close()
+        required = len(set(self.source_variant_ids))
+        ranked: list[tuple[Any, str]] = []
+        for symbol_raw, distinct_variants, newest in grouped:
+            symbol = str(symbol_raw or "")
+            if int(distinct_variants or 0) != required:
+                continue
+            if (
+                symbol != symbol.strip().upper()
+                or _SYMBOL_RE.fullmatch(symbol) is None
+                or symbol.endswith("-USD")
+            ):
+                continue
+            ranked.append((newest, symbol))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return tuple(
+            symbol for _newest, symbol in ranked[:_VIABILITY_UNIVERSE_CAP]
+        )
+
     def _fundamentals_receipts(
         self,
         symbols: Sequence[str],
@@ -693,7 +764,15 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         if self._last_hub_snapshot_sha256 == probe_sha:
             return ()
 
-        symbols = tuple(str(value) for value in probe["equity_symbols"])
+        # Universe = hub equity symbols UNION symbols with complete fresh
+        # viability route-sets (see _viability_universe_probe).  The hub's
+        # per-tick symbols alone flicker down to a single tape-delta symbol.
+        symbols = tuple(
+            sorted(
+                {str(value) for value in probe["equity_symbols"]}
+                | set(self._viability_universe_probe())
+            )
+        )
         fundamentals = self._fundamentals_receipts(symbols)
         db = Session(bind=self._bind, expire_on_commit=False)
         try:
