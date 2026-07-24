@@ -7135,6 +7135,20 @@ def _execute_no_order_smoke(
     }
 
 
+def _exception_chain_lines(exc: BaseException, *, cap: int = 8) -> list[str]:
+    """One bounded line per exception in the __cause__/__context__ chain, innermost first."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen and len(chain) < cap:
+        seen.add(id(cur))
+        chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return [
+        f"{type(link).__name__}: {str(link)[:300]}" for link in reversed(chain)
+    ]
+
+
 def _last_known_equity_forced_symbols(engine: Any, *, cap: int = 24) -> tuple[str, ...]:
     """Last-known equity universe from the momentum hub, to seed the provider lanes.
 
@@ -7825,6 +7839,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     traceback.format_exc()
                 )
             ),
+            # 2026-07-24 (a86-1032): ang head+tail bound sa itaas ay PUMUPUTOL
+            # mismo sa root-error line kapag mahaba ang chained traceback (nasa
+            # gitna ito: dulo ng UNANG block).  Ilista nang hiwalay ang buong
+            # exception chain (innermost muna) para hindi kailanman mawala ang
+            # tunay na dahilan.
+            "root_error_chain": _exception_chain_lines(exc),
             "paper_execution_started": (
                 None if active_order_boundary_entered else False
             ),
