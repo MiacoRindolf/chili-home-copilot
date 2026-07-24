@@ -677,8 +677,21 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
         db = Session(bind=self._bind, expire_on_commit=False)
         try:
             db.execute(text(_READ_ONLY_TRANSACTION_SQL))
+            # 2026-07-24 (a86-0825): stamp read_at from the SAME wall clock that
+            # stamps every timestamp it is compared against.  It was previously
+            # pg transaction_timestamp() -- the ONLY pg-clock anchor in this
+            # flow, while fundamentals returned_at, the hub's last_tick_utc, and
+            # every viability-row freshness stamp are host datetime.now(UTC)
+            # (producer + this process share the host clock).  Those cross-clock
+            # comparisons had ZERO skew tolerance, so any transient pg/WSL VM
+            # clock lag behind the host (bursts under load) spuriously rejected
+            # with derived_source_provider_result_from_future / hub_snapshot_
+            # stale even though real-time ordering was correct.  Same-clock
+            # anchoring removes the entire failure class with no tolerance
+            # constant; the read-only transaction still pins the DB snapshot and
+            # the hub sha re-check still detects mid-capture movement.
             read_at = _utc(
-                db.execute(text("SELECT transaction_timestamp()" )).scalar_one(),
+                self.wall_clock(),
                 "derived_source_read_at",
             )
             hub = self._hub_snapshot(db)
