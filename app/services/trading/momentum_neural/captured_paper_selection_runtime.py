@@ -140,9 +140,16 @@ def _nonnegative_seconds(value: Any, field_name: str) -> float:
 
 
 # Re-check cadence while warming up the initial selection snapshot.  read_snapshot
-# is a database read, so this is deliberately coarse (a documented floor, not a
-# busy-wait like the durable/producer frontier loops).
-_INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS = 2.0
+# is a database read PLUS one fundamentals fetch per hub symbol, so this is
+# deliberately coarse (a documented floor, not a busy-wait like the durable/
+# producer frontier loops).  2026-07-24 (a86-1147/1207): at 2.0s a 360s warmup
+# drove ~180 read cycles (~4000 provider fetches + Session churn) and the smoke
+# service crashed 0xC0000005 inside python311.dll at the SAME offset twice --
+# an interpreter-level fault under cumulative multi-threaded churn (120s/2s =
+# 60 cycles passed 5/5 the same day).  15s keeps the total cycle count (~24)
+# well under the proven-safe dose while still sampling a ~300s producer period
+# many times over.
+_INITIAL_SNAPSHOT_WARMUP_POLL_SECONDS = 15.0
 
 
 def _health_mapping(value: Any, field_name: str) -> dict[str, Any]:
