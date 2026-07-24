@@ -7364,28 +7364,21 @@ def _execute_active_service(
             consume=consume_final_start_authority,
             assert_current=assert_final_start_current,
         )
-        # 2026-07-24: break the post-cutover tape<->hub deadlock. After cutover the
-        # legacy bridges are stopped and the candidate lanes come up with NO forced
-        # symbols, so the writer only watches the DYNAMIC universe -- which is
-        # derived from the momentum hub.  But the hub is refreshed by the surviving
-        # producer's FAST tape_delta_ignite job, which needs fresh tape from the
-        # lanes watching.  Idle lanes => no tape => hub goes stale (>context_max_age)
-        # => the fenced-start's first selection read fails derived_source_hub_snapshot
-        # _stale even through the warmup (a86-0335).  Seed the lanes with the
-        # last-known equity universe (from the hub's own symbols_evaluated) so they
-        # watch + capture IMMEDIATELY, tape flows, and the producer refreshes the hub.
-        # Fail-open to () (pure dynamic, prior behaviour) on any error.  The candidate
-        # never writes the hub itself, so there is no race with the external producer.
-        _forced_universe = _last_known_equity_forced_symbols(
-            composition.database_engine
-        )
+        # 2026-07-24 (a86-0906 post-mortem): do NOT pass forced symbols here.  The
+        # bridge writer treats forced_syms as an EXCLUSIVE explicit roster and
+        # disables every dynamic subscription source (iqfeed_trade_bridge.py
+        # "explicit CLI symbols -> no dynamic subscribe").  Seeding the lanes with
+        # the last-known hub universe (ae6f068) therefore REPLACED the ~90-symbol
+        # dynamic RTH universe with ~22 stale names: measured cutover tape fell
+        # from ~15k rows/min across 90+ symbols to ~200/min across 5-6, the fast
+        # per-symbol viability path starved, and the fenced-start warmup exhausted
+        # (derived_source_current_snapshot_empty).  The dynamic sources (live
+        # sessions, eligible, ross universe, alerts) are DB-reads available to the
+        # candidate writer from its first reconcile, so the lanes converge on the
+        # live universe without seeding.  If premarket dynamic thinness (a86-0335
+        # hub-stale) reappears, seeding must be reworked to be ADDITIVE to the
+        # dynamic reads instead of exclusive (helper retained above for that).
         _forced_provider_options: dict[str, Any] = {"readiness_timeout_seconds": 60.0}
-        if _forced_universe:
-            _forced_provider_options["trade_forced_symbols"] = _forced_universe
-            _forced_provider_options["depth_forced_symbols"] = _forced_universe
-        _emit_startup_breadcrumb(
-            "forced_universe seeded n=%d" % len(_forced_universe)
-        )
         supervisor_started = True
         _emit_startup_breadcrumb("BEGIN 6 supervisor.start_active")
         start_health = composition.supervisor.start_active(
