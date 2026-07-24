@@ -595,8 +595,13 @@ class CaptureOnlySmokeReadAuthority:
         try:
             evidence = self.smoke_runner()
         except Exception as exc:
+            # 2026-07-24 (a86-1619): surface the bounded root cause — the fixed
+            # message hid WHICH dependency failed (same observability gap fixed
+            # in the operator chain's preselection wrapper).
             raise CapturedPaperPreactivationProbeError(
-                "CAPTURE_SMOKE_FAILED", "capture-only provider smoke failed closed"
+                "CAPTURE_SMOKE_FAILED",
+                "capture-only provider smoke failed closed: "
+                f"{type(exc).__name__}: {str(exc)[:512]}",
             ) from exc
         if type(evidence) is not CaptureOnlySmokeEvidence:
             raise CapturedPaperPreactivationProbeError(
