@@ -805,9 +805,13 @@ def _capture_candidate_exact_print_preselection(
     except CapturedPaperOperatorChainError:
         raise
     except Exception as exc:
+        # Keep the typed fail-closed contract but surface the ROOT exception
+        # class+message (bounded) — a86-0810/0817 rejected here with an empty
+        # stderr and no way to see WHICH dependency failed without this.
         raise CapturedPaperOperatorChainError(
             "CANDIDATE_EXACT_PRINT_PRESELECTION_FAILED",
-            "bounded candidate exact-print producer failed closed",
+            "bounded candidate exact-print producer failed closed: "
+            f"{type(exc).__name__}: {str(exc)[:512]}",
         ) from exc
 
 
