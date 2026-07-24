@@ -427,7 +427,15 @@ def test_source_fails_closed_when_no_symbol_survives_eligibility(db) -> None:
     assert rejected.value.reason == "derived_source_current_snapshot_empty"
 
 
-def test_source_rejects_hub_generation_drift_during_provider_query(db) -> None:
+def test_source_binds_in_transaction_hub_when_hub_ticks_during_provider_query(
+    db,
+) -> None:
+    # 2026-07-24 (a86-1532): the probe-vs-in-transaction hub sha EQUALITY pin
+    # was unsatisfiable at production cadence (hub ticks every 5-25s; the
+    # fundamentals prefetch takes multiples of that), so a mid-query hub tick
+    # rejected EVERY read.  The in-transaction hub read is now authoritative:
+    # a hub change during the provider query must NOT reject the read, and the
+    # published snapshot must bind the IN-TRANSACTION hub sha (not the probe's).
     material = _seed_source(db)
 
     def fundamentals(_symbol: str):
@@ -445,9 +453,8 @@ def test_source_rejects_hub_generation_drift_during_provider_query(db) -> None:
 
     source = _source(material, fundamentals_reader=fundamentals)
 
-    with pytest.raises(CapturedPaperSelectionSourceUnavailable) as rejected:
-        source.read_snapshot()
-    assert rejected.value.reason == "derived_source_hub_changed_during_capture"
+    snapshots = source.read_snapshot()
+    assert {item.symbol for item in snapshots} == {"ACTU"}
 
 
 def test_source_binds_dilution_clock_to_transaction_read_time(db, monkeypatch) -> None:

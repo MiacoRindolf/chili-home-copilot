@@ -795,8 +795,23 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                 "derived_source_read_at",
             )
             hub = self._hub_snapshot(db)
-            if hub.get("hub_snapshot_sha256") != probe_sha:
-                _reject("derived_source_hub_changed_during_capture")
+            # 2026-07-24 (a86-1532): the probe-vs-in-transaction hub sha
+            # EQUALITY pin is unsatisfiable at production cadence: the hub
+            # ticks every 5-25s (measured live, even after hours) while the
+            # fundamentals prefetch for the union universe takes multiples of
+            # that, so every read lost the race and rejected
+            # derived_source_hub_changed_during_capture.  The IN-TRANSACTION
+            # hub read is the authoritative snapshot (same REPEATABLE READ
+            # snapshot as the viability rows); the probe is only a prefetch
+            # hint for the fundamentals universe.  No-lookahead is preserved
+            # (fundamentals still predate read_at, checked below) and the
+            # published occurrence binds THIS in-transaction hub sha.
+            hub_sha = _sha(
+                hub.get("hub_snapshot_sha256"),
+                "derived_source_hub_snapshot_sha256",
+            )
+            if self._last_hub_snapshot_sha256 == hub_sha:
+                return ()
             if any(
                 _utc(receipt["returned_at"], "fundamentals_returned_at") > read_at
                 for receipt in fundamentals.values()
@@ -1016,7 +1031,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     ),
                     "read_at": read_at,
                     "hub_snapshot": copy.deepcopy(dict(hub)),
-                    "hub_snapshot_sha256": probe_sha,
+                    "hub_snapshot_sha256": hub_sha,
                     "fundamentals_query_receipt": copy.deepcopy(
                         dict(fundamentals_receipt)
                     ),
@@ -1083,7 +1098,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                         post_score_adjustment=post_score,
                         source_payload=source_payload,
                         source_fingerprint_sha256=fingerprint,
-                        hub_snapshot_sha256=probe_sha,
+                        hub_snapshot_sha256=hub_sha,
                         event_at=event_at,
                         read_at=read_at,
                         correlation_id=correlation,
@@ -1101,7 +1116,7 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                     ),
                 )
             )
-            self._last_hub_snapshot_sha256 = probe_sha
+            self._last_hub_snapshot_sha256 = hub_sha
             return result
         finally:
             try:
