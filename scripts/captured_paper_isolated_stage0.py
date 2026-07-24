@@ -1224,13 +1224,14 @@ def _admit_and_execute(argv: Sequence[str]) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    # The sealed dependency inventory runs before the target service can
-    # install its own diagnostics.  Emit one bounded all-thread snapshot if
-    # that admission phase itself stalls; successful targets replace this
-    # one-shot timer when their main function starts.
-    import faulthandler
-
-    faulthandler.dump_traceback_later(30.0, repeat=False, file=sys.stderr)
+    # 2026-07-24 (a86-1147/1207/1229): the 30s dump_traceback_later armed here
+    # CRASHED the interpreter (0xC0000005 in python311.dll, same offset
+    # 0x10ab0b, WER-confirmed 3x) whenever the target service's heavy imports
+    # ran longer than 30s under midday load -- the timer's C-level stderr write
+    # fires mid-import and corrupts the interpreter.  This is the SAME failure
+    # class already removed from the service itself (4e15b9b, the 120s timer);
+    # this stage0 copy was missed.  The service's fsync'd breadcrumbs +
+    # root_error_chain now cover stall diagnosis without a GIL-less watchdog.
     try:
         return _admit_and_execute(tuple(sys.argv[1:] if argv is None else argv))
     except IsolatedStage0Error as exc:
