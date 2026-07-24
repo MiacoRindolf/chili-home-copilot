@@ -893,14 +893,25 @@ class SqlAlchemyCapturedViabilitySnapshotSource:
                         # whole fenced start for one poisoned row.  Exclude the
                         # symbol fail-soft instead, like every other
                         # per-symbol eligibility failure.
+                        # 2026-07-24 (a86-1448): DROPPED the row-vs-hub
+                        # correlation equality.  The incremental writer stamps
+                        # each tick's correlation on the rows it touches, so a
+                        # symbol's 10 variant rows legitimately mix correlations
+                        # (measured live: 46 symbols with "" + 28 with a UUID in
+                        # one window) and can never all equal the LAST hub
+                        # tick's -- the same per-tick-state-pinned-across-
+                        # independent-writes flaw as the universe pin.  The hub
+                        # itself already allows an empty correlation (a74) and
+                        # the published occurrence synthesizes its own
+                        # captured:<fingerprint> correlation; provenance stays
+                        # pinned by source_node + freshness + from-future +
+                        # variant-sha + the read-only snapshot.
                         score = r.viability_score
                         if (
                             score is None
                             or not math.isfinite(float(score))
                             or ag < 0.0
                             or ag > self.context_max_age_seconds
-                            or str(r.correlation_id or "")
-                            != str(hub["correlation_id"])
                             or str(r.source_node_id or "") != HUB_NODE_ID
                         ):
                             coherent = False
