@@ -228,7 +228,7 @@ PREACTIVATION_ROLLBACK_BASELINE_MODE = "PREACTIVATION_ROLLBACK_BASELINE"
 # so Apply rolled back and TerminateProcess'd a healthy service with no fault
 # trace.  Widened to match the service (180s); stays under the 10-min receipt
 # / 15-min manifest windows.
-STARTUP_HANDSHAKE_MAX_AGE_SECONDS = 180.0
+STARTUP_HANDSHAKE_MAX_AGE_SECONDS = 480.0
 STARTUP_DISPATCH_LOCK_WAIT_SECONDS = 30.0
 STARTUP_DISPATCH_LOCK_BYTE = b"0"
 STARTUP_DISPATCH_LOCK_BYTE_SHA256 = hashlib.sha256(

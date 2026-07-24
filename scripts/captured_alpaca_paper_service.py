@@ -92,8 +92,8 @@ _HOST_CUTOVER_APPLY_CONFIRMATION = "CUTOVER_FAKE_MONEY_ALPACA_PAPER"
 # fault trace (no WER dump, no .service-crash.json, no THREAD-CRASH), which is
 # exactly why ~60 activation generations mis-read it as a native crash.
 # 180s stays well under the 10-min receipt / 15-min manifest windows.
-_HOST_ACTIVATION_MAX_AGE_SECONDS = 180.0
-_HOST_ACTIVATION_WAIT_SECONDS = 180.0
+_HOST_ACTIVATION_MAX_AGE_SECONDS = 480.0
+_HOST_ACTIVATION_WAIT_SECONDS = 480.0
 _ACTIVE_START_EVIDENCE_MAX_BYTES = 512 * 1024
 _LEGACY_PAPER_BROKER_QUIET_HORIZON_SECONDS = 30.0
 _LEGACY_PAPER_BROKER_QUIET_HORIZON_POLICY = (
@@ -6407,13 +6407,17 @@ def _assemble_service_composition(
             durable_timeout_seconds=handoff_ttl_seconds,
             producer_timeout_seconds=handoff_ttl_seconds,
             # A host cutover stops the legacy capture lanes, so the candidate
-            # lanes need a few seconds to re-establish watches and refill the
-            # derived viability before the FIRST selection cycle can observe a
-            # non-empty source.  Tolerate that transient rather than failing the
-            # fenced start on the very first (still-warming) read.  MUST stay
-            # under the cutover STARTED-handshake window (180s) with margin, so
-            # the startup receipt is still written before the host gives up.
-            initial_snapshot_warmup_seconds=120.0,
+            # lanes need time to re-establish watches and the derived viability
+            # needs a producer refresh before the FIRST selection cycle can
+            # observe a non-empty source.  a86-1111 (lunchtime lull): the slow
+            # scanner path refreshes complete per-symbol route-sets about every
+            # ~300s and the fast tape-delta path only touches active movers, so
+            # a warmup SHORTER than one slow-producer period can miss the burst
+            # entirely regardless of market health.  Cover >= one full period +
+            # margin.  MUST stay under the cutover STARTED-handshake window
+            # (480s pair) with margin, so the startup receipt is still written
+            # before the host gives up.
+            initial_snapshot_warmup_seconds=360.0,
             monotonic_clock=monotonic_clock,
         )
     )
