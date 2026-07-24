@@ -7135,6 +7135,50 @@ def _execute_no_order_smoke(
     }
 
 
+def _last_known_equity_forced_symbols(engine: Any, *, cap: int = 24) -> tuple[str, ...]:
+    """Last-known equity universe from the momentum hub, to seed the provider lanes.
+
+    Read the hub node (nm_momentum_crypto_intel) local_state.symbols_evaluated and
+    keep the equity names (NOT ``-USD`` crypto pairs) that match the selection
+    reader's symbol grammar.  Used to force the post-cutover lanes to watch +
+    capture tape immediately instead of idling until a fresh hub exists (which the
+    hub itself needs tape to become).  Read-only; fail-open to () on ANY error so a
+    missing/empty hub simply preserves the prior pure-dynamic behaviour.
+    """
+    try:
+        from sqlalchemy import text as _sql_text
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                _sql_text(
+                    "SELECT local_state FROM brain_node_states "
+                    "WHERE node_id = :n"
+                ),
+                {"n": "nm_momentum_crypto_intel"},
+            ).fetchone()
+        if not row or not row[0]:
+            return ()
+        state = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        raw = state.get("symbols_evaluated")
+        if not isinstance(raw, list):
+            return ()
+        seen: set[str] = set()
+        out: list[str] = []
+        for value in raw:
+            symbol = str(value or "").strip().upper()
+            if not symbol or symbol.endswith("-USD") or symbol in seen:
+                continue
+            if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,35}", symbol) is None:
+                continue
+            seen.add(symbol)
+            out.append(symbol)
+            if len(out) >= cap:
+                break
+        return tuple(out)
+    except Exception:
+        return ()
+
+
 def _execute_active_service(
     *,
     verified: activation_contract.VerifiedCapturedPaperActivation,
@@ -7320,6 +7364,28 @@ def _execute_active_service(
             consume=consume_final_start_authority,
             assert_current=assert_final_start_current,
         )
+        # 2026-07-24: break the post-cutover tape<->hub deadlock. After cutover the
+        # legacy bridges are stopped and the candidate lanes come up with NO forced
+        # symbols, so the writer only watches the DYNAMIC universe -- which is
+        # derived from the momentum hub.  But the hub is refreshed by the surviving
+        # producer's FAST tape_delta_ignite job, which needs fresh tape from the
+        # lanes watching.  Idle lanes => no tape => hub goes stale (>context_max_age)
+        # => the fenced-start's first selection read fails derived_source_hub_snapshot
+        # _stale even through the warmup (a86-0335).  Seed the lanes with the
+        # last-known equity universe (from the hub's own symbols_evaluated) so they
+        # watch + capture IMMEDIATELY, tape flows, and the producer refreshes the hub.
+        # Fail-open to () (pure dynamic, prior behaviour) on any error.  The candidate
+        # never writes the hub itself, so there is no race with the external producer.
+        _forced_universe = _last_known_equity_forced_symbols(
+            composition.database_engine
+        )
+        _forced_provider_options: dict[str, Any] = {"readiness_timeout_seconds": 60.0}
+        if _forced_universe:
+            _forced_provider_options["trade_forced_symbols"] = _forced_universe
+            _forced_provider_options["depth_forced_symbols"] = _forced_universe
+        _emit_startup_breadcrumb(
+            "forced_universe seeded n=%d" % len(_forced_universe)
+        )
         supervisor_started = True
         _emit_startup_breadcrumb("BEGIN 6 supervisor.start_active")
         start_health = composition.supervisor.start_active(
@@ -7331,7 +7397,7 @@ def _execute_active_service(
             # re-login -- which would raise inside start_active and get the
             # healthy service rolled back/killed.  60s absorbs a reconnect
             # cycle and still fits inside the 180s PREPARED->STARTED window.
-            provider_options={"readiness_timeout_seconds": 60.0},
+            provider_options=_forced_provider_options,
         )
         _emit_startup_breadcrumb("END 6 supervisor.start_active returned")
         assert_final_start_current()
