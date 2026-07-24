@@ -805,9 +805,23 @@ def _capture_candidate_exact_print_preselection(
     except CapturedPaperOperatorChainError:
         raise
     except Exception as exc:
-        # Keep the typed fail-closed contract but surface the ROOT exception
-        # class+message (bounded) — a86-0810/0817 rejected here with an empty
-        # stderr and no way to see WHICH dependency failed without this.
+        # Keep the typed fail-closed contract but persist the ROOT traceback to
+        # the artifact root — a86-0810/0817 rejected here with an empty stderr
+        # and the typed error's message field is dropped by every emitter, so
+        # without this file the failing dependency is invisible.
+        try:
+            import traceback as _tb
+
+            failure_dir = artifact_root / "capture-preselection"
+            failure_dir.mkdir(parents=True, exist_ok=True)
+            (failure_dir / "preselection-failure.txt").write_text(
+                "".join(
+                    _tb.format_exception(type(exc), exc, exc.__traceback__)
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
         raise CapturedPaperOperatorChainError(
             "CANDIDATE_EXACT_PRINT_PRESELECTION_FAILED",
             "bounded candidate exact-print producer failed closed: "
