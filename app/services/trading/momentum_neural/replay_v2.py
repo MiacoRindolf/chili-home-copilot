@@ -165,6 +165,20 @@ REPLAY_REVIEW_LATENCY_K = float(
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
 
 
+def _historical_full_pipeline_coverage_reason(
+    *,
+    float_gate_enabled: bool,
+) -> str:
+    """Return the first unavailable causal input for legacy full-pipeline replay."""
+
+    if float_gate_enabled:
+        return "historical_float_reference_coverage_unavailable"
+    # Even with the new float gate disabled, build_equity_universe enriches an
+    # injected snapshot with a current-day IQFeed DB aggregate. Replay v2 has no
+    # sealed as-of equivalent, so the selection lane remains unavailable.
+    return "historical_universe_reference_coverage_unavailable"
+
+
 def _prefetch_ohlcv_frames(
     symbols: Iterable[str],
     *,
@@ -965,7 +979,6 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     # STEP 2 prints-based fill model: bulk-load the day's TRADE PRINTS once (twin of Tape over
     # iqfeed_trade_ticks) only when the flag is on. OFF ⇒ None ⇒ the entry seam keeps the EXACT
     # quote fill (byte-identical). REPLAY-ONLY.
-    trade_tape = TradeTape(date) if REPLAY_PRINTS_FILL else None
     result: dict = {
         "date": date,
         "engine": "v2",
@@ -989,6 +1002,33 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         if persist:
             _persist(result)
         return result
+    if armed_source == "full_pipeline":
+        float_gate_enabled = bool(
+            getattr(
+                settings,
+                "chili_momentum_universe_float_gate_enabled",
+                True,
+            )
+        )
+        coverage_reason = _historical_full_pipeline_coverage_reason(
+            float_gate_enabled=float_gate_enabled,
+        )
+        result["coverage_grade"] = "COVERAGE_UNAVAILABLE"
+        result["coverage_unavailable_reasons"] = [coverage_reason]
+        result["coverage_provenance"] = {
+            "selection_builder": "build_equity_universe",
+            "float_gate_setting": (
+                "chili_momentum_universe_float_gate_enabled"
+            ),
+            "float_gate_enabled": float_gate_enabled,
+            "current_db_fallback_allowed": False,
+            "current_provider_fallback_allowed": False,
+        }
+        result["error"] = coverage_reason
+        if persist:
+            _persist(result)
+        return result
+    trade_tape = TradeTape(date) if REPLAY_PRINTS_FILL else None
 
     # REPLAY->LIVE SIZING PARITY (operator "walang mintis", 2026-06-23): size off the SAME
     # real account equity the live lane uses, NOT a stale fixed basis, so the replay's
@@ -1251,7 +1291,10 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             return []
         # Stage 1: the REAL universe screen + freshness×move rank (as-of snapshot).
         try:
-            screened = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snapshot)
+            screened = build_equity_universe(
+                EQUITY_ROSS_SMALLCAP,
+                snapshot=snapshot,
+            )
         except Exception:
             screened = []
         screened_set = {str(x).upper() for x in screened}
