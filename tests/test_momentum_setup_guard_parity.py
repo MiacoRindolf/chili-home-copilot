@@ -148,7 +148,9 @@ class TestInverseHeadShouldersBaseline:
         assert ok is True, f"clean inverse-H&S must fire, got {reason} dbg={dbg}"
         assert reason == "inverse_head_shoulders_break"
         assert dbg["pullback_high"] == pytest.approx(_IHS_NECK, abs=1e-6)
-        assert dbg["pullback_low"] == pytest.approx(8.50, abs=1e-6)  # head low = stop
+        # Ross-parity L2a (2026-07-25): stop = RIGHT-SHOULDER low (9.10), not the head low
+        # (8.50) — intended pinned-expectation update with the stop-alignment change
+        assert dbg["pullback_low"] == pytest.approx(9.10, abs=1e-6)
 
     def test_clean_ihs_tick_break_fires(self):
         df = _ihs_df()

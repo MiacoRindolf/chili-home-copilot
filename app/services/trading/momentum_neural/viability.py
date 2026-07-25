@@ -1150,6 +1150,24 @@ def score_viability_explicit(
                 elif _grade_delta > 0:
                     base += _grade_delta
                     warnings.append("Strong catalyst (FDA/M&A/contract) — Ross-style")
+            # ARB-FLAT gate (Ross SS101): a CONFIRMED buyout TARGET trades pinned at the
+            # deal price — no intraday long opportunity; any residual gap is merger-arb
+            # with deal-break tail risk. PRECEDENCE: beats strong (a headline matching
+            # both "definitive agreement" and "to be acquired" is FLAT — apply the
+            # negative tilt and drop live eligibility even if the grade delta above was
+            # positive). Distinct class from weak so the reverse-split / private-
+            # placement sign-refinements and the fake-catalyst set (all weak-keyed)
+            # never touch it. Flag OFF -> skipped -> byte-identical.
+            if bool(getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", True)):
+                _arb_g = _meta2.get("arb_flat_catalyst_symbols")
+                if _arb_g and symbol.upper() in {str(s).upper() for s in _arb_g}:
+                    from .catalyst import _catalyst_tilt
+
+                    base -= abs(float(_catalyst_tilt()))
+                    live_eligible = False
+                    warnings.append(
+                        "Arb-flat catalyst (confirmed buyout target — price pinned at deal)"
+                    )
     except (TypeError, ValueError, AttributeError):
         pass
 

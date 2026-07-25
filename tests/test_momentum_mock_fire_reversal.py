@@ -32,6 +32,7 @@ TESTS-ONLY: this file never edits source. Each gate is exercised through its pub
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -72,8 +73,16 @@ def _rows(bars):
 #  (1) flush_dip_buy_confirmation  — AS101 algo-flush V-bounce dip-buy
 #  Inline structural gate. FIRE = "flush_dip_buy". Mocks: compute_all_from_df (ema_9 rising +
 #  vwap + atr), candles.is_bounce_curl_candle (curl). _bottoming_tail runs for real on the
-#  flush bar geometry. RTH gate defaults OFF -> fail-open.
+#  flush bar geometry. RTH gate defaults OFF -> fail-open. The MORNING-ONLY guard (JZXN
+#  2026-07-10) reads ``now`` (else the last bar timestamp — here a RangeIndex label, i.e. a
+#  nonsense 1970 epoch clock), so every call injects a frozen 10:00-ET ``now``.
 # ════════════════════════════════════════════════════════════════════════════════════════
+
+# Frozen MORNING clock: 14:00 UTC = 10:00 ET (July = EDT), inside RTH and before the
+# 10:30 ET morning-window cutoff (9:30 open + chili_momentum_reclaim_max_hours_after_open
+# = 1h). Without it the guard falls back to df.index[-1] — the RangeIndex int 11 ->
+# pd.Timestamp(11ns after epoch) -> 19:00 ET -> a deterministic block at any wall hour.
+_FLUSH_NOW = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
 
 def _flush_dip_df() -> pd.DataFrame:
     """A front-side up name, a fast bottoming-tail flush bar INTO support, then a green curl
@@ -96,12 +105,19 @@ def _flush_dip_df() -> pd.DataFrame:
         (9.88, 9.92, 9.20, 9.85),   # 10 FLUSH bar: long lower wick into VWAP (low 9.20)
         (9.85, 9.98, 9.80, 9.95),   # 11 cur = green CURL reclaiming above VWAP
     ]
-    return _rows(bars)
+    df = _rows(bars)
+    # Ross-parity L1b (2026-07-25): the curl/reclaim bar needs a REAL volume surge now
+    # (the flush_dip volume gate); 3M vs the 1M lead-in = volume_ratio 3.0 >= 1.5.
+    df.loc[df.index[-1], "Volume"] = 3_000_000
+    return df
 
 
 def _flush_settings(ms) -> None:
     ms.chili_momentum_flush_dip_buy_enabled = True
     ms.chili_momentum_dip_buy_rth_only_enabled = False  # RTH gate OFF -> fail-open
+    ms.chili_momentum_reclaim_max_hours_after_open = 1.0  # morning cutoff 10:30 ET
+    ms.chili_momentum_flush_dip_volume_gate_enabled = True  # Ross-parity L1b
+    ms.chili_momentum_pullback_volume_spike_multiple = 1.5
 
 
 def _flush_arrays(n: int = 12) -> dict:
@@ -122,7 +138,9 @@ class TestFlushDipBuyMockFire:
                 patch(f"{_GATES}.compute_all_from_df", return_value=_flush_arrays()), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
             _flush_settings(ms)
-            ok, reason, dbg = flush_dip_buy_confirmation(df, entry_interval="5m", symbol="TEST")
+            ok, reason, dbg = flush_dip_buy_confirmation(
+                df, entry_interval="5m", symbol="TEST", now=_FLUSH_NOW,
+            )
         assert ok is True, f"clean flush-dip must fire, got {reason} dbg={dbg}"
         assert reason == "flush_dip_buy"
         assert dbg["pullback_low"] == pytest.approx(9.20, abs=1e-6)   # the dip low = stop
@@ -136,7 +154,9 @@ class TestFlushDipBuyMockFire:
                 patch(f"{_GATES}.compute_all_from_df", return_value=_flush_arrays()), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=False):
             _flush_settings(ms)
-            ok, reason, dbg = flush_dip_buy_confirmation(df, entry_interval="5m", symbol="TEST")
+            ok, reason, dbg = flush_dip_buy_confirmation(
+                df, entry_interval="5m", symbol="TEST", now=_FLUSH_NOW,
+            )
         assert ok is False
         assert reason == "flush_dip_weak_curl"
 
@@ -148,7 +168,9 @@ class TestFlushDipBuyMockFire:
                 patch(f"{_GATES}.compute_all_from_df", return_value=falling), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
             _flush_settings(ms)
-            ok, reason, dbg = flush_dip_buy_confirmation(df, entry_interval="5m", symbol="TEST")
+            ok, reason, dbg = flush_dip_buy_confirmation(
+                df, entry_interval="5m", symbol="TEST", now=_FLUSH_NOW,
+            )
         assert ok is False
         assert reason == "flush_dip_not_front_side"
 
@@ -175,6 +197,7 @@ def _vwap_settings(ms) -> None:
     ms.chili_momentum_vwap_reclaim_enabled = True
     ms.chili_momentum_vwap_reclaim_min_below_bars = 2
     ms.chili_momentum_vwap_reclaim_vol_mult = 1.5
+    ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
 
 
 def _vwap_arrays(n: int = 12) -> dict:
@@ -193,8 +216,22 @@ class TestVwapReclaimMockFire:
         assert ok is True, f"clean vwap-reclaim must fire, got {reason} dbg={dbg}"
         assert reason == "vwap_reclaim"
         assert dbg["pullback_high"] == pytest.approx(9.85, abs=1e-6)
-        assert dbg["pullback_low"] == pytest.approx(9.42, abs=1e-6)
+        # Ross-parity L2a: stop = LOSS-OF-VWAP (9.50), not the reclaim-bar low (9.42)
+        assert dbg["pullback_low"] == pytest.approx(9.50, abs=1e-6)
+        assert dbg["stop_model"] == "loss_of_vwap"
         assert dbg["bars_below"] >= 2
+
+    def test_legacy_stop_with_alignment_flag_off(self):
+        """Kill-switch parity: ross_stop_alignment OFF -> legacy reclaim-bar-low stop (9.42)."""
+        df = _vwap_reclaim_df()
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=_vwap_arrays()):
+            _vwap_settings(ms)
+            ms.chili_momentum_ross_stop_alignment_enabled = False
+            ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is True
+        assert dbg["pullback_low"] == pytest.approx(9.42, abs=1e-6)
+        assert dbg["stop_model"] == "reclaim_bar_low"
 
     def test_negative_low_volume_no_fire(self):
         """The reclaim happens but WITHOUT the volume spike (a drift back over VWAP, not a
@@ -626,6 +663,7 @@ def _ihs_settings(ms) -> None:
     ms.chili_momentum_swing_pivot_half_window = 1
     ms.chili_momentum_swing_pivot_atr_noise_frac = 0.0
     ms.chili_momentum_pullback_volume_spike_multiple = 1.5
+    ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
 
 
 def _ihs_arrays(n: int = 9) -> dict:
@@ -667,7 +705,7 @@ class TestInverseHeadShouldersMockFire:
     def test_positive_clean_ihs_fires(self):
         """A clean inverse-H&S (head below both shoulders, RS holds) breaking the neckline with
         all chase-guards passing -> FIRES ``inverse_head_shoulders_break``; entry = neckline,
-        stop = head low."""
+        stop = RIGHT-SHOULDER low (Ross-parity L2a; the head low is a full pattern-depth away)."""
         df = _ihs_df()
         with patch(f"{_GATES}.settings") as ms, _IhsPassGuards():
             _ihs_settings(ms)
@@ -677,7 +715,21 @@ class TestInverseHeadShouldersMockFire:
         assert ok is True, f"clean inverse-H&S must fire, got {reason} dbg={dbg}"
         assert reason == "inverse_head_shoulders_break"
         assert dbg["pullback_high"] == pytest.approx(_IHS_NECK, abs=1e-6)  # neckline = entry
-        assert dbg["pullback_low"] == pytest.approx(8.50, abs=1e-6)        # head low = stop
+        assert dbg["pullback_low"] == pytest.approx(9.10, abs=1e-6)        # RS low = stop
+        assert dbg["stop_model"] == "right_shoulder_low"
+
+    def test_legacy_stop_with_alignment_flag_off(self):
+        """Kill-switch parity: ross_stop_alignment OFF -> legacy HEAD-low stop (8.50)."""
+        df = _ihs_df()
+        with patch(f"{_GATES}.settings") as ms, _IhsPassGuards():
+            _ihs_settings(ms)
+            ms.chili_momentum_ross_stop_alignment_enabled = False
+            ok, reason, dbg = inverse_head_shoulders_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+            )
+        assert ok is True
+        assert dbg["pullback_low"] == pytest.approx(8.50, abs=1e-6)
+        assert dbg["stop_model"] == "head_low"
 
     def test_negative_extended_no_fire(self):
         """The NOT-PARABOLIC extension guard trips (the neckline break is excessively extended
@@ -696,8 +748,10 @@ class TestInverseHeadShouldersMockFire:
 # ════════════════════════════════════════════════════════════════════════════════════════
 #  (8) wick_reclaim_confirmation  — HVM101 #008 hot-tape wick reclaim
 #  Inline gate, MANDATORY hot-tape gate (_is_hot_tape via ATR%/RVOL floors). FIRE =
-#  "wick_reclaim". Mocks: compute_all_from_df (atr + volume_ratio). The rejection candle +
-#  flush + retrace geometry runs for real; the hot-tape gate passes via a high RVOL.
+#  "wick_reclaim". Mocks: compute_all_from_df (atr + volume_ratio) + tape_confirms_hold (the
+#  UNIFIED buyers_confirmed gate delegates to it for equities and fails CLOSED with db=None).
+#  The rejection candle + flush + retrace geometry runs for real; the hot-tape gate passes
+#  via a high RVOL.
 # ════════════════════════════════════════════════════════════════════════════════════════
 
 def _wick_reclaim_df() -> pd.DataFrame:
@@ -722,6 +776,7 @@ def _wick_settings(ms) -> None:
     ms.chili_momentum_wick_reclaim_min_retrace_frac = 0.4
     ms.chili_momentum_vwap_reclaim_min_below_bars = 2
     ms.chili_momentum_wick_reclaim_slow_recovery_gate_enabled = False
+    ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
 
 
 def _wick_arrays(n: int = 12) -> dict:
@@ -740,13 +795,32 @@ class TestWickReclaimMockFire:
         FIRES ``wick_reclaim``; entry = wick high, stop = flush/wick low."""
         df = _wick_reclaim_df()
         with patch(f"{_GATES}.settings") as ms, \
-                patch(f"{_GATES}.compute_all_from_df", return_value=_wick_arrays()):
+                patch(f"{_GATES}.compute_all_from_df", return_value=_wick_arrays()), \
+                patch(f"{_GATES}.tape_confirms_hold",
+                      return_value=(True, {"reason": "tape_hold_ok"})):
             _wick_settings(ms)
             ok, reason, dbg = wick_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is True, f"clean wick-reclaim must fire, got {reason} dbg={dbg}"
         assert reason == "wick_reclaim"
         assert dbg["pullback_high"] == pytest.approx(11.00, abs=1e-6)  # wick high = level
-        assert dbg["pullback_low"] == pytest.approx(9.80, abs=1e-6)    # flush low = stop
+        # Ross-parity L2a: stop = RECLAIM-BAR low (9.88; the structural instant-out),
+        # never looser than the flush low (degeneracy guard)
+        assert dbg["pullback_low"] == pytest.approx(9.88, abs=1e-6)
+        assert dbg["stop_model"] == "reclaim_bar_low"
+
+    def test_legacy_stop_with_alignment_flag_off(self):
+        """Kill-switch parity: ross_stop_alignment OFF -> legacy flush-low stop (9.80)."""
+        df = _wick_reclaim_df()
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=_wick_arrays()), \
+                patch(f"{_GATES}.tape_confirms_hold",
+                      return_value=(True, {"reason": "tape_hold_ok"})):
+            _wick_settings(ms)
+            ms.chili_momentum_ross_stop_alignment_enabled = False
+            ok, reason, dbg = wick_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is True
+        assert dbg["pullback_low"] == pytest.approx(9.80, abs=1e-6)
+        assert dbg["stop_model"] == "flush_low"
 
     def test_negative_cold_tape_no_fire(self):
         """The MANDATORY hot-tape gate fails (cold tape: low RVOL + low ATR%) -> the trigger

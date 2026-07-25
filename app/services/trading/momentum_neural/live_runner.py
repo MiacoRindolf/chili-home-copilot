@@ -20522,6 +20522,27 @@ STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
     "first_pullback_ok", "first_pullback_tick_ok",
 )
 
+# Ross-parity L2b (2026-07-25): ORB + inverse-H&S emit pullback_low/high under the SAME
+# debug keys as every other structural trigger, but their reasons were NEVER in the tuple
+# above — so their structural stops were silently dropped (ATR fallback) and they were
+# excluded from the leader/chase structural bypasses. Latent bug found by the coverage
+# audit. Flag-gated extension (accessor below) so one env flip reverts BOTH detectors to
+# the old ATR-stop behavior. Exact fire-reason strings verified against entry_gates.py.
+ORB_IHS_STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
+    "orb_break", "orb_break_tick_ok",
+    "inverse_head_shoulders_break", "inverse_head_shoulders_break_tick_ok",
+)
+
+
+def structural_trigger_reasons() -> tuple[str, ...]:
+    """The reason set whose ``pullback_low`` becomes the structural stop (and which counts
+    as a structural trigger for the leader/chase bypasses). ALL consumption sites read this
+    accessor so the ``chili_momentum_orb_ihs_structural_stop_enabled`` flag stays consistent
+    across stop-stash + bypass semantics. Flag OFF -> the legacy base tuple, byte-identical."""
+    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", True)):
+        return STRUCTURAL_TRIGGER_REASONS + ORB_IHS_STRUCTURAL_TRIGGER_REASONS
+    return STRUCTURAL_TRIGGER_REASONS
+
 
 def _scope_backside_bench_to_et_session(
     le: dict,
@@ -26991,7 +27012,7 @@ def tick_live_session(
                     _g4e_ok, _g4e_dbg = reentry_escalation_decision(
                         enabled=True,
                         escalation_level=_g4e_level,
-                        structural_trigger=(_trigger_reason in STRUCTURAL_TRIGGER_REASONS),
+                        structural_trigger=(_trigger_reason in structural_trigger_reasons()),
                         live_price=_g4e_px,
                         prior_hwm=_float_or_none(_g4e_prior.get("high_water_mark")),
                         prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
@@ -27120,7 +27141,7 @@ def tick_live_session(
                                     le["g4_leader_min"] = _cc_min_key
                                     le["g4_leader_is"] = _cc_leader
                                     _commit_le(sess, le)
-                                if _cc_leader is True and (_trigger_reason in STRUCTURAL_TRIGGER_REASONS):
+                                if _cc_leader is True and (_trigger_reason in structural_trigger_reasons()):
                                     from .entry_gates import tape_confirms_hold as _cc_tape_fn
 
                                     _cc_tape_ok, _cc_tape_dbg = _cc_tape_fn(
@@ -27240,7 +27261,7 @@ def tick_live_session(
             # (the class list is the shared module constant STRUCTURAL_TRIGGER_REASONS —
             # also the G4 P2 escalation gate's required-quality set; see its definition
             # for the per-class provenance comments)
-            if _trigger_reason in STRUCTURAL_TRIGGER_REASONS and _pb_debug.get("pullback_low"):
+            if _trigger_reason in structural_trigger_reasons() and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
                 # level) so the held-position handler can fast-bail if it fails to hold
@@ -38572,6 +38593,77 @@ def tick_live_session(
                     _g4c_dbg["error"] = repr(_g4c_exc)
                     _log.debug(
                         "[momentum_live] g4 leader-exempt read failed (fail-closed)",
+                        exc_info=True,
+                    )
+            # Ross-parity L5 / GAP-B (2026-07-25): FRESH-IGNITION exemption — a NON-leader
+            # symbol whose tape is actively igniting at the cap edge must not terminalize
+            # with its next leg ahead (the leader exemption above already covers the #1;
+            # this covers the fresh igniter that hasn't taken the crown yet — the
+            # ross-parity study's re-entry conversion lever). Fresh ignition = buyers
+            # lifting NOW (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-
+            # CLOSED) OR membership in the running-up burst map (>=3%/5min). Bounded:
+            # at most chili_momentum_max_ignition_exemptions grants per session (default
+            # 1 — one extra cycle per ignition episode; max_stopout_reentries stays the
+            # base cap). The grant only recycles to WATCHING — the actual re-entry still
+            # passes the existing G4 escalated confirmation (structural trigger + tape),
+            # the same quality-raise contract the leader exemption uses. FAIL-CLOSED:
+            # any read error => no exemption => terminalize exactly as today.
+            if (
+                not _re_ok
+                and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True))
+            ):
+                _ign_dbg: dict = {}
+                try:
+                    _ign_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
+                    _ign_used = int(le.get("ignition_exemptions") or 0)
+                    _ign_dbg["used"] = _ign_used
+                    _ign_dbg["max"] = _ign_max
+                    _ign_ok = False
+                    if _ign_used < _ign_max:
+                        _ign_sym = str(sess.symbol or "").strip().upper()
+                        # AND-composition (validated 2026-07-25): the replay A/B showed the
+                        # instant-accel leg alone grants on NOISE (a momentary lift on a
+                        # fade/chop day: CLRO −0.97 / QTTB −2.93 per granted cycle). A REAL
+                        # ignition must show BOTH: buyers lifting at this instant (leg 1,
+                        # fail-closed) AND a sustained >=3%/5min burst (leg 2, the running-up
+                        # map) — the JEM-class re-ignition signature. Either leg absent =>
+                        # no grant.
+                        # leg 1: executed-tape confirmer (module-attr call so the replay
+                        # driver's sim-clock patch of signed_tape_accel_features applies)
+                        from . import entry_gates as _ign_eg
+
+                        _tc_ok, _tc_dbg = _ign_eg.tape_confirms_hold(_ign_sym, db=db)
+                        _ign_dbg["tape"] = _tc_dbg
+                        if _tc_ok:
+                            # leg 2: the running-up burst map (>=3%/5min internal floor)
+                            from .nbbo_tape import tape_running_up_signal_map
+
+                            _run_map = tape_running_up_signal_map(db, now_utc=_utcnow()) or {}
+                            _ign_dbg["running_up_hit"] = _ign_sym in _run_map
+                            _ign_ok = _ign_sym in _run_map
+                    from .risk_policy import fresh_ignition_reentry_allowed
+
+                    _ign_allowed, _ign_reason = fresh_ignition_reentry_allowed(
+                        enabled=True,  # the bypass flag gates this whole block above
+                        ignition_ok=_ign_ok,
+                        ignition_exemptions=_ign_used,
+                        max_ignition_exemptions=_ign_max,
+                    )
+                    _ign_dbg["decision"] = _ign_reason
+                    if _ign_allowed:
+                        _re_ok = True
+                        le["ignition_exemptions"] = _ign_used + 1
+                        _emit(db, sess, "live_reentry_cap_ignition_exempt", {
+                            "reason": _re_reason,
+                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                            "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+                            "ignition_exemptions": int(le["ignition_exemptions"]),
+                            "ignition_read": _ign_dbg,
+                        })
+                except Exception as _ign_exc:
+                    _ign_dbg["error"] = repr(_ign_exc)
+                    _log.debug(
+                        "[momentum_live] fresh-ignition exempt read failed (fail-closed)",
                         exc_info=True,
                     )
             if not _re_ok:

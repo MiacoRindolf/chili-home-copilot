@@ -61,6 +61,13 @@ class UniverseProfile:
     min_change_pct: float | None = None  # signed % change floor (long bias: positive)
     max_universe: int = 50
     low_float_bias: bool = False  # prefer low float (proxy via price when float absent)
+    # Ross-parity L4 (2026-07-25): optional PROFILE-level float ceiling override. None =
+    # the universe float gate falls back to the ONE shared reference (the viability
+    # A-setup ceiling, chili_momentum_a_setup_quality_floor_float_ceiling_shares) — no
+    # second number. NOTE: nbbo_tape's eligibility read (getattr float_shares_max) only
+    # activates when a profile SETS this; leaving the Ross profile at None keeps that
+    # consumer inert (the universe ranked-subset gate is the L4 change surface).
+    float_shares_max: float | None = None
     catalyst_required: bool = False
     # Freshness: tighten the shared snapshot TTL for this profile so newly-igniting
     # names surface while a clean first-pullback entry still exists (None = 30min default).
@@ -855,12 +862,70 @@ def build_equity_universe(
     # guaranteed slots count toward `cap` or extend it: they EXTEND it, so the normal
     # top-`cap` pool is never starved by the re-catch — the guarantee is purely additive
     # and bounded. OFF ⇒ `_guaranteed` is empty ⇒ byte-identical to the old loop.
+    # Ross-parity L4 (2026-07-25): FLOAT gate on the final ranked subset — Ross scans
+    # FLOAT FIRST (supply side); a high-float grinder occupying a scarce ranked slot
+    # burns enrichment/viability budget before its inevitable downstream veto (the
+    # A-setup 20M fail-CLOSED gate), and the low-float candidate ranked just below the
+    # cut never enters the pool. Gate ONLY here (post-rank), per-candidate via the
+    # process-lifetime-cached get_ticker_float — bounded by a ~2x lookup budget so a
+    # cache-cold first run cannot become an API storm. FAIL-OPEN on None float (the
+    # downstream viability gate is the fail-closed backstop) and on exhausted budget.
+    # Reference = profile override else the ONE shared viability ceiling (no 2nd number).
+    _float_gate_on = bool(
+        getattr(_settings, "chili_momentum_universe_float_gate_enabled", True)
+    ) if _settings else False
+    _float_max: float | None = None
+    _float_budget = 0
+    if _float_gate_on:
+        try:
+            _float_max = (
+                float(profile.float_shares_max)
+                if getattr(profile, "float_shares_max", None) is not None
+                else float(getattr(
+                    _settings,
+                    "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
+                    20_000_000.0,
+                ) or 20_000_000.0)
+            )
+        except (TypeError, ValueError):
+            _float_max = None
+
+    def _float_band_ok(ticker: str) -> bool:
+        """True = keep. Fail-OPEN on None/missing/error/exhausted-budget."""
+        nonlocal _float_budget
+        if _float_max is None:
+            return True
+        if _float_budget <= 0:
+            return True  # budget exhausted -> keep (never starve the pool on lookups)
+        _float_budget -= 1
+        try:
+            from ...massive_client import get_ticker_float
+
+            fs = get_ticker_float(ticker)
+        except Exception:
+            return True
+        if fs is None:
+            return True
+        try:
+            return float(fs) <= _float_max
+        except (TypeError, ValueError):
+            return True
+
     seen: set[str] = set()
     out: list[str] = []
+    dropped_float = 0
+    # Lookup budget = 2x the PROFILE's max_universe (NOT the uncapped hard ceiling —
+    # with uncapped ON, cap=1500 would make a cold-cache first run a ~3000-call API
+    # storm). ~100 lookups covers the quality head of the ranking; the tail past the
+    # budget keeps fail-open and the viability gate remains the backstop.
+    _float_budget = 2 * max(1, int(profile.max_universe))
     for ticker in _guaranteed:
         if ticker in seen:
             continue
         seen.add(ticker)
+        if not _float_band_ok(ticker):
+            dropped_float += 1
+            continue
         out.append(ticker)
     # Additive: re-catch never DISPLACES the ranked pool. But never breach the
     # DB-safety hard ceiling when uncapped (it bounds total row count) — clamp there.
@@ -871,9 +936,18 @@ def build_equity_universe(
         if ticker in seen:
             continue
         seen.add(ticker)
+        if not _float_band_ok(ticker):
+            dropped_float += 1
+            continue
         out.append(ticker)
         if len(out) >= _effective_cap:
             break
+    if dropped_float:
+        logger.info(
+            "[universe] float gate dropped %d candidate(s) above %.0f shares "
+            "(ranked slots reallocated; viability fail-closed gate remains the backstop)",
+            dropped_float, float(_float_max or 0.0),
+        )
     return out
 
 

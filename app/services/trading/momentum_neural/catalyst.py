@@ -399,6 +399,14 @@ _WEAK_CATALYST_KEYWORDS = (
     "compliance with", "notice of delisting", "delisting", "bankrupt", "chapter 11",
     "default", "restatement", "securities fraud", "class action", "investigation",
     "subpoena", "private placement", "warrant exercise", "shelf registration",
+    # SEC dilution-filing forms (Ross SS101: a secondary/shelf prices the stock DOWN
+    # toward the offering — a long-side fade, not a catalyst). COLLISION-SAFE forms
+    # only: bare "s-1"/"s-3"/"f-1" are substrings of ordinary words ("class-1",
+    # "phase-1") because this classifier is a lowercase substring match; the "form"-
+    # prefixed / "registration"-suffixed variants and the "424b" prospectus stem
+    # (covers 424B1..B5) are unambiguous in real headline text.
+    "form s-1", "s-1 registration", "form s-3", "s-3 registration",
+    "form f-1", "f-1 registration", "424b",
 )
 
 # Reverse-split + private-placement headline markers — the SUBSET of the weak list whose SIGN
@@ -664,11 +672,49 @@ _STRONG_CATALYST_KEYWORDS = (
     "phase 3", "phase iii", "phase 2", "phase ii", "topline results", "primary endpoint",
     "met its primary", "positive results", "trial results", "clinical trial",
     "partnership", "strategic partnership", "collaboration agreement", "definitive agreement",
-    "merger", "acquisition", "to acquire", "to be acquired", "buyout", "takeover",
+    "merger", "acquisition", "to acquire",
     "awarded contract", "wins contract", "contract award", "government contract",
     "defense contract", "purchase order", "letter of intent", "joint venture",
-    "record revenue", "raises guidance", "beats", "earnings beat", "tender offer",
+    "record revenue", "raises guidance", "beats", "earnings beat",
 )
+
+# ── ARB-FLAT catalysts (Ross SS101 news lesson): a CONFIRMED buyout/takeover of the
+# COMPANY pins the price at the deal level — the stock trades FLAT at the offer (the
+# remaining gap is merger-arb with deal-break tail risk), so there is NO intraday
+# momentum opportunity on the LONG side. Distinct CLASS from weak (not dilution — the
+# reverse-split / private-placement sign-refinements and the fake-catalyst set all key
+# on weak-set membership and must not touch these), same net effect: negative tilt +
+# live-ineligible. Target-side phrasings only — acquirer-side deal-making ("merger",
+# "acquisition", "to acquire", "definitive agreement") STAYS strong: the buyER can run.
+# Precedence in the consumer: arb-flat beats strong when a headline matches both.
+_ARB_FLAT_CATALYST_KEYWORDS = (
+    "to be acquired", "buyout", "takeover", "tender offer",
+)
+
+
+def _is_arb_flat_catalyst(title: str) -> bool:
+    """True when a headline is a CONFIRMED-buyout / arb-flat catalyst (the target trades
+    pinned at the deal price). Pure; fail-open to False."""
+    t = str(title or "").lower()
+    return any(k in t for k in _ARB_FLAT_CATALYST_KEYWORDS)
+
+
+def arb_flat_catalyst_symbols() -> set[str]:
+    """Normalized tickers whose freshest fresh-news headline is an ARB-FLAT catalyst
+    (confirmed buyout target — price pinned at the deal). Same title-carrying fetch as
+    ``weak_catalyst_symbols``; fail-open to empty when the news feed is unavailable.
+    Gated by ``chili_momentum_catalyst_arb_flat_gate_enabled`` at the consumer."""
+    try:
+        from ...massive_client import get_recent_news_items
+
+        return {
+            _norm(tk)
+            for tk, title in get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
+            if _is_arb_flat_catalyst(title)
+        }
+    except Exception:
+        logger.debug("[catalyst] arb-flat-catalyst grade fetch failed", exc_info=True)
+        return set()
 
 
 def _is_strong_catalyst(title: str) -> bool:
