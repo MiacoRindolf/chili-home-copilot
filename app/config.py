@@ -4989,6 +4989,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"),
         description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
     )
+    chili_momentum_tick_break_tape_confirm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED"),
+        description="Ross-parity L1 (2026-07-25): the ORB/ABCD TICK-BREAK paths additionally require buyers on the executed tape (tape_confirms_hold — the bull_flag/inverse-H&S standard) + the tick-break family's thrust buffers on ABCD (was a bare price>level fire). Tape-fail does NOT darken the detector — it falls through to the completed-bar + volume-spike path. Independent rollback domains: a pattern_tape_gate_enabled rollback fail-OPENs here (never newly darkens ORB/ABCD). KILL-SWITCH: False -> exact legacy naked-tick behavior -> byte-identical.",
+    )
     chili_momentum_orb_minutes: int = Field(
         default=5,
         ge=1,
