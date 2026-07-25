@@ -50,20 +50,84 @@ _MAX_NATIVE_DOCUMENT_BYTES = 16 * 1024 * 1024
 # These are fixed by this source file.  An operational executor may not replace
 # them with a shorter or caller-selected shard and still mint readiness.
 FOCUSED_COMPILE_RELATIVE_PATHS = (
+    "app/migrations.py",
+    "app/models/captured_paper_selection_frontier.py",
+    "app/services/yf_session.py",
+    "app/services/trading/momentum_neural/variants.py",
     "scripts/captured_paper_readiness_evidence.py",
     "scripts/iqfeed_capture_only_smoke.py",
     "scripts/run_captured_paper_preactivation_probes.py",
+    "scripts/build_captured_paper_runtime_env.py",
+    "scripts/build_captured_paper_preactivation.py",
+    "scripts/captured_alpaca_paper_service.py",
+    "scripts/captured_paper_host_cutover.py",
+    "scripts/captured_paper_operator_flow.py",
+    "scripts/captured_paper_runtime_env.py",
+    "scripts/captured_paper_activation_contract.py",
+    "scripts/captured_paper_activation_runner.py",
+    "scripts/build_captured_paper_activation_authority.py",
+    "scripts/run_captured_paper_operator_chain.py",
     "app/services/trading/momentum_neural/captured_paper_admission.py",
+    "app/services/trading/momentum_neural/captured_paper_initial_candidate_reader.py",
     "app/services/trading/momentum_neural/captured_paper_outbox.py",
+    "app/services/trading/momentum_neural/captured_paper_selection_producer.py",
+    "app/services/trading/momentum_neural/captured_paper_selection_queue.py",
+    "app/services/trading/momentum_neural/captured_paper_selection_runtime.py",
+    "app/services/trading/momentum_neural/captured_paper_selection_source.py",
+    "app/services/trading/momentum_neural/captured_paper_service_supervisor.py",
     "app/services/trading/momentum_neural/captured_paper_transport_coordinator.py",
+    "app/services/trading/momentum_neural/captured_paper_variant_binding.py",
 )
 FOCUSED_PYTEST_NODE_IDS = (
     "tests/test_iqfeed_capture_only_smoke.py::test_capture_only_smoke_binds_real_shape_checks_exact_print_and_quiesces",
+    "tests/test_captured_paper_selection_source.py::test_source_captures_full_four_stream_envelope_and_scores_without_fallback",
+    "tests/test_captured_paper_selection_source.py::test_missing_typed_fundamentals_receipt_fails_only_that_decision",
+    "tests/test_captured_paper_selection_queue.py::test_visible_commit_is_ignored_until_post_fsync_gate_acknowledges_it",
+    "tests/test_captured_paper_selection_queue.py::test_coverage_unavailable_event_emits_route_tombstone_not_empty_advance",
+    "tests/test_captured_paper_selection_producer.py::test_batch_upsert_and_frontier_cas_commit_together",
+    "tests/test_captured_paper_selection_producer.py::test_crash_rollback_then_restart_is_atomic_and_idempotent",
+    "tests/test_captured_paper_selection_producer.py::test_migration_353_route_state_schema_and_cas_guards",
+    "tests/test_captured_paper_selection_runtime.py::test_constructor_is_fully_inert_then_prime_precedes_reader_install",
+    "tests/test_captured_paper_selection_runtime.py::test_hash_bound_not_applied_outcome_never_builds_runtime_or_calls_rollback",
+    "tests/test_captured_paper_initial_candidate_reader.py::test_real_db_reader_returns_only_exact_current_captured_row_without_mutation",
+    "tests/test_captured_paper_variant_binding.py::test_migration_352_receipt_and_append_only_transition_round_trip",
+    "tests/test_captured_paper_variant_binding.py::test_reserved_clone_is_invisible_to_generic_readers_and_mutators",
+    "tests/test_captured_paper_service_supervisor.py::test_selection_prime_precedes_fresh_authority_and_order_workers",
+    "tests/test_captured_paper_service_supervisor.py::test_post_quiesce_deactivation_runs_after_every_owner_and_before_fence_release",
+    "tests/test_captured_alpaca_paper_service.py::test_composition_uses_measured_capacity_and_one_exact_adapter_generation",
+    "tests/test_captured_paper_service_selection_integration.py::test_real_service_selection_lifecycle_primes_reads_and_rolls_back",
+    "tests/test_yf_session_fundamentals_receipt.py::test_authoritative_empty_is_distinct_from_provider_error",
+    "tests/test_yf_session_fundamentals_receipt.py::test_stale_cache_is_not_reclassified_as_fresh_when_circuit_is_open",
+    "tests/test_adaptive_risk_policy_settings.py::test_replay_and_captured_paper_use_identical_policy_projection",
+    "tests/test_adaptive_risk_policy_settings.py::test_builder_cannot_bind_magic_dollar_or_one_symbol_activation_caps",
+    "tests/test_adaptive_risk_policy.py::test_concurrency_emerges_from_aggregate_risk_not_one_symbol_cap",
+    "tests/test_adaptive_risk_runtime_contract.py::test_atomic_three_dimension_reservation_and_no_magic_activation_caps_are_required",
+    "tests/test_run_captured_paper_operator_chain.py::test_import_is_inert_and_does_not_touch_network_db_broker_or_host",
+    "tests/test_run_captured_paper_operator_chain.py::test_chain_request_is_canonical_hash_bound_and_pinned_by_outer_request",
+    "tests/test_run_captured_paper_operator_chain.py::test_full_operator_chain_bootstraps_exact_print_before_selection_and_is_hash_bound",
+    "tests/test_captured_paper_operator_flow.py::test_operator_flow_publishes_build_ready_and_only_no_order_next_command",
+    "tests/test_captured_paper_operator_flow.py::test_materialization_runs_runtime_after_long_shards_and_short_ttl_reads_last",
+    "tests/test_captured_paper_runtime_env.py::test_installs_equity_only_candidate_and_excludes_every_live_credential",
+    "tests/test_captured_paper_host_cutover.py::test_validate_only_is_default_and_performs_no_mutation",
+    "tests/test_build_captured_paper_preactivation.py::test_code_inventory_exactly_matches_activation_contract_and_local_dependency_closure",
     "tests/test_captured_paper_admission.py::test_pre_reservation_breaker_expiring_during_lock_walk_rolls_back_all",
     "tests/test_captured_paper_outbox.py::test_transport_indeterminate_is_reconciliation_only_and_never_terminalized",
     "tests/test_captured_paper_transport_coordinator.py::test_authority_invalidated_after_fence_is_zero_post_and_reconciliation_only",
     "tests/test_captured_paper_fill_watch.py::test_append_commit_must_follow_the_bound_fill_observation",
     "tests/test_captured_paper_activation_contract.py::test_valid_envelope_authorizes_only_fake_money_equity_paper",
+    "tests/test_captured_paper_activation_runner.py::test_production_isolation_gate_requires_i_s_b_and_no_site_modules",
+    "tests/test_captured_paper_activation_runner.py::test_git_authority_runs_before_secret_install_with_minimal_sanitized_env",
+    "tests/test_captured_paper_activation_runner.py::test_validate_only_reaches_real_validate_boundary_but_never_apply",
+    "tests/test_captured_paper_activation_runner.py::test_staged_no_order_service_drift_is_rehashed_at_immediate_prelaunch",
+    "tests/test_captured_paper_activation_runner.py::test_every_post_apply_failure_runs_exactly_one_exact_rollback",
+    "tests/test_captured_paper_activation_runner.py::test_success_result_fsync_failure_remains_inside_compensated_apply_boundary",
+    "tests/test_captured_paper_activation_runner.py::test_subprocess_timeout_kills_exact_owned_child_and_grandchild_tree",
+    "tests/test_captured_paper_admission.py::test_missing_first_dip_receipt_keeps_daily_opportunity_reusable",
+    "tests/test_build_captured_paper_activation_authority.py::test_import_is_inert_stdlib_only_and_performs_no_authority_probe",
+    "tests/test_build_captured_paper_activation_authority.py::test_real_temp_git_builds_exact_canonical_loader_roundtrip_and_no_secret_receipt",
+    "tests/test_build_captured_paper_activation_authority.py::test_valid_looking_ignored_python_cache_cannot_execute_during_build",
+    "tests/test_build_captured_paper_activation_authority.py::test_private_publication_failure_leaves_no_final_or_pending_and_never_overwrites",
+    "tests/test_build_captured_paper_activation_authority.py::test_malformed_identity_database_and_secret_configuration_reject",
 )
 LIFECYCLE_SCENARIOS = (
     "ownership_idempotency",
@@ -81,12 +145,12 @@ OPERATIONAL_MAX_AGE_SECONDS_BY_KIND: Mapping[str, int] = MappingProxyType(
         # consumer (finalize, cutover, launcher, ActivatePaper) re-walks the
         # roster against the contract table, so the two tables must agree
         # per kind.  See the contract table for the full sizing rationale.
-        "runtime_settings": 10 * 60,
+        "runtime_settings": 20 * 60,
         "broker_account": 10 * 60,
-        "database_schema": 10 * 60,
-        "capture_host_smoke": 10 * 60,
+        "database_schema": 20 * 60,
+        "capture_host_smoke": 20 * 60,
         "focused_regressions": 60 * 60,
-        "lifecycle_preflight": 10 * 60,
+        "lifecycle_preflight": 20 * 60,
         "kill_switch": 10 * 60,
         "rollback_snapshot": 60 * 60,
     }
@@ -531,8 +595,13 @@ class CaptureOnlySmokeReadAuthority:
         try:
             evidence = self.smoke_runner()
         except Exception as exc:
+            # 2026-07-24 (a86-1619): surface the bounded root cause — the fixed
+            # message hid WHICH dependency failed (same observability gap fixed
+            # in the operator chain's preselection wrapper).
             raise CapturedPaperPreactivationProbeError(
-                "CAPTURE_SMOKE_FAILED", "capture-only provider smoke failed closed"
+                "CAPTURE_SMOKE_FAILED",
+                "capture-only provider smoke failed closed: "
+                f"{type(exc).__name__}: {str(exc)[:512]}",
             ) from exc
         if type(evidence) is not CaptureOnlySmokeEvidence:
             raise CapturedPaperPreactivationProbeError(
@@ -1249,10 +1318,21 @@ def _capture_observations(
     provider_observed = _fresh(
         provider.get("observed_at"), now, seconds=60, field="provider health"
     )
+    from scripts.iqfeed_capture_only_smoke import (
+        equity_extended_session_is_open,
+    )
+
+    closed_session_activation_only = bool(
+        provider.get("activation_only_closed_session_without_exact_print") is True
+        and not equity_extended_session_is_open(now)
+    )
     if (
         health.get("capture_store_writable") is not True
         or provider.get("socket_readable") is not True
-        or provider.get("exact_print_clock_observed") is not True
+        or (
+            provider.get("exact_print_clock_observed") is not True
+            and not closed_session_activation_only
+        )
     ):
         raise CapturedPaperPreactivationProbeError(
             "CAPTURE_HEALTH_UNAVAILABLE", "capture/provider health is not executable"
@@ -1341,7 +1421,12 @@ def _focused_regression_observations(
         )
     selected, failures, errors, _skipped, case_names = _parse_junit(native.junit_xml)
     expected_case_names = tuple(node.rsplit("::", 1)[1] for node in FOCUSED_PYTEST_NODE_IDS)
-    if sorted(case_names) != sorted(expected_case_names):
+    observed_case_names = tuple(name.split("[", 1)[0] for name in case_names)
+    if (
+        len(set(expected_case_names)) != len(expected_case_names)
+        or set(observed_case_names) != set(expected_case_names)
+        or any(observed_case_names.count(name) < 1 for name in expected_case_names)
+    ):
         raise CapturedPaperPreactivationProbeError(
             "REGRESSION_TEST_ROSTER_MISMATCH",
             "JUnit testcases differ from the fixed focused shard",

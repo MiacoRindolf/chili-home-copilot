@@ -497,6 +497,18 @@ def test_code_inventory_exactly_matches_activation_contract_and_local_dependency
     ) == inventory.code_build_sha256
 
 
+def test_dependency_capsule_seeds_packaging_used_by_its_own_builder() -> None:
+    inventory = builder.CapturedPaperCodeInventory(
+        candidate_root=REPO,
+        artifacts=(),
+        source_paths={},
+        source_hashes={},
+        code_build_sha256="0" * 64,
+    )
+
+    assert "packaging" in builder._captured_paper_external_import_roots(inventory)
+
+
 def test_builder_binds_existing_artifacts_and_publishes_verified_no_order_envelope(
     tmp_path: Path,
 ) -> None:

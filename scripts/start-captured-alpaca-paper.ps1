@@ -995,15 +995,14 @@ try {
             # 2026-07-17: the task-owned console is invisible, which hid two
             # consecutive live PREPARED-phase stalls (only the dispatch lock
             # ever appeared).  Persist the service console next to the
-            # handshake artifacts; every argument is a validated no-space
-            # sealed path or base64, so array argument passing is exact.
-            $serviceProcess = Start-Process -FilePath $python `
-                -ArgumentList $arguments -NoNewWindow -Wait -PassThru `
-                -WorkingDirectory $candidate `
-                -RedirectStandardOutput ($hostReadyReceipt + '.service-stdout.log') `
-                -RedirectStandardError ($hostReadyReceipt + '.service-stderr.log')
-            if ($serviceProcess.ExitCode -ne 0) {
-                throw "Captured Alpaca PAPER service rejected with exit code $($serviceProcess.ExitCode)"
+            # handshake artifacts.  The call operator preserves the argument
+            # array exactly, including allowlisted paths containing spaces;
+            # The process-launch cmdlet would flatten the array into one line.
+            & $python @arguments `
+                1> ($hostReadyReceipt + '.service-stdout.log') `
+                2> ($hostReadyReceipt + '.service-stderr.log')
+            if ($LASTEXITCODE -ne 0) {
+                throw "Captured Alpaca PAPER service rejected with exit code $LASTEXITCODE"
             }
         }
         else {

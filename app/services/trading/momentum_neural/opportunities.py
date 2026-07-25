@@ -16,6 +16,7 @@ from .operator_readiness import build_momentum_operator_readiness
 from .strategy_params import summarize_strategy_params
 from .viability_health import get_viability_pipeline_health
 from .viability_scope import VIABILITY_SCOPE_SYMBOL
+from .variants import CAPTURED_PAPER_VARIANT_KEY_PREFIX
 
 _log = logging.getLogger(__name__)
 
@@ -273,6 +274,11 @@ def list_momentum_opportunities(
         db.query(MomentumSymbolViability, MomentumStrategyVariant)
         .join(MomentumStrategyVariant, MomentumStrategyVariant.id == MomentumSymbolViability.variant_id)
         .filter(MomentumStrategyVariant.is_active.is_(True))
+        .filter(
+            MomentumStrategyVariant.variant_key.notlike(
+                f"{CAPTURED_PAPER_VARIANT_KEY_PREFIX}%"
+            )
+        )
         .filter(MomentumSymbolViability.scope == VIABILITY_SCOPE_SYMBOL)
         .filter(MomentumSymbolViability.freshness_ts >= fresh_cutoff)
         .order_by(MomentumSymbolViability.symbol.asc(), MomentumSymbolViability.viability_score.desc())

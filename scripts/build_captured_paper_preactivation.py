@@ -50,10 +50,10 @@ _MAX_DEPENDENCY_CLOSURE_BYTES = 512 * 1024 * 1024
 # in the service), and the final manifest may not outlive this envelope
 # (contract chronology check), so smoke duration ate most of the receipt
 # window and finalize -> cutover -> ActivatePaper could not fit in what was
-# left.  12 minutes keeps the 10-minute receipt class fully usable through
-# the tail and stays under the contract's 15-minute
-# _MAX_MANIFEST_AGE_SECONDS cap with slack for clock skew.
-_MANIFEST_TTL = timedelta(minutes=12)
+# left.  Twenty minutes covers the measured sealed-service startup on this
+# host.  Broker identity and the durable kill switch are still refreshed
+# immediately before the host permit is consumed.
+_MANIFEST_TTL = timedelta(minutes=20)
 _DEPENDENCY_CLOSURE_SCHEMA_VERSION = "chili.captured-paper-dependency-closure.v1"
 
 _RUNTIME_SECRET_KEYS = frozenset(
@@ -179,6 +179,21 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "captured_paper_selection": (
             "app/services/trading/momentum_neural/captured_paper_selection.py"
         ),
+        "captured_paper_selection_frontier_model": (
+            "app/models/captured_paper_selection_frontier.py"
+        ),
+        "captured_paper_selection_producer": (
+            "app/services/trading/momentum_neural/captured_paper_selection_producer.py"
+        ),
+        "captured_paper_selection_queue": (
+            "app/services/trading/momentum_neural/captured_paper_selection_queue.py"
+        ),
+        "captured_paper_selection_runtime": (
+            "app/services/trading/momentum_neural/captured_paper_selection_runtime.py"
+        ),
+        "captured_paper_selection_source": (
+            "app/services/trading/momentum_neural/captured_paper_selection_source.py"
+        ),
         "captured_paper_service_supervisor": (
             "app/services/trading/momentum_neural/captured_paper_service_supervisor.py"
         ),
@@ -190,6 +205,12 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         ),
         "captured_paper_transport_worker": (
             "app/services/trading/momentum_neural/captured_paper_transport_worker.py"
+        ),
+        "captured_paper_variant_binding": (
+            "app/services/trading/momentum_neural/captured_paper_variant_binding.py"
+        ),
+        "captured_viability_adapter": (
+            "app/services/trading/momentum_neural/captured_viability_adapter.py"
         ),
         "entry_gates": "app/services/trading/momentum_neural/entry_gates.py",
         "execution_family_registry": "app/services/trading/execution_family_registry.py",
@@ -207,6 +228,9 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "live_replay_capture": "app/services/trading/momentum_neural/live_replay_capture.py",
         "live_runner": "app/services/trading/momentum_neural/live_runner.py",
         "live_runner_loop": "app/services/trading/momentum_neural/live_runner_loop.py",
+        "momentum_viability": (
+            "app/services/trading/momentum_neural/viability.py"
+        ),
         "replay_capture_contract": (
             "app/services/trading/momentum_neural/replay_capture_contract.py"
         ),
@@ -214,6 +238,7 @@ _SOURCE_RELATIVE_PATHS: Mapping[str, str] = MappingProxyType(
         "readiness_evidence": "scripts/captured_paper_readiness_evidence.py",
         "runtime_environment": "scripts/captured_paper_runtime_env.py",
         "trading_models": "app/models/trading.py",
+        "yf_session": "app/services/yf_session.py",
     }
 )
 
@@ -706,6 +731,10 @@ def _captured_paper_external_import_roots(
     # (naranasan live: "unsealed import rejected: ta" sa no-order boot).
     external: set[str] = {
         "alpaca",
+        # The capsule builder imports Requirement inside a function, which
+        # the module-import AST walk intentionally excludes.  It still must
+        # be present in the sealed -I/-S runtime that builds the next capsule.
+        "packaging",
         "pandas",
         "psutil",
         "psycopg2",
@@ -1598,8 +1627,8 @@ def build_captured_paper_preactivation_offline(
         # capture_host_smoke receipt left a 41s window that ended 4s BEFORE
         # the manifest file hit disk — structurally unusable).  A receipt
         # already expired at build time still rejects the build below; the
-        # envelope itself is governed by _MANIFEST_TTL (contract-capped at
-        # 15 minutes), which bounds the smoke -> finalize handoff.
+        # envelope itself is governed by _MANIFEST_TTL, which bounds the
+        # smoke -> finalize -> host-cutover handoff.
         if expires_at <= now:
             raise CapturedPaperPreactivationBuildError(
                 "EVIDENCE_STALE", f"{kind} receipt is already expired"

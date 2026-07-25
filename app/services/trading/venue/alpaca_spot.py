@@ -1510,6 +1510,605 @@ class AlpacaSpotAdapter:
                 "error_type": type(exc).__name__,
             }
 
+    def get_paper_order_transition_census(
+        self,
+        *,
+        after: datetime,
+        until: datetime,
+        read_binding: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return every PAPER order submitted in one bounded activation window.
+
+        A flat/open-order snapshot cannot reveal an order that was accepted and
+        then canceled between observations.  The final captured-PAPER start fence
+        therefore queries ``status=all`` after the legacy execution lane has been
+        quiesced.  Alpaca exposes no tie-safe cursor for this endpoint, so a full
+        500-row response is explicitly unavailable rather than silently partial.
+        """
+
+        try:
+            _require_paper_posture()
+            if not _paper():
+                raise RuntimeError("Alpaca order-transition census is not PAPER")
+            if (
+                AlpacaSpotAdapter._account_client
+                is not _EXACT_FILL_ACCOUNT_CLIENT_METHOD
+                or AlpacaSpotAdapter._exact_fill_reader_connection_generation
+                is not _EXACT_FILL_CONNECTION_GENERATION_METHOD
+                or AlpacaSpotAdapter.get_paper_order_transition_census
+                is not _EXACT_PAPER_ORDER_TRANSITION_CENSUS_METHOD
+            ):
+                raise RuntimeError(
+                    "Alpaca order-transition census method identity changed"
+                )
+            if not isinstance(read_binding, Mapping):
+                raise RuntimeError("Alpaca order-transition binding is missing")
+
+            def _utc(value: Any, field: str) -> datetime:
+                if not isinstance(value, datetime) or value.tzinfo is None:
+                    raise RuntimeError(f"Alpaca {field} is not timezone-aware")
+                if value.utcoffset() is None:
+                    raise RuntimeError(f"Alpaca {field} has no UTC offset")
+                return value.astimezone(timezone.utc)
+
+            after_utc = _utc(after, "order-transition after clock")
+            until_utc = _utc(until, "order-transition until clock")
+            if not after_utc < until_utc:
+                raise RuntimeError("Alpaca order-transition window is empty")
+
+            binding_json, binding_sha256 = _canonical_evidence(dict(read_binding))
+            client = AlpacaSpotAdapter._account_client(self)
+            connection_generation = (
+                AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                    self, client
+                )
+            )
+            with _clients_lock:
+                account_id = str(
+                    _clients.get("trading:observed_account_id") or ""
+                ).strip()
+            if not account_id or account_id != self._bound_account_id:
+                raise RuntimeError("Alpaca order-transition account is unbound")
+            if (
+                str(read_binding.get("expected_account_id") or "").strip()
+                != account_id
+                or str(read_binding.get("connection_generation") or "").strip()
+                != connection_generation
+                or str(read_binding.get("after") or "").strip()
+                != after_utc.isoformat()
+                or str(read_binding.get("until") or "").strip()
+                != until_utc.isoformat()
+            ):
+                raise RuntimeError(
+                    "Alpaca order-transition binding does not match read authority"
+                )
+
+            from alpaca.common.enums import Sort
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+
+            page_size = 500
+            query = {
+                "status": "all",
+                "after": after_utc.isoformat(),
+                "until": until_utc.isoformat(),
+                "limit": page_size,
+                "direction": "asc",
+                "nested": False,
+            }
+            query_json, query_sha256 = _canonical_evidence(query)
+            requested_at = _now()
+            if until_utc > requested_at:
+                raise RuntimeError(
+                    "Alpaca order-transition until clock is future-dated"
+                )
+            request = GetOrdersRequest(
+                status=QueryOrderStatus.ALL,
+                after=after_utc,
+                until=until_utc,
+                limit=page_size,
+                direction=Sort.ASC,
+                nested=False,
+            )
+            orders = client.get_orders(filter=request)
+            received_at = _now()
+            if not isinstance(orders, list):
+                raise RuntimeError(
+                    "Alpaca order-transition census response is malformed"
+                )
+            if len(orders) >= page_size:
+                raise RuntimeError(
+                    "Alpaca order-transition census reached its non-pageable bound"
+                )
+
+            raw_orders: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            seen_cids: set[str] = set()
+            prior_submitted_at: datetime | None = None
+            for order in orders:
+                payload = order.model_dump(mode="json")
+                if not isinstance(payload, dict):
+                    raise RuntimeError(
+                        "Alpaca order-transition payload is malformed"
+                    )
+                order_id = str(payload.get("id") or "").strip()
+                client_order_id = str(
+                    payload.get("client_order_id") or ""
+                ).strip()
+                asset_class = str(payload.get("asset_class") or "").strip().lower()
+                status = str(payload.get("status") or "").strip().lower()
+                submitted_raw = payload.get("submitted_at")
+                try:
+                    submitted_at = _utc(
+                        submitted_raw
+                        if isinstance(submitted_raw, datetime)
+                        else datetime.fromisoformat(
+                            str(submitted_raw or "").replace("Z", "+00:00")
+                        ),
+                        "order submitted_at",
+                    )
+                except (ValueError, TypeError) as exc:
+                    raise RuntimeError(
+                        "Alpaca order-transition submitted_at is invalid"
+                    ) from exc
+                if (
+                    not order_id
+                    or not client_order_id
+                    or order_id in seen_ids
+                    or client_order_id in seen_cids
+                    or asset_class != "us_equity"
+                    or not status
+                    or submitted_at < after_utc
+                    or submitted_at > until_utc
+                    or (
+                        prior_submitted_at is not None
+                        and submitted_at < prior_submitted_at
+                    )
+                ):
+                    raise RuntimeError(
+                        "Alpaca order-transition identity or ordering is ambiguous"
+                    )
+                seen_ids.add(order_id)
+                seen_cids.add(client_order_id)
+                prior_submitted_at = submitted_at
+                raw_orders.append(payload)
+
+            # ``alpaca.trading.models.Order`` deliberately has no account_id.
+            # Account authority comes from the exact cached PAPER client,
+            # observed account UUID, credential fingerprint and process-local
+            # connection generation.  Re-check after the remote read so a
+            # credential/client swap cannot be hidden behind valid order rows.
+            post_read_generation = (
+                AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                    self, client
+                )
+            )
+            with _clients_lock:
+                post_read_account_id = str(
+                    _clients.get("trading:observed_account_id") or ""
+                ).strip()
+            if (
+                post_read_generation != connection_generation
+                or post_read_account_id != account_id
+                or post_read_account_id != self._bound_account_id
+            ):
+                raise RuntimeError(
+                    "Alpaca order-transition connection generation changed"
+                )
+
+            response_json, response_sha256 = _canonical_evidence(raw_orders)
+            available_at = _now()
+            if not requested_at <= received_at <= available_at:
+                raise RuntimeError(
+                    "Alpaca order-transition census clocks are not causal"
+                )
+            receipt = {
+                "schema_version": "chili.alpaca-paper-order-transition-census.v2",
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_sha256": binding_sha256,
+                "method": "GET",
+                "path": "/orders",
+                "api_version": "v2",
+                "query_canonical_json": query_json,
+                "query_sha256": query_sha256,
+                "requested_at": requested_at.isoformat(),
+                "received_at": received_at.isoformat(),
+                "available_at": available_at.isoformat(),
+                "terminal_proof": {
+                    "pagination_complete": True,
+                    "reason": "complete_short_page",
+                    "scope": "bounded_submitted_at_query_only",
+                    "page_count": 1,
+                    "request_limit": page_size,
+                    "response_count": len(raw_orders),
+                    "response_sha256": response_sha256,
+                },
+                "inventory_sha256": response_sha256,
+                "exact_order_count": len(raw_orders),
+                "account_binding_basis": (
+                    "pinned_paper_client_observed_account_and_credential_generation"
+                ),
+            }
+            receipt_json, receipt_sha256 = _canonical_evidence(receipt)
+            return {
+                "readable": True,
+                "pagination_complete": True,
+                "broker_environment": "paper",
+                "asset_class": "us_equity",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_canonical_json": binding_json,
+                "read_binding_sha256": binding_sha256,
+                "query_receipt_canonical_json": receipt_json,
+                "query_receipt_sha256": receipt_sha256,
+                "inventory_canonical_json": response_json,
+                "inventory_sha256": response_sha256,
+                "orders": raw_orders,
+                "query_after": after_utc.isoformat(),
+                "query_until": until_utc.isoformat(),
+                "requested_at": requested_at,
+                "received_at": received_at,
+                "available_at": available_at,
+            }
+        except Exception as exc:
+            logger.warning(
+                "[alpaca_spot] exact PAPER order-transition census failed: %s",
+                type(exc).__name__,
+            )
+            return {
+                "readable": False,
+                "pagination_complete": False,
+                "reason": "alpaca_paper_order_transition_census_unavailable",
+                "error_type": type(exc).__name__,
+            }
+
+    def get_paper_account_fill_activity_census(
+        self,
+        *,
+        after: datetime,
+        until: datetime,
+        read_binding: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return all PAPER FILL activities in one bounded account window.
+
+        This is a read-only, account-wide companion to the per-order settlement
+        reader.  It is intended for a two-cycle activation fixed-point fence:
+        callers compare two independently content-addressed inventories and
+        require no new activities.  Pagination completion proves only that the
+        bounded API query was fully read; it does not prove that Alpaca has no
+        later-arriving activity outside ``until``.
+        """
+
+        try:
+            _require_paper_posture()
+            if not _paper():
+                raise RuntimeError("Alpaca fill-activity census is not PAPER")
+            if (
+                AlpacaSpotAdapter._account_client
+                is not _EXACT_FILL_ACCOUNT_CLIENT_METHOD
+                or AlpacaSpotAdapter._exact_fill_reader_connection_generation
+                is not _EXACT_FILL_CONNECTION_GENERATION_METHOD
+                or AlpacaSpotAdapter.get_paper_account_fill_activity_census
+                is not _EXACT_PAPER_ACCOUNT_FILL_ACTIVITY_CENSUS_METHOD
+            ):
+                raise RuntimeError(
+                    "Alpaca fill-activity census method identity changed"
+                )
+            if not isinstance(read_binding, Mapping):
+                raise RuntimeError("Alpaca fill-activity binding is missing")
+
+            def _utc(value: Any, field: str) -> datetime:
+                if not isinstance(value, datetime) or value.tzinfo is None:
+                    raise RuntimeError(f"Alpaca {field} is not timezone-aware")
+                if value.utcoffset() is None:
+                    raise RuntimeError(f"Alpaca {field} has no UTC offset")
+                return value.astimezone(timezone.utc)
+
+            def _payload_utc(value: Any, field: str) -> datetime:
+                try:
+                    parsed = (
+                        value
+                        if isinstance(value, datetime)
+                        else datetime.fromisoformat(
+                            str(value or "").replace("Z", "+00:00")
+                        )
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(f"Alpaca {field} is invalid") from exc
+                return _utc(parsed, field)
+
+            after_utc = _utc(after, "fill-activity after clock")
+            until_utc = _utc(until, "fill-activity until clock")
+            if not after_utc < until_utc:
+                raise RuntimeError("Alpaca fill-activity window is empty")
+
+            binding_json, binding_sha256 = _canonical_evidence(dict(read_binding))
+            client = AlpacaSpotAdapter._account_client(self)
+            connection_generation = (
+                AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                    self, client
+                )
+            )
+            with _clients_lock:
+                account_id = str(
+                    _clients.get("trading:observed_account_id") or ""
+                ).strip()
+            if not account_id or account_id != self._bound_account_id:
+                raise RuntimeError("Alpaca fill-activity account is unbound")
+            if (
+                str(read_binding.get("expected_account_id") or "").strip()
+                != account_id
+                or str(read_binding.get("connection_generation") or "").strip()
+                != connection_generation
+                or str(read_binding.get("after") or "").strip()
+                != after_utc.isoformat()
+                or str(read_binding.get("until") or "").strip()
+                != until_utc.isoformat()
+            ):
+                raise RuntimeError(
+                    "Alpaca fill-activity binding does not match read authority"
+                )
+
+            requested_at = _now()
+            if until_utc > requested_at:
+                raise RuntimeError("Alpaca fill-activity until clock is future-dated")
+
+            activity_after = after_utc.isoformat()
+            activity_until = until_utc.isoformat()
+            page_size = 100
+            max_pages = 100
+            page_token: str | None = None
+            seen_page_tokens: set[str] = set()
+            seen_activity_ids: set[str] = set()
+            prior_transaction_at: datetime | None = None
+            raw_activities: list[dict[str, Any]] = []
+            page_receipts: list[dict[str, Any]] = []
+            terminal_reason: str | None = None
+
+            for page_index in range(max_pages):
+                request_page_token = page_token
+                query: dict[str, Any] = {
+                    "activity_types": "FILL",
+                    "after": activity_after,
+                    "until": activity_until,
+                    "direction": "asc",
+                    "page_size": page_size,
+                }
+                if request_page_token is not None:
+                    query["page_token"] = request_page_token
+                query_json, query_sha256 = _canonical_evidence(query)
+                page_requested_at = _now()
+                payload = client._request(
+                    "GET",
+                    "/account/activities",
+                    data=query,
+                    api_version="v2",
+                )
+                page_received_at = _now()
+                if (
+                    not isinstance(payload, list)
+                    or len(payload) > page_size
+                    or any(not isinstance(item, dict) for item in payload)
+                ):
+                    raise RuntimeError(
+                        "Alpaca fill-activity census response is malformed"
+                    )
+
+                page_rows: list[dict[str, Any]] = []
+                for activity in payload:
+                    row = dict(activity)
+                    activity_id = str(row.get("id") or "").strip()
+                    activity_account_id = str(
+                        row.get("account_id") or ""
+                    ).strip()
+                    activity_type = str(
+                        row.get("activity_type") or ""
+                    ).strip().upper()
+                    order_id = str(row.get("order_id") or "").strip()
+                    fill_type = str(row.get("type") or "").strip().lower()
+                    symbol = str(row.get("symbol") or "").strip()
+                    side = str(row.get("side") or "").strip().lower()
+                    transaction_at = _payload_utc(
+                        row.get("transaction_time"),
+                        "fill-activity transaction_time",
+                    )
+                    try:
+                        qty = Decimal(str(row.get("qty")))
+                        price = Decimal(str(row.get("price")))
+                    except (InvalidOperation, TypeError, ValueError) as exc:
+                        raise RuntimeError(
+                            "Alpaca fill-activity economics are invalid"
+                        ) from exc
+                    if (
+                        not activity_id
+                        or activity_id in seen_activity_ids
+                        or (
+                            activity_account_id
+                            and activity_account_id != account_id
+                        )
+                        or activity_type != "FILL"
+                        or not order_id
+                        or fill_type not in {"fill", "partial_fill"}
+                        or not symbol
+                        or side not in {"buy", "sell"}
+                        or not qty.is_finite()
+                        or qty <= 0
+                        or not price.is_finite()
+                        or price <= 0
+                        or transaction_at < after_utc
+                        or transaction_at > until_utc
+                        or (
+                            prior_transaction_at is not None
+                            and transaction_at < prior_transaction_at
+                        )
+                    ):
+                        raise RuntimeError(
+                            "Alpaca fill-activity identity or ordering is ambiguous"
+                        )
+                    seen_activity_ids.add(activity_id)
+                    prior_transaction_at = transaction_at
+                    page_rows.append(row)
+
+                page_json, page_sha256 = _canonical_evidence(page_rows)
+                page_available_at = _now()
+                if not (
+                    requested_at
+                    <= page_requested_at
+                    <= page_received_at
+                    <= page_available_at
+                ):
+                    raise RuntimeError(
+                        "Alpaca fill-activity page clocks are not causal"
+                    )
+                raw_activities.extend(page_rows)
+
+                terminal = len(page_rows) < page_size
+                next_page_token: str | None = None
+                if terminal:
+                    terminal_reason = "pagination_complete_short_page"
+                else:
+                    next_page_token = str(page_rows[-1].get("id") or "").strip()
+                    if (
+                        not next_page_token
+                        or next_page_token == request_page_token
+                        or next_page_token in seen_page_tokens
+                    ):
+                        raise RuntimeError(
+                            "Alpaca fill-activity pagination did not advance"
+                        )
+                page_receipts.append(
+                    {
+                        "page_index": page_index,
+                        "request_page_token": request_page_token,
+                        "request_canonical_json": query_json,
+                        "request_sha256": query_sha256,
+                        "requested_at": page_requested_at.isoformat(),
+                        "received_at": page_received_at.isoformat(),
+                        "available_at": page_available_at.isoformat(),
+                        "response_count": len(page_rows),
+                        "response_canonical_json": page_json,
+                        "response_sha256": page_sha256,
+                        "next_page_token": next_page_token,
+                        "terminal": terminal,
+                    }
+                )
+                if terminal:
+                    break
+                seen_page_tokens.add(str(next_page_token))
+                page_token = next_page_token
+            else:
+                raise RuntimeError(
+                    "Alpaca fill-activity pagination exceeded bound"
+                )
+
+            if terminal_reason != "pagination_complete_short_page":
+                raise RuntimeError("Alpaca fill-activity terminal proof is missing")
+
+            post_read_generation = (
+                AlpacaSpotAdapter._exact_fill_reader_connection_generation(
+                    self, client
+                )
+            )
+            with _clients_lock:
+                post_read_account_id = str(
+                    _clients.get("trading:observed_account_id") or ""
+                ).strip()
+            if (
+                post_read_generation != connection_generation
+                or post_read_account_id != account_id
+                or post_read_account_id != self._bound_account_id
+            ):
+                raise RuntimeError(
+                    "Alpaca fill-activity connection generation changed"
+                )
+
+            received_at = _now()
+            inventory_json, inventory_sha256 = _canonical_evidence(raw_activities)
+            available_at = _now()
+            if not requested_at <= received_at <= available_at:
+                raise RuntimeError("Alpaca fill-activity census clocks are not causal")
+            receipt = {
+                "schema_version": "chili.alpaca-paper-account-fill-census.v1",
+                "broker_environment": "paper",
+                "activity_scope": "all_account_fill_activities",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_sha256": binding_sha256,
+                "method": "GET",
+                "path": "/account/activities",
+                "api_version": "v2",
+                "query_after": activity_after,
+                "query_until": activity_until,
+                "direction": "asc",
+                "page_size": page_size,
+                "max_pages": max_pages,
+                "pages": page_receipts,
+                "requested_at": requested_at.isoformat(),
+                "received_at": received_at.isoformat(),
+                "available_at": available_at.isoformat(),
+                "terminal_proof": {
+                    "pagination_complete": True,
+                    "reason": terminal_reason,
+                    "page_count": len(page_receipts),
+                    "last_request_page_token": page_receipts[-1][
+                        "request_page_token"
+                    ],
+                    "last_response_sha256": page_receipts[-1][
+                        "response_sha256"
+                    ],
+                    "last_response_count": page_receipts[-1][
+                        "response_count"
+                    ],
+                    "last_page_terminal": page_receipts[-1]["terminal"],
+                    "scope": "bounded_query_pagination_only",
+                },
+                "inventory_sha256": inventory_sha256,
+                "exact_activity_count": len(raw_activities),
+                "account_binding_basis": (
+                    "pinned_paper_client_observed_account_and_credential_generation"
+                    "_with_optional_native_row_cross_check"
+                ),
+            }
+            receipt_json, receipt_sha256 = _canonical_evidence(receipt)
+            return {
+                "readable": True,
+                "pagination_complete": True,
+                "broker_environment": "paper",
+                "activity_scope": "all_account_fill_activities",
+                "provider_account_id": account_id,
+                "adapter_connection_generation": connection_generation,
+                "adapter_build_sha256": _ALPACA_SPOT_BUILD_SHA256,
+                "read_binding_canonical_json": binding_json,
+                "read_binding_sha256": binding_sha256,
+                "query_receipt_canonical_json": receipt_json,
+                "query_receipt_sha256": receipt_sha256,
+                "inventory_canonical_json": inventory_json,
+                "inventory_sha256": inventory_sha256,
+                "activities": raw_activities,
+                "query_after": activity_after,
+                "query_until": activity_until,
+                "requested_at": requested_at,
+                "received_at": received_at,
+                "available_at": available_at,
+            }
+        except Exception as exc:
+            logger.warning(
+                "[alpaca_spot] exact PAPER fill-activity census failed: %s",
+                type(exc).__name__,
+            )
+            return {
+                "readable": False,
+                "pagination_complete": False,
+                "reason": "alpaca_paper_account_fill_activity_census_unavailable",
+                "error_type": type(exc).__name__,
+            }
+
     def get_paper_position_census(
         self,
         *,
@@ -2615,6 +3214,12 @@ _EXACT_ORDER_SUBMISSION_AUDIT_SNAPSHOT_METHOD = (
 )
 _EXACT_PAPER_POSITION_CENSUS_METHOD = (
     AlpacaSpotAdapter.get_paper_position_census
+)
+_EXACT_PAPER_ORDER_TRANSITION_CENSUS_METHOD = (
+    AlpacaSpotAdapter.get_paper_order_transition_census
+)
+_EXACT_PAPER_ACCOUNT_FILL_ACTIVITY_CENSUS_METHOD = (
+    AlpacaSpotAdapter.get_paper_account_fill_activity_census
 )
 register_exact_alpaca_fill_reader(AlpacaSpotAdapter.get_paper_fill_activity_batch)
 register_exact_alpaca_bp_census_reader(

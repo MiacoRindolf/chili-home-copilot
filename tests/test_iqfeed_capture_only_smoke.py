@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -60,6 +61,13 @@ class _Handoff:
             "oversized_envelope_lost": 0,
             "bridge_source_sha256": self.bridge_sha,
         }
+
+    def start(self):
+        assert self.started is False
+        self.started = True
+
+    def close(self):
+        self.started = False
 
 
 class _Composition(IqfeedCaptureIngressComposition):
@@ -149,17 +157,19 @@ class _Health:
         l1_sha: str,
         l2_sha: str,
         exact_print_count: int = 1,
+        observed_at: datetime = NOW,
     ) -> None:
         self.root = root
         self.l1_sha = l1_sha
         self.l2_sha = l2_sha
         self.exact_print_count = exact_print_count
+        self.observed_at = observed_at
 
     def observe(self, *, composition, provider_health):
         assert isinstance(composition, _Composition)
         assert provider_health["all_ready"] is True
         return smoke.CaptureOnlyHealthObservation(
-            observed_at=NOW,
+            observed_at=self.observed_at,
             capture_store_root=str(self.root),
             capture_store_probe_sha256="a" * 64,
             resource_binding_sha256=BINDING_SHA,
@@ -169,7 +179,7 @@ class _Health:
             exact_print_event_count=self.exact_print_count,
             exact_print_inventory_sha256="b" * 64,
             last_exact_print_available_at=(
-                NOW if self.exact_print_count else None
+                self.observed_at if self.exact_print_count else None
             ),
             dropped_event_count=0,
             overflow_count=0,
@@ -219,7 +229,12 @@ def _preflight(tmp_path: Path):
     )
 
 
-def _fixture(tmp_path: Path, *, exact_print_count: int = 1):
+def _fixture(
+    tmp_path: Path,
+    *,
+    exact_print_count: int = 1,
+    observed_at: datetime = NOW,
+):
     preflight = _preflight(tmp_path)
     trade = _Bridge(preflight.source_paths["iqfeed_trade_bridge"], "trade")
     depth = _Bridge(preflight.source_paths["iqfeed_depth_bridge"], "depth")
@@ -228,6 +243,7 @@ def _fixture(tmp_path: Path, *, exact_print_count: int = 1):
         l1_sha=preflight.source_hashes["iqfeed_trade_bridge"],
         l2_sha=preflight.source_hashes["iqfeed_depth_bridge"],
         exact_print_count=exact_print_count,
+        observed_at=observed_at,
     )
     pressure = CapturePressureSample(
         observed_at=NOW,
@@ -301,6 +317,84 @@ def test_capture_only_smoke_missing_current_exact_print_fails_closed_and_stops(t
     assert trade.bound is None and depth.bound is None
     assert trade.stopped.is_set() and depth.stopped.is_set()
     assert composition.state is IqfeedIngressCompositionState.CLOSED
+
+
+def test_closed_session_activation_smoke_starts_without_claiming_exact_print(tmp_path):
+    closed = datetime(2026, 7, 17, 0, 10, tzinfo=UTC)
+    config, composition, trade, depth = _fixture(
+        tmp_path,
+        exact_print_count=0,
+        observed_at=closed,
+    )
+    config = replace(
+        config,
+        activation_only_allow_closed_session_without_exact_print=True,
+    )
+
+    evidence = smoke.run_capture_only_preactivation_smoke(
+        config,
+        wall_clock=lambda: closed,
+        composition_factory=lambda *_args, **_kwargs: composition,
+    )
+
+    assert evidence.provider_health["exact_print_clock_observed"] is False
+    assert evidence.provider_health[
+        "activation_only_closed_session_without_exact_print"
+    ] is True
+    assert evidence.provider_health["last_exact_print_available_at"] is None
+    assert trade.bound is None and depth.bound is None
+    assert composition.state is IqfeedIngressCompositionState.CLOSED
+
+
+def test_l1_exact_print_preselection_never_constructs_or_requires_depth_provider(
+    tmp_path,
+):
+    config, composition, trade, depth = _fixture(tmp_path)
+    config = smoke.CaptureOnlySmokeConfiguration(
+        preflight=config.preflight,
+        pressure_sample=config.pressure_sample,
+        capture_health_authority=config.capture_health_authority,
+        trade_forced_symbols=config.trade_forced_symbols,
+        depth_forced_symbols=(),
+        l1_only_exact_print_preselection=True,
+        readiness_timeout_seconds=config.readiness_timeout_seconds,
+        observation_timeout_seconds=config.observation_timeout_seconds,
+        join_timeout_seconds=config.join_timeout_seconds,
+        reconnect_wait_seconds=config.reconnect_wait_seconds,
+        trade_bridge=trade,
+        depth_bridge=None,
+    )
+
+    evidence = smoke.run_capture_only_preactivation_smoke(
+        config,
+        wall_clock=lambda: NOW,
+        composition_factory=lambda *_args, **_kwargs: composition,
+    )
+
+    assert evidence.schema_version == (
+        "chili.iqfeed-l1-exact-print-preselection-smoke.v1"
+    )
+    assert evidence.host_binding["provider_scope"] == "l1_exact_print_preselection"
+    assert evidence.host_binding["trade_bridge_bound"] is True
+    assert evidence.host_binding["depth_bridge_bound"] is False
+    assert evidence.host_binding["l2_snapshot_completion_required"] is False
+    assert evidence.host_binding["l2_decision_coverage_policy"] == (
+        "decision_local_fail_closed"
+    )
+    assert evidence.provider_health["depth_provider_started"] is False
+    assert evidence.closure["l2_opportunity_consumed"] is False
+    assert evidence.closure["l2_risk_reserved"] is False
+    assert trade.stopped.is_set()
+    assert depth.stopped.is_set() is False
+    assert depth.bound is None
+    assert composition.l2_handoff.started is False
+    assert composition.state is IqfeedIngressCompositionState.CLOSED
+    payload = evidence.to_dict()
+    embedded = dict(payload)
+    digest = embedded.pop("evidence_sha256")
+    assert digest == hashlib.sha256(
+        smoke._canonical_json_bytes(embedded)
+    ).hexdigest()
 
 
 def test_capture_only_smoke_rejects_installed_hot_run_surface_before_provider_start(

@@ -15,7 +15,13 @@ from types import SimpleNamespace
 import pytest
 
 import app.services.trading.momentum_neural.captured_paper_dispatcher as dispatch_mod
+import app.services.trading.momentum_neural.captured_paper_entry_intent as intent_contract
+import app.services.trading.momentum_neural.captured_paper_fill_capture as fill_capture_mod
+import app.services.trading.momentum_neural.live_runner as live_runner_mod
 import app.services.trading.momentum_neural.live_runner_loop as loop_mod
+from app.services.trading.momentum_neural.alpaca_paper_identity import (
+    alpaca_paper_account_identity_sha256,
+)
 from app.services.trading.momentum_neural.live_runner_loop import (
     _EVENT_TICK_MIN_SPACING_S,
     _STOP_CONFIRM_DELAY_S,
@@ -42,6 +48,7 @@ _IQFEED_PIN = "iqfeed-l1-exact-print-provenance-v3+sha256:0123456789abcdef"
 _IQFEED_RUN_ID = "12553525-2da8-4b22-a69f-d3034871e90c"
 _CAPTURED_PAPER_ACCOUNT_ID = "d7cc580c-2b8f-432f-b771-1cecfb3fe87a"
 _CAPTURED_PAPER_GENERATION = "f6ef5ba0-5b91-49bf-a2f5-e71e8e270eb3"
+_CAPTURED_PAPER_CONNECTION_GENERATION = "alpaca-paper-loop-generation-41"
 
 
 def _captured_paper_owner_marker(
@@ -64,6 +71,122 @@ def _captured_paper_owner_marker(
         first_dip_policy_mode="candidate",
     )
     return dispatch_mod.captured_paper_session_owner_marker(request)
+
+
+def _captured_paper_entry_post_commit_request():
+    route = intent_contract.CapturedPaperRouteToken(
+        session_id=41,
+        symbol="ACTU",
+        execution_family="alpaca_spot",
+        account_scope="alpaca:paper",
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        code_build_sha256="a" * 64,
+        config_sha256="b" * 64,
+        capture_receipt_sha256="c" * 64,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        first_dip_policy_mode="candidate",
+    )
+    arm_token = "8d7e932b-77ec-4752-b5f7-19370cd65104"
+    arm = intent_contract.CapturedPaperConfirmedArmGeneration(
+        session_id=route.session_id,
+        arm_token=arm_token,
+        expires_at=datetime(2026, 7, 19, 17, 0, tzinfo=timezone.utc),
+        symbol_claim_token=f"arm-{arm_token}",
+        account_scope=route.account_scope,
+        expected_account_id=route.expected_account_id,
+        confirmed_at=datetime(2026, 7, 19, 16, 0, tzinfo=timezone.utc),
+    )
+    opportunity = intent_contract.CapturedPaperOpportunityKey(
+        account_scope=route.account_scope,
+        symbol=route.symbol,
+        trading_date=datetime(2026, 7, 19).date(),
+        setup_family="first_dip_reclaim",
+    )
+    intent = intent_contract.CapturedPaperEntryIntent(
+        route_token=route,
+        confirmed_arm_generation=arm,
+        symbol_claim_token=arm.symbol_claim_token,
+        binder_id="2c92c330-9f73-49bb-ae47-f4806fe90290",
+        opportunity_key=opportunity,
+        intent_generation="7a25158f-2487-4764-9ecf-4055a92a9105",
+        decision_id="captured-paper-loop-test-41",
+        client_order_id="captured-paper-loop-test-41",
+        setup_family="first_dip_reclaim",
+        decision_at=datetime(2026, 7, 19, 16, 30, tzinfo=timezone.utc),
+        structural_stop_price="2.50",
+        entry_limit_ceiling_price="3.00",
+        account_receipt_sha256="d" * 64,
+        bbo_receipt_sha256="e" * 64,
+        setup_evidence_sha256="f" * 64,
+        policy_sha256="1" * 64,
+        feature_flags_sha256="2" * 64,
+    )
+    return intent_contract.CapturedPaperPostCommitRequest(
+        intent=intent,
+        completion_generation="bd0775e8-21ff-4bb1-b109-21d6ad8af70f",
+    )
+
+
+def _captured_paper_exit_post_commit_request():
+    return fill_capture_mod.CapturedPaperExitFillPostCommitRequest.build(
+        session_id=41,
+        reservation_id="9f231942-4814-41c7-a717-11799af75208",
+        decision_packet_sha256="d" * 64,
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        account_identity_sha256=alpaca_paper_account_identity_sha256(
+            _CAPTURED_PAPER_ACCOUNT_ID
+        ),
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation="alpaca-paper-loop-generation-41",
+        symbol="ACTU",
+        entry_client_order_id="chili-paper-entry-actu-41",
+        exit_client_order_id="chili-paper-exit-actu-41",
+        provider_order_id="68baa224-02ff-4d9f-82ff-2f20289fd1ae",
+        exit_owner_receipt_sha256="e" * 64,
+    )
+
+
+def _captured_paper_exit_transport_post_commit_request():
+    return fill_capture_mod.CapturedPaperExitTransportPostCommitRequest.build(
+        session_id=41,
+        reservation_id="9f231942-4814-41c7-a717-11799af75208",
+        decision_packet_sha256="d" * 64,
+        account_scope="alpaca:paper",
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        account_identity_sha256=alpaca_paper_account_identity_sha256(
+            _CAPTURED_PAPER_ACCOUNT_ID
+        ),
+        session_owner_content_sha256="f" * 64,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+        execution_family="alpaca_spot",
+        symbol="ACTU",
+        entry_client_order_id="chili-paper-entry-actu-41",
+        exit_client_order_id="chili-paper-exit-actu-41",
+        transport_claim_token="captured-paper-claim-actu-41",
+        transport_owner_generation=1,
+        transport_owner_kind="ordinary_exit",
+        transport_lease_id="captured-paper-exit-lease-actu-41",
+        order_request={
+            "account_scope": "alpaca:paper",
+            "alpaca_account_id": _CAPTURED_PAPER_ACCOUNT_ID,
+            "product_id": "ACTU",
+            "side": "sell",
+            "position_intent": "sell_to_close",
+            "client_order_id": "chili-paper-exit-actu-41",
+            "base_size": "10",
+            "order_type": "market",
+            "limit_price": None,
+            "time_in_force": "day",
+            "extended_hours": False,
+        },
+        session_position_quantity="10",
+        exit_reason="stop",
+        attempt_no=1,
+        quote_independent_authority=False,
+        bbo_required=True,
+        bbo_max_age_seconds="1",
+    )
 
 
 def _iqfeed_payload(now: datetime, **overrides) -> str:
@@ -957,6 +1080,7 @@ def test_captured_paper_tracker_rejects_entire_foreign_runnable_inventory(
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=account_id,
         runtime_generation=generation,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     tracker = loop_mod._LiveSessionTracker(scope)
     exact = SimpleNamespace(
@@ -1011,6 +1135,7 @@ def test_captured_paper_tracker_ignores_distinct_preowner_state(monkeypatch):
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     tracker = loop_mod._LiveSessionTracker(scope)
     preowner = SimpleNamespace(
@@ -1079,6 +1204,7 @@ def test_captured_paper_tracker_rejects_runnable_preowner_without_final_owner(
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     tracker = loop_mod._LiveSessionTracker(scope)
     invalid = SimpleNamespace(
@@ -1127,8 +1253,10 @@ def test_captured_paper_loop_tick_uses_strict_dispatch_only(monkeypatch):
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=account_id,
         runtime_generation=generation,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(captured_paper_scope=scope)
+    loop._worker_context.generation = 1
     lifecycle = SimpleNamespace(
         commits=0,
         rollbacks=0,
@@ -1186,14 +1314,205 @@ def test_captured_paper_loop_tick_uses_strict_dispatch_only(monkeypatch):
     assert lifecycle.closes == 1
 
 
+def test_captured_paper_loop_dispatches_entry_and_exit_completion_only_after_commit_and_close(
+    monkeypatch,
+):
+    entry_request = _captured_paper_entry_post_commit_request()
+    transport_request = _captured_paper_exit_transport_post_commit_request()
+    exit_request = _captured_paper_exit_post_commit_request()
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+    )
+    trace = []
+    databases = []
+
+    class _Db:
+        def __init__(self, ordinal):
+            self.ordinal = ordinal
+            self.closed = False
+
+        def commit(self):
+            trace.append((self.ordinal, "commit"))
+
+        def rollback(self):
+            trace.append((self.ordinal, "rollback"))
+
+        def close(self):
+            self.closed = True
+            trace.append((self.ordinal, "close"))
+
+    def session_local():
+        db = _Db(len(databases) + 1)
+        databases.append(db)
+        return db
+
+    results = iter(("entry", "transport", "fill"))
+
+    def tick(_db, _session_id, **_kwargs):
+        result = next(results)
+        trace.append((len(databases), "tick"))
+        if result == "transport":
+            authority = live_runner_mod._CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+            assert authority is not None
+            authority.staged_transport_requests[int(_session_id)] = (
+                transport_request
+            )
+            return {"ok": True}
+        if result == "fill":
+            authority = live_runner_mod._CAPTURED_PAPER_EXIT_RUNTIME_AUTHORITY.get()
+            assert authority is not None
+            assert authority.owner_generation == 1
+            assert authority.expected_account_id == _CAPTURED_PAPER_ACCOUNT_ID
+            assert authority.runtime_generation == _CAPTURED_PAPER_GENERATION
+            assert (
+                authority.broker_connection_generation
+                == _CAPTURED_PAPER_CONNECTION_GENERATION
+            )
+            authority.staged_requests[int(_session_id)] = exit_request
+            return {"ok": True}
+        return entry_request
+
+    def complete_entry(request):
+        assert databases[-1].closed is True
+        assert request is entry_request
+        trace.append((len(databases), "entry_completion"))
+
+    def complete_exit(request):
+        assert databases[-1].closed is True
+        assert request is exit_request
+        trace.append((len(databases), "exit_completion"))
+
+    def transport_exit(request):
+        assert databases[-1].closed is True
+        assert request is transport_request
+        trace.append((len(databases), "exit_transport"))
+
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_exit_completion_handler=complete_exit,
+        captured_paper_exit_transport_handler=transport_exit,
+    )
+    loop._worker_context.generation = 1
+    monkeypatch.setattr(loop_mod, "SessionLocal", session_local)
+    monkeypatch.setattr(
+        loop_mod,
+        "dispatch_captured_paper_live_runner_tick",
+        tick,
+    )
+    monkeypatch.setattr(
+        loop_mod,
+        "dispatch_captured_paper_post_commit",
+        complete_entry,
+    )
+
+    loop._tick_session(41)
+    loop._tick_session(41)
+    loop._tick_session(41)
+
+    assert trace == [
+        (1, "tick"),
+        (1, "commit"),
+        (1, "close"),
+        (1, "entry_completion"),
+        (2, "tick"),
+        (2, "commit"),
+        (2, "close"),
+        (2, "exit_transport"),
+        (3, "tick"),
+        (3, "commit"),
+        (3, "close"),
+        (3, "exit_completion"),
+    ]
+
+
+def test_captured_paper_loop_commit_or_post_commit_failure_preserves_retry_without_rollback_or_redispatch(
+    monkeypatch,
+):
+    exit_request = _captured_paper_exit_transport_post_commit_request()
+    scope = loop_mod.CapturedPaperLiveRunnerScope(
+        expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+        runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+    )
+    calls = SimpleNamespace(
+        commits=0,
+        rollbacks=0,
+        closes=0,
+        completions=0,
+    )
+
+    class _CommitFailureDb:
+        def commit(self):
+            calls.commits += 1
+            raise RuntimeError("synthetic commit failure")
+
+        def rollback(self):
+            calls.rollbacks += 1
+
+        def close(self):
+            calls.closes += 1
+
+    def complete(_request):
+        calls.completions += 1
+        raise RuntimeError("synthetic post-commit failure")
+
+    loop = LiveRunnerLoop(
+        captured_paper_scope=scope,
+        captured_paper_exit_transport_handler=complete,
+    )
+    loop._worker_context.generation = 1
+    monkeypatch.setattr(loop_mod, "SessionLocal", _CommitFailureDb)
+    monkeypatch.setattr(
+        loop_mod,
+        "dispatch_captured_paper_live_runner_tick",
+        lambda *_args, **_kwargs: {
+            fill_capture_mod.CAPTURED_PAPER_EXIT_TRANSPORT_POST_COMMIT_KEY: (
+                exit_request
+            ),
+        },
+    )
+
+    loop._tick_session(41)
+
+    assert calls.commits == 1
+    assert calls.rollbacks >= 1
+    assert calls.closes == 1
+    assert calls.completions == 0
+
+    committed = SimpleNamespace(commits=0, rollbacks=0, closes=0)
+
+    class _CommittedDb:
+        def commit(self):
+            committed.commits += 1
+
+        def rollback(self):
+            committed.rollbacks += 1
+
+        def close(self):
+            committed.closes += 1
+
+    monkeypatch.setattr(loop_mod, "SessionLocal", _CommittedDb)
+
+    loop._tick_session(41)
+
+    assert committed.commits == 1
+    assert committed.rollbacks == 0
+    assert committed.closes == 1
+    assert calls.completions == 1
+
+
 def test_expired_initial_release_refreshes_tracker_after_commit(monkeypatch):
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(captured_paper_scope=scope)
     loop._running = True
     loop._generation = 7
+    loop._worker_context.generation = 7
     loop._stop_event = loop_mod.threading.Event()
     lifecycle = SimpleNamespace(commits=0, rollbacks=0, closes=0)
     db = SimpleNamespace(
@@ -1234,6 +1553,7 @@ def test_captured_paper_iqfeed_event_refuses_legacy_symbol_admission(monkeypatch
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id="d7cc580c-2b8f-432f-b771-1cecfb3fe87a",
         runtime_generation="f6ef5ba0-5b91-49bf-a2f5-e71e8e270eb3",
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(captured_paper_scope=scope)
     monkeypatch.setattr(
@@ -1291,6 +1611,7 @@ def test_captured_paper_start_rejects_missing_or_noncallable_admitter(
         loop_mod.start_captured_paper_live_runner_loop(
             expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
             runtime_generation=_CAPTURED_PAPER_GENERATION,
+            broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
             captured_paper_symbol_admitter=admitter,
         )
         is False
@@ -1317,6 +1638,7 @@ def test_captured_paper_start_refuses_invalid_iqfeed_admission_contract(
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(
         captured_paper_scope=scope,
@@ -1428,6 +1750,7 @@ def test_captured_paper_start_waits_for_generation_owned_notify_listener(
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(
         captured_paper_scope=scope,
@@ -1460,6 +1783,7 @@ def test_captured_paper_listener_startup_failure_rolls_back_owner(monkeypatch):
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(
         captured_paper_scope=scope,
@@ -1491,6 +1815,7 @@ def test_captured_paper_admission_runs_under_exact_generation_and_refreshes(
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     calls = []
     loop = None
@@ -1565,17 +1890,20 @@ def test_ordinary_loop_cannot_install_captured_paper_admitter():
         LiveRunnerLoop(captured_paper_symbol_admitter=lambda **_kwargs: {})
 
 
-def test_captured_paper_singleton_retry_requires_exact_admitter_identity(
+def test_captured_paper_singleton_retry_requires_exact_handler_identity(
     monkeypatch,
 ):
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     admitter = lambda **_kwargs: {"ok": True}
+    completion_handler = lambda _request: None
     selected = LiveRunnerLoop(
         captured_paper_scope=scope,
         captured_paper_symbol_admitter=admitter,
+        captured_paper_exit_completion_handler=completion_handler,
     )
     starts = []
     monkeypatch.setattr(selected, "start", lambda: starts.append("start") or True)
@@ -1605,7 +1933,9 @@ def test_captured_paper_singleton_retry_requires_exact_admitter_identity(
         loop_mod.start_captured_paper_live_runner_loop(
             expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
             runtime_generation=_CAPTURED_PAPER_GENERATION,
+            broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
             captured_paper_symbol_admitter=admitter,
+            captured_paper_exit_completion_handler=completion_handler,
         )
         is True
     )
@@ -1613,9 +1943,21 @@ def test_captured_paper_singleton_retry_requires_exact_admitter_identity(
         loop_mod.start_captured_paper_live_runner_loop(
             expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
             runtime_generation=_CAPTURED_PAPER_GENERATION,
+            broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
             captured_paper_symbol_admitter=(
                 lambda **_kwargs: {"ok": True}
             ),
+            captured_paper_exit_completion_handler=completion_handler,
+        )
+        is False
+    )
+    assert (
+        loop_mod.start_captured_paper_live_runner_loop(
+            expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
+            runtime_generation=_CAPTURED_PAPER_GENERATION,
+            broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
+            captured_paper_symbol_admitter=admitter,
+            captured_paper_exit_completion_handler=lambda _request: None,
         )
         is False
     )
@@ -1690,6 +2032,7 @@ def test_captured_paper_listener_is_not_ready_during_reconnect_gap(monkeypatch):
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(
         captured_paper_scope=scope,
@@ -2330,6 +2673,7 @@ def test_ignition_refused_for_captured_paper_scope(monkeypatch):
     scope = loop_mod.CapturedPaperLiveRunnerScope(
         expected_account_id=_CAPTURED_PAPER_ACCOUNT_ID,
         runtime_generation=_CAPTURED_PAPER_GENERATION,
+        broker_connection_generation=_CAPTURED_PAPER_CONNECTION_GENERATION,
     )
     loop = LiveRunnerLoop(
         captured_paper_scope=scope,

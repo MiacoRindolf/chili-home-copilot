@@ -22,7 +22,7 @@ from ....models.trading import (
 )
 from .features import ExecutionReadinessFeatures
 from .strategy_params import family_default_params, normalize_strategy_params, summarize_strategy_params
-from .variants import iter_momentum_families
+from .variants import CAPTURED_PAPER_VARIANT_KEY_PREFIX, iter_momentum_families
 from .viability_scope import infer_viability_scope
 
 _log = logging.getLogger(__name__)
@@ -220,6 +220,9 @@ def active_variant_for_family(db: Session, family_id: str) -> MomentumStrategyVa
         .filter(
             MomentumStrategyVariant.family == fam,
             MomentumStrategyVariant.is_active.is_(True),
+            MomentumStrategyVariant.variant_key.notlike(
+                f"{CAPTURED_PAPER_VARIANT_KEY_PREFIX}%"
+            ),
         )
         .order_by(MomentumStrategyVariant.version.desc(), MomentumStrategyVariant.id.desc())
         .first()

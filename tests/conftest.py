@@ -542,6 +542,16 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
             "trading_automation_simulated_fills",
         }
     )
+    # These relations can exist from a previous test process even when the
+    # current test's import closure has not registered their ORM metadata.
+    # Always clean them in the guarded ``*_test`` database, child first.  The
+    # route state must precede strategy variants because its RESTRICT FK and
+    # immutable-row trigger intentionally forbid ordinary cleanup.
+    _migration_owned_application_ledger = (
+        "captured_paper_selection_route_states",
+        "captured_paper_variant_application_events",
+        "captured_paper_variant_application_receipts",
+    )
     if table_names is not None:
         _evict_idle_in_transaction_peers()
         _terminate_stale_truncate_peers()
@@ -555,8 +565,12 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
                 "captured_paper_completed_fill_watch",
                 "captured_paper_phase_one_handoff_events",
                 "captured_paper_phase_one_handoffs",
+                *_migration_owned_application_ledger,
             ):
-                if relation not in table_names:
+                if (
+                    relation not in table_names
+                    and relation not in _migration_owned_application_ledger
+                ):
                     continue
                 present = conn.execute(
                     text("SELECT to_regclass(:name) IS NOT NULL"),
@@ -610,6 +624,19 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
             with engine.begin() as conn:
                 conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
                 conn.execute(text(f"SET LOCAL statement_timeout = '{statement_s}s'"))
+                for relation in _migration_owned_application_ledger:
+                    present = conn.execute(
+                        text("SELECT to_regclass(:name) IS NOT NULL"),
+                        {"name": relation},
+                    ).scalar_one()
+                    if present:
+                        conn.execute(text(
+                            f'ALTER TABLE "{relation}" DISABLE TRIGGER USER'
+                        ))
+                        conn.execute(text(f'DELETE FROM "{relation}"'))
+                        conn.execute(text(
+                            f'ALTER TABLE "{relation}" ENABLE TRIGGER USER'
+                        ))
                 names = [f'"{name}"' for name in _truncate_relation_names(conn, logical_names)]
                 # Production append-only tables also reject TRUNCATE. Test
                 # isolation is allowed to bypass USER triggers only inside the

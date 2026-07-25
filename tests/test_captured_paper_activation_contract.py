@@ -800,11 +800,13 @@ def _bundle(tmp_path: Path) -> Bundle:
     preactivation = {
         "schema_version": PREACTIVATION_MANIFEST_SCHEMA_VERSION,
         "generated_at": (NOW - timedelta(seconds=4)).isoformat(),
-        # Mirrors the builder's _MANIFEST_TTL (12 minutes as of 2026-07-17)
-        # so the envelope outlives the 10-minute receipt class — the
+        # Mirrors the builder's bounded activation window, long enough for
+        # the measured sealed-service startup. The
         # slow-smoke test below depends on receipts expiring before the
         # envelope does.
-        "expires_at": (NOW + timedelta(minutes=12)).isoformat(),
+        # generated_at is NOW-4s in this fixture, so keep the synthetic
+        # interval strictly inside the 20-minute production cap.
+        "expires_at": (NOW + timedelta(minutes=19)).isoformat(),
         **shared_manifest,
         "authority_boundary": authority,
         "readiness_receipts": {
@@ -1379,7 +1381,7 @@ def test_slow_no_order_smoke_requires_and_accepts_post_shutdown_refresh(
     smoke_completed_at = NOW + timedelta(seconds=320)
 
     # Past the class boundary: the original receipts (captured NOW-5s,
-    # 600s window) are no longer current activation authority.
+    # bounded receipt window) are no longer current activation authority.
     assert all(
         datetime.fromisoformat(
             json.loads(Path(bundle.preactivation["readiness_receipts"][kind]["path"]).read_text())["expires_at"]
