@@ -4994,6 +4994,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"),
         description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
     )
+    chili_momentum_ross_stop_alignment_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED"),
+        description="Ross-parity L2a (2026-07-25): stops = the Ross structural reference, not the deepest low. THREE sites: inverse-H&S stop = RIGHT-SHOULDER low (was head low — a full pattern-depth away, ~2x the earned R; a retest that loses the right shoulder already failed); wick_reclaim stop = RECLAIM-BAR low w/ max(flush_low,...) degeneracy guard (Ross instant-out, structural form — losing the reclaim bar = the reclaim failed; was flush low); vwap_reclaim stop = LOSS-OF-VWAP (the thesis IS 'bulls hold VWAP'; was reclaim-bar low). Sizing hazard bounded by construction: structural_or_vol_floored_atr_pct (paper_execution.py) takes the FURTHER of structural-vs-vol-floor, so tighter structural stops never shrink the sizing distance below the shared vol floor. KILL-SWITCH: False -> all three revert to legacy stops -> byte-identical.",
+    )
     chili_momentum_flush_dip_volume_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
