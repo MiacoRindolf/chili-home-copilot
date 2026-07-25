@@ -1,0 +1,142 @@
+{
+  "schema_version": "chili.weekend_capture_coverage.v1",
+  "generated_at_utc": "2026-07-25T22:46:10.2173257Z",
+  "classification": "DIAGNOSTIC_ONLY_READ_ONLY_COVERAGE_INVENTORY",
+  "authority_limits": {
+    "profitability_evidence": false,
+    "ross_parity_evidence": false,
+    "replay_certification": false,
+    "paper_activation_authority": false,
+    "live_cash_authority": false
+  },
+  "mutation_posture": {
+    "database_transaction_mode": "READ_ONLY",
+    "database_statement_timeout_milliseconds": 10000,
+    "provider_calls": 0,
+    "broker_calls": 0,
+    "orders_submitted": 0,
+    "task_or_service_mutations": 0,
+    "production_files_changed": 0
+  },
+  "local_database_recent_tail_samples": {
+    "iqfeed_trade_ticks": {
+      "sample_order": "id_desc",
+      "sample_rows": 10000,
+      "first_observed_at": "2026-07-24T23:45:25.622417Z",
+      "last_observed_at": "2026-07-25T21:18:58.771341Z",
+      "distinct_symbols": 119,
+      "provider_clock_rows": 0,
+      "full_provenance_rows": 0,
+      "distinct_bridge_runs": 0,
+      "full_provenance_definition": [
+        "provider_event_at",
+        "received_at",
+        "available_at",
+        "bridge_run_id",
+        "connection_generation",
+        "source_frame_sequence",
+        "source_frame_sha256"
+      ],
+      "postgres_statistics_provenance_null_fraction": 1.0
+    },
+    "momentum_nbbo_spread_tape": {
+      "sample_order": "id_desc",
+      "sample_rows": 10000,
+      "first_observed_at": "2026-07-25T21:41:12.608911Z",
+      "last_observed_at": "2026-07-25T22:13:49.933786Z",
+      "distinct_symbols": 104,
+      "provider_clock_rows": 0,
+      "full_provenance_rows": 0,
+      "distinct_bridge_runs": 0,
+      "full_provenance_definition": [
+        "provider_event_at",
+        "received_at",
+        "available_at",
+        "bridge_run_id",
+        "connection_generation",
+        "source_frame_sequence",
+        "source_frame_sha256"
+      ]
+    },
+    "iqfeed_depth_snapshots": {
+      "sample_order": "id_desc",
+      "sample_rows": 10000,
+      "first_observed_at": "2026-07-25T12:01:15.793065Z",
+      "last_observed_at": "2026-07-25T12:05:51.540408Z",
+      "distinct_symbols": 75,
+      "rows_with_bid_and_ask_payloads": 10000,
+      "source": "iqfeed_l2",
+      "provider_event_clock_column_present": false,
+      "received_clock_column_present": false,
+      "available_clock_column_present": false,
+      "release_or_run_identity_columns_present": false
+    },
+    "captured_paper_selection": {
+      "frontier_rows": 0,
+      "frontier_event_rows": 0,
+      "latest_source_available_at": null
+    }
+  },
+  "content_addressed_store_inventory": {
+    "accessible_chili_paper_capture_store_directories": 86,
+    "accessible_chili_paper_event_gap_or_seal_files": 0,
+    "captured_paper_takeover_activation_capture_store_directories": 22,
+    "captured_paper_takeover_capture_store_files": 26,
+    "captured_paper_takeover_market_event_files": 0,
+    "captured_paper_takeover_file_class": "PREACTIVATION_WRITE_PROBES_ONLY",
+    "example_probe_path": "C:\\chili-codex-artifacts\\captured-paper-takeover\\activation-artifacts-20260720-5d3e8d9-r12\\capture-store\\.preactivation-capture-smoke\\e9088116088a8e14ec983985e2a29ea34aba656d30fca0e0236a659e623641b6.json",
+    "example_probe_sha256": "e9088116088a8e14ec983985e2a29ea34aba656d30fca0e0236a659e623641b6",
+    "example_probe_schema_version": "chili.iqfeed-capture-only-store-probe.v1"
+  },
+  "local_artifact_evidence": {
+    "premarket_status": {
+      "path": "C:\\chili-paper\\a86-premarket\\premarket-status.json",
+      "sha256": "6fb77ec9db9cd1efdc5c138a8bd364f0e942a3439b3082dbf526aaab7f2f3727",
+      "phase": "TAPE_POLL",
+      "reported_age": 999999,
+      "observed_utc": "2026-07-25T12:07:41.3628828Z"
+    },
+    "latest_accessible_preselection_failure": {
+      "path": "C:\\chili-paper\\a86-0824-7fbdc97\\capture-preselection\\preselection-failure.txt",
+      "sha256": "9207b354c0ca64db5a6144975ce7332fa9477d6f59e591e0bdc2982470f34e7c",
+      "reason": "COMPOSITION_UNAVAILABLE_RESOURCE_PRESSURE_MEMORY"
+    },
+    "july_24_live_replay": {
+      "path": "D:\\CHILI-Docker\\chili-data\\replays\\2026-07-24_live.json",
+      "sha256": "8d2ecd79aec12cb81e51383589e3d1b42813b53387d7d0cfaac70388e0e5a19d",
+      "trades": 0,
+      "candidates": 0,
+      "live_sessions": 0
+    },
+    "historical_causal_window_inventory": {
+      "path": "D:\\dev\\chili-home-copilot-weekend-profitability\\artifacts\\weekend-profitability-20260718\\historical_causal_window_inventory.json",
+      "sha256": "c45e1846e02241a3b4b02719be9649b68646a67b604250473442cda7b768a481",
+      "causally_complete_cycles": 0,
+      "assessed_cycles": 12
+    }
+  },
+  "resource_recheck": {
+    "binding_report_path": "C:\\chili-paper\\b17-03fc84e\\chili-replay-capture-benchmark-59aef3700291470a9c647819a236ae99-o_8rvvyp\\reports\\a3871b07a476b14137cf550b0f124638686a58ce3acd1d118e69a07e633e3694.json",
+    "binding_report_sha256": "a3871b07a476b14137cf550b0f124638686a58ce3acd1d118e69a07e633e3694",
+    "binding_sha256": "920cd6a124630556a45f762cbf4134963b3c5ee7506f954d724bcd06ca23ed09",
+    "observed_at_utc": "2026-07-25T22:46:10.2173257Z",
+    "available_memory_gib": 21.102,
+    "memory_pressure_entry_gib": 9.517,
+    "memory_margin_gib": 11.585,
+    "cpu_three_sample_average_percent": 45.37,
+    "cpu_pressure_entry_percent": 92.0,
+    "capture_drive_free_gib": 39.744,
+    "disk_pressure_entry_gib": 3.772,
+    "disk_margin_gib": 35.971,
+    "current_snapshot_inside_pressure_state": false,
+    "qualification": "A fresh bound sample is still mandatory at the eligible-session composition boundary."
+  },
+  "verdict": {
+    "new_replay_grade_window_found": false,
+    "new_causally_scorable_trade_leg_found": false,
+    "third_strategy_hypothesis_authorized": false,
+    "profitability_patch_supported": false,
+    "reason_code": "COVERAGE_UNAVAILABLE",
+    "next_safe_evidence_step": "Run the existing sealed captured-PAPER operator boundary during the next eligible equity session; accept data only when the actual store contains content-addressed events, explicit gaps, clean seals, exact provider/received/available clocks, release/run/config identities, and continuity watermarks."
+  }
+}
