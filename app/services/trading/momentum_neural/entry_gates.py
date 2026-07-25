@@ -4763,6 +4763,44 @@ def flush_dip_buy_confirmation(
                     )
                 )
             debug["first_dip_tape_confirmed"] = True
+        # Ross-parity L1b (2026-07-25): relative-volume gate on the curl/reclaim bar —
+        # the audit found flush_dip was the only dip/breakout family fire with NO volume
+        # confirm (ORB/ABCD/vwap_reclaim all require a spike). Reuses the existing
+        # pullback_volume_spike_multiple (no new number) with the ORB bar-path tail(21)
+        # fallback. FAIL-OPEN when the ratio is uncomputable (thin data never blocks —
+        # the stated ORB convention). Kill-switch flag OFF ⇒ skipped ⇒ byte-identical.
+        if bool(getattr(settings, "chili_momentum_flush_dip_volume_gate_enabled", True)):
+            try:
+                _fd_vol_mult = float(getattr(
+                    settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+            except (TypeError, ValueError):
+                _fd_vol_mult = 1.5
+            _fd_vol_ratio = None
+            try:
+                _fd_arrays = compute_all_from_df(df, needed={"volume_ratio"})
+                _fd_vr = _fd_arrays.get("volume_ratio") or []
+                _fd_cur = len(df) - 1
+                _fd_vol_ratio = (
+                    float(_fd_vr[_fd_cur])
+                    if _fd_cur < len(_fd_vr) and _fd_vr[_fd_cur] is not None
+                    else None
+                )
+                if _fd_vol_ratio is None:
+                    _fd_vol = df["Volume"]
+                    _fd_w = _fd_vol.tail(21)
+                    _fd_avg = (
+                        float(_fd_w.iloc[:-1].mean()) if len(_fd_w) > 1
+                        else float(_fd_vol.iloc[-1])
+                    )
+                    _fd_vol_ratio = (
+                        (float(_fd_vol.iloc[-1]) / _fd_avg) if _fd_avg > 0 else None
+                    )
+            except (TypeError, ValueError, IndexError, KeyError):
+                _fd_vol_ratio = None
+            if _fd_vol_ratio is not None:
+                debug["vol_ratio"] = round(_fd_vol_ratio, 2)
+                if _fd_vol_ratio < _fd_vol_mult:
+                    return False, "flush_dip_low_volume", debug
         return True, "flush_dip_buy", debug
     except Exception as exc:
         if (
