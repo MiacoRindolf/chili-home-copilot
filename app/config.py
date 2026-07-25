@@ -3182,6 +3182,11 @@ class Settings(BaseSettings):
     # identical to current (top-50 + scheduled-only). Adaptive / no-magic: ONE base
     # FLOOR knob (chili_momentum_ignition_min_pct); the hard ceiling is a DB backstop,
     # NOT a quality cap. See docs/DESIGN/MOMENTUM_LANE.md.
+    chili_momentum_universe_float_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED"),
+        description="Ross-parity L4 (2026-07-25): FLOAT gate on the final ranked universe subset (Ross scans float FIRST — supply side). Per-candidate get_ticker_float (process-cached) on the ranked head only, lookup budget 2x profile.max_universe (~100 — never the uncapped hard ceiling; no API storm). Reference = profile.float_shares_max override else the ONE shared viability A-setup ceiling (a_setup_quality_floor_float_ceiling_shares, 20M — no second number). FAIL-OPEN on None float / error / exhausted budget (the viability fail-CLOSED gate is the backstop); high-float names stop burning ranked slots + enrichment budget. KILL-SWITCH: False -> gate skipped -> byte-identical.",
+    )
     chili_momentum_universe_uncapped_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_UNCAPPED_ENABLED"),
