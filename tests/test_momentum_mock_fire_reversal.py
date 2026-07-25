@@ -32,6 +32,7 @@ TESTS-ONLY: this file never edits source. Each gate is exercised through its pub
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -72,8 +73,16 @@ def _rows(bars):
 #  (1) flush_dip_buy_confirmation  — AS101 algo-flush V-bounce dip-buy
 #  Inline structural gate. FIRE = "flush_dip_buy". Mocks: compute_all_from_df (ema_9 rising +
 #  vwap + atr), candles.is_bounce_curl_candle (curl). _bottoming_tail runs for real on the
-#  flush bar geometry. RTH gate defaults OFF -> fail-open.
+#  flush bar geometry. RTH gate defaults OFF -> fail-open. The MORNING-ONLY guard (JZXN
+#  2026-07-10) reads ``now`` (else the last bar timestamp — here a RangeIndex label, i.e. a
+#  nonsense 1970 epoch clock), so every call injects a frozen 10:00-ET ``now``.
 # ════════════════════════════════════════════════════════════════════════════════════════
+
+# Frozen MORNING clock: 14:00 UTC = 10:00 ET (July = EDT), inside RTH and before the
+# 10:30 ET morning-window cutoff (9:30 open + chili_momentum_reclaim_max_hours_after_open
+# = 1h). Without it the guard falls back to df.index[-1] — the RangeIndex int 11 ->
+# pd.Timestamp(11ns after epoch) -> 19:00 ET -> a deterministic block at any wall hour.
+_FLUSH_NOW = datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc)
 
 def _flush_dip_df() -> pd.DataFrame:
     """A front-side up name, a fast bottoming-tail flush bar INTO support, then a green curl
@@ -102,6 +111,7 @@ def _flush_dip_df() -> pd.DataFrame:
 def _flush_settings(ms) -> None:
     ms.chili_momentum_flush_dip_buy_enabled = True
     ms.chili_momentum_dip_buy_rth_only_enabled = False  # RTH gate OFF -> fail-open
+    ms.chili_momentum_reclaim_max_hours_after_open = 1.0  # morning cutoff 10:30 ET
 
 
 def _flush_arrays(n: int = 12) -> dict:
@@ -122,7 +132,9 @@ class TestFlushDipBuyMockFire:
                 patch(f"{_GATES}.compute_all_from_df", return_value=_flush_arrays()), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
             _flush_settings(ms)
-            ok, reason, dbg = flush_dip_buy_confirmation(df, entry_interval="5m", symbol="TEST")
+            ok, reason, dbg = flush_dip_buy_confirmation(
+                df, entry_interval="5m", symbol="TEST", now=_FLUSH_NOW,
+            )
         assert ok is True, f"clean flush-dip must fire, got {reason} dbg={dbg}"
         assert reason == "flush_dip_buy"
         assert dbg["pullback_low"] == pytest.approx(9.20, abs=1e-6)   # the dip low = stop
@@ -136,7 +148,9 @@ class TestFlushDipBuyMockFire:
                 patch(f"{_GATES}.compute_all_from_df", return_value=_flush_arrays()), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=False):
             _flush_settings(ms)
-            ok, reason, dbg = flush_dip_buy_confirmation(df, entry_interval="5m", symbol="TEST")
+            ok, reason, dbg = flush_dip_buy_confirmation(
+                df, entry_interval="5m", symbol="TEST", now=_FLUSH_NOW,
+            )
         assert ok is False
         assert reason == "flush_dip_weak_curl"
 
@@ -148,7 +162,9 @@ class TestFlushDipBuyMockFire:
                 patch(f"{_GATES}.compute_all_from_df", return_value=falling), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
             _flush_settings(ms)
-            ok, reason, dbg = flush_dip_buy_confirmation(df, entry_interval="5m", symbol="TEST")
+            ok, reason, dbg = flush_dip_buy_confirmation(
+                df, entry_interval="5m", symbol="TEST", now=_FLUSH_NOW,
+            )
         assert ok is False
         assert reason == "flush_dip_not_front_side"
 
@@ -696,8 +712,10 @@ class TestInverseHeadShouldersMockFire:
 # ════════════════════════════════════════════════════════════════════════════════════════
 #  (8) wick_reclaim_confirmation  — HVM101 #008 hot-tape wick reclaim
 #  Inline gate, MANDATORY hot-tape gate (_is_hot_tape via ATR%/RVOL floors). FIRE =
-#  "wick_reclaim". Mocks: compute_all_from_df (atr + volume_ratio). The rejection candle +
-#  flush + retrace geometry runs for real; the hot-tape gate passes via a high RVOL.
+#  "wick_reclaim". Mocks: compute_all_from_df (atr + volume_ratio) + tape_confirms_hold (the
+#  UNIFIED buyers_confirmed gate delegates to it for equities and fails CLOSED with db=None).
+#  The rejection candle + flush + retrace geometry runs for real; the hot-tape gate passes
+#  via a high RVOL.
 # ════════════════════════════════════════════════════════════════════════════════════════
 
 def _wick_reclaim_df() -> pd.DataFrame:
@@ -740,7 +758,9 @@ class TestWickReclaimMockFire:
         FIRES ``wick_reclaim``; entry = wick high, stop = flush/wick low."""
         df = _wick_reclaim_df()
         with patch(f"{_GATES}.settings") as ms, \
-                patch(f"{_GATES}.compute_all_from_df", return_value=_wick_arrays()):
+                patch(f"{_GATES}.compute_all_from_df", return_value=_wick_arrays()), \
+                patch(f"{_GATES}.tape_confirms_hold",
+                      return_value=(True, {"reason": "tape_hold_ok"})):
             _wick_settings(ms)
             ok, reason, dbg = wick_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
         assert ok is True, f"clean wick-reclaim must fire, got {reason} dbg={dbg}"
