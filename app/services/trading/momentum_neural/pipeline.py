@@ -2343,6 +2343,21 @@ def run_momentum_neural_tick(
     if _strong:
         meta["strong_catalyst_symbols"] = sorted(_strong)
 
+    # ARB-FLAT catalyst set (Ross SS101): CONFIRMED buyout-TARGET headlines ("to be
+    # acquired"/"buyout"/"takeover"/"tender offer") — price pinned at the deal, no
+    # intraday long. Distinct class from weak (dilution) and fake (credibility): the
+    # consumer (score_viability) applies a negative tilt + live-ineligible with
+    # precedence OVER strong. Same once-per-pass best-effort fetch; fail-open no-op.
+    try:
+        if bool(getattr(settings, "chili_momentum_catalyst_arb_flat_gate_enabled", True)):
+            from .catalyst import arb_flat_catalyst_symbols
+
+            _arb_flat = arb_flat_catalyst_symbols() or set()
+            if _arb_flat:
+                meta["arb_flat_catalyst_symbols"] = sorted(_arb_flat)
+    except Exception:
+        _log.debug("[pipeline] arb-flat catalyst fetch failed", exc_info=True)
+
     # FAKE-catalyst credibility set (Ross AS101/HVM101): UNVERIFIED / hacked-PR / unsolicited-
     # buyout / rumor / pump headlines Ross DISTRUSTS (they round-trip fully). Same once-per-pass
     # best-effort fetch; JSON-safe sorted list. Empty / absent feed / flag OFF -> no-op.

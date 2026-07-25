@@ -5163,6 +5163,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_GRADE_GATE_ENABLED"),
         description="E2: grade catalysts — suppress weak-catalyst (dilution/compliance/legal) equities from live eligibility and boost strong-catalyst (FDA/M&A/contract) names; medium neutral. Absent feed/crypto -> no-op. KILL-SWITCH: False -> byte-identical.",
     )
+    chili_momentum_catalyst_arb_flat_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED"),
+        description="Ross-parity L3 (2026-07-25): ARB-FLAT catalyst class — a CONFIRMED buyout TARGET ('to be acquired'/'buyout'/'takeover'/'tender offer') trades pinned at the deal price; no intraday long opportunity, residual gap = merger-arb tail risk. Negative tilt + live-ineligible with precedence OVER strong (a 'definitive agreement to be acquired' headline is FLAT). Distinct class from weak so the reverse-split/private-placement sign-refinements and the fake-catalyst set (weak-keyed) never touch it. Nested under catalyst_grade_gate_enabled. KILL-SWITCH: False -> byte-identical.",
+    )
     chili_momentum_catalyst_action_grading_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ACTION_GRADING_ENABLED"),
