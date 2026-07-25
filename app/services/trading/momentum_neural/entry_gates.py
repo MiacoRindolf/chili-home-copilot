@@ -4763,6 +4763,44 @@ def flush_dip_buy_confirmation(
                     )
                 )
             debug["first_dip_tape_confirmed"] = True
+        # Ross-parity L1b (2026-07-25): relative-volume gate on the curl/reclaim bar —
+        # the audit found flush_dip was the only dip/breakout family fire with NO volume
+        # confirm (ORB/ABCD/vwap_reclaim all require a spike). Reuses the existing
+        # pullback_volume_spike_multiple (no new number) with the ORB bar-path tail(21)
+        # fallback. FAIL-OPEN when the ratio is uncomputable (thin data never blocks —
+        # the stated ORB convention). Kill-switch flag OFF ⇒ skipped ⇒ byte-identical.
+        if bool(getattr(settings, "chili_momentum_flush_dip_volume_gate_enabled", True)):
+            try:
+                _fd_vol_mult = float(getattr(
+                    settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+            except (TypeError, ValueError):
+                _fd_vol_mult = 1.5
+            _fd_vol_ratio = None
+            try:
+                _fd_arrays = compute_all_from_df(df, needed={"volume_ratio"})
+                _fd_vr = _fd_arrays.get("volume_ratio") or []
+                _fd_cur = len(df) - 1
+                _fd_vol_ratio = (
+                    float(_fd_vr[_fd_cur])
+                    if _fd_cur < len(_fd_vr) and _fd_vr[_fd_cur] is not None
+                    else None
+                )
+                if _fd_vol_ratio is None:
+                    _fd_vol = df["Volume"]
+                    _fd_w = _fd_vol.tail(21)
+                    _fd_avg = (
+                        float(_fd_w.iloc[:-1].mean()) if len(_fd_w) > 1
+                        else float(_fd_vol.iloc[-1])
+                    )
+                    _fd_vol_ratio = (
+                        (float(_fd_vol.iloc[-1]) / _fd_avg) if _fd_avg > 0 else None
+                    )
+            except (TypeError, ValueError, IndexError, KeyError):
+                _fd_vol_ratio = None
+            if _fd_vol_ratio is not None:
+                debug["vol_ratio"] = round(_fd_vol_ratio, 2)
+                if _fd_vol_ratio < _fd_vol_mult:
+                    return False, "flush_dip_low_volume", debug
         return True, "flush_dip_buy", debug
     except Exception as exc:
         if (
@@ -4872,9 +4910,18 @@ def vwap_reclaim_confirmation(
         if vol_ratio < vol_mult:
             return False, "vwap_reclaim_low_volume", debug
 
-        # Level = the reclaim bar high (break level); stop = the reclaim bar low.
+        # Level = the reclaim bar high (break level). STOP (Ross-parity L2a, 2026-07-25):
+        # LOSS-OF-VWAP — Ross SS101 #018: after a reclaim, the trade thesis IS "bulls hold
+        # VWAP"; dropping back below it invalidates the reclaim regardless of the bar's
+        # low. Legacy reclaim-bar-low behind the ross_stop_alignment kill-switch (OFF ->
+        # byte-identical). The 0<stop<level guard holds: level=bar high >= close > vwap.
         level = float(high.iloc[cur])
-        stop = float(low.iloc[cur])
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
+            stop = float(vwap_cur)
+            debug["stop_model"] = "loss_of_vwap"
+        else:
+            stop = float(low.iloc[cur])
+            debug["stop_model"] = "reclaim_bar_low"
         if not (0.0 < stop < level):
             return False, "vwap_reclaim_bad_level", debug
         debug.update({
@@ -5111,10 +5158,20 @@ def wick_reclaim_confirmation(
         if retrace_frac < min_retrace_frac:
             return False, "wick_reclaim_retrace_too_shallow", debug
 
-        # Level = the wick high (the breakout/continuation target the bailout machinery uses);
-        # stop = the flush/wick low. Reuse the IDENTICAL pullback_high/pullback_low keys.
+        # Level = the wick high (the breakout/continuation target the bailout machinery uses).
+        # STOP (Ross-parity L2a, 2026-07-25): the RECLAIM BAR's low — Ross HVM101 #008 treats
+        # the wick reclaim as instant-out ("stop = break-even: if it doesn't resolve
+        # immediately, out"). The reclaim bar's low is the REAL structural version of that:
+        # losing it means the reclaim failed. max(flush_low, ...) degeneracy guard — when the
+        # reclaim bar IS the flush bar this is a no-op (never looser than legacy). Legacy
+        # flush-low behind the ross_stop_alignment kill-switch (OFF -> byte-identical).
         level = wick_high
-        stop = flush_low
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
+            stop = max(float(flush_low), float(low.iloc[cur]))
+            debug["stop_model"] = "reclaim_bar_low"
+        else:
+            stop = flush_low
+            debug["stop_model"] = "flush_low"
         if not (0.0 < stop < level):
             return False, "wick_reclaim_bad_level", debug
         debug.update({
@@ -7220,9 +7277,19 @@ def inverse_head_shoulders_confirmation(
         if ls_depth > cap or rs_depth > cap:
             return False, "inverse_head_shoulders_shoulder_too_deep", debug
 
-        # The break level = the neckline; stop = the HEAD low (structural support).
+        # The break level = the neckline. STOP (Ross-parity L2a, 2026-07-25): the
+        # RIGHT-SHOULDER low — Ross SS101 #017 stops the inv-H&S below the right
+        # shoulder, not the head: by the neckline break the head low is a full
+        # pattern-depth away (~2x the R the setup earns), and a retest that loses the
+        # right shoulder has already failed the structure. Legacy head-low behind the
+        # ross_stop_alignment kill-switch (OFF -> byte-identical).
         level = neckline
-        stop = head_l
+        if bool(getattr(settings, "chili_momentum_ross_stop_alignment_enabled", True)):
+            stop = rs_l
+            debug["stop_model"] = "right_shoulder_low"
+        else:
+            stop = head_l
+            debug["stop_model"] = "head_low"
         if not (0.0 < stop < level):
             return False, "inverse_head_shoulders_bad_level", debug
         debug["pullback_high"] = float(level)

@@ -3182,6 +3182,11 @@ class Settings(BaseSettings):
     # identical to current (top-50 + scheduled-only). Adaptive / no-magic: ONE base
     # FLOOR knob (chili_momentum_ignition_min_pct); the hard ceiling is a DB backstop,
     # NOT a quality cap. See docs/DESIGN/MOMENTUM_LANE.md.
+    chili_momentum_universe_float_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED"),
+        description="Ross-parity L4 (2026-07-25): FLOAT gate on the final ranked universe subset (Ross scans float FIRST — supply side). Per-candidate get_ticker_float (process-cached) on the ranked head only, lookup budget 2x profile.max_universe (~100 — never the uncapped hard ceiling; no API storm). Reference = profile.float_shares_max override else the ONE shared viability A-setup ceiling (a_setup_quality_floor_float_ceiling_shares, 20M — no second number). FAIL-OPEN on None float / error / exhausted budget (the viability fail-CLOSED gate is the backstop); high-float names stop burning ranked slots + enrichment budget. KILL-SWITCH: False -> gate skipped -> byte-identical.",
+    )
     chili_momentum_universe_uncapped_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_UNCAPPED_ENABLED"),
@@ -4988,6 +4993,21 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"),
         description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_orb_ihs_structural_stop_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED"),
+        description="Ross-parity L2b (2026-07-25): adds orb_break*/inverse_head_shoulders_break* to the structural-trigger reason set (accessor structural_trigger_reasons(), read by ALL three consumers: the risk_policy structural_trigger flag, the chase-cap leader bypass, and the structural-stop stash). Fixes the latent bug where both detectors emitted pullback_low that was silently dropped (ATR-fallback stops). Declared interaction: also widens leader/chase bypass eligibility for these two genuinely-structural triggers. KILL-SWITCH: False -> legacy base tuple -> byte-identical (both revert to ATR stops).",
+    )
+    chili_momentum_ross_stop_alignment_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED"),
+        description="Ross-parity L2a (2026-07-25): stops = the Ross structural reference, not the deepest low. THREE sites: inverse-H&S stop = RIGHT-SHOULDER low (was head low — a full pattern-depth away, ~2x the earned R; a retest that loses the right shoulder already failed); wick_reclaim stop = RECLAIM-BAR low w/ max(flush_low,...) degeneracy guard (Ross instant-out, structural form — losing the reclaim bar = the reclaim failed; was flush low); vwap_reclaim stop = LOSS-OF-VWAP (the thesis IS 'bulls hold VWAP'; was reclaim-bar low). Sizing hazard bounded by construction: structural_or_vol_floored_atr_pct (paper_execution.py) takes the FURTHER of structural-vs-vol-floor, so tighter structural stops never shrink the sizing distance below the shared vol floor. KILL-SWITCH: False -> all three revert to legacy stops -> byte-identical.",
+    )
+    chili_momentum_flush_dip_volume_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
+        description="Ross-parity L1b (2026-07-25): flush_dip_buy additionally requires a relative-volume surge on the curl/reclaim bar (volume_ratio >= pullback_volume_spike_multiple — the same reference the ORB/ABCD bar paths use; no new number). FAIL-OPEN when the ratio is uncomputable (thin data never blocks, the ORB convention). Reject reason: flush_dip_low_volume. KILL-SWITCH: False -> gate skipped -> byte-identical.",
     )
     chili_momentum_tick_break_tape_confirm_enabled: bool = Field(
         default=True,

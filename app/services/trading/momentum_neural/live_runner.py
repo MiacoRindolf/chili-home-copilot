@@ -19484,6 +19484,27 @@ STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
     "first_pullback_ok", "first_pullback_tick_ok",
 )
 
+# Ross-parity L2b (2026-07-25): ORB + inverse-H&S emit pullback_low/high under the SAME
+# debug keys as every other structural trigger, but their reasons were NEVER in the tuple
+# above — so their structural stops were silently dropped (ATR fallback) and they were
+# excluded from the leader/chase structural bypasses. Latent bug found by the coverage
+# audit. Flag-gated extension (accessor below) so one env flip reverts BOTH detectors to
+# the old ATR-stop behavior. Exact fire-reason strings verified against entry_gates.py.
+ORB_IHS_STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
+    "orb_break", "orb_break_tick_ok",
+    "inverse_head_shoulders_break", "inverse_head_shoulders_break_tick_ok",
+)
+
+
+def structural_trigger_reasons() -> tuple[str, ...]:
+    """The reason set whose ``pullback_low`` becomes the structural stop (and which counts
+    as a structural trigger for the leader/chase bypasses). ALL consumption sites read this
+    accessor so the ``chili_momentum_orb_ihs_structural_stop_enabled`` flag stays consistent
+    across stop-stash + bypass semantics. Flag OFF -> the legacy base tuple, byte-identical."""
+    if bool(getattr(settings, "chili_momentum_orb_ihs_structural_stop_enabled", True)):
+        return STRUCTURAL_TRIGGER_REASONS + ORB_IHS_STRUCTURAL_TRIGGER_REASONS
+    return STRUCTURAL_TRIGGER_REASONS
+
 
 def _scope_backside_bench_to_et_session(
     le: dict,
@@ -24770,7 +24791,7 @@ def tick_live_session(
                     _g4e_ok, _g4e_dbg = reentry_escalation_decision(
                         enabled=True,
                         escalation_level=_g4e_level,
-                        structural_trigger=(_trigger_reason in STRUCTURAL_TRIGGER_REASONS),
+                        structural_trigger=(_trigger_reason in structural_trigger_reasons()),
                         live_price=_g4e_px,
                         prior_hwm=_float_or_none(_g4e_prior.get("high_water_mark")),
                         prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
@@ -24899,7 +24920,7 @@ def tick_live_session(
                                     le["g4_leader_min"] = _cc_min_key
                                     le["g4_leader_is"] = _cc_leader
                                     _commit_le(sess, le)
-                                if _cc_leader is True and (_trigger_reason in STRUCTURAL_TRIGGER_REASONS):
+                                if _cc_leader is True and (_trigger_reason in structural_trigger_reasons()):
                                     from .entry_gates import tape_confirms_hold as _cc_tape_fn
 
                                     _cc_tape_ok, _cc_tape_dbg = _cc_tape_fn(
@@ -25019,7 +25040,7 @@ def tick_live_session(
             # (the class list is the shared module constant STRUCTURAL_TRIGGER_REASONS —
             # also the G4 P2 escalation gate's required-quality set; see its definition
             # for the per-class provenance comments)
-            if _trigger_reason in STRUCTURAL_TRIGGER_REASONS and _pb_debug.get("pullback_low"):
+            if _trigger_reason in structural_trigger_reasons() and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
                 # level) so the held-position handler can fast-bail if it fails to hold
