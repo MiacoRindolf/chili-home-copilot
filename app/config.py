@@ -7713,7 +7713,7 @@ class Settings(BaseSettings):
     chili_momentum_fresh_ignition_reentry_bypass_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED"),
-        description="Ross-parity L5 / GAP-B (2026-07-25): at the stopout-cap terminalization edge, a NON-leader symbol with a FRESH IGNITION (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-closed; OR membership in the running-up burst map >=3%/5min) is granted a bounded exemption — recycle to WATCHING instead of FINISHED. The re-entry itself still passes the existing G4 escalated confirmation (structural trigger + tape) — the same quality-raise contract as the leader exemption. Emits live_reentry_cap_ignition_exempt. FAIL-CLOSED on any read error. KILL-SWITCH: False -> terminalize exactly as legacy -> byte-identical.",
+        description="Ross-parity L5 / GAP-B (2026-07-25): at the stopout-cap terminalization edge, a NON-leader symbol with a FRESH IGNITION (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-closed; AND membership in the running-up burst map >=3%/5min — AND-composition validated 2026-07-25: the instant-accel leg alone granted on fade/chop-day noise in replay) is granted a bounded exemption — recycle to WATCHING instead of FINISHED. The re-entry itself still passes the existing G4 escalated confirmation (structural trigger + tape) — the same quality-raise contract as the leader exemption. Emits live_reentry_cap_ignition_exempt. FAIL-CLOSED on any read error. KILL-SWITCH: False -> terminalize exactly as legacy -> byte-identical.",
     )
     chili_momentum_max_ignition_exemptions: int = Field(
         default=1,

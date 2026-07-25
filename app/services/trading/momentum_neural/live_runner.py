@@ -36382,6 +36382,13 @@ def tick_live_session(
                     _ign_ok = False
                     if _ign_used < _ign_max:
                         _ign_sym = str(sess.symbol or "").strip().upper()
+                        # AND-composition (validated 2026-07-25): the replay A/B showed the
+                        # instant-accel leg alone grants on NOISE (a momentary lift on a
+                        # fade/chop day: CLRO −0.97 / QTTB −2.93 per granted cycle). A REAL
+                        # ignition must show BOTH: buyers lifting at this instant (leg 1,
+                        # fail-closed) AND a sustained >=3%/5min burst (leg 2, the running-up
+                        # map) — the JEM-class re-ignition signature. Either leg absent =>
+                        # no grant.
                         # leg 1: executed-tape confirmer (module-attr call so the replay
                         # driver's sim-clock patch of signed_tape_accel_features applies)
                         from . import entry_gates as _ign_eg
@@ -36389,15 +36396,12 @@ def tick_live_session(
                         _tc_ok, _tc_dbg = _ign_eg.tape_confirms_hold(_ign_sym, db=db)
                         _ign_dbg["tape"] = _tc_dbg
                         if _tc_ok:
-                            _ign_ok = True
-                        else:
                             # leg 2: the running-up burst map (>=3%/5min internal floor)
                             from .nbbo_tape import tape_running_up_signal_map
 
                             _run_map = tape_running_up_signal_map(db, now_utc=_utcnow()) or {}
                             _ign_dbg["running_up_hit"] = _ign_sym in _run_map
-                            if _ign_sym in _run_map:
-                                _ign_ok = True
+                            _ign_ok = _ign_sym in _run_map
                     from .risk_policy import fresh_ignition_reentry_allowed
 
                     _ign_allowed, _ign_reason = fresh_ignition_reentry_allowed(
