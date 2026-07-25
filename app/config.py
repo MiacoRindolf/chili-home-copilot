@@ -7292,9 +7292,9 @@ class Settings(BaseSettings):
     # small buffer over the entry — the thesis did not confirm, so bail before the stop.
     # A winner that pops (prints a new high above the confirm buffer) is IMMUNE.
     chili_momentum_bail_on_no_confirmation_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED"),
-        description="GAP1: within the no-confirmation window after entry, bail if the breakout shows NO confirming strength (no new high since entry AND price at/below the confirm buffer over entry). A new high above the buffer makes the position immune (a popping winner is never cut). OFF (default) ⇒ byte-identical.",
+        description="GAP1: within the no-confirmation window after entry, bail if the breakout shows NO confirming strength (no new high since entry AND price at/below the confirm buffer over entry). A new high above the buffer makes the position immune (a popping winner is never cut). DEFAULT ON (2026-07-25, Ross 'breakout or bailout'): FSM replay A/B on recorded tape — QTTB 07-13 +26.92 (cut fading losers early), CLRO 07-02 -8.18 (re-entry churn in a midday grind), PLSM 07-13 0.00; net +18.74 across the matrix, and bailing frees the concurrency slot for re-entry rotation. Kill-switch: env CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED=0.",
     )
     chili_momentum_no_confirmation_window_seconds: float = Field(
         default=20.0,
@@ -9192,9 +9192,9 @@ class Settings(BaseSettings):
         description="LOCATE #3: the maximum fractional size BOOST for the steepest qualifying dip (0.25 = up to +25% size on the fastest flush). The multiplier interpolates 1.0..1+this by the dip ROC over an ATR-noise floor; clamped here so it can never run away. Only consulted when chili_momentum_dip_velocity_conviction_enabled is ON.",
     )
     chili_momentum_sub_vwap_trap_entry_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED"),
-        description="LOCATE #4 SUB-VWAP TRAP: a breakdown BELOW VWAP that FAILS to follow through (no new low for K bars, a bottoming-tail flush that got bought) then RECLAIMS back above VWAP = a bear-trap / short-cover long. DISTINCT from vwap_reclaim (which needs K closes below): the trap is a SHARP undercut-and-reclaim (the stop-run below VWAP), not a sustained loss. Entry = the reclaim bar high (pullback_high); stop = the trap low (pullback_low). Carries ALL chase-guards (tape REQUIRED+fail-closed, _hod_extension_ok, _detect_back_side + front_side_state, _l2_entry_veto) + the LIVE_PENDING_ENTRY vetoes. false (default) = returns disabled before any compute = byte-identical.",
+        description="LOCATE #4 SUB-VWAP TRAP: a breakdown BELOW VWAP that FAILS to follow through (no new low for K bars, a bottoming-tail flush that got bought) then RECLAIMS back above VWAP = a bear-trap / short-cover long. DISTINCT from vwap_reclaim (which needs K closes below): the trap is a SHARP undercut-and-reclaim (the stop-run below VWAP), not a sustained loss. Entry = the reclaim bar high (pullback_high); stop = the trap low (pullback_low). Carries ALL chase-guards (tape REQUIRED+fail-closed, _hod_extension_ok, _detect_back_side + front_side_state, _l2_entry_veto) + the LIVE_PENDING_ENTRY vetoes. DEFAULT ON (2026-07-25, Ross SS101 #018 coverage-audit promotion): mechanism-verified FULL fidelity; FSM replay A/B on CLRO 07-02 + QTTB 07-13 + PLSM 07-13 = byte-identical to base in all three (never mis-fires when the geometry is absent). Kill-switch: env CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED=0.",
     )
     chili_momentum_pulling_away_roc_entry_enabled: bool = Field(
         default=False,
