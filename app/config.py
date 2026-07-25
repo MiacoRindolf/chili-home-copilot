@@ -4994,6 +4994,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"),
         description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
     )
+    chili_momentum_orb_ihs_structural_stop_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED"),
+        description="Ross-parity L2b (2026-07-25): adds orb_break*/inverse_head_shoulders_break* to the structural-trigger reason set (accessor structural_trigger_reasons(), read by ALL three consumers: the risk_policy structural_trigger flag, the chase-cap leader bypass, and the structural-stop stash). Fixes the latent bug where both detectors emitted pullback_low that was silently dropped (ATR-fallback stops). Declared interaction: also widens leader/chase bypass eligibility for these two genuinely-structural triggers. KILL-SWITCH: False -> legacy base tuple -> byte-identical (both revert to ATR stops).",
+    )
     chili_momentum_ross_stop_alignment_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED"),
