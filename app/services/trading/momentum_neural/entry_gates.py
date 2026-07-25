@@ -3766,6 +3766,42 @@ def tape_confirms_hold(
         return False, dbg  # any error -> fail-CLOSED
 
 
+def _tick_break_tape_ok(
+    symbol: str | None, *, db: Any = None, settings: Any = settings, l2_as_of: Any = None
+) -> tuple[bool, dict[str, Any]]:
+    """Ross-parity L1 (2026-07-25): tape confirm for the NAKED tick-break paths (ORB/ABCD).
+
+    The audit found ``orb_break_tick_ok`` / ``abcd_break_tick_ok`` fire on price-thrust
+    alone — no executed-tape read — while bull_flag / inverse-H&S require
+    ``tape_confirms_hold`` on their tick fires. This wrapper brings ORB/ABCD to the same
+    standard WITHOUT coupling them to the 12-trigger rollback flag:
+
+    - lever kill-switch ``chili_momentum_tick_break_tape_confirm_enabled`` OFF
+      ⇒ ``(True, confirm_disabled)`` — exact legacy naked-tick behavior, byte-identical.
+    - ``tape_confirms_hold`` ok ⇒ ``(True, tape_hold_confirmed)``.
+    - reason ``tape_hold_disabled`` (i.e. ``chili_momentum_pattern_tape_gate_enabled``
+      rolled back) ⇒ ``(True, tape_gate_rolled_back_fail_open)`` — that flag's documented
+      rollback restores the TWELVE legacy triggers' dark state; it must NOT newly darken
+      detectors it never governed. Rollback domains stay independent.
+    - genuine no-data / thin / stale / not-confirmed / error ⇒ ``(False, reason)`` —
+      fail-CLOSED on the tick path, matching the bull_flag convention: no buyers on the
+      executed tape ⇒ don't chase the tick (the caller falls through to its completed-bar
+      + volume path, so a dead tape degrades to bar entries instead of going dark)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_tick_break_tape_confirm_enabled", True)):
+            return True, {"reason": "confirm_disabled"}
+        ok, dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        if ok:
+            return True, dbg
+        if str(dbg.get("reason") or "") == "tape_hold_disabled":
+            dbg = dict(dbg)
+            dbg["reason"] = "tape_gate_rolled_back_fail_open"
+            return True, dbg
+        return False, dbg
+    except Exception:
+        return False, {"reason": "tick_break_tape_error"}  # fail-CLOSED (tick path only)
+
+
 def buyers_confirmed(
     symbol: str | None, *, db: Any = None, settings: Any = settings, l2_as_of: Any = None
 ) -> tuple[bool, dict[str, Any]]:
@@ -4727,6 +4763,44 @@ def flush_dip_buy_confirmation(
                     )
                 )
             debug["first_dip_tape_confirmed"] = True
+        # Ross-parity L1b (2026-07-25): relative-volume gate on the curl/reclaim bar —
+        # the audit found flush_dip was the only dip/breakout family fire with NO volume
+        # confirm (ORB/ABCD/vwap_reclaim all require a spike). Reuses the existing
+        # pullback_volume_spike_multiple (no new number) with the ORB bar-path tail(21)
+        # fallback. FAIL-OPEN when the ratio is uncomputable (thin data never blocks —
+        # the stated ORB convention). Kill-switch flag OFF ⇒ skipped ⇒ byte-identical.
+        if bool(getattr(settings, "chili_momentum_flush_dip_volume_gate_enabled", True)):
+            try:
+                _fd_vol_mult = float(getattr(
+                    settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+            except (TypeError, ValueError):
+                _fd_vol_mult = 1.5
+            _fd_vol_ratio = None
+            try:
+                _fd_arrays = compute_all_from_df(df, needed={"volume_ratio"})
+                _fd_vr = _fd_arrays.get("volume_ratio") or []
+                _fd_cur = len(df) - 1
+                _fd_vol_ratio = (
+                    float(_fd_vr[_fd_cur])
+                    if _fd_cur < len(_fd_vr) and _fd_vr[_fd_cur] is not None
+                    else None
+                )
+                if _fd_vol_ratio is None:
+                    _fd_vol = df["Volume"]
+                    _fd_w = _fd_vol.tail(21)
+                    _fd_avg = (
+                        float(_fd_w.iloc[:-1].mean()) if len(_fd_w) > 1
+                        else float(_fd_vol.iloc[-1])
+                    )
+                    _fd_vol_ratio = (
+                        (float(_fd_vol.iloc[-1]) / _fd_avg) if _fd_avg > 0 else None
+                    )
+            except (TypeError, ValueError, IndexError, KeyError):
+                _fd_vol_ratio = None
+            if _fd_vol_ratio is not None:
+                debug["vol_ratio"] = round(_fd_vol_ratio, 2)
+                if _fd_vol_ratio < _fd_vol_mult:
+                    return False, "flush_dip_low_volume", debug
         return True, "flush_dip_buy", debug
     except Exception as exc:
         if (
@@ -5385,15 +5459,35 @@ def ross_abcd_confirmation(
         # ── TRIGGER: D = the break above the B->C swing high ─────────────────────────────
         cur_hi = float(high.iloc[cur])
         # TICK-BREAK: the structure is valid on completed bars and the live tick is already
-        # trading through the level -> enter on that tick (mirrors the other Batch triggers;
-        # the caller's tick-break block applies the thrust buffer via the WAIT reason).
-        if (
-            live_price is not None and float(live_price) > 0
-            and float(live_price) > level
-        ):
-            debug["tick_break"] = True
-            debug["live_price"] = float(live_price)
-            return True, "abcd_break_tick_ok", debug
+        # trading through the level -> enter on that tick. Ross-parity L1 (2026-07-25):
+        # this was the NAKED-est tick path in the file (bare price>level — no thrust, no
+        # tape). Now requires the tick-break family's standard confirms: the premarket
+        # thrust buffer + the anti-chase thrust cap + buyers on the executed tape
+        # (_tick_break_tape_ok, bull_flag standard). Tape/thrust-fail does NOT return —
+        # falls through to the completed-bar + volume-spike path below.
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            _confirm_on = bool(getattr(
+                settings, "chili_momentum_tick_break_tape_confirm_enabled", True))
+            if not _confirm_on:
+                # kill-switch OFF -> exact legacy naked-tick behavior (byte-identical)
+                debug["tape_reason"] = "confirm_disabled"
+                debug["tick_break"] = True
+                debug["live_price"] = float(live_price)
+                return True, "abcd_break_tick_ok", debug
+            _thrust_ok = _premarket_tickbreak_confirmed(
+                live_price=float(live_price), level=float(level),
+                atr_pct=atr_pct, symbol=symbol, now=now,
+            ) and _dipbuy_tick_thrust_ok(
+                live_price=float(live_price), level=float(level), atr_pct=atr_pct,
+            )
+            if _thrust_ok:
+                _tape_ok, _tape_dbg = _tick_break_tape_ok(
+                    symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+                debug["tape_reason"] = str(_tape_dbg.get("reason") or "")
+                if _tape_ok:
+                    debug["tick_break"] = True
+                    debug["live_price"] = float(live_price)
+                    return True, "abcd_break_tick_ok", debug
         if cur_hi <= level:
             return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
         # A completed bar broke D -> require a VOLUME spike on the break bar (real demand).
@@ -9659,9 +9753,17 @@ def opening_range_breakout_confirmation(
                 live_price=float(live_price), level=float(level), atr_pct=atr_pct,
             )
         ):
-            debug["tick_break"] = True
-            debug["live_price"] = float(live_price)
-            return True, "orb_break_tick_ok", debug
+            # Ross-parity L1: the tick fire additionally requires buyers on the executed
+            # tape (the bull_flag standard). Tape-fail does NOT return — fall through to
+            # the completed-bar + volume-spike path below (dead tape degrades to bar
+            # entries instead of going dark).
+            _tape_ok, _tape_dbg = _tick_break_tape_ok(
+                symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+            debug["tape_reason"] = str(_tape_dbg.get("reason") or "")
+            if _tape_ok:
+                debug["tick_break"] = True
+                debug["live_price"] = float(live_price)
+                return True, "orb_break_tick_ok", debug
 
         # not broken on a completed bar -> ARM a tick-watch at the OR-high level.
         cur_hi = float(high.iloc[cur])

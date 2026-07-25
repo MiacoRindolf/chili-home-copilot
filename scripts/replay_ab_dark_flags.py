@@ -623,7 +623,19 @@ def main():
     arm_name = os.environ.get("ARM", "base").strip().lower()
     if arm_name not in ARMS:
         print(f"UNKNOWN ARM {arm_name!r}; pick one of {sorted(ARMS)}"); return
-    flags = ARMS[arm_name]
+    flags = dict(ARMS[arm_name])
+    # FLAGS_JSON (2026-07-25): arbitrary settings overrides merged OVER the arm's
+    # flags — makes every weekend A/B a pure-env matter (no per-PR driver edits).
+    # Example: FLAGS_JSON={"chili_momentum_ross_stop_alignment_enabled": false}
+    # for a parity arm proving a lever's kill-switch restores baseline behavior.
+    _fj = os.environ.get("FLAGS_JSON", "").strip()
+    if _fj:
+        import json as _json
+        _overrides = _json.loads(_fj)
+        if not isinstance(_overrides, dict):
+            print(f"FLAGS_JSON must be a JSON object, got {type(_overrides).__name__}"); return
+        flags.update(_overrides)
+    print(f"  merged_flags={flags}")
     res = run_arm(f"{SYMBOL}-{arm_name}", grid, ticks, flags)
     print(f"\n[ARM={arm_name}] {SYMBOL} PnL {res[0]:+.2f} entries={res[1]} exits={res[2]}")
 

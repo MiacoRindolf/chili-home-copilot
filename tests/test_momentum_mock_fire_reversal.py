@@ -105,13 +105,19 @@ def _flush_dip_df() -> pd.DataFrame:
         (9.88, 9.92, 9.20, 9.85),   # 10 FLUSH bar: long lower wick into VWAP (low 9.20)
         (9.85, 9.98, 9.80, 9.95),   # 11 cur = green CURL reclaiming above VWAP
     ]
-    return _rows(bars)
+    df = _rows(bars)
+    # Ross-parity L1b (2026-07-25): the curl/reclaim bar needs a REAL volume surge now
+    # (the flush_dip volume gate); 3M vs the 1M lead-in = volume_ratio 3.0 >= 1.5.
+    df.loc[df.index[-1], "Volume"] = 3_000_000
+    return df
 
 
 def _flush_settings(ms) -> None:
     ms.chili_momentum_flush_dip_buy_enabled = True
     ms.chili_momentum_dip_buy_rth_only_enabled = False  # RTH gate OFF -> fail-open
     ms.chili_momentum_reclaim_max_hours_after_open = 1.0  # morning cutoff 10:30 ET
+    ms.chili_momentum_flush_dip_volume_gate_enabled = True  # Ross-parity L1b
+    ms.chili_momentum_pullback_volume_spike_multiple = 1.5
 
 
 def _flush_arrays(n: int = 12) -> dict:
