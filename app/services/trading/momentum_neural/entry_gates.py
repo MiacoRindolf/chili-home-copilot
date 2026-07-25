@@ -4750,18 +4750,6 @@ def flush_dip_buy_confirmation(
                     "first_dip_tape_execution_surface_mismatch"
                 )
                 return False, "flush_dip_first_dip_tape_invalid", debug
-            if _actual_surface == "captured_db_paper":
-                # The accepted receipt must reach the same active capture
-                # runtime while it is still a private object.  Persisted debug
-                # cannot reconstruct this lineage later.  A missing/mismatched
-                # sink vetoes only this decision and leaves the daily
-                # opportunity, risk ledger, and broker untouched.
-                debug["first_dip_prior_detector_reference_sha256"] = (
-                    _retain_captured_first_dip_detector_for_opportunity(
-                        _tape_evaluation,
-                        opportunity_key=dict(_first_dip_opportunity or {}),
-                    )
-                )
             debug["first_dip_tape_confirmed"] = True
         # Ross-parity L1b (2026-07-25): relative-volume gate on the curl/reclaim bar —
         # the audit found flush_dip was the only dip/breakout family fire with NO volume
@@ -4801,6 +4789,18 @@ def flush_dip_buy_confirmation(
                 debug["vol_ratio"] = round(_fd_vol_ratio, 2)
                 if _fd_vol_ratio < _fd_vol_mult:
                     return False, "flush_dip_low_volume", debug
+        if _first_dip_candidate and _actual_surface == "captured_db_paper":
+            # Retain only at the terminal detector-success boundary, after
+            # every later veto (including relative volume) has passed.  The
+            # private receipt cannot be reconstructed from persisted debug,
+            # while a rejected decision must leave the daily opportunity,
+            # risk ledger, and broker untouched.
+            debug["first_dip_prior_detector_reference_sha256"] = (
+                _retain_captured_first_dip_detector_for_opportunity(
+                    _tape_evaluation,
+                    opportunity_key=dict(_first_dip_opportunity or {}),
+                )
+            )
         return True, "flush_dip_buy", debug
     except Exception as exc:
         if (

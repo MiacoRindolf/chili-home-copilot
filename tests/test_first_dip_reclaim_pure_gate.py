@@ -83,6 +83,8 @@ def _settings(*, first_dip: bool, policy_mode: str = "baseline") -> SimpleNamesp
         chili_momentum_first_dip_tape_max_source_age_seconds=1.0,
         chili_momentum_l2_confirm_tick_rate_floor_pctile=0.25,
         chili_momentum_first_dip_tape_minimum_prints=3,
+        chili_momentum_flush_dip_volume_gate_enabled=True,
+        chili_momentum_pullback_volume_spike_multiple=1.5,
     )
 
 
@@ -925,6 +927,44 @@ def test_db_paper_first_dip_is_classified_before_generic_and_uses_paper_receipt(
     assert debug["first_dip_tape_decision_receipt"]["authority_source"] == (
         "captured_db_paper"
     )
+
+
+def test_db_paper_low_volume_veto_does_not_retain_or_pin_first_dip(
+    monkeypatch,
+):
+    frame = _plsm_shape()
+    frame.iloc[-1, frame.columns.get_loc("Volume")] = 300_000
+    settings_obj, generic_calls = _configure_db_paper_first_dip_call_graph(
+        monkeypatch,
+        frame,
+    )
+    decision_at = pd.Timestamp(
+        "2026-07-13 12:16:29.500000+00:00"
+    ).to_pydatetime()
+    request = FirstDipTapeDecisionRequest(
+        symbol="PLSM",
+        decision_at=decision_at,
+        policy=FirstDipTapePolicy.from_settings(settings_obj),
+    )
+    authority = captured_first_dip_detector_authority(request)
+    retained: list[dict[str, object]] = []
+
+    def retain(_resolution, opportunity_key):
+        retained.append(dict(opportunity_key))
+        return "e" * 64
+
+    with _installed_captured_first_dip_detector_retention_provider(retain):
+        with _installed_captured_db_paper_first_dip_tape_decision_authority(
+            authority
+        ):
+            allowed, reason, debug = _run_db_paper_gate(decision_at)
+
+    assert (allowed, reason) == (False, "flush_dip_low_volume")
+    assert generic_calls == []
+    assert retained == []
+    assert "first_dip_prior_detector_reference_sha256" not in debug[
+        "first_dip_reject"
+    ]
 
 
 def test_db_paper_missing_receipt_vetoes_only_that_decision_and_is_reusable(
