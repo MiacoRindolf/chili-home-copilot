@@ -3296,6 +3296,39 @@ def reentry_after_stop_allowed(
     return True, "allowed"
 
 
+def fresh_ignition_reentry_allowed(
+    *,
+    enabled: bool,
+    ignition_ok: bool,
+    ignition_exemptions: int,
+    max_ignition_exemptions: int,
+) -> tuple[bool, str]:
+    """Ross-parity L5 / GAP-B (2026-07-25): pure decision for the FRESH-IGNITION cap
+    exemption at the stopout-cap terminalization edge (no I/O — the caller supplies the
+    tape/burst read as ``ignition_ok``).
+
+    Grants an exemption ONLY when: the bypass flag is ON, the tape is actively igniting
+    (``ignition_ok``, fail-closed at the caller), AND fewer than
+    ``max_ignition_exemptions`` grants have been used this session (the bound — one
+    documented setting; ``max_stopout_reentries`` stays the base cap). Everything else
+    => no exemption => the session terminalizes exactly as legacy.
+    Returns (allowed, reason)."""
+    if not enabled:
+        return False, "flag_off"
+    try:
+        used = int(ignition_exemptions or 0)
+        cap = int(max_ignition_exemptions or 0)
+    except (TypeError, ValueError):
+        return False, "bad_basis_fail_closed"
+    if cap <= 0:
+        return False, "no_exemption_budget"
+    if used >= cap:
+        return False, "max_ignition_exemptions_reached"
+    if not ignition_ok:
+        return False, "no_fresh_ignition"
+    return True, "ignition_exempt"
+
+
 def reentry_escalation_decision(
     *,
     enabled: bool,
