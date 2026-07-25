@@ -7690,6 +7690,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_STOPOUT_REENTRIES"),
         description="TASK#8: per-name/per-session cap on re-entries permitted after a STOP-OUT/loss. Only loss recycles count; profit recycles are unbounded. ge 1, le 10.",
     )
+    chili_momentum_fresh_ignition_reentry_bypass_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED"),
+        description="Ross-parity L5 / GAP-B (2026-07-25): at the stopout-cap terminalization edge, a NON-leader symbol with a FRESH IGNITION (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-closed; OR membership in the running-up burst map >=3%/5min) is granted a bounded exemption — recycle to WATCHING instead of FINISHED. The re-entry itself still passes the existing G4 escalated confirmation (structural trigger + tape) — the same quality-raise contract as the leader exemption. Emits live_reentry_cap_ignition_exempt. FAIL-CLOSED on any read error. KILL-SWITCH: False -> terminalize exactly as legacy -> byte-identical.",
+    )
+    chili_momentum_max_ignition_exemptions: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_IGNITION_EXEMPTIONS"),
+        description="Ross-parity L5: bound on fresh-ignition cap exemptions per session (the ONE new setting of the GAP-B change; max_stopout_reentries stays the base cap — this grants at most N extra cycles when the tape is actively igniting). Default 1 = the minimal evolve step.",
+    )
     chili_momentum_reentry_chase_cap_r: float = Field(
         default=1.5,
         ge=0.0,

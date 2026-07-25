@@ -36335,6 +36335,73 @@ def tick_live_session(
                         "[momentum_live] g4 leader-exempt read failed (fail-closed)",
                         exc_info=True,
                     )
+            # Ross-parity L5 / GAP-B (2026-07-25): FRESH-IGNITION exemption — a NON-leader
+            # symbol whose tape is actively igniting at the cap edge must not terminalize
+            # with its next leg ahead (the leader exemption above already covers the #1;
+            # this covers the fresh igniter that hasn't taken the crown yet — the
+            # ross-parity study's re-entry conversion lever). Fresh ignition = buyers
+            # lifting NOW (tape_confirms_hold: signed accel>0 + tick-rate floor, fail-
+            # CLOSED) OR membership in the running-up burst map (>=3%/5min). Bounded:
+            # at most chili_momentum_max_ignition_exemptions grants per session (default
+            # 1 — one extra cycle per ignition episode; max_stopout_reentries stays the
+            # base cap). The grant only recycles to WATCHING — the actual re-entry still
+            # passes the existing G4 escalated confirmation (structural trigger + tape),
+            # the same quality-raise contract the leader exemption uses. FAIL-CLOSED:
+            # any read error => no exemption => terminalize exactly as today.
+            if (
+                not _re_ok
+                and bool(getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", True))
+            ):
+                _ign_dbg: dict = {}
+                try:
+                    _ign_max = int(getattr(settings, "chili_momentum_max_ignition_exemptions", 1) or 1)
+                    _ign_used = int(le.get("ignition_exemptions") or 0)
+                    _ign_dbg["used"] = _ign_used
+                    _ign_dbg["max"] = _ign_max
+                    _ign_ok = False
+                    if _ign_used < _ign_max:
+                        _ign_sym = str(sess.symbol or "").strip().upper()
+                        # leg 1: executed-tape confirmer (module-attr call so the replay
+                        # driver's sim-clock patch of signed_tape_accel_features applies)
+                        from . import entry_gates as _ign_eg
+
+                        _tc_ok, _tc_dbg = _ign_eg.tape_confirms_hold(_ign_sym, db=db)
+                        _ign_dbg["tape"] = _tc_dbg
+                        if _tc_ok:
+                            _ign_ok = True
+                        else:
+                            # leg 2: the running-up burst map (>=3%/5min internal floor)
+                            from .nbbo_tape import tape_running_up_signal_map
+
+                            _run_map = tape_running_up_signal_map(db, now_utc=_utcnow()) or {}
+                            _ign_dbg["running_up_hit"] = _ign_sym in _run_map
+                            if _ign_sym in _run_map:
+                                _ign_ok = True
+                    from .risk_policy import fresh_ignition_reentry_allowed
+
+                    _ign_allowed, _ign_reason = fresh_ignition_reentry_allowed(
+                        enabled=True,  # the bypass flag gates this whole block above
+                        ignition_ok=_ign_ok,
+                        ignition_exemptions=_ign_used,
+                        max_ignition_exemptions=_ign_max,
+                    )
+                    _ign_dbg["decision"] = _ign_reason
+                    if _ign_allowed:
+                        _re_ok = True
+                        le["ignition_exemptions"] = _ign_used + 1
+                        _emit(db, sess, "live_reentry_cap_ignition_exempt", {
+                            "reason": _re_reason,
+                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                            "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+                            "ignition_exemptions": int(le["ignition_exemptions"]),
+                            "ignition_read": _ign_dbg,
+                        })
+                except Exception as _ign_exc:
+                    _ign_dbg["error"] = repr(_ign_exc)
+                    _log.debug(
+                        "[momentum_live] fresh-ignition exempt read failed (fail-closed)",
+                        exc_info=True,
+                    )
             if not _re_ok:
                 _commit_le(sess, le)
                 _safe_transition(db, sess, STATE_LIVE_FINISHED)
