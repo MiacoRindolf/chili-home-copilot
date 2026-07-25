@@ -191,6 +191,7 @@ def _vwap_settings(ms) -> None:
     ms.chili_momentum_vwap_reclaim_enabled = True
     ms.chili_momentum_vwap_reclaim_min_below_bars = 2
     ms.chili_momentum_vwap_reclaim_vol_mult = 1.5
+    ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
 
 
 def _vwap_arrays(n: int = 12) -> dict:
@@ -209,8 +210,22 @@ class TestVwapReclaimMockFire:
         assert ok is True, f"clean vwap-reclaim must fire, got {reason} dbg={dbg}"
         assert reason == "vwap_reclaim"
         assert dbg["pullback_high"] == pytest.approx(9.85, abs=1e-6)
-        assert dbg["pullback_low"] == pytest.approx(9.42, abs=1e-6)
+        # Ross-parity L2a: stop = LOSS-OF-VWAP (9.50), not the reclaim-bar low (9.42)
+        assert dbg["pullback_low"] == pytest.approx(9.50, abs=1e-6)
+        assert dbg["stop_model"] == "loss_of_vwap"
         assert dbg["bars_below"] >= 2
+
+    def test_legacy_stop_with_alignment_flag_off(self):
+        """Kill-switch parity: ross_stop_alignment OFF -> legacy reclaim-bar-low stop (9.42)."""
+        df = _vwap_reclaim_df()
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=_vwap_arrays()):
+            _vwap_settings(ms)
+            ms.chili_momentum_ross_stop_alignment_enabled = False
+            ok, reason, dbg = vwap_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is True
+        assert dbg["pullback_low"] == pytest.approx(9.42, abs=1e-6)
+        assert dbg["stop_model"] == "reclaim_bar_low"
 
     def test_negative_low_volume_no_fire(self):
         """The reclaim happens but WITHOUT the volume spike (a drift back over VWAP, not a
@@ -642,6 +657,7 @@ def _ihs_settings(ms) -> None:
     ms.chili_momentum_swing_pivot_half_window = 1
     ms.chili_momentum_swing_pivot_atr_noise_frac = 0.0
     ms.chili_momentum_pullback_volume_spike_multiple = 1.5
+    ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
 
 
 def _ihs_arrays(n: int = 9) -> dict:
@@ -683,7 +699,7 @@ class TestInverseHeadShouldersMockFire:
     def test_positive_clean_ihs_fires(self):
         """A clean inverse-H&S (head below both shoulders, RS holds) breaking the neckline with
         all chase-guards passing -> FIRES ``inverse_head_shoulders_break``; entry = neckline,
-        stop = head low."""
+        stop = RIGHT-SHOULDER low (Ross-parity L2a; the head low is a full pattern-depth away)."""
         df = _ihs_df()
         with patch(f"{_GATES}.settings") as ms, _IhsPassGuards():
             _ihs_settings(ms)
@@ -693,7 +709,21 @@ class TestInverseHeadShouldersMockFire:
         assert ok is True, f"clean inverse-H&S must fire, got {reason} dbg={dbg}"
         assert reason == "inverse_head_shoulders_break"
         assert dbg["pullback_high"] == pytest.approx(_IHS_NECK, abs=1e-6)  # neckline = entry
-        assert dbg["pullback_low"] == pytest.approx(8.50, abs=1e-6)        # head low = stop
+        assert dbg["pullback_low"] == pytest.approx(9.10, abs=1e-6)        # RS low = stop
+        assert dbg["stop_model"] == "right_shoulder_low"
+
+    def test_legacy_stop_with_alignment_flag_off(self):
+        """Kill-switch parity: ross_stop_alignment OFF -> legacy HEAD-low stop (8.50)."""
+        df = _ihs_df()
+        with patch(f"{_GATES}.settings") as ms, _IhsPassGuards():
+            _ihs_settings(ms)
+            ms.chili_momentum_ross_stop_alignment_enabled = False
+            ok, reason, dbg = inverse_head_shoulders_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+            )
+        assert ok is True
+        assert dbg["pullback_low"] == pytest.approx(8.50, abs=1e-6)
+        assert dbg["stop_model"] == "head_low"
 
     def test_negative_extended_no_fire(self):
         """The NOT-PARABOLIC extension guard trips (the neckline break is excessively extended
@@ -740,6 +770,7 @@ def _wick_settings(ms) -> None:
     ms.chili_momentum_wick_reclaim_min_retrace_frac = 0.4
     ms.chili_momentum_vwap_reclaim_min_below_bars = 2
     ms.chili_momentum_wick_reclaim_slow_recovery_gate_enabled = False
+    ms.chili_momentum_ross_stop_alignment_enabled = True  # Ross-parity L2a
 
 
 def _wick_arrays(n: int = 12) -> dict:
@@ -766,7 +797,24 @@ class TestWickReclaimMockFire:
         assert ok is True, f"clean wick-reclaim must fire, got {reason} dbg={dbg}"
         assert reason == "wick_reclaim"
         assert dbg["pullback_high"] == pytest.approx(11.00, abs=1e-6)  # wick high = level
-        assert dbg["pullback_low"] == pytest.approx(9.80, abs=1e-6)    # flush low = stop
+        # Ross-parity L2a: stop = RECLAIM-BAR low (9.88; the structural instant-out),
+        # never looser than the flush low (degeneracy guard)
+        assert dbg["pullback_low"] == pytest.approx(9.88, abs=1e-6)
+        assert dbg["stop_model"] == "reclaim_bar_low"
+
+    def test_legacy_stop_with_alignment_flag_off(self):
+        """Kill-switch parity: ross_stop_alignment OFF -> legacy flush-low stop (9.80)."""
+        df = _wick_reclaim_df()
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=_wick_arrays()), \
+                patch(f"{_GATES}.tape_confirms_hold",
+                      return_value=(True, {"reason": "tape_hold_ok"})):
+            _wick_settings(ms)
+            ms.chili_momentum_ross_stop_alignment_enabled = False
+            ok, reason, dbg = wick_reclaim_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is True
+        assert dbg["pullback_low"] == pytest.approx(9.80, abs=1e-6)
+        assert dbg["stop_model"] == "flush_low"
 
     def test_negative_cold_tape_no_fire(self):
         """The MANDATORY hot-tape gate fails (cold tape: low RVOL + low ATR%) -> the trigger
