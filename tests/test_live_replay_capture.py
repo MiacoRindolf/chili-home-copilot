@@ -2723,13 +2723,28 @@ def test_coordinator_binds_detector_and_fresh_final_read_to_adaptive_request(
     assert frontier.opportunity_key_sha256 == request.opportunity_key.key_sha256
     assert frontier.input_prefix_sequence > detector_proof.input_prefix_sequence
     assert len(frontier.frontier_sha256) == 64
-    wall_clock.set(final_boundary + timedelta(milliseconds=1))
+    held_final_at = final_boundary + timedelta(milliseconds=40)
+    held_final_read, held_final_profile, _ = stage_tape_read(
+        decision_id="veee-first-dip-final-held-before-reject",
+        decision_at=held_final_at,
+        prices=(10.11, 10.13, 10.15),
+        attest=False,
+    )
+    assert held_final_read.receipt is not None
+    held_final_proof = coordinator.attest_first_dip_pre_reservation_inputs(
+        adaptive_request=request,
+        dependency_profile=held_final_profile,
+        captured_reads=(held_final_read,),
+        first_dip_tape_read_id=held_final_read.receipt.read_id,
+    )
+    rejected_at = held_final_at + timedelta(milliseconds=4)
+    wall_clock.set(rejected_at)
     decision_prefix = coordinator.checkpoint_decision(
         decision_id=detector_proof.decision_id,
         symbol="VEEE",
         decision_at=detector_at,
-        received_at=final_boundary,
-        available_at=final_boundary + timedelta(milliseconds=1),
+        received_at=rejected_at,
+        available_at=rejected_at,
         required_read_ids=(detector_read.receipt.read_id,),
         decision_output=CaptureDecisionOutput(
             decision_id=detector_proof.decision_id,
@@ -2757,13 +2772,43 @@ def test_coordinator_binds_detector_and_fresh_final_read_to_adaptive_request(
     assert decision_prefix.checkpoint.decision_payload[
         "first_dip_final_capture_frontier_sha256"
     ] == frontier.frontier_sha256
+    with pytest.raises(CaptureContractError, match="already terminal"):
+        coordinator.retain_accepted_first_dip_detector(
+            resolution=detector_resolution,
+            opportunity_key_sha256=request.opportunity_key.key_sha256,
+        )
+    with pytest.raises(CaptureContractError, match="already terminal"):
+        coordinator.prepare_captured_first_dip_tape_authority(
+            attestation=held_final_proof,
+            policy=policy,
+            purpose=(
+                first_dip_tape_decision
+                .FIRST_DIP_TAPE_PURPOSE_PRE_RESERVATION
+            ),
+            final_boundary_available_at=rejected_at,
+        )
+    stale_final_at = rejected_at + timedelta(milliseconds=40)
+    stale_final_read, stale_final_profile, _ = stage_tape_read(
+        decision_id="veee-first-dip-final-after-reject",
+        decision_at=stale_final_at,
+        prices=(10.16, 10.18, 10.21),
+        attest=False,
+    )
+    assert stale_final_read.receipt is not None
+    with pytest.raises(CaptureContractError, match="already terminal"):
+        coordinator.attest_first_dip_pre_reservation_inputs(
+            adaptive_request=request,
+            dependency_profile=stale_final_profile,
+            captured_reads=(stale_final_read,),
+            first_dip_tape_read_id=stale_final_read.receipt.read_id,
+        )
     with pytest.raises(CaptureContractError, match="foreign or mismatched"):
         coordinator.checkpoint_decision(
             decision_id=detector_proof.decision_id,
             symbol="VEEE",
             decision_at=detector_at,
-            received_at=final_boundary,
-            available_at=final_boundary + timedelta(milliseconds=1),
+            received_at=stale_final_at,
+            available_at=stale_final_at,
             required_read_ids=(detector_read.receipt.read_id,),
             decision_output=CaptureDecisionOutput(
                 decision_id=detector_proof.decision_id,
@@ -2781,6 +2826,119 @@ def test_coordinator_binds_detector_and_fresh_final_read_to_adaptive_request(
     with pytest.raises(CaptureContractError, match="one-shot"):
         with bridge.install():
             pass
+
+    # The decision above was capture-valid but ultimately REJECTed with no
+    # order intent. A later decision for the same once-per-day opportunity must
+    # therefore bind its own fresh detector receipt rather than inherit or
+    # collide with the vetoed attempt's receipt.
+    retry_decision_id = "veee-first-dip-adaptive-retry"
+    retry_detector_at = stale_final_at + timedelta(milliseconds=100)
+    (
+        retry_detector_read,
+        _retry_detector_profile,
+        retry_detector_proof,
+    ) = stage_tape_read(
+        decision_id=retry_decision_id,
+        decision_at=retry_detector_at,
+        prices=(10.15, 10.20, 10.24),
+    )
+    assert retry_detector_proof is not None
+    assert retry_detector_read.receipt is not None
+    retry_capture_binding = (
+        adaptive_risk_capture_binding_from_active_attestation(
+            retry_detector_proof
+        )
+    )
+    retry_adaptive_at = retry_detector_at + timedelta(milliseconds=20)
+    retry_evidence = dict(request.inputs.evidence)
+    retry_evidence["capture_prefix"] = RiskInputEvidence(
+        source="live-replay-capture:first-dip-detector",
+        observed_at=retry_capture_binding.observed_at,
+        available_at=retry_capture_binding.available_at,
+        content_sha256=retry_capture_binding.input_prefix_root_sha256,
+        provider_generation=retry_capture_binding.verifier_generation,
+    )
+    retry_inputs = replace(
+        request.inputs,
+        decision_id=retry_decision_id,
+        as_of=retry_adaptive_at,
+        capture_prefix_root_sha256=(
+            retry_detector_proof.input_prefix_root_sha256
+        ),
+        evidence=retry_evidence,
+    )
+    retry_request = replace(
+        request,
+        client_order_id=retry_decision_id,
+        inputs=retry_inputs,
+    )
+    retry_detector_authority = (
+        coordinator.prepare_captured_first_dip_tape_authority(
+            attestation=retry_detector_proof,
+            policy=policy,
+            purpose=(
+                first_dip_tape_decision.FIRST_DIP_TAPE_PURPOSE_DETECTOR
+            ),
+        )
+    )
+    with (
+        first_dip_tape_decision
+        ._installed_captured_db_paper_first_dip_tape_decision_authority(
+            retry_detector_authority
+        )
+    ):
+        retry_detector_resolution = (
+            first_dip_tape_decision.resolve_first_dip_tape_decision(
+                symbol="VEEE",
+                decision_at=retry_detector_at,
+                policy=policy,
+                purpose=(
+                    first_dip_tape_decision.FIRST_DIP_TAPE_PURPOSE_DETECTOR
+                ),
+            )
+        )
+    retry_retained = coordinator.retain_accepted_first_dip_detector(
+        resolution=retry_detector_resolution,
+        opportunity_key_sha256=request.opportunity_key.key_sha256,
+    )
+
+    assert retry_retained != retained
+    assert coordinator.retain_accepted_first_dip_detector(
+        resolution=retry_detector_resolution,
+        opportunity_key_sha256=request.opportunity_key.key_sha256,
+    ) == retry_retained
+    retry_final_at = retry_detector_at + timedelta(milliseconds=150)
+    retry_final_read, retry_final_profile, _ = stage_tape_read(
+        decision_id="veee-first-dip-final-retry",
+        decision_at=retry_final_at,
+        prices=(10.25, 10.30, 10.34),
+        attest=False,
+    )
+    assert retry_final_read.receipt is not None
+    retry_final_proof = coordinator.attest_first_dip_pre_reservation_inputs(
+        adaptive_request=retry_request,
+        dependency_profile=retry_final_profile,
+        captured_reads=(retry_final_read,),
+        first_dip_tape_read_id=retry_final_read.receipt.read_id,
+    )
+    assert (
+        retry_final_proof.first_dip_prior_detector_reference_sha256
+        == retry_retained
+    )
+    retry_final_boundary = retry_final_at + timedelta(milliseconds=4)
+    wall_clock.set(retry_final_boundary)
+    retry_final_authority = (
+        coordinator.prepare_captured_first_dip_tape_authority(
+            attestation=retry_final_proof,
+            policy=policy,
+            purpose=(
+                first_dip_tape_decision
+                .FIRST_DIP_TAPE_PURPOSE_PRE_RESERVATION
+            ),
+            final_boundary_available_at=retry_final_boundary,
+        )
+    )
+    assert retry_final_authority is not None
 
 
 def test_complete_empty_first_dip_window_is_a_gap_free_reusable_negative(
