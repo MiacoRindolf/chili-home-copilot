@@ -4989,6 +4989,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"),
         description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
     )
+    chili_momentum_flush_dip_volume_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
+        description="Ross-parity L1b (2026-07-25): flush_dip_buy additionally requires a relative-volume surge on the curl/reclaim bar (volume_ratio >= pullback_volume_spike_multiple — the same reference the ORB/ABCD bar paths use; no new number). FAIL-OPEN when the ratio is uncomputable (thin data never blocks, the ORB convention). Reject reason: flush_dip_low_volume. KILL-SWITCH: False -> gate skipped -> byte-identical.",
+    )
     chili_momentum_orb_minutes: int = Field(
         default=5,
         ge=1,
