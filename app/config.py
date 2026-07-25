@@ -4994,6 +4994,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
         description="Ross-parity L1b (2026-07-25): flush_dip_buy additionally requires a relative-volume surge on the curl/reclaim bar (volume_ratio >= pullback_volume_spike_multiple — the same reference the ORB/ABCD bar paths use; no new number). FAIL-OPEN when the ratio is uncomputable (thin data never blocks, the ORB convention). Reject reason: flush_dip_low_volume. KILL-SWITCH: False -> gate skipped -> byte-identical.",
     )
+    chili_momentum_tick_break_tape_confirm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED"),
+        description="Ross-parity L1 (2026-07-25): the ORB/ABCD TICK-BREAK paths additionally require buyers on the executed tape (tape_confirms_hold — the bull_flag/inverse-H&S standard) + the tick-break family's thrust buffers on ABCD (was a bare price>level fire). Tape-fail does NOT darken the detector — it falls through to the completed-bar + volume-spike path. Independent rollback domains: a pattern_tape_gate_enabled rollback fail-OPENs here (never newly darkens ORB/ABCD). KILL-SWITCH: False -> exact legacy naked-tick behavior -> byte-identical.",
+    )
     chili_momentum_orb_minutes: int = Field(
         default=5,
         ge=1,
