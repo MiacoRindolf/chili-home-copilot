@@ -3183,7 +3183,7 @@ class Settings(BaseSettings):
     # FLOOR knob (chili_momentum_ignition_min_pct); the hard ceiling is a DB backstop,
     # NOT a quality cap. See docs/DESIGN/MOMENTUM_LANE.md.
     chili_momentum_universe_float_gate_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_FLOAT_GATE_ENABLED"),
         description="EXPERIMENTAL Ross-parity L4 candidate (2026-07-25): float gate on the final ranked universe subset. Default False because the current provider/cache-dependent read is not captured as a typed content-addressed decision input and no causal selection-funnel/OOS economics were measured. Explicit True is reserved for isolated captured-selection experiments; False skips the gate.",
     )
@@ -4995,22 +4995,22 @@ class Settings(BaseSettings):
         description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
     )
     chili_momentum_orb_ihs_structural_stop_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_IHS_STRUCTURAL_STOP_ENABLED"),
         description="EXPERIMENTAL Ross-parity L2b candidate (2026-07-25): adds orb_break*/inverse_head_shoulders_break* to the structural-trigger reason set used by risk policy, chase-cap bypass, and structural-stop stash. Default False because the available diagnostic replays contained no affected trigger/consumer witness and the widened tape/chase path is not yet sealed-replay/PAPER parity-proven. Explicit True is reserved for isolated causal experiments; False keeps the legacy base tuple.",
     )
     chili_momentum_ross_stop_alignment_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_STOP_ALIGNMENT_ENABLED"),
         description="EXPERIMENTAL Ross-parity L2a candidate (2026-07-25): substitutes right-shoulder/reclaim-bar/loss-of-VWAP structural stops. Default False because the available diagnostic replays had no affected setup/consumer witness and therefore did not measure sizing, pending-order, stop/target, or loss-containment effects. Explicit True is reserved for isolated causal OOS experiments; False keeps legacy stops.",
     )
     chili_momentum_flush_dip_volume_gate_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_VOLUME_GATE_ENABLED"),
         description="EXPERIMENTAL Ross-parity L1b candidate (2026-07-25): requires a relative-volume surge on the flush-dip curl/reclaim bar. Default False because the reported improvement came from one known losing window and has no sealed paired OOS/cost proof or complete resolved-policy provenance. Explicit True is reserved for isolated causal experiments; False skips the gate.",
     )
     chili_momentum_tick_break_tape_confirm_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_BREAK_TAPE_CONFIRM_ENABLED"),
         description="EXPERIMENTAL Ross-parity L1 candidate (2026-07-25): adds executed-tape confirmation to ORB/ABCD tick breaks and thrust buffers to ABCD. Default False because the diagnostic A/B was net adverse, conflated two mechanisms, and the direct tape query lacks a sealed executed-read receipt. Explicit True is reserved for isolated causal experiments; False preserves the legacy tick path.",
     )
@@ -5189,7 +5189,7 @@ class Settings(BaseSettings):
         description="E2: grade catalysts — suppress weak-catalyst (dilution/compliance/legal) equities from live eligibility and boost strong-catalyst (FDA/M&A/contract) names; medium neutral. Absent feed/crypto -> no-op. KILL-SWITCH: False -> byte-identical.",
     )
     chili_momentum_catalyst_arb_flat_gate_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ARB_FLAT_GATE_ENABLED"),
         description="EXPERIMENTAL Ross-parity L3 arb-flat candidate (2026-07-25). Default False because raw headline substring matching does not prove target identity or confirmation and the current-news read has no typed sealed replay receipt or negative-control economics. Explicit True enables the candidate veto under the established catalyst-grade gate; False retains legacy strong classification.",
     )
@@ -7322,7 +7322,7 @@ class Settings(BaseSettings):
     # small buffer over the entry — the thesis did not confirm, so bail before the stop.
     # A winner that pops (prints a new high above the confirm buffer) is IMMUNE.
     chili_momentum_bail_on_no_confirmation_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED"),
         description="EXPERIMENTAL GAP1 candidate: within the no-confirmation window after entry, bail if the breakout shows no confirming strength. Default False because the available three-window mutable/mock replay was mixed, in-sample, and produced adverse re-entry churn without sealed ask/bid, costs, or OOS proof. Explicit True is reserved for isolated causal experiments.",
     )
@@ -7711,7 +7711,7 @@ class Settings(BaseSettings):
         description="TASK#8: per-name/per-session cap on re-entries permitted after a STOP-OUT/loss. Only loss recycles count; profit recycles are unbounded. ge 1, le 10.",
     )
     chili_momentum_fresh_ignition_reentry_bypass_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRESH_IGNITION_REENTRY_BYPASS_ENABLED"),
         description="EXPERIMENTAL Ross-parity L5 / GAP-B: at the stopout-cap terminalization edge, a NON-leader symbol with both an executed-tape confirmation and sustained running-up burst may receive a bounded recycle to WATCHING. Default OFF: the OR form added one losing cycle in each available diagnostic window, while the post-hoc AND form produced zero positive activations on the same windows and has no sealed ReplayV3/captured-PAPER or held-out/OOS promotion evidence. Enable only through an explicit experiment configuration. Missing or unreadable evidence remains fail-closed.",
     )
@@ -9234,7 +9234,7 @@ class Settings(BaseSettings):
         description="LOCATE #3: the maximum fractional size BOOST for the steepest qualifying dip (0.25 = up to +25% size on the fastest flush). The multiplier interpolates 1.0..1+this by the dip ROC over an ATR-noise floor; clamped here so it can never run away. Only consulted when chili_momentum_dip_velocity_conviction_enabled is ON.",
     )
     chili_momentum_sub_vwap_trap_entry_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED"),
         description="EXPERIMENTAL LOCATE #4 sub-VWAP-trap entry candidate. Default False because the available CLRO/QTTB/PLSM diagnostics produced zero positive-path fires; no transferable profitability, captured-input parity, or OOS loss-containment result was demonstrated. Explicit True is reserved for isolated causal experiments with the existing chase/tape/L2 guards.",
     )

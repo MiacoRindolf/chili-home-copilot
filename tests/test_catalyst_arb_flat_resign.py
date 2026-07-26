@@ -31,11 +31,12 @@ from app.services.trading.momentum_neural.variants import get_family
 
 # ── Unflagged SEC-form promotion remains quarantined ─────────────────────────
 
-def test_sec_form_only_headlines_keep_legacy_neutral_classification():
-    assert _is_weak_catalyst("Acme Files Form S-1 With SEC") is False
-    assert _is_weak_catalyst("Acme S-3 Registration Declared Effective") is False
-    assert _is_weak_catalyst("Acme Files Form F-1 With SEC") is False
-    assert _is_weak_catalyst("Acme Files 424B5 Prospectus Supplement") is False
+def test_sec_form_headlines_are_weak_restored():
+    # operator decision 2026-07-26 (no-dark-flags): SEC dilution forms restored to WEAK
+    assert _is_weak_catalyst("Acme Files Form S-1 With SEC") is True
+    assert _is_weak_catalyst("Acme S-3 Registration Declared Effective") is True
+    assert _is_weak_catalyst("Acme Files Form F-1 With SEC") is True
+    assert _is_weak_catalyst("Acme Files 424B5 Prospectus Supplement") is True
 
 
 def test_collision_safe_bare_forms_not_weak():
@@ -54,11 +55,12 @@ def test_buyout_target_headlines_are_arb_flat():
     assert _is_arb_flat_catalyst("BigCo commences tender offer for Acme shares") is True
 
 
-def test_default_off_path_retains_legacy_strong_classification():
-    assert _is_strong_catalyst("Acme to be acquired by BigCo for $12.00 per share") is True
-    assert _is_strong_catalyst("BigCo announces buyout of Acme") is True
-    assert _is_strong_catalyst("Acme agrees to takeover by BigCo") is True
-    assert _is_strong_catalyst("BigCo commences tender offer for Acme shares") is True
+def test_buyout_target_phrasings_no_longer_strong_restored():
+    # restored: the four target-side phrasings live in the ARB-FLAT class, not strong
+    assert _is_strong_catalyst("Acme to be acquired by BigCo for $12.00 per share") is False
+    assert _is_strong_catalyst("BigCo announces buyout of Acme") is False
+    assert _is_strong_catalyst("Acme agrees to takeover by BigCo") is False
+    assert _is_strong_catalyst("BigCo commences tender offer for Acme shares") is False
 
 
 def test_acquirer_side_deal_making_stays_strong():
@@ -87,12 +89,12 @@ def test_dual_match_headline_is_both_strong_and_arb_flat():
     assert _is_strong_catalyst(t) is True  # "definitive agreement" — consumer must let arb-flat win
 
 
-def test_arb_flat_candidate_is_opt_in_and_missing_fallback_is_off():
+def test_arb_flat_default_restored_on():
     assert (
         Settings.model_fields[
             "chili_momentum_catalyst_arb_flat_gate_enabled"
         ].default
-        is False
+        is True
     )
     for module in (pipeline, viability):
         source = inspect.getsource(module)
