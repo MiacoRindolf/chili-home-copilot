@@ -1989,6 +1989,7 @@ class IqfeedCaptureHost:
         self._macro_feature_caches: dict[str, dict] = {}
         self._provider_supervisor: IqfeedProviderLoopSupervisor | None = None
         self._provider_join_timeout_seconds = 20.0
+        self._shutdown_capture_aborts: tuple[Mapping[str, Any], ...] = ()
         self._lock = threading.RLock()
 
     @property
@@ -2505,8 +2506,8 @@ class IqfeedCaptureHost:
             with self._lock:
                 self._captured_paper_admission_symbols.discard(symbol)
 
-    def _close_bound_capture_resources(self) -> Mapping[str, Any]:
-        """Unbind only after provider quiescence, then drain the composition."""
+    def _unbind_capture_handoffs(self) -> None:
+        """Remove both bridge routes after provider-loop quiescence."""
 
         failures: list[BaseException] = []
         if self._depth_bound:
@@ -2529,6 +2530,11 @@ class IqfeedCaptureHost:
             raise CaptureContractError(
                 "IQFeed host bridge unbinding failed closed"
             ) from failures[0]
+
+    def _close_bound_capture_resources(self) -> Mapping[str, Any]:
+        """Unbind only after provider quiescence, then drain the composition."""
+
+        self._unbind_capture_handoffs()
         return self.composition.close()
 
     def start_provider_loops(
@@ -2627,15 +2633,20 @@ class IqfeedCaptureHost:
                 return self.health()
             if self._state is IqfeedCaptureHostState.FAILED:
                 raise CaptureContractError("failed IQFeed host cannot be cleanly closed")
-            service_health = self.composition.service.health()
+            if self._state is IqfeedCaptureHostState.PREPARED:
+                result = self.composition.close()
+                self._state = IqfeedCaptureHostState.CLOSED
+                return {
+                    **self.health(),
+                    "composition": result,
+                    "shutdown_capture_aborts": (),
+                }
             if (
-                service_health["pending_symbols"]
-                or service_health["running_symbols"]
-                or self._captured_paper_runner_symbols
+                self._captured_paper_runner_symbols
                 or self._captured_paper_admission_symbols
             ):
                 raise CaptureContractError(
-                    "cannot close IQFeed host with active capture runs"
+                    "cannot close IQFeed host during captured PAPER execution"
                 )
             if self._provider_supervisor is not None:
                 try:
@@ -2648,12 +2659,56 @@ class IqfeedCaptureHost:
                         "IQFeed provider lanes did not quiesce before unbind"
                     ) from exc
             try:
-                result = self._close_bound_capture_resources()
+                self._unbind_capture_handoffs()
+                self.composition.quiesce_ingress_for_shutdown()
+            except BaseException:
+                self._state = IqfeedCaptureHostState.FAILED
+                raise
+            service_health = self.composition.service.health()
+            if service_health["pending_symbols"]:
+                self._state = IqfeedCaptureHostState.FAILED
+                raise CaptureContractError(
+                    "IQFeed shutdown found an in-flight capture admission after drain"
+                )
+            shutdown_aborts: list[Mapping[str, Any]] = []
+            try:
+                for symbol in tuple(sorted(service_health["running_symbols"])):
+                    self.depth_bridge.deactivate_capture_symbol(symbol)
+                    self.composition.l2_handoff.deactivate_hot_symbol(symbol)
+                    closed = self.composition.service.abort_symbol(
+                        symbol,
+                        reason=(
+                            "iqfeed_host_shutdown_terminal_flat_authority_unavailable"
+                        ),
+                    )
+                    shutdown_aborts.append(
+                        MappingProxyType(
+                            {
+                                "symbol": symbol,
+                                "run_id": closed.identity.run_id,
+                                "generation": closed.identity.generation,
+                                "reason": closed.reason,
+                                "writer_stopped": closed.writer_stopped,
+                                "certification_eligible": (
+                                    closed.certification_eligible
+                                ),
+                            }
+                        )
+                    )
+                    self._shutdown_capture_aborts = tuple(shutdown_aborts)
+                    if not closed.writer_stopped:
+                        raise CaptureContractError(
+                            "IQFeed shutdown capture writer did not stop"
+                        )
+                result = self.composition.close()
             except BaseException:
                 self._state = IqfeedCaptureHostState.FAILED
                 raise
             self._state = IqfeedCaptureHostState.CLOSED
-            return {**self.health(), "composition": result}
+            return {
+                **self.health(),
+                "composition": result,
+            }
 
     def health(self) -> Mapping[str, Any]:
         with self._lock:
@@ -2695,6 +2750,10 @@ class IqfeedCaptureHost:
                 ),
                 "captured_paper_admissions_in_flight": tuple(
                     sorted(self._captured_paper_admission_symbols)
+                ),
+                "shutdown_capture_aborts": tuple(
+                    dict(row)
+                    for row in getattr(self, "_shutdown_capture_aborts", ())
                 ),
                 "task_or_service_mutated": False,
                 "binding_receipt": (

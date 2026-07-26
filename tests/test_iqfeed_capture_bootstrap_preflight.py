@@ -6,6 +6,8 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import threading
+from types import SimpleNamespace
 from typing import Any, Callable
 import uuid
 
@@ -500,6 +502,37 @@ def _open_external_generations(composition):
     return l1, l2
 
 
+def _exact_l1_row(l1_generation, sequence: int) -> dict[str, Any]:
+    provider_at = NOW - timedelta(milliseconds=10 - sequence)
+    selected = list(capture_host.iqfeed_trade_bridge.SELECTED_UPDATE_FIELDS)
+    return {
+        "sym": "VEEE",
+        "px": 4.12,
+        "sz": 100.0,
+        "bid": 4.11,
+        "ask": 4.13,
+        "provider_at": provider_at,
+        "provider_trade_reference_at": provider_at,
+        "received_at": NOW - timedelta(milliseconds=2),
+        "basis": capture_host.iqfeed_trade_bridge.EXACT_PRINT_TIMESTAMP_BASIS,
+        "bridge": capture_host.iqfeed_trade_bridge.BRIDGE_BUILD,
+        "message_type": "Q",
+        "bridge_run_id": l1_generation.provider_instance_id,
+        "connection_generation": l1_generation.provider_generation,
+        "provider_trade_date": "2026-07-15",
+        "provider_trade_time": f"14:00:00.00{sequence}",
+        "provider_tick_id": str(1000 + sequence),
+        "trade_market_center": "N",
+        "trade_conditions": ["@"],
+        "message_contents": "Cba",
+        "selected_update_fields": selected,
+        "selected_update_fields_sha256": sha256_json(selected),
+        "selected_update_fields_ack_sha256": "e" * 64,
+        "source_frame_sequence": sequence,
+        "source_frame_sha256": f"{sequence:064x}",
+    }
+
+
 def _shared_store_runtime(composition) -> SharedCaptureStoreRuntime:
     return SharedCaptureStoreRuntime.create(
         composition.preflight.capture_store_root,
@@ -678,6 +711,245 @@ def test_unified_host_binds_both_bridges_without_provider_db_store_or_task_side_
     assert host.close()["state"] == "closed"
     assert capture_host.iqfeed_trade_bridge._capture_handoff is None
     assert capture_host.iqfeed_depth_bridge._capture_handoff is None
+
+
+def test_unified_host_closes_prepared_composition_without_starting_ingress(
+    tmp_path,
+) -> None:
+    bundle = _make_bundle(tmp_path)
+    composition = bootstrap.prepare_iqfeed_capture_ingress(
+        _load(bundle),
+        pressure_sample=_pressure_sample(bundle),
+        wall_clock=lambda: NOW,
+    )
+    host = capture_host.IqfeedCaptureHost(composition, wall_clock=lambda: NOW)
+
+    result = host.close()
+
+    assert result["state"] == "closed"
+    assert result["composition"]["state"] == "closed"
+    assert result["shutdown_capture_aborts"] == ()
+    assert composition.l1_handoff.health()["started"] is False
+    assert composition.l2_handoff.health()["started"] is False
+
+
+def test_unified_host_shutdown_drain_failure_never_aborts_or_seals(
+    tmp_path, monkeypatch
+) -> None:
+    bundle = _make_bundle(tmp_path)
+    composition = bootstrap.prepare_iqfeed_capture_ingress(
+        _load(bundle),
+        pressure_sample=_pressure_sample(bundle),
+        wall_clock=lambda: NOW,
+    )
+    host = capture_host.IqfeedCaptureHost(composition, wall_clock=lambda: NOW)
+    host.bind()
+    original_service_health = composition.service.health
+    aborts: list[str] = []
+
+    monkeypatch.setattr(
+        composition.service,
+        "health",
+        lambda: {
+            **original_service_health(),
+            "pending_symbols": (),
+            "running_symbols": ("VEEE",),
+        },
+    )
+    monkeypatch.setattr(
+        composition.service,
+        "abort_symbol",
+        lambda symbol, **_kwargs: aborts.append(symbol),
+    )
+    monkeypatch.setattr(
+        composition.service,
+        "release_and_seal",
+        lambda *_args, **_kwargs: pytest.fail(
+            "failed ingress drain must never attempt a seal"
+        ),
+    )
+    monkeypatch.setattr(
+        composition.l2_handoff,
+        "close",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            CaptureContractError("fixture handoff drain failure")
+        ),
+    )
+
+    with pytest.raises(CaptureContractError, match="unpersisted loss"):
+        host.close()
+
+    assert aborts == []
+    assert host.state is capture_host.IqfeedCaptureHostState.FAILED
+
+
+def test_unified_host_shutdown_fails_if_aborted_writer_did_not_stop(
+    tmp_path, monkeypatch
+) -> None:
+    bundle = _make_bundle(tmp_path)
+    composition = bootstrap.prepare_iqfeed_capture_ingress(
+        _load(bundle),
+        pressure_sample=_pressure_sample(bundle),
+        wall_clock=lambda: NOW,
+    )
+    host = capture_host.IqfeedCaptureHost(composition, wall_clock=lambda: NOW)
+    host.bind()
+    original_service_health = composition.service.health
+    run_id = str(uuid.uuid4())
+
+    monkeypatch.setattr(
+        composition.service,
+        "health",
+        lambda: {
+            **original_service_health(),
+            "pending_symbols": (),
+            "running_symbols": ("VEEE",),
+        },
+    )
+    monkeypatch.setattr(
+        composition.service,
+        "abort_symbol",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            identity=SimpleNamespace(run_id=run_id, generation=1),
+            reason=(
+                "capture_session_aborted:"
+                "iqfeed_host_shutdown_terminal_flat_authority_unavailable"
+            ),
+            writer_stopped=False,
+            certification_eligible=False,
+        ),
+    )
+
+    with pytest.raises(
+        CaptureContractError,
+        match="shutdown capture writer did not stop",
+    ):
+        host.close()
+
+    assert host.state is capture_host.IqfeedCaptureHostState.FAILED
+    assert host.health()["shutdown_capture_aborts"] == (
+        {
+            "symbol": "VEEE",
+            "run_id": run_id,
+            "generation": 1,
+            "reason": (
+                "capture_session_aborted:"
+                "iqfeed_host_shutdown_terminal_flat_authority_unavailable"
+            ),
+            "writer_stopped": False,
+            "certification_eligible": False,
+        },
+    )
+
+
+def test_unified_host_shutdown_drains_real_l1_frame_before_real_unsealed_abort(
+    tmp_path, monkeypatch
+) -> None:
+    bundle = _make_bundle(tmp_path)
+    composition = bootstrap.prepare_iqfeed_capture_ingress(
+        _load(bundle),
+        pressure_sample=_pressure_sample(bundle),
+        wall_clock=lambda: NOW,
+    )
+    host = capture_host.IqfeedCaptureHost(composition, wall_clock=lambda: NOW)
+    runtime = _shared_store_runtime(composition)
+    release_submit = threading.Event()
+    close_thread: threading.Thread | None = None
+    try:
+        host.bind()
+        l1, _l2 = _open_external_generations(composition)
+        composition.install_hot_run_factory(
+            shared_store_runtime=runtime,
+            startup_input_provider=_base_startup_provider(composition),
+            settings_projection_sha256=SETTINGS_PROJECTION_SHA256,
+        )
+        assert composition.l1_handoff.offer_released_rows(
+            trade_rows=(_exact_l1_row(l1, 1),),
+            quote_rows=(),
+            available_at=NOW,
+        ) == (1, 0)
+        assert composition.l1_handoff.wait_until_idle(5.0)
+        admission = host.admit_hot_symbol(
+            "VEEE",
+            required_l1_stream=CaptureStream.IQFEED_PRINT,
+        )
+        assert admission.capture_ready
+        coordinator = composition.service.coordinator_for("VEEE")
+        assert coordinator.state.value == "running"
+
+        submit_entered = threading.Event()
+        original_submit = composition.l1_handoff.sink.submit_envelope
+
+        def _blocking_submit(envelope):
+            if envelope.source_frame_sequence == 2:
+                submit_entered.set()
+                assert release_submit.wait(timeout=5.0)
+            return original_submit(envelope)
+
+        monkeypatch.setattr(
+            composition.l1_handoff.sink,
+            "submit_envelope",
+            _blocking_submit,
+        )
+        assert composition.l1_handoff.offer_released_rows(
+            trade_rows=(_exact_l1_row(l1, 2),),
+            quote_rows=(),
+            available_at=NOW,
+        ) == (1, 0)
+        assert submit_entered.wait(timeout=5.0)
+
+        outcome: dict[str, Any] = {}
+        failures: list[BaseException] = []
+
+        def _close_host() -> None:
+            try:
+                outcome.update(host.close())
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        close_thread = threading.Thread(target=_close_host)
+        close_thread.start()
+        close_thread.join(timeout=0.05)
+        assert close_thread.is_alive()
+        assert coordinator.state.value == "running"
+
+        release_submit.set()
+        close_thread.join(timeout=5.0)
+        assert not close_thread.is_alive()
+        assert failures == []
+        assert host.state is capture_host.IqfeedCaptureHostState.CLOSED
+        assert coordinator.state.value == "aborted"
+        assert composition.l1_handoff.health()["submitted"] == 2
+        assert runtime.health()["lease_count"] == 0
+        assert outcome["shutdown_capture_aborts"] == (
+            {
+                "symbol": "VEEE",
+                "run_id": coordinator.identity.run_id,
+                "generation": coordinator.identity.generation,
+                "reason": (
+                    "capture_session_aborted:"
+                    "iqfeed_host_shutdown_terminal_flat_authority_unavailable"
+                ),
+                "writer_stopped": True,
+                "certification_eligible": False,
+            },
+        )
+        assert "VEEE" not in capture_host.iqfeed_depth_bridge._capture_hot_symbols
+        assert (
+            "VEEE"
+            not in capture_host.iqfeed_depth_bridge._capture_checkpointed_generation
+        )
+        assert composition.l2_handoff.health()["requested_hot_symbols"] == ()
+        assert host.close()["shutdown_capture_aborts"] == outcome[
+            "shutdown_capture_aborts"
+        ]
+    finally:
+        release_submit.set()
+        if close_thread is not None and close_thread.is_alive():
+            close_thread.join(timeout=5.0)
+        if host.state is capture_host.IqfeedCaptureHostState.BOUND:
+            host.close()
+        runtime.close()
 
 
 def test_unified_host_rejects_loaded_bridge_hash_mismatch_before_threads(
