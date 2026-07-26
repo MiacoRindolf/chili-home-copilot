@@ -310,7 +310,8 @@ class TestAbcdTickBreakTape:
             delattr(ms, "chili_momentum_tick_break_tape_confirm_enabled")
         else:
             ms.chili_momentum_tick_break_tape_confirm_enabled = confirm_on
-        with patch(f"{_GATES}._batch_c_atr_pct", return_value=(0.02, 0.20)), \
+        with patch(f"{_GATES}.settings", ms), \
+                patch(f"{_GATES}._batch_c_atr_pct", return_value=(0.02, 0.20)), \
                 patch(f"{_GATES}._swing_pivots", return_value=_abcd_pivots()), \
                 patch(f"{_GATES}._collapse_cap", return_value=0.90), \
                 patch(f"{_GATES}.compute_all_from_df", return_value={"volume_ratio": [1.0] * 8}), \

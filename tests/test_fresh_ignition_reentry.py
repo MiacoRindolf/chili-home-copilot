@@ -14,14 +14,14 @@ import pytest
 from app.services.trading.momentum_neural.risk_policy import fresh_ignition_reentry_allowed
 
 
-def test_unproven_feature_is_opt_in_by_default():
+def test_restored_default_is_on():
     from app.config import Settings
 
     assert (
         Settings.model_fields[
             "chili_momentum_fresh_ignition_reentry_bypass_enabled"
         ].default
-        is False
+        is True
     )
     assert (
         'getattr(settings, "chili_momentum_fresh_ignition_reentry_bypass_enabled", False)'

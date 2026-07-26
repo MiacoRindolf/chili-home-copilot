@@ -50,16 +50,16 @@ def test_flag_off_is_legacy_base_tuple():
         assert r not in got
 
 
-def test_unpromoted_structural_candidates_default_and_fallback_off():
+def test_restored_structural_defaults_are_on():
     assert (
         Settings.model_fields[
             "chili_momentum_orb_ihs_structural_stop_enabled"
         ].default
-        is False
+        is True
     )
     assert (
         Settings.model_fields["chili_momentum_ross_stop_alignment_enabled"].default
-        is False
+        is True
     )
 
     # A partial/mock settings projection must not silently enable the wider
