@@ -7,15 +7,133 @@ baseline:
   ARM=trap : trap ON, bailout OFF
   ARM=bail : trap OFF, bailout ON
   ARM=both : both ON (the production default)
-Derived from replay_window.py (all 9 replay gotchas retained). READ-ONLY on chili; the
-throwaway sim DB comes from TEST_DATABASE_URL (use chili_replay2_test — NOT chili_test,
-pytest truncates it). SYMBOL/WIN_START/WIN_END/OHLCV_START env-parameterized as before.
+Derived from replay_window.py (all 9 replay gotchas retained). The archive source is
+explicit and read-only; the throwaway sink comes from TEST_DATABASE_URL and must end
+in ``_test``. SYMBOL/WIN_START/WIN_END/OHLCV_START are explicit inputs.
+
+Direct invocation is fail-closed: GOLDEN=1, isolated config/launcher markers,
+explicit source/sink/equity/risk/execution-family values, and the exact disposable
+sink confirmation are required before any app module imports. ARM defaults to
+``both`` (the intended default-ON policy), never the both-OFF experiment.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from diagnostic_replay_db import (  # noqa: E402
+    guarded_database_identity,
+    verify_connected_endpoint,
+)
+
+PROD = str(os.environ.get("REPLAY_SOURCE_DATABASE_URL") or "").strip()
+SIM = str(os.environ.get("TEST_DATABASE_URL") or "").strip()
+if not PROD:
+    raise RuntimeError(
+        "REPLAY_SOURCE_DATABASE_URL is required; current/prod DB fallback is forbidden"
+    )
+if not SIM:
+    raise RuntimeError(
+        "TEST_DATABASE_URL is required; replay sink fallback is forbidden"
+    )
+
+
+SOURCE_IDENTITY = guarded_database_identity(PROD, sink=False)
+SINK_IDENTITY = guarded_database_identity(SIM, sink=True)
+if SOURCE_IDENTITY.server_key == SINK_IDENTITY.server_key:
+    raise RuntimeError("replay source and disposable sink must differ")
+if os.environ.get("GOLDEN") != "1":
+    raise RuntimeError("GOLDEN=1 is required; current operational tables are forbidden")
+if os.environ.get("CHILI_CAPTURED_PAPER_CONFIG_ISOLATED") != "true":
+    raise RuntimeError("isolated config loading is required before app imports")
+if os.environ.get("CHILI_DIAGNOSTIC_REPLAY_ISOLATED") != "true":
+    raise RuntimeError("sealed diagnostic replay launcher marker is required")
+if (
+    os.environ.get("CHILI_REPLAY_TEST_SINK_CONFIRMATION")
+    != "RESET_DISPOSABLE_REPLAY_TEST_SINK"
+):
+    raise RuntimeError("exact disposable replay sink confirmation is required")
+
+_SECRET_PREFIXES = (
+    "ALPACA",
+    "APCA_",
+    "ANTHROPIC",
+    "IQFEED",
+    "LLM_API",
+    "MASSIVE",
+    "OPENAI",
+    "ORTEX",
+    "POLYGON",
+    "PREMIUM_API",
+    "TELEGRAM",
+)
+_CHILI_SENSITIVE_TOKENS = (
+    "ALPACA",
+    "ANTHROPIC",
+    "BROKER",
+    "IQFEED",
+    "LIVE_API",
+    "MASSIVE",
+    "OPENAI",
+    "ORTEX",
+    "POLYGON",
+    "ROBINHOOD",
+    "TELEGRAM",
+)
+_inherited_secrets = sorted(
+    key
+    for key in os.environ
+    if key.upper().startswith(_SECRET_PREFIXES)
+    or (
+        key.upper().startswith("CHILI_")
+        and any(token in key.upper() for token in _CHILI_SENSITIVE_TOKENS)
+    )
+)
+if _inherited_secrets:
+    raise RuntimeError(
+        "provider/broker/LLM credentials are forbidden in diagnostic replay"
+    )
+
+_expected_build_sha = str(
+    os.environ.get("CHILI_REPLAY_EXPECTED_BUILD_SHA") or ""
+).strip()
+_expected_driver_sha256 = str(
+    os.environ.get("CHILI_REPLAY_EXPECTED_DRIVER_SHA256") or ""
+).strip()
+if (
+    len(_expected_build_sha) not in {40, 64}
+    or any(ch not in "0123456789abcdef" for ch in _expected_build_sha)
+    or len(_expected_driver_sha256) != 64
+    or any(ch not in "0123456789abcdef" for ch in _expected_driver_sha256)
+):
+    raise RuntimeError("exact replay build/driver authority is required")
+with open(__file__, "rb") as _driver_file:
+    _actual_driver_sha256 = hashlib.sha256(_driver_file.read()).hexdigest()
+if _actual_driver_sha256 != _expected_driver_sha256:
+    raise RuntimeError("replay driver bytes do not match authority")
+_actual_build_sha = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    cwd=os.path.dirname(SCRIPT_DIR),
+    capture_output=True,
+    text=True,
+    check=True,
+).stdout.strip()
+_dirty_build = subprocess.run(
+    ["git", "status", "--porcelain"],
+    cwd=os.path.dirname(SCRIPT_DIR),
+    capture_output=True,
+    text=True,
+    check=True,
+).stdout
+if _actual_build_sha != _expected_build_sha or _dirty_build.strip():
+    raise RuntimeError("replay driver requires the exact clean build authority")
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -29,33 +147,31 @@ from app.services.trading.momentum_neural.replay_mock_broker import FillMode
 from app.config import settings
 from app.models.trading import TradingAutomationSession, TradingAutomationEvent
 
-# GOLDEN-TABLE SOURCE (2026-07-26): GOLDEN=1 reads the pinned archive tables
-# (replay_golden_ticks / replay_golden_nbbo) instead of the live prod tables, so
-# replays keep working after the 30d/5d pruners age the live rows out (the JEM-class
-# asset loss). Sink-side writes are untouched (the mirror still lands in the sink's
-# live-named tables the FSM reads).
-GOLDEN = os.environ.get("GOLDEN", "0") == "1"
-SRC_TICKS = "replay_golden_ticks" if GOLDEN else "iqfeed_trade_ticks"
-SRC_NBBO = "replay_golden_nbbo" if GOLDEN else "momentum_nbbo_spread_tape"
+# Only the pinned diagnostic archive is reachable. Sink-side writes land in the
+# explicitly confirmed disposable _test database.
+GOLDEN = True
+SRC_TICKS = "replay_golden_ticks"
+SRC_NBBO = "replay_golden_nbbo"
 
-PROD = "postgresql://chili:chili@localhost:5433/chili"          # READ-ONLY source
-SIM = os.environ.get("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
+def _required_env(name: str) -> str:
+    value = str(os.environ.get(name) or "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is required")
+    return value
 
-SYMBOL = os.environ.get("SYMBOL", "CLRO")
-# The grind window that carried the 6.48->7.27 leg (+$285 in the earlier counterfactual).
-WIN_START = datetime.fromisoformat(os.environ.get("WIN_START", "2026-07-02T14:00:00"))
-WIN_END = datetime.fromisoformat(os.environ.get("WIN_END", "2026-07-02T16:00:00"))
-OHLCV_START = datetime.fromisoformat(os.environ.get("OHLCV_START", "2026-07-02T13:00:00"))
+
+SYMBOL = _required_env("SYMBOL").upper()
+WIN_START = datetime.fromisoformat(_required_env("WIN_START"))
+WIN_END = datetime.fromisoformat(_required_env("WIN_END"))
+OHLCV_START = datetime.fromisoformat(_required_env("OHLCV_START"))
 GRID_STEP_S = float(os.environ.get("GRID_STEP_S", "1.5"))
 DIAG = os.environ.get("DIAG", "0") == "1"
 ENTRY_DIAG = os.environ.get("ENTRY_DIAG", "0") == "1"
-# EQUITY: env-overridable (2026-07-09) — 13000 mirrors the RH live account (the
-# historical default); 100000 mirrors the Alpaca PAPER account for full-size runs.
-# EXEC_FAMILY=alpaca_spot makes the paper full-size floor (#893) apply in-replay
-# (the floor is gated on the alpaca_spot family + chili_alpaca_paper).
-EQUITY = float(os.environ.get("EQUITY", "13000"))
-RISK = float(os.environ.get("RISK", EQUITY * 0.01))
-EXEC_FAMILY = os.environ.get("EXEC_FAMILY", "robinhood_agentic_mcp")
+EQUITY = float(_required_env("EQUITY"))
+RISK = float(_required_env("RISK"))
+EXEC_FAMILY = _required_env("EXEC_FAMILY")
+if EQUITY <= 0 or RISK <= 0:
+    raise RuntimeError("EQUITY and RISK must be positive")
 
 
 def _naive(t):
@@ -64,7 +180,18 @@ def _naive(t):
 
 def load_prod():
     eng = create_engine(PROD)
+    probe = eng.raw_connection()
+    try:
+        verify_connected_endpoint(probe, SOURCE_IDENTITY)
+    finally:
+        probe.close()
     with eng.connect() as c:
+        c.execute(
+            text(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+            )
+        )
+        c.execute(text("SET LOCAL TIME ZONE 'UTC'"))
         nbbo = pd.read_sql(text(
             "SELECT observed_at, bid, ask, mid FROM " + SRC_NBBO + " "
             "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid "
@@ -131,7 +258,10 @@ def mirror_nbbo_streaming(sim_engine):
     prod per run makes the replay self-contained and immune to sink-table drift."""
     import psycopg2
     src = psycopg2.connect(PROD)
-    src.set_session(readonly=True)
+    src.set_session(readonly=True, isolation_level="REPEATABLE READ")
+    verify_connected_endpoint(src, SOURCE_IDENTITY)
+    with src.cursor() as preflight:
+        preflight.execute("SET LOCAL TIME ZONE 'UTC'")
     scur = src.cursor(name="nbbo_mirror_stream")
     scur.itersize = 10000
     scur.execute(
@@ -183,7 +313,10 @@ def mirror_ticks_streaming(sim_engine):
     tape look slow -> UNCERTAIN cadence + a broken 5m higher-low). No pandas, bounded memory."""
     import psycopg2
     src = psycopg2.connect(PROD)
-    src.set_session(readonly=True)
+    src.set_session(readonly=True, isolation_level="REPEATABLE READ")
+    verify_connected_endpoint(src, SOURCE_IDENTITY)
+    with src.cursor() as preflight:
+        preflight.execute("SET LOCAL TIME ZONE 'UTC'")
     scur = src.cursor(name="mirror_stream")  # server-side cursor (streams, no full materialize)
     scur.itersize = 10000
     scur.execute(
@@ -216,10 +349,9 @@ class AsOfProvider:
     MINUTES after the ignition, so tick-synthesized bars leave the detectors inside a
     <10-bar warmup dead zone at the exact actionable moment (VWAV dip 12:08-12:15 with
     tape from 12:06; CLRO-0702 curl with the 12:00-12:23 base missing) — LIVE would have
-    had the FULL day's bars from the market-data providers. Prepend REAL historical 1m
-    bars (yfinance, prepost) for the session BEFORE the first tick, so the replay's bar
-    context matches what live saw. As-of safety: prepended bars are still filtered to
-    index <= sim-now."""
+    had the FULL day's bars from the market-data providers. Prepend retained historical
+    1m bars from the required local cache for the session BEFORE the first tick. As-of
+    safety: prepended bars are still filtered to index <= sim-now."""
     def __init__(self, ticks, pre_bars=None):
         t = ticks.copy()
         if not t.empty:
@@ -379,6 +511,11 @@ def run_arm(label, grid, ticks, flags):
         _lr2.grind_mode_decision = _gmd_spy
 
     eng = create_engine(SIM)
+    _sink_probe = eng.raw_connection()
+    try:
+        verify_connected_endpoint(_sink_probe, SINK_IDENTITY)
+    finally:
+        _sink_probe.close()
     Sess = sessionmaker(bind=eng)
     db = Sess()
     # clean any prior replay_v3 ticks + stale seeded CLRO sessions
@@ -412,6 +549,7 @@ def run_arm(label, grid, ticks, flags):
     arm = rv3.RecordedArm(symbol=SYMBOL, live_eligible_at_utc=WIN_START.isoformat(),
                           viability_score=0.9, atr_pct=0.05)
     seed = rv3.seed_replay_session(db, arm=arm, execution_family=EXEC_FAMILY)
+    print(f"  replay_session_id={seed.session_id}")
     # FULL-SIZE seed override (2026-07-09): the seed hardcodes max_loss_per_trade_usd=50
     # (the P1 "sane small budget"); re-cap it at the documented 1%-of-EQUITY so the
     # replay sizes like the live paper lane (#893). Notional ceiling stays generous.
@@ -468,48 +606,41 @@ def run_arm(label, grid, ticks, flags):
     mock.set_quote = _set_quote_and_vol
     pre_bars = None
     if os.environ.get("PREPEND_OHLCV", "0") == "1":
-        # Real historical 1m session bars (premarket included) fetched ONCE at setup —
-        # BEFORE the replay's network guard arms; converts yf's ET-aware index to naive UTC.
-        #
-        # PREPEND PIN (2026-07-12 determinism fix): the live yfinance fetch DRIFTS across
-        # days (bar revisions / the sliding ~30-day 1m retention window) — the same JEM
-        # window moved −697.07 → −692.73 overnight with ZERO code change, which poisons
-        # cross-day A/B comparisons. First fetch per (symbol, session-date) is cached to
-        # CSV; every later run replays the IDENTICAL bars. Delete the cache file to
-        # deliberately refresh. Cache dir override: CHILI_REPLAY_PREPEND_CACHE_DIR.
-        try:
-            _cache_dir = os.environ.get(
-                "CHILI_REPLAY_PREPEND_CACHE_DIR",
-                r"D:\CHILI-Docker\chili-data\replay_prepend_cache",
+        # Replay warmup is local-only. Missing or unreadable cache is a coverage
+        # failure; there is no provider/network or silent tick-only fallback.
+        _cache_dir = str(
+            os.environ.get("CHILI_REPLAY_PREPEND_CACHE_DIR") or ""
+        ).strip()
+        if not _cache_dir:
+            raise RuntimeError("CHILI_REPLAY_PREPEND_CACHE_DIR is required")
+        _cache_fp = os.path.join(
+            _cache_dir, f"{SYMBOL}_{WIN_START.date().isoformat()}_1m.csv"
+        )
+        if not os.path.isfile(_cache_fp):
+            raise RuntimeError(
+                f"PREPEND_OHLCV coverage unavailable: cache missing {_cache_fp}"
             )
-            os.makedirs(_cache_dir, exist_ok=True)
-            _cache_fp = os.path.join(
-                _cache_dir, f"{SYMBOL}_{WIN_START.date().isoformat()}_1m.csv"
-            )
-            _yfd = None
-            if os.path.exists(_cache_fp):
-                _yfd = pd.read_csv(_cache_fp, index_col=0, parse_dates=True)
-                print(f"  PREPEND_OHLCV: cache HIT {_cache_fp} ({len(_yfd)} bars)")
-            else:
-                import yfinance as yf
-
-                _d0 = WIN_START.date().isoformat()
-                _d1 = (WIN_START.date() + timedelta(days=1)).isoformat()
-                _yfd = yf.download(SYMBOL, start=_d0, end=_d1, interval="1m", prepost=True,
-                                   progress=False, auto_adjust=False)
-                if _yfd is not None and not _yfd.empty:
-                    if isinstance(_yfd.columns, pd.MultiIndex):
-                        _yfd.columns = [c[0] for c in _yfd.columns]
-                    _yfd = _yfd[["Open", "High", "Low", "Close", "Volume"]].copy()
-                    _yfd.index = pd.to_datetime(_yfd.index).tz_convert("UTC").tz_localize(None)
-                    _yfd.to_csv(_cache_fp)
-                    print(f"  PREPEND_OHLCV: cache MISS -> fetched + pinned {_cache_fp}")
-            if _yfd is not None and not _yfd.empty:
-                pre_bars = _yfd
-                print(f"  PREPEND_OHLCV: {len(pre_bars)} real 1m bars loaded "
-                      f"({pre_bars.index[0]} .. {pre_bars.index[-1]})")
-        except Exception as _pe:
-            print(f"  PREPEND_OHLCV failed ({_pe}); continuing tick-only")
+        _expected_sha = str(
+            os.environ.get("CHILI_REPLAY_PREPEND_CACHE_SHA256") or ""
+        ).strip().lower()
+        if not _expected_sha:
+            raise RuntimeError("CHILI_REPLAY_PREPEND_CACHE_SHA256 is required")
+        with open(_cache_fp, "rb") as _cache_file:
+            _actual_sha = hashlib.sha256(_cache_file.read()).hexdigest()
+        if _actual_sha != _expected_sha:
+            raise RuntimeError("PREPEND_OHLCV coverage unavailable: cache hash mismatch")
+        _yfd = pd.read_csv(_cache_fp, index_col=0, parse_dates=True)
+        if _yfd.empty:
+            raise RuntimeError("PREPEND_OHLCV coverage unavailable: cache is empty")
+        _required_columns = {"Open", "High", "Low", "Close", "Volume"}
+        if not _required_columns.issubset(_yfd.columns):
+            raise RuntimeError("PREPEND_OHLCV coverage unavailable: invalid cache schema")
+        if _yfd.index.hasnans or not _yfd.index.is_monotonic_increasing:
+            raise RuntimeError("PREPEND_OHLCV coverage unavailable: invalid cache clock")
+        pre_bars = _yfd
+        print(f"  PREPEND_OHLCV: cache HIT {_cache_fp} ({len(pre_bars)} bars)")
+        print(f"  PREPEND_OHLCV: {len(pre_bars)} real 1m bars loaded "
+              f"({pre_bars.index[0]} .. {pre_bars.index[-1]})")
     provider = AsOfProvider(ticks, pre_bars=pre_bars)
     driver = rv3.ReplayV3Driver(
         db, seed, mock=mock, ohlcv_provider=provider, grid=grid,
@@ -646,7 +777,7 @@ def main():
             "chili_momentum_bail_on_no_confirmation_enabled": True,
         },
     }
-    arm_name = os.environ.get("ARM", "base").strip().lower()
+    arm_name = os.environ.get("ARM", "both").strip().lower()
     if arm_name not in ARMS:
         print(f"UNKNOWN ARM {arm_name!r}; pick one of {sorted(ARMS)}"); return
     flags = dict(ARMS[arm_name])
