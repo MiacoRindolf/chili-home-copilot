@@ -9955,12 +9955,6 @@ class Settings(BaseSettings):
         default="", validation_alias=AliasChoices("CHILI_ORTEX_API_KEY"),
         description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty ⇒ no Ortex fetch ⇒ no tilt (fail-open).",
     )
-    chili_ortex_daily_fetch_budget: int = Field(
-        default=300,
-        ge=0,
-        validation_alias=AliasChoices("CHILI_ORTEX_DAILY_FETCH_BUDGET"),
-        description="CREDIT-BURN GUARD (2026-07-26): process-wide daily cap on Ortex HTTP fetches (Trader plan meters credits; a pathological loop must never drain the account). Default 300 ≈ top-12 × 2 endpoints × ~12 refreshes with headroom — the ONE documented setting; 0 = unlimited (guard off). Exhausted ⇒ fetches fail-open to no-data (the chain's existing neutral semantics) until UTC midnight + one WARNING.",
-    )
     # ── SHORT LANE (docs/DESIGN/SHORT_SIDE_LANE.md, P1) ────────────────────────
     # Master gate for the Alpaca short lane. Default FALSE by design (operator-
     # approved in the design doc): shorts carry asymmetric squeeze risk, so the
