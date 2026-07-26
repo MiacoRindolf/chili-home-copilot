@@ -62,12 +62,31 @@ CANONICAL = {
                              "ohlcv_start": "2026-07-13T12:05:00", "prepend": True},
 }
 
-# Ross-evidence cross-reference symbol-days (frame-verified evidence exists) — always baseline.
-ROSS_CROSSREF = {
+# Fallback Ross cross-reference symbol-days (frame-verified evidence) — used only when the
+# ground-truth manifest is absent; otherwise the manifest's TRADE rows drive promotion.
+ROSS_CROSSREF_FALLBACK = {
     ("CLRO", "2026-07-07"), ("VRAX", "2026-07-09"), ("CETX", "2026-07-02"),
     ("BJDX", "2026-07-07"), ("SILO", "2026-07-07"), ("JEM", "2026-06-30"),
     ("UPC", "2026-06-29"), ("UPC", "2026-06-26"),
 }
+
+DEFAULT_ROSS_MANIFEST = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "project_ws", "AgentOps", "ross_video_evidence", "manifest.json")
+
+
+def load_ross_crossref(path: str) -> set[tuple[str, str]]:
+    """Ross TRADE symbol-days from the ground-truth manifest (chili.ross_ground_truth_manifest.v1).
+    Reject rows stay library-tier — the scorecard still crossrefs them if replayed later."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        out = {(str(w.get("symbol") or "").upper(), str(w.get("date") or ""))
+               for w in doc.get("windows", [])
+               if w.get("ross_action") == "trade" or w.get("expected_action") == "trade"}
+        return {k for k in out if k[0] and k[1]}
+    except (OSError, ValueError):
+        return set(ROSS_CROSSREF_FALLBACK)
 
 BASELINE_TARGET = 22          # canonicals + crossref + top-gold fill
 MAX_PER_DAY = 2               # diversity: no single day monopolizes the baseline
@@ -161,7 +180,10 @@ def main() -> int:
     ap.add_argument("--out-dir", default="D:/CHILI-Docker/chili-data/replay_batch")
     ap.add_argument("--inventory", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "data", "golden_harvest_inventory.json"))
+    ap.add_argument("--ross-manifest", default=DEFAULT_ROSS_MANIFEST)
     args = ap.parse_args()
+    ross_crossref = load_ross_crossref(args.ross_manifest)
+    print(f"[derive] ross crossref trade symbol-days loaded: {len(ross_crossref)}")
 
     with open(args.inventory, "r", encoding="utf-8") as f:
         inv = {(w["symbol"], w["day"]): w for w in json.load(f)["windows"]}
@@ -214,7 +236,7 @@ def main() -> int:
         w["tier"] = "library"
     def promote(w) -> bool:
         if per_day.get(w["day"], 0) >= MAX_PER_DAY and w["window_source"] != "canonical" \
-                and (w["symbol"], w["day"]) not in ROSS_CROSSREF:
+                and (w["symbol"], w["day"]) not in ross_crossref:
             return False
         w["tier"] = "baseline"
         per_day[w["day"]] = per_day.get(w["day"], 0) + 1
@@ -222,7 +244,7 @@ def main() -> int:
 
     n_base = 0
     for w in windows:
-        if w["window_source"] == "canonical" or (w["symbol"], w["day"]) in ROSS_CROSSREF:
+        if w["window_source"] == "canonical" or (w["symbol"], w["day"]) in ross_crossref:
             if promote(w):
                 n_base += 1
     for w in sorted(windows, key=lambda x: -x["ticks"]):
