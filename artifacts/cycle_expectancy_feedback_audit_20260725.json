@@ -1,0 +1,173 @@
+{
+  "schema_version": "chili.weekend-cycle-expectancy-feedback-audit.v1",
+  "generated_at_utc": "2026-07-26T02:36:28.8007536Z",
+  "classification": "DIAGNOSTIC_ONLY_CURRENT_DB_NOT_REPLAY_AUTHORITY",
+  "authority_limits": {
+    "profitability_certification": false,
+    "ross_parity_established": false,
+    "replay_v3_certifiable": false,
+    "reason": "This is a bounded transaction-READ-ONLY inventory of current DB-paper simulated fills. It has no sealed exact-clock market window and is not executable ask-entry/bid-exit evidence."
+  },
+  "source": {
+    "database": "local container chili-home-copilot-postgres-1 / database chili",
+    "transaction": "READ ONLY",
+    "statement_timeout": "20s",
+    "canonical_cycle_rows": 132,
+    "canonical_cycle_rows_sha256": "93879bfaf12a4db65425de12f05a511ea5459231579da42ed23d8f53fc81f633",
+    "row_serialization": "session_id<TAB>decision_packet_id<TAB>symbol<TAB>exit_leg_count<TAB>full_cycle_pnl_9dp<TAB>terminal_leg_pnl_9dp<TAB>first_fill_at_us<TAB>last_fill_at_us<LF>; ordered by session_id, decision_packet_id",
+    "contract": [
+      "packet is bound to the same session, user, symbol, PAPER execution mode, and trade decision type",
+      "simulation/long lane only",
+      "exactly one flat-to-long entry",
+      "one or more ordered long exit legs with exactly one final long-to-flat exit",
+      "entry quantity equals the sum of exit quantities",
+      "all retained quantities and exit P&L values are finite"
+    ]
+  },
+  "scoreboard": {
+    "canonical_cycle_count": 132,
+    "symbol_count": 11,
+    "scaled_cycle_count": 10,
+    "full_cycle_net_pnl_usd": -215.996872,
+    "terminal_only_net_pnl_usd": -261.816017,
+    "pnl_omitted_by_terminal_only_usd": 45.819145,
+    "full_cycle_mean_usd": -1.636340,
+    "terminal_only_mean_usd": -1.983455,
+    "full_cycle_median_usd": -0.423172,
+    "terminal_only_median_usd": -0.450156,
+    "sign_flip_count": 5,
+    "winner_mislabeled_nonwinner": 5,
+    "nonwinner_mislabeled_winner": 0,
+    "max_abs_cycle_delta_usd": 13.409544
+  },
+  "scaled_cycles": [
+    {
+      "session_id": 12853,
+      "decision_packet_id": 78746,
+      "symbol": "JZXN",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 13.488574,
+      "terminal_leg_pnl_usd": 0.079030,
+      "omitted_pnl_usd": 13.409544,
+      "sign_flip": false
+    },
+    {
+      "session_id": 12853,
+      "decision_packet_id": 78723,
+      "symbol": "JZXN",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 4.147868,
+      "terminal_leg_pnl_usd": -7.453471,
+      "omitted_pnl_usd": 11.601339,
+      "sign_flip": true
+    },
+    {
+      "session_id": 12862,
+      "decision_packet_id": 78724,
+      "symbol": "JZXN",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 7.061378,
+      "terminal_leg_pnl_usd": -2.183835,
+      "omitted_pnl_usd": 9.245213,
+      "sign_flip": true
+    },
+    {
+      "session_id": 750,
+      "decision_packet_id": 17473,
+      "symbol": "XPL-USD",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 3.576746,
+      "terminal_leg_pnl_usd": -0.675694,
+      "omitted_pnl_usd": 4.252440,
+      "sign_flip": true
+    },
+    {
+      "session_id": 12862,
+      "decision_packet_id": 78745,
+      "symbol": "JZXN",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 9.740822,
+      "terminal_leg_pnl_usd": 6.651726,
+      "omitted_pnl_usd": 3.089095,
+      "sign_flip": false
+    },
+    {
+      "session_id": 751,
+      "decision_packet_id": 17247,
+      "symbol": "FIDA-USD",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 2.458136,
+      "terminal_leg_pnl_usd": -0.545837,
+      "omitted_pnl_usd": 3.003974,
+      "sign_flip": true
+    },
+    {
+      "session_id": 750,
+      "decision_packet_id": 18250,
+      "symbol": "XPL-USD",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 3.835343,
+      "terminal_leg_pnl_usd": 2.905640,
+      "omitted_pnl_usd": 0.929703,
+      "sign_flip": false
+    },
+    {
+      "session_id": 3,
+      "decision_packet_id": 73,
+      "symbol": "ONDO-USD",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 0.457056,
+      "terminal_leg_pnl_usd": 0.305995,
+      "omitted_pnl_usd": 0.151061,
+      "sign_flip": false
+    },
+    {
+      "session_id": 3,
+      "decision_packet_id": 48,
+      "symbol": "ONDO-USD",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": 0.084377,
+      "terminal_leg_pnl_usd": -0.052399,
+      "omitted_pnl_usd": 0.136777,
+      "sign_flip": true
+    },
+    {
+      "session_id": 758,
+      "decision_packet_id": 17272,
+      "symbol": "ROBO-USD",
+      "exit_legs": 2,
+      "full_cycle_pnl_usd": -1.414374,
+      "terminal_leg_pnl_usd": -1.414374,
+      "omitted_pnl_usd": 0.000000,
+      "sign_flip": false
+    }
+  ],
+  "correction": {
+    "branch": "codex/fix-paper-cycle-expectancy-20260725",
+    "commit": "76fe5cdbdc156297f0a26d8eb5587c644f856284",
+    "draft_pr": "https://github.com/MiacoRindolf/chili-home-copilot/pull/940",
+    "production_file_sha256": {
+      "app/services/trading/momentum_neural/live_runner.py": "f1e6265c5ce501948b8a3b0ae2f90186901ed224c88f70bac12cfd2cf50558f7",
+      "app/services/trading/momentum_neural/paper_runner.py": "ab76b5baf01dbb5394118e5fda03252767f280ba431955b7bc3c30b50908fee6"
+    },
+    "test_file_sha256": {
+      "tests/test_momentum_asymmetric_exit.py": "fd84f3fc4f7ee2d57ad8468da285b0b9b22b75e0c741a4d808c976fd412c3673"
+    },
+    "validation": {
+      "py_compile": "PASS",
+      "git_diff_check": "PASS",
+      "zero_egress_postgresql_focused_and_adjacent": "20/20 PASS",
+      "independent_deep_review": "CLEAN P0/P1",
+      "disposable_project_cleanup": "0 containers / 0 volumes / 0 networks retained"
+    }
+  },
+  "verdict": {
+    "defect_proven": true,
+    "before": "Terminal-runner-only outcome learning omitted prior scale-out economics and mislabeled five canonical winners as non-winners in this diagnostic sample.",
+    "after": "Whole-cycle packet/deployment feedback is accepted only from a complete packet-bound simulated fill set or a verified append-only Alpaca PAPER settlement; incomplete authority emits a typed learning gap.",
+    "remaining_p2": [
+      "cycle-finalization crash/retry idempotency",
+      "whole-cycle slippage attribution"
+    ]
+  }
+}
