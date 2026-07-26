@@ -26,6 +26,15 @@ from app.services.trading.momentum_neural.replay_mock_broker import FillMode
 from app.config import settings
 from app.models.trading import TradingAutomationSession, TradingAutomationEvent
 
+# GOLDEN-TABLE SOURCE (2026-07-26): GOLDEN=1 reads the pinned archive tables
+# (replay_golden_ticks / replay_golden_nbbo) instead of the live prod tables, so
+# replays keep working after the 30d/5d pruners age the live rows out (the JEM-class
+# asset loss). Sink-side writes are untouched (the mirror still lands in the sink's
+# live-named tables the FSM reads).
+GOLDEN = os.environ.get("GOLDEN", "0") == "1"
+SRC_TICKS = "replay_golden_ticks" if GOLDEN else "iqfeed_trade_ticks"
+SRC_NBBO = "replay_golden_nbbo" if GOLDEN else "momentum_nbbo_spread_tape"
+
 PROD = "postgresql://chili:chili@localhost:5433/chili"          # READ-ONLY source
 SIM = os.environ.get("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
 
@@ -54,9 +63,9 @@ def load_prod():
     eng = create_engine(PROD)
     with eng.connect() as c:
         nbbo = pd.read_sql(text(
-            "SELECT observed_at, bid, ask, mid FROM momentum_nbbo_spread_tape "
+            "SELECT observed_at, bid, ask, mid FROM " + SRC_NBBO + " "
             "WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND bid>0 AND ask>=bid "
-            "ORDER BY observed_at ASC"), c, params={"s": SYMBOL, "a": WIN_START, "b": WIN_END})
+            "ORDER BY observed_at ASC, id ASC"), c, params={"s": SYMBOL, "a": WIN_START, "b": WIN_END})
         # downsample ticks at the SQL level (keep every TICK_STRIDE-th) — the full CLRO run
         # window is 200k+ ticks (OOM risk); every 8th keeps ~30k, plenty for the 1m/5m resample
         # + forward-momentum slope direction. Volume is scaled back up by the stride so the
@@ -65,8 +74,8 @@ def load_prod():
         ticks = pd.read_sql(text(
             "SELECT observed_at, price, size*:st AS size, bid, ask FROM ("
             "  SELECT observed_at, price, size, bid, ask, "
-            "         row_number() OVER (ORDER BY observed_at) AS rn "
-            "  FROM iqfeed_trade_ticks "
+            "         row_number() OVER (ORDER BY observed_at, id) AS rn "
+            "  FROM " + SRC_TICKS + " "
             "  WHERE symbol=:s AND observed_at>=:a AND observed_at<:b AND price>0"
             ") q WHERE mod(rn, :st) = 0 ORDER BY observed_at ASC"),
             c, params={"s": SYMBOL, "a": OHLCV_START, "b": WIN_END, "st": stride})
@@ -124,8 +133,8 @@ def mirror_nbbo_streaming(sim_engine):
     scur.itersize = 10000
     scur.execute(
         "SELECT observed_at, bid, ask, mid, spread_bps, day_volume, source "
-        "FROM momentum_nbbo_spread_tape "
-        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s ORDER BY observed_at ASC",
+        "FROM " + SRC_NBBO + " "
+        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s ORDER BY observed_at ASC, id ASC",
         (SYMBOL, OHLCV_START, WIN_END))
     dst = sim_engine.raw_connection()
     dcur = dst.cursor()
@@ -175,8 +184,8 @@ def mirror_ticks_streaming(sim_engine):
     scur = src.cursor(name="mirror_stream")  # server-side cursor (streams, no full materialize)
     scur.itersize = 10000
     scur.execute(
-        "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
-        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0 ORDER BY observed_at ASC",
+        "SELECT observed_at, price, size, bid, ask FROM " + SRC_TICKS + " "
+        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s AND price>0 ORDER BY observed_at ASC, id ASC",
         (SYMBOL, OHLCV_START, WIN_END))
     dst = sim_engine.raw_connection()
     dcur = dst.cursor()
