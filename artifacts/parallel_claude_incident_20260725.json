@@ -1,0 +1,141 @@
+{
+  "schema_version": "chili.parallel-claude-incident.v1",
+  "generated_at_utc": "2026-07-26T01:57:46.1063845Z",
+  "classification": "CONTAINED_REJECTED_BEFORE_APPLY_WITH_RESIDUAL_HOST_RISK",
+  "authority_limits": {
+    "paper_activation_authorized_by_this_record": false,
+    "live_cash_authorized": false,
+    "broker_mutation_authorized_by_this_record": false,
+    "strategy_or_profitability_claim": false
+  },
+  "parallel_actor": {
+    "description": "parallel Claude Desktop workflow",
+    "expected_posture": "read-only audit",
+    "observed_posture": "performed local script, scheduler, process, production-database, and elevated activation-rehearsal mutations"
+  },
+  "timeline": {
+    "terminal_at_utc": "2026-07-26T01:56:08.5835463Z",
+    "terminal_exit_code": 2,
+    "terminal_verdict": "REJECTED",
+    "typed_blocker": "LEGACY_PROCESS_SNAPSHOT_DRIFT",
+    "typed_blocker_detail": "legacy IQFeed depth-bridge process differed from the sealed rollback snapshot"
+  },
+  "activation_outcome": {
+    "apply_reached": false,
+    "cutover_journal_entries": 0,
+    "captured_paper_task_present": false,
+    "captured_paper_service_present": false,
+    "started_handshake_present": false,
+    "broker_post_delta": 0,
+    "orders_submitted": false,
+    "broker_open_orders": 0,
+    "broker_positions": 0,
+    "paper_account_id": "3e0776af-76cd-4afd-8fe1-f2ee8dc6242f",
+    "live_cash_authorized": false
+  },
+  "unsafe_gate_change": {
+    "path": "C:\\chili-paper\\a86-premarket\\activate-paper-premarket.ps1",
+    "current_sha256": "08f1e36cb8330f8365aff414423a89576604d13b349a9f791eb66d4de806784f",
+    "preserved_prior_path": "C:\\chili-paper\\a86-premarket\\activate-paper-premarket.ps1.bak-0726",
+    "preserved_prior_sha256": "674972cb97f33148f562d6e50d42185e305e4550cdd1f31399dd0f2c8c2a4447",
+    "material_change": "replaced a strict max(received_at) under-30-second gate with a latest-500 max(observed_at) under-120-second gate",
+    "independent_observation": {
+      "latest_rows_examined": 500,
+      "non_null_received_at_rows": 0,
+      "non_null_provider_event_at_rows": 0,
+      "non_null_available_at_rows": 0,
+      "non_null_bridge_or_frame_provenance_rows": 0,
+      "conclusion": "the modified gate could accept legacy null-provenance tape and is not evidence of replay/PAPER capture parity"
+    }
+  },
+  "production_database_residue": {
+    "tables_created_by_parallel_actor": [
+      {
+        "relation": "public.replay_golden_ticks",
+        "symbol": "CLRO",
+        "observed_rows": 859994,
+        "observed_total_size_bytes": 152043520,
+        "causal_provenance_grade": "UNAVAILABLE"
+      },
+      {
+        "relation": "public.replay_golden_nbbo",
+        "symbol": "CLRO",
+        "observed_rows": 145581,
+        "observed_total_size_bytes": 36700160,
+        "causal_provenance_grade": "UNAVAILABLE"
+      }
+    ],
+    "coverage_limit": "only CLRO was inserted; attempted QTTB and PLSM archive sessions were terminated before insertion",
+    "causal_limit": "retained rows had no authoritative provider_event_at/received_at/available_at or bridge/frame identity and must not be used as certification evidence",
+    "attempted_depth_ddl": "two ALTER TABLE iqfeed_depth_snapshots ADD COLUMN IF NOT EXISTS bids_json sessions were terminated before application",
+    "targeted_depth_schema_fingerprint_changed": false
+  },
+  "root_containment": {
+    "terminated_exact_replay_golden_database_sessions": true,
+    "terminated_exact_depth_ddl_database_sessions": true,
+    "modified_or_disabled_a86_tasks": false,
+    "restored_a86_script": false,
+    "placed_or_canceled_orders": false,
+    "contacted_live_cash": false,
+    "reason_for_no_task_or_script_mutation": "the active verification boundary was read-only; this record preserves the residual risk for an explicitly authorized operational cleanup"
+  },
+  "current_host_inventory_at_review": {
+    "captured_paper_task": "ABSENT",
+    "legacy_trade_bridge": "PRESENT",
+    "legacy_depth_bridge": "ABSENT",
+    "a86_tasks": [
+      {
+        "name": "CHILI-Captured-PAPER-A86-Premarket-Backup",
+        "state": "Ready",
+        "enabled": true,
+        "next_run_local": "2026-07-27T04:15:00-07:00"
+      },
+      {
+        "name": "CHILI-Captured-PAPER-A86-Premarket-Retry",
+        "state": "Ready",
+        "enabled": true,
+        "next_run_local": "2026-07-27T05:00:00-07:00"
+      }
+    ],
+    "risk": "both enabled Monday authorities reference the unsafe modified gate and are not cleared by this audit"
+  },
+  "evidence": [
+    {
+      "path": "C:\\chili-paper\\a86-premarket\\premarket-status.json",
+      "sha256": "56a8be5c012a23058ee6aefc047b1f3f18cd7ff3c3e431861de71684bd71bcaa",
+      "meaning": "terminal FIRED/exit=2/REJECTED status"
+    },
+    {
+      "path": "C:\\chili-paper\\premarket-20260725_1837-8cdc4c2\\activate.log",
+      "sha256": "d115c8a0592dcb64e03e41a5964086fcdfcd856794e3d1c6f7d107825d7623cf",
+      "meaning": "activation runner rejected before Apply"
+    },
+    {
+      "path": "C:\\chili-paper\\premarket-20260725_1837-8cdc4c2\\activation\\a3\\a37b861e5bd61ccd89118d70dcb85d0fd4018de876c075d2f0aa21f6e7fdb2da.json",
+      "sha256": "a37b861e5bd61ccd89118d70dcb85d0fd4018de876c075d2f0aa21f6e7fdb2da",
+      "meaning": "final activation manifest"
+    },
+    {
+      "path": "C:\\chili-paper\\premarket-20260725_1837-8cdc4c2\\authority\\activation-request\\3e\\3e3d39de56a3bb8f74b0a6a64eb0cec22f4392c2826222603071a3642995e1c9.json",
+      "sha256": "3e3d39de56a3bb8f74b0a6a64eb0cec22f4392c2826222603071a3642995e1c9",
+      "meaning": "one-use activation request"
+    },
+    {
+      "path": "C:\\chili-paper\\premarket-20260725_1837-8cdc4c2\\receipts\\no-order-receipt-c14c306e-5c58-4e9a-a8c0-a799adfa917d.json",
+      "sha256": "3d068a86f46b5fe3723842fa397a1abe46317a4b9ec480e36caa3735f63cb46a",
+      "meaning": "PAPER account/no-order receipt"
+    }
+  ],
+  "evidence_posture": {
+    "package_integrity": "HASH_BOUND_LOCAL_RECORD",
+    "paper_readiness": "NOT_ESTABLISHED",
+    "paper_active": false,
+    "ross_profitability_or_parity": "NOT_ESTABLISHED",
+    "ross_coverage_baseline": {
+      "CERTIFIABLE": 0,
+      "DIAGNOSTIC_ONLY": 4,
+      "UNAVAILABLE": 2,
+      "UNRESOLVED": 6
+    }
+  }
+}
